@@ -1912,34 +1912,44 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn filesystem_events_reload_clean_content_and_surface_rename_conflicts(
+    async fn file_monitor_reload_is_linux_only_but_rename_conflicts_are_cross_platform(
         cx: &mut gpui::TestAppContext,
     ) {
         let file = TempFile::new("watcher", "original\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
 
         std::fs::write(file.path(), "external\n").expect("external write");
-        for _ in 0..40 {
-            cx.cx
-                .executor()
-                .advance_clock(std::time::Duration::from_millis(100));
-            cx.cx.run_until_parked();
-            let updated = view.read_with(&cx.cx, |view, _| {
-                view.editor()
-                    .is_some_and(|editor| editor.buffer() == "external\n")
-            });
-            if updated {
-                break;
+        if cfg!(target_os = "linux") {
+            for _ in 0..40 {
+                cx.cx
+                    .executor()
+                    .advance_clock(std::time::Duration::from_millis(100));
+                cx.cx.run_until_parked();
+                let updated = view.read_with(&cx.cx, |view, _| {
+                    view.editor()
+                        .is_some_and(|editor| editor.buffer() == "external\n")
+                });
+                if updated {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert_eq!(
+                view.read_with(&cx.cx, |view, _| {
+                    view.editor().expect("editor loaded").buffer().to_owned()
+                }),
+                "external\n",
+                "a clean editor adopts a watcher-delivered external write"
+            );
+        } else {
+            assert_eq!(
+                view.read_with(&cx.cx, |view, _| {
+                    view.editor().expect("editor loaded").buffer().to_owned()
+                }),
+                "original\n",
+                "the inotify monitor is intentionally unavailable on macOS"
+            );
         }
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| {
-                view.editor().expect("editor loaded").buffer().to_owned()
-            }),
-            "external\n",
-            "a clean editor adopts a watcher-delivered external write"
-        );
 
         view.update(&mut cx.cx, |view, cx| {
             let editor = view.editor_mut().expect("editor loaded");
