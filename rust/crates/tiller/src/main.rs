@@ -766,6 +766,7 @@ enum WorkspaceAction {
     /// query field) is deferred through this queue like every other
     /// Window-needing follow-up from a non-Window context.
     OpenNewTabPalette,
+    SetTranslucency(bool),
 }
 
 #[derive(Clone)]
@@ -3263,6 +3264,16 @@ struct TillerWorkspace {
     panes: Arc<PaneRegistry>,
     control_state: Arc<Mutex<ControlState>>,
     pending_actions: Arc<Mutex<Vec<WorkspaceAction>>>,
+    translucency_enabled: bool,
+    /// `None` means this workspace has not itself applied a live window
+    /// background yet. That keeps test fixtures able to exercise their first
+    /// opaque request while suppressing subsequent identical live updates.
+    last_applied_translucency: Option<bool>,
+    /// Headless GPUI windows do not expose a background-appearance getter.
+    /// Record requests only in tests at the one seam that also forwards them
+    /// to GPUI, rather than claiming to observe platform window state.
+    #[cfg(test)]
+    requested_window_backgrounds: Vec<gpui::WindowBackgroundAppearance>,
     show_settings: bool,
     /// Set when settings closes and the main surface must take focus back
     /// (the settings surface held it while open; a stale focus would leave
@@ -3457,6 +3468,7 @@ impl TillerWorkspace {
         tray_roster: Option<tray::SharedRoster>,
         tray_requests: Option<tray::TrayRequestQueue>,
         tray_handle: Option<tray::TrayHandle>,
+        translucency_enabled: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
@@ -3565,6 +3577,9 @@ impl TillerWorkspace {
                                 }
                                 WorkspaceAction::OpenNewTabPalette => {
                                     workspace.open_command_palette(window, cx);
+                                }
+                                WorkspaceAction::SetTranslucency(enabled) => {
+                                    workspace.apply_translucency(enabled, window, cx);
                                 }
                                 WorkspaceAction::RestoreLaunchSnapshot => {
                                     if let Err(error) =
@@ -3910,6 +3925,10 @@ impl TillerWorkspace {
             panes,
             control_state,
             pending_actions,
+            translucency_enabled,
+            last_applied_translucency: None,
+            #[cfg(test)]
+            requested_window_backgrounds: Vec::new(),
             tabs,
             active_tab,
             tab_drag_snapshot: None,
@@ -3980,6 +3999,31 @@ impl TillerWorkspace {
         // call, so construction needs no separate one-off check.
         workspace.sync_activity(cx);
         workspace
+    }
+
+    fn apply_translucency(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.last_applied_translucency == Some(enabled) {
+            return;
+        }
+        self.translucency_enabled = enabled;
+        self.apply_window_background(startup_window_background(enabled), window);
+        self.last_applied_translucency = Some(enabled);
+        cx.notify();
+    }
+
+    fn apply_window_background(
+        &mut self,
+        appearance: gpui::WindowBackgroundAppearance,
+        window: &mut Window,
+    ) {
+        #[cfg(test)]
+        self.requested_window_backgrounds.push(appearance);
+        window.set_background_appearance(appearance);
     }
 
     /// The shell's current layout, in the shape persistence understands.
@@ -12410,6 +12454,12 @@ fn app_settings_with_environment_override(mut settings: AppSettings) -> AppSetti
     settings
 }
 
+/// The one material resolution shared by the first `WindowOptions` request
+/// and every later live Settings update.
+fn startup_window_background(translucency_enabled: bool) -> gpui::WindowBackgroundAppearance {
+    shell_chrome::current_platform_material(translucency_enabled).window_background()
+}
+
 fn main() {
     // First statement in the process, and it has to stay first. `gpui`
     // decides X11 vs Wayland by reading the environment
@@ -12485,6 +12535,7 @@ fn main() {
         let pending_for_tab_bar = pending_actions.clone();
         let pending_for_status_bar = pending_actions.clone();
         let pending_for_settings = pending_actions.clone();
+        let pending_for_settings_change = pending_actions.clone();
         let pending_for_titlebar = pending_actions.clone();
         let control_actions = Arc::new(Mutex::new(Vec::<ControlAction>::new()));
         let mut control_state_seed =
@@ -12565,6 +12616,7 @@ fn main() {
             }
             snapshot
         };
+        let initial_translucency = settings_snapshot.translucency;
         let panes_for_window = panes.clone();
         let workspace_for_quit = Arc::new(Mutex::new(None::<Entity<TillerWorkspace>>));
         let workspace_slot = workspace_for_quit.clone();
@@ -12581,6 +12633,7 @@ fn main() {
         let window_result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_background: startup_window_background(initial_translucency),
                 titlebar: Some(TitlebarOptions {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.), px(12.))),
@@ -12704,6 +12757,7 @@ fn main() {
                             }
                         })
                         .on_change(move |snapshot| {
+                            let translucency = snapshot.translucency;
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
                             // F-SET-22: persist the per-agent accent colours
@@ -12715,6 +12769,9 @@ fn main() {
                             }
                             session_store_for_settings
                                 .save_settings(&app_settings_from_snapshot(snapshot));
+                            if let Ok(mut actions) = pending_for_settings_change.lock() {
+                                actions.push(WorkspaceAction::SetTranslucency(translucency));
+                            }
                         })
                         .on_revoke_browser_origin({
                             let session_store = session_store_for_browser_revoke.clone();
@@ -12790,6 +12847,7 @@ fn main() {
                         tray_roster.clone(),
                         tray_requests.clone(),
                         tray_handle,
+                        initial_translucency,
                         cx,
                     )
                 });
@@ -13088,7 +13146,14 @@ mod tests {
     }
 
     fn palette_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
-        palette_test_workspace_with_tab_count(cx, 1)
+        palette_test_workspace_with_translucency(cx, false)
+    }
+
+    fn palette_test_workspace_with_translucency(
+        cx: &mut Context<TillerWorkspace>,
+        translucency_enabled: bool,
+    ) -> TillerWorkspace {
+        palette_test_workspace_with_tab_count_and_translucency(cx, 1, translucency_enabled)
     }
 
     fn test_workspace_for_repo(
@@ -13304,6 +13369,14 @@ mod tests {
         cx: &mut Context<TillerWorkspace>,
         tab_count: usize,
     ) -> TillerWorkspace {
+        palette_test_workspace_with_tab_count_and_translucency(cx, tab_count, false)
+    }
+
+    fn palette_test_workspace_with_tab_count_and_translucency(
+        cx: &mut Context<TillerWorkspace>,
+        tab_count: usize,
+        translucency_enabled: bool,
+    ) -> TillerWorkspace {
         let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
         let scratch_root = std::env::temp_dir()
             .canonicalize()
@@ -13389,7 +13462,14 @@ mod tests {
                 path: working_directory.to_string_lossy().into_owned(),
             })
         });
-        let settings = cx.new(|cx| Settings::new(cx));
+        let pending_for_settings_change = pending_actions.clone();
+        let settings = cx.new(|cx| {
+            Settings::new(cx).on_change(move |snapshot| {
+                if let Ok(mut actions) = pending_for_settings_change.lock() {
+                    actions.push(WorkspaceAction::SetTranslucency(snapshot.translucency));
+                }
+            })
+        });
         let right_panel = cx.new(|_| RightPanel::new(working_directory.clone()));
         TillerWorkspace::new(
             titlebar,
@@ -13420,6 +13500,7 @@ mod tests {
             None,
             None,
             None,
+            translucency_enabled,
             cx,
         )
     }
@@ -13493,6 +13574,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             cx,
         )
     }
@@ -13585,6 +13667,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             cx,
         )
     }
@@ -13685,6 +13768,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             cx,
         )
     }
@@ -17590,6 +17674,102 @@ mod tests {
             cx.debug_bounds("Codex-usage-text").is_some(),
             "the other visible providers stay"
         );
+    }
+
+    #[gpui::test]
+    async fn applying_translucency_updates_workspace_and_window_material(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.apply_translucency(false, window, cx);
+            workspace.apply_translucency(false, window, cx);
+            workspace.apply_translucency(true, window, cx);
+            assert!(workspace.translucency_enabled);
+            assert_eq!(
+                workspace.requested_window_backgrounds,
+                vec![
+                    shell_chrome::current_platform_material(false).window_background(),
+                    shell_chrome::current_platform_material(true).window_background(),
+                ],
+                "the window-appearance seam records each real material request once"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn settings_translucency_toggle_reaches_the_live_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.open_settings(Some(SettingsCategory::Appearance), cx)
+        });
+        cx.run_until_parked();
+
+        let toggle = cx
+            .debug_bounds("appearance-translucency")
+            .expect("translucency toggle");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.background_executor.advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(workspace.translucency_enabled);
+            assert_eq!(
+                workspace.requested_window_backgrounds,
+                vec![shell_chrome::current_platform_material(true).window_background()],
+                "the Settings queue reaches the live window-appearance seam"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn persisted_translucency_initializes_workspace_and_startup_material(
+        cx: &mut TestAppContext,
+    ) {
+        let snapshot = settings_snapshot_from_app_settings(AppSettings {
+            translucency: true,
+            ..AppSettings::default()
+        });
+        let initial_translucency = snapshot.translucency;
+        assert_eq!(
+            startup_window_background(initial_translucency),
+            shell_chrome::current_platform_material(true).window_background(),
+            "startup requests the material resolved from the persisted preference"
+        );
+
+        let window = cx.add_window(|_window, cx| {
+            palette_test_workspace_with_translucency(cx, initial_translucency)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        assert!(workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.translucency_enabled
+        }));
     }
 
     #[gpui::test]
