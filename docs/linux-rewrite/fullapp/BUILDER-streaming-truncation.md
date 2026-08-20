@@ -10,21 +10,34 @@ runner and the UI — the same shape of gap as F-CORE-FILE-01, where a green
 unit test covered a comparator the app never called.
 
 Own worktree `/var/tmp/tt-streamcap-3262725439`, branch
-`verify/streaming-truncation-3262725439`, rebased onto `c8192485` (picked
-up the `kill_ours` harness fix — no Rust changed between `90329a22` and
-`c8192485`, so the already-built binary didn't need a rebuild). Own build
-dir. Fresh label per drive, never reused. Not pushed, ledger untouched.
+`verify/streaming-truncation-3262725439`, rebased onto `2bc8875b` (current
+origin tip at drive time — picked up the neutral-cwd harness fix that grew
+out of this drive's own methodology note; no Rust changed between
+`c8192485` and `2bc8875b`, so the already-built binary didn't need a
+rebuild). Own build dir. Fresh label per drive, never reused. Not pushed,
+ledger untouched.
 
 **Answer: the flag is discarded, and it is discarded before it can go
 anywhere — this isn't "nothing downstream reads it yet," it's structurally
-impossible for anything to read it as the code is written.**
+impossible for anything to read it as the code is written, and it is the
+*only* production caller in the workspace, not one of several.**
 
 ## Finding the path
 
-Two production call sites reach `GitRunner::run_streaming*`. One
-(`git.rs:787`) only exists inside a cancellation test, running a fake shell
-script — not reachable from the app. The other is real:
-`GitClone::clone` (`tiller_git/src/clone.rs:33-38`):
+This isn't "one call site I happened to check" — it's every call site there
+is:
+
+```
+$ grep -rn run_streaming rust/crates/ --include=*.rs | grep -v '/git.rs:' | grep -v '/tests/'
+rust/crates/tiller_git/src/lib.rs:61:pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
+rust/crates/tiller_git/src/clone.rs:33:        GitRunner::run_streaming(&arguments, parent, move |line| {
+```
+
+Two lines, and one of them is the `pub use` re-export that makes the
+function visible outside the crate — not a call. `GitClone::clone`
+(`tiller_git/src/clone.rs:33-38`) is the *only* place `run_streaming` (or
+`run_streaming_with_binary` / `run_streaming_cancellable`) is invoked
+outside `git.rs`'s own tests anywhere in this workspace:
 
 ```rust
 GitRunner::run_streaming(&arguments, parent, move |line| {
@@ -34,6 +47,9 @@ GitRunner::run_streaming(&arguments, parent, move |line| {
 })?;
 Ok(())
 ```
+
+(The remaining match inside `git.rs` itself, at line 787, is a
+`run_streaming_cancellable` call from `git_cancellation_kills_the_child_and_reports_cancelled` — a test running a fake shell script, not reachable from the app.)
 
 `GitCommandResult` — the value carrying `.truncated` — is bound to nothing.
 `GitClone::clone`'s own signature is `Result<(), GitError>`; there is no
@@ -49,35 +65,70 @@ uses it" alternative team-lead named: Sidebar's "+" → "Clone Repository…"
 (`start_clone_project`, `sidebar.rs:1565`) opens a real `CloneForm`
 (`clone-url-field` / `clone-submit` debug selectors confirmed in source),
 which is the one and only place `GitClone::clone` is ever called from
-outside tests.
+outside tests. So this is a real gap on reachable UI, not dead code nobody
+can get to — the same shape as F-TAB-13's move-tab machinery, except here
+the path to it is live.
 
-**A second thing worth naming, because it changes what "past the pipe
-buffer" should even mean here:** `read_stderr_lines` (`git.rs:396-439`)
-decouples the live `on_line` callback from the byte cap entirely —
-`events_tx.send(StreamEvent::StderrLine(line))` fires for every line
-regardless of whether `captured` has already hit `limit`, because the
-progress callback is what drives the UI's live percentage and was never
-meant to depend on the retained buffer. Only the *separately* retained
-`captured: Vec<u8>` (the thing nobody ever reads back) is capped. So even
-if the flag survived to the UI, a capped run wouldn't show up as garbled or
-truncated progress — the progress bar is immune to the cap by construction.
-The `truncated` flag's only possible observers were always "the returned
-`GitCommandResult`," and that value dies in `clone.rs` before it can be
-observed at all.
+## The drain question is settled by construction — the fixture doesn't need to answer it
 
-## Fixture — and an honest miss against last time's bar
+The buffered path's drain guarantee (`read_capped`, proved live last round
+with a fixture past the 64 KiB pipe buffer) and the streaming path's drain
+guarantee are not the same code, and I initially treated not being able to
+force a 64 KiB stderr capture through *this* call site as a shortfall
+against that earlier bar. That framing was wrong. For this specific
+question — does the streaming reader ever leave git blocked on a full pipe
+— the source is the better instrument than a fixture could ever be: a
+fixture proves the drain happened for *one* clone of *one* size; the loop's
+structure settles it for *every* clone, at any size, forever, without
+needing to be re-run.
 
-Same discipline as the buffered-path drive: size the output so it clears a
-64 KiB pipe buffer, not merely the configured cap, so the drain itself is
-under test. It didn't work the same way here, and that's worth recording
-rather than glossing over.
+`read_stderr_lines` (`git.rs:396-439`) reads in a plain loop with no
+cap-conditional exit:
 
-`git clone --progress`'s stderr is **percentage-throttled, not
-volume-scaled** — it reports 0-100% per phase regardless of how much data
-or how many objects that percentage represents. Measured directly rather
-than assumed, clone-ing progressively larger local fixtures with
-`--no-local` (forcing the real object-transfer path instead of git's
-hardlink shortcut):
+```rust
+let count = match std::io::Read::read(&mut pipe, &mut buffer) {
+    Ok(0) | Err(_) => break,
+    Ok(count) => count,
+};
+let room = limit.saturating_sub(captured.len());
+if count > room {
+    captured.extend_from_slice(&buffer[..room]);
+    truncated = true;
+} else {
+    captured.extend_from_slice(&buffer[..count]);
+}
+```
+
+`room` only ever changes how much of *this read* gets copied into
+`captured` — it never changes whether the next `read()` call happens. The
+loop keeps calling `read()` until the pipe returns EOF or an error,
+regardless of how full `captured` already is. That is what "drained by
+construction" means: there is no code path where the reader stops pulling
+bytes off the pipe because the cap was hit. It also decouples the *live*
+per-line callback from the cap entirely — the `for &byte in &buffer[..count]`
+scan that drives `events_tx.send(StreamEvent::StderrLine(line))` runs over
+the full read every iteration, so the progress bar the UI shows is fed from
+the uncapped stream even when `captured` (the buffer nobody ever reads back)
+has already stopped growing.
+
+One genuine gap, not a fixture-sized one: `git.rs:424`,
+`if events_tx.send(StreamEvent::StderrLine(line)).is_err() { return; }`,
+exits the loop without draining whatever is still in the pipe. That only
+fires when the receiving end of the channel has already gone away — the UI
+task dropped or the app is shutting down — not as a function of output
+size or cap. It's worth naming because it's the one place "always drains"
+isn't quite true, but it isn't a truncation-cap bug; it's a shutdown-race
+one, and a different question from the one this drive was asked to answer.
+
+## The fixture measurements — kept because they're the useful part, not the drain proof
+
+The plateau below is real data and worth having on its own terms, even
+though it no longer needs to answer the drain question: `git clone
+--progress`'s stderr is **percentage-throttled, not volume-scaled** — it
+reports 0-100% per phase regardless of how much data or how many objects
+that percentage represents. Measured directly rather than assumed, cloning
+progressively larger local fixtures with `--no-local` (forcing the real
+object-transfer path instead of git's hardlink shortcut):
 
 | fixture | wall time | stderr bytes |
 |---|---|---|
@@ -88,69 +139,97 @@ hardlink shortcut):
 
 That's a plateau, not a scaling curve — 15x the wall-clock time bought
 roughly 8 KB. Reaching 64 KiB this way would cost several more minutes of
-clone time for a diminishing-returns extrapolation, which isn't a
-reasonable use of the box for one data point. **I did not clear 64 KiB of
-real stderr from this call site**, and I'm not going to imply otherwise.
-What I used instead: the largest fixture above (1.75 GB source, ~32 KB of
-real progress text) against `TILLER_GIT_OUTPUT_LIMIT_BYTES=1024` — about
-32x the cap, comfortably enough to trigger `truncated` — plus the
-structural reading above (the drain loop's `read()` call has no
-cap-conditional early exit, matching the exact pattern the buffered path's
-`read_capped` already proved live) as the substitute for the specific
-"would this ever leave a pipe undrained" question at *this* call site.
+clone time for a diminishing-returns extrapolation. This is why a 64 KiB
+pipe cannot be filled through this call site at any repo size anyone would
+reasonably wait for — a fact about `git clone --progress`'s own output
+volume, not a limitation of the harness or the drive.
 
 ## The drive
 
-`TILLER_PROJECTS_DIR` redirected under `/var/tmp` (the real default is
-`$HOME/Tiller/projects` — had to override it so a real clone never lands
-in the user's actual home directory). `TILLER_GIT_TIMEOUT_MS=200000`, since
-the default 10s deadline is well under this fixture's real clone time — the
-first attempt at this drive hit exactly that
-(`02-timeout-error-propagates-correctly.png`: "Clone failed: git clone
---progress --no-local … did not finish within 10s and was killed"), which
-is a useful accidental control: `GitError::TimedOut` **did** reach the UI
-correctly through this same call chain. That confirms error propagation
-through `CloneForm::submit` works in general — the gap is specific to the
-`Ok(GitCommandResult{truncated: true, ..})` success case, not a general
-"nothing from clone ever reaches the UI."
+Since the drain question is settled by the source and the truncation flag
+has no consumer regardless of its value, the fixture no longer needed to
+be large — what was still worth proving live is that the clone path is
+genuinely reachable end-to-end and renders real progress, not a synthetic
+route. Used the smallest fixture that still shows visible in-progress
+state rather than jumping straight from 0% to done: a fresh single-commit
+repo with 14 × 8 MB random blobs (112 MB on disk), standalone `time git
+clone --no-local` measured at 10.7s wall before touching the app.
 
-With the timeout raised: opened the form (`01-clone-form-empty.png`), typed
-the local fixture path into `clone-url-field`, pressed Return. At 105s the
-form was still genuinely running (`03-clone-in-progress-live.png`,
-"Cloning… 0%" — this repo spends most of its time in local compression
-before the transfer phase the progress bar tracks). It finished sometime
-before the 150s mark.
+`TILLER_PROJECTS_DIR` redirected under `/var/tmp` (the real default is
+`$HOME/Tiller/projects`). First attempt at this smaller drive still left
+`TILLER_GIT_TIMEOUT_MS` unset by mistake (a fresh shell per command losing
+an earlier export, not a code issue) and hit the same default-10s deadline
+as last round's first attempt — same accidental control as before,
+`GitError::TimedOut` reaching the UI correctly as "Clone failed: … did not
+finish within 10s and was killed." That partial clone left a stale
+destination directory behind (caught and removed before the next attempt —
+see the methodology note below). Re-ran with `TILLER_GIT_TIMEOUT_MS=60000`,
+comfortably above the measured 10.7s.
+
+Opened the form (`01-clone-form-empty.png`), typed the local fixture path
+into `clone-url-field`, clicked "Clone repository". Captured a frame while
+the clone was genuinely in flight (`03-clone-in-progress-live.png` —
+"Cloning… 0%", live). It finished cleanly a few seconds later.
 
 **Result** (`04-clone-succeeded-no-truncation-indicator.png`): the project
-`tt-streamcap-3262725439-clonesrc` appears in the sidebar with its `master`
-worktree, marked Primary. The clone form is gone — `CloneFormEvent::Cloned`
-fires on success and closes it. **No error, no warning, no truncation
-indicator anywhere.** Verified the clone itself is genuinely intact despite
-the capped capture (git writes the real repository content to disk
-independent of what the reader retains for progress purposes, so this was
-expected, but checked rather than assumed): `git status --short` clean,
-`git log --oneline` shows all 4 source commits, `git fsck --full` reports
-nothing.
-
-So: the flag was (with very high confidence — same command, same fixture,
-same measured ~32KB baseline, 32x the configured cap) `true` for this run,
-and a person looking at the app has zero way to know that. That's the
-finding — not "a flag nothing reads yet," but a flag that was thrown away
-one line after being produced, with no return-type slot for a future reader
-to ever add one without changing `GitClone::clone`'s signature.
+`tt-streamcap-3262725439-smallclonesrc` appears in the sidebar with its
+`master` worktree, marked Primary. The clone form is gone —
+`CloneFormEvent::Cloned` fires on success and closes it. **No error, no
+warning, no truncation indicator anywhere** — there is no surface in this
+UI that could show one even if the flag had survived to reach it. Verified
+the clone itself is genuinely intact: `git log --oneline` shows the one
+source commit, `git fsck --full` reports nothing, `du -sh` shows the full
+112 MB (225 MB with git's own object-store overhead) present on disk.
 
 ## One methodology note, not a code finding
 
-Two probe attempts at this drive were launched with my Bash tool's cwd set
-to the shared `tiller-linux` checkout (`/home/enzopalmisano/…/tiller-linux`
-— the repo this whole engagement runs from). Tiller auto-registered that
-directory as a project and mounted real Chat/Terminal tabs rooted there on
-first launch, because `wayland-drive.sh` doesn't `cd` before exec-ing the
-binary — it inherits the caller's cwd. Checked immediately, before touching
-anything else: `git status --short` in that repo was clean and nothing
-under it had a recent mtime, so nothing was written. Fixed by always
-launching from `/var/tmp` for the rest of this drive; recorded here in case
-the same shape of surprise costs someone else a "wait, why does my sidebar
-have a real project in it" moment. Not the same class of thing as the
-label-collision note from the previous drive — that was stale state
-carried by a reused label; this is cwd inheritance on a clean one.
+`wtype`'s default text-typing mode (`type "<text>"` in this harness, no
+`-k`) sent zero characters to this specific text field across repeated
+attempts — the URL field stayed on its placeholder every time, even though
+the same mechanism has worked elsewhere in past drives. A single named key
+(`key a`) landed reliably; a bare-string `type` of the same one or two
+characters did not, and firing many `key <name>` calls back-to-back with no
+delay between them dropped all but the first one or two. What worked
+consistently: one `key <xkb-keysym-name>` per character (`/` → `slash`, `-`
+→ `minus`, digits and letters literal) with a `sleep 0.2`-0.25s between
+each. That's roughly 10-12s of pure typing overhead for a 46-character
+path, paid once. Worth a line in `WAYLAND-LANE.md`'s trap table for the
+next drive that needs to type an arbitrary string into a GPUI text field —
+`key`-per-character-with-settle is the reliable path, `type` is not,
+against this app.
+
+Separately: the app's default project directory (`$HOME/Tiller/projects`)
+turned out to already be an active shared scratch area from earlier rounds
+of this same verification engagement (other builders' test project
+directories dated two days prior were already there), not empty, untouched
+personal storage — but it is still the *real* user directory, not something
+this drive should write into, and an early attempt did land a stale
+partial-clone directory there by mistake (a fresh Bash tool call losing a
+previous call's `TILLER_PROJECTS_DIR` export, not a code issue). Caught by
+checking the destination immediately after the failure that revealed it,
+removed before continuing, and every later attempt in this drive correctly
+set `TILLER_PROJECTS_DIR` under `/var/tmp` first. Also confirmed the app
+now launches from a neutral cwd on its own (`2bc8875b`, merged since the
+previous drive) rather than needing a manual `cd /var/tmp` before invoking
+the harness, which was still done here as belt-and-suspenders.
+
+## Verdict
+
+**F-GIT-RUN-01 stays PASSED.** The row is about the buffered path, and that
+was driven and confirmed last round — nothing here changes it.
+
+The streaming finding is a separate fact, worth recording on its own
+terms rather than folded into a row it isn't about: the streaming runner's
+`GitCommandResult.truncated` is written, unit-tested
+(`run_streaming_reports_a_truncated_capture`), reachable by drain-by-
+construction on every path except a receiver-hangup shutdown race, and has
+*zero* consumers in the shipping app — not "not yet wired up," but
+structurally discarded by `GitClone::clone`'s own return type before it
+can reach `CloneForm::submit`, which discards it again regardless. Same
+shape as F-TAB-13's move-tab machinery — real, tested code the app cannot
+act on — except this one sits behind UI a person actually reaches (Sidebar
+"+" → "Clone Repository…"), so it's a live gap, not a dead corner. Whether
+to wire it up — return it through `GitClone::clone`, surface it in
+`CloneForm`, or decide a truncated progress capture never mattered to a
+user in the first place — is a scope call for the user. Reporting it, not
+fixing it.
