@@ -1,109 +1,20 @@
 #!/bin/bash
-# Single verification entrypoint: regenerates the project, builds the app,
-# and runs every package's tests. Used as the gate for every task.
-set -euo pipefail
-cd "$(dirname "$0")/.."
-
-xcodegen generate
-bash Scripts/check-migration-fixtures.sh
-bash Scripts/check-module-boundaries.sh
-
-# Build tillerctl so dev-build fallback exists for pane spawns.
-swift build --package-path Packages/TillerControl --product tillerctl
-# CODE_SIGNING_ALLOWED=NO: this build only needs to compile, not run or be
-# distributed — avoids requiring a "Mac Development" cert on CI runners
-# that only carry the Developer ID Application cert used for releases.
-xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
-  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates build | tail -5
-
-tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
-trap 'rm -rf "$tmpdir"' EXIT
-
-# App-target tests (TillerTests, sources in AppTests/). Deliberately NOT
-# passing CODE_SIGNING_ALLOWED=NO or -derivedDataPath: with either one the
-# test host hangs in dyld before test discovery on managed Macs.
-# The package checkout is shared with the build above, but derived data remains
-# separate so the test host keeps the managed-Mac workaround.
+# Single verification gate for the whole repo. This filename and its "CI OK" contract
+# predate the Rust port -- CLAUDE.md, AGENTS.md, README.md, and Scripts/Tests/test-ci.sh
+# all quote `Scripts/ci.sh` as *the* gate, and that contract does not change just because
+# the Swift/Xcode project it used to build is gone. The only build target left in this
+# repo is the Rust/gpui workspace under rust/, whose gate was already built, hardened,
+# and independently tested under the name Scripts/ci-linux.sh (see
+# docs/superpowers/plans/2026-08-13-linux-verification-gate.md and
+# Scripts/Tests/test-ci-linux.sh) while the Swift gate above was still the one most of
+# this repo's history calls "the" CI script.
 #
-# The log lands in gitignored DerivedData rather than a trap-deleted tmpdir:
-# when this step fails, the failure detail is the whole point, and a tail of
-# the last lines is usually xcodebuild epilogue, not the failing assertion.
-app_test_log=DerivedData/apptests.log
-mkdir -p DerivedData
-set +e
-xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates \
-  -clonedSourcePackagesDirPath DerivedData/SourcePackages > "$app_test_log" 2>&1
-app_test_status=$?
-set -e
-if [ "$app_test_status" != 0 ]; then
-    echo "==> App tests FAILED (full log: $app_test_log)"
-    grep -E "✘|error:|Test Case .* failed" "$app_test_log" | head -40
-    exit 1
-fi
-# [1-9][0-9]* not [0-9]+: a misconfigured selector exits "TEST SUCCEEDED"
-# having run zero tests, which this assertion exists to catch.
-grep -qE "Test run with [1-9][0-9]* tests" "$app_test_log" || {
-    echo "FAILED: App test run reported no tests (full log: $app_test_log)"; exit 1; }
-tail -3 "$app_test_log"
-
-# --- Parallel package tests ---
-# TillerTerminal is excluded from the parallel batch and run on its own afterwards.
-# Its PtyProcessTests spawn real PTYs and assert on wall-clock deadlines and on output
-# arriving within a timeout, so they fail whenever the machine is saturated — and this
-# batch saturates it. They pass consistently when run alone.
-
-serial_pkg=TillerTerminal
-
-: > "$tmpdir/jobs"
-for pkg in Packages/*/; do
-    name=${pkg%/}; name=${name##*/}
-    [ "$name" = "$serial_pkg" ] && continue
-    {
-        cd "$pkg"
-        set +e
-        start=$SECONDS
-        swift test > "$tmpdir/$name.log" 2>&1
-        status=$?
-        printf '%s %s\n' "$status" "$((SECONDS - start))" > "$tmpdir/$name.status"
-    } &
-    echo "$!:$name" >> "$tmpdir/jobs"
-done
-
-failed_names=""
-while IFS=: read -r pid name; do
-    wait "$pid" 2>/dev/null || true
-    read -r status elapsed < "$tmpdir/$name.status" || {
-        status=1
-        elapsed='?'
-    }
-    echo "==> swift test: Packages/$name/ (${elapsed}s)"
-    cat "$tmpdir/$name.log"
-    if [ "$status" != "0" ]; then
-        failed_names="$failed_names $name"
-    fi
-done < "$tmpdir/jobs"
-
-if [ -d "Packages/$serial_pkg" ]; then
-    echo "==> swift test: Packages/$serial_pkg/ (serial — timing-sensitive PTY tests)"
-    serial_start=$SECONDS
-    set +e
-    timeout 900 bash -c "cd 'Packages/$serial_pkg' && swift test"
-    serial_status=$?
-    set -e
-    echo "==> swift test: Packages/$serial_pkg/ completed in $((SECONDS - serial_start))s"
-    if [ "$serial_status" = 124 ]; then
-        echo "TIMEOUT: serial tests hung for >900s (15 minutes)"
-        failed_names="$failed_names $serial_pkg"
-    elif [ "$serial_status" != 0 ]; then
-        failed_names="$failed_names $serial_pkg"
-    fi
-fi
-
-if [ -n "$failed_names" ]; then
-    echo "FAILED packages:$failed_names"
-    exit 1
-fi
-
-echo "CI OK"
+# Rather than fork that ~500-line gate under this name -- which would give the repo two
+# copies of the same logic to keep in sync, or worse, two gates that quietly disagree --
+# this script simply *is* Scripts/ci-linux.sh: `exec` replaces this process with it, so
+# stdout, stderr, and the exit code all pass through completely unchanged. Every doc under
+# docs/ that already tells an agent to run `./Scripts/ci-linux.sh` keeps working exactly as
+# written; this name is just an alias that also keeps working for anything that still
+# expects `Scripts/ci.sh` to be the one gate to run.
+set -euo pipefail
+exec "$(dirname "${BASH_SOURCE[0]}")/ci-linux.sh" "$@"
