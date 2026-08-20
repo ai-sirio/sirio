@@ -605,7 +605,7 @@ impl RightPanel {
         let context_entity = entity.clone();
         let diff_path = path.clone();
         let diff_entity = entity.clone();
-        let glyph = file_glyph(&path, is_dir);
+        let glyph = file_row_glyph(&path, is_dir);
         div()
             .id(row_id)
             .debug_selector(move || {
@@ -667,6 +667,13 @@ impl RightPanel {
             })
             .child(
                 div()
+                    .debug_selector(move || {
+                        if is_dir {
+                            "file-directory-disclosure".to_owned()
+                        } else {
+                            "file-file-disclosure".to_owned()
+                        }
+                    })
                     .w(px(10.0))
                     .flex()
                     .items_center()
@@ -677,23 +684,37 @@ impl RightPanel {
                     }),
             )
             // The per-type file glyph — the visible subject of the "File
-            // icons" setting. It is resolved from the embedded set (the
-            // Material set, the only one this platform offers; the settings
-            // screen is gated to match, P19) and tinted like the Swift
-            // explorer's subtitle-tinted FileTypeIcon.
+            // icons" setting. Directory rows intentionally have no glyph or
+            // icon slot so their names follow the disclosure control directly.
+            .when_some(glyph, |this, glyph| {
+                this.child(
+                    div()
+                        .debug_selector(|| "file-file-icon".to_owned())
+                        .w(px(14.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            IconElement::new(glyph, theme.typography.callout)
+                                .text_color(theme.subtitle),
+                        ),
+                )
+            })
             .child(
                 div()
-                    .w(px(14.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        IconElement::new(glyph, theme.typography.callout)
-                            .text_color(theme.subtitle),
-                    ),
+                    .debug_selector(move || {
+                        if is_dir {
+                            "file-directory-name".to_owned()
+                        } else {
+                            "file-file-name".to_owned()
+                        }
+                    })
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(name),
             )
-            .child(div().flex_1().overflow_hidden().text_ellipsis().child(name))
             .when(read_error.is_some(), |this| {
                 this.child(
                     div()
@@ -1308,6 +1329,13 @@ fn file_glyph(path: &Path, is_dir: bool) -> Icon {
     }
 }
 
+fn file_row_glyph(path: &Path, is_dir: bool) -> Option<Icon> {
+    if is_dir {
+        return None;
+    }
+    Some(file_glyph(path, false))
+}
+
 fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<FileNode>, String> {
     let entries = std::fs::read_dir(directory).map_err(|error| error.to_string())?;
     let mut nodes = entries
@@ -1547,6 +1575,15 @@ mod tests {
                 "file_glyph({path:?}, {is_dir})"
             );
         }
+    }
+
+    #[test]
+    fn file_row_glyph_keeps_file_icons_but_omits_directory_icons() {
+        assert_eq!(file_row_glyph(Path::new("/repo/src"), true), None);
+        assert_eq!(
+            file_row_glyph(Path::new("/repo/main.rs"), false),
+            Some(Icon::File)
+        );
     }
 
     #[test]
@@ -2323,6 +2360,31 @@ mod tests {
             window.simulate_next_frame(cx);
             window.simulate_next_frame(cx);
         });
+        let directory_disclosure = cx
+            .debug_bounds("file-directory-disclosure")
+            .expect("the directory disclosure slot is drawn");
+        let directory_name = cx
+            .debug_bounds("file-directory-name")
+            .expect("the directory name is drawn");
+        assert!(
+            cx.debug_bounds("file-directory-icon").is_none(),
+            "directory rows do not draw a file icon or reserve its slot"
+        );
+
+        let file_icon = cx
+            .debug_bounds("file-file-icon")
+            .expect("the file icon slot is drawn");
+        let file_name = cx
+            .debug_bounds("file-file-name")
+            .expect("the file name is drawn");
+        let gap = file_name.origin.x.as_f32()
+            - (file_icon.origin.x.as_f32() + file_icon.size.width.as_f32());
+        let expected_directory_name_x =
+            directory_disclosure.origin.x.as_f32() + directory_disclosure.size.width.as_f32() + gap;
+        assert!(
+            (directory_name.origin.x.as_f32() - expected_directory_name_x).abs() <= 0.5,
+            "directory name follows the disclosure slot directly: disclosure={directory_disclosure:?}, name={directory_name:?}, file_gap={gap}"
+        );
         assert!(
             cx.debug_bounds("file-row").is_some(),
             "the expanded directory's child is laid out in the drawn frame"
