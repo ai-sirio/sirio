@@ -5,42 +5,44 @@
 <h1 align="center">Tiller</h1>
 
 <p align="center">
-  <strong>Steer every coding agent from one native Mac window.</strong>
+  <strong>Steer every coding agent from one native Linux window.</strong>
 </p>
 
 <p align="center">
-  A lightweight native macOS app for running Claude Code, Codex, OpenCode, Pi and Oh-My-Pi<br/>
+  A lightweight native Linux app for running Claude Code, Codex, OpenCode, Pi and Oh-My-Pi<br/>
   side by side — one sidebar per project, one terminal per worktree, one glance at who needs you.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/macOS-15.0%2B-blue?style=flat-square" alt="macOS 15.0+" />
+  <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" />
-  <img src="https://img.shields.io/badge/Swift-6.0-orange?style=flat-square" alt="Swift 6.0" />
+  <img src="https://img.shields.io/badge/Rust-2024%20edition-orange?style=flat-square" alt="Rust 2024 edition" />
   <a href="https://github.com/e-palmisano/tiller"><img src="https://img.shields.io/github/stars/e-palmisano/tiller?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
   <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" /></a>
-</p>
-<p align="center">
-  <img src="assets/readme-hero.png" width="960" alt="Tiller running with a project sidebar and an active terminal pane" />
 </p>
 
 ---
 
+> Tiller started as a native macOS app (SwiftUI/Swift 6) and has been rewritten in Rust on
+> [gpui](https://github.com/zed-industries/zed) for Linux. The Swift original is retired —
+> see [`docs/linux-rewrite/README.md`](docs/linux-rewrite/README.md) for the exact commit and
+> how to read its source from git history.
+
 ## Features
 
 - 🗂️ **Sidebar of projects & worktrees** — local git worktrees, one row per branch, sorted by urgency
-- 🖥️ **Native terminal** — built on [libghostty](https://github.com/ghostty-org/ghostty), tabs and recursive splits
-- 📝 **Markdown editor** — click a `.md` link in the terminal (or drag & drop / ⌘O) to open it in a tab: rendered preview + code mode, live reload while agents write
+- 🖥️ **Native terminal** — built on [alacritty_terminal](https://github.com/alacritty/alacritty), tabs and recursive splits
+- 📝 **Markdown editor** — click a `.md` link in the terminal (or drag & drop / `Ctrl+O`) to open it in a tab: rendered preview + code mode, live reload while agents write
+- 🌐 **Embedded browser tab** — a native WebKitGTK surface composited alongside the terminal, for previewing a running dev server without leaving the window
+- 📋 **Diff/changes viewer** — a git-status-aware Changes surface: stage, unstage, discard, and open a path-specific diff tab
 - 🤖 **5 agent adapters** — Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, each with lifecycle hooks
 - 🔌 **Control socket** — `tillerctl` CLI for scripted create/write/read/wait/notify against any pane
-- 🔔 **Menu bar roster** — a live pulse on every active agent; spins while working, rings when one needs you; click to jump straight back into the right worktree, even with the window closed
-- 🔕 **Native notifications** — Touch-free heads-up when an agent finishes or stalls
-- 💾 **Session persistence** — agent sessions survive an app restart (GRDB-backed)
+- 🔔 **Tray roster** — a `StatusNotifierItem` tray icon with a live pulse on every active agent; click to jump straight back into the right worktree, even with the window closed
+- 🔕 **Desktop notifications** — a heads-up when an agent finishes or stalls
+- 💾 **Session persistence** — agent sessions survive an app restart (SQLite-backed)
 - 📊 **Provider usage tracking** — Claude / Codex / OpenCode / Ollama usage at a glance
-- 🔐 **macOS permissions page** — one-shot onboarding + Settings section to grant the TCC permissions agents inherit (notifications, screen recording, accessibility, full disk access, automation, local network)
-- **Auto-update** — toast in basso a destra quando esce una nuova release: Scarica, poi Aggiorna e riavvia (Sparkle 2, appcast firmato EdDSA su GitHub Releases).
 
-**Deliberately not doing:** diff viewer, embedded browser, remote SSH / mobile relay, scheduling — Tiller stays a focused terminal + agent hub, not an IDE.
+**Deliberately not doing:** remote SSH / mobile relay, scheduling — Tiller stays a focused terminal + agent hub, not an IDE.
 
 ---
 
@@ -94,13 +96,13 @@ The nine panel subcommands are:
 
 ## Install
 
-Tiller doesn't ship prebuilt binaries yet — build it from source (see below). It's a small SPM monorepo, first build takes a couple of minutes.
+Tiller doesn't ship prebuilt binaries yet — build it from source (see below). It's a Cargo workspace of 13 crates; first build takes a few minutes.
 
 ---
 
 ## First Launch
 
-Tiller asks for **Notifications permission** on first launch, so it can alert you when an agent finishes or needs input. Everything else runs with no special entitlements — no accessibility hooks, no telemetry, no network calls beyond what your agents themselves make.
+Tiller needs no special permission prompts on Linux — it runs with no elevated access, no telemetry, and no network calls beyond what your agents themselves make. Desktop notifications go through the freedesktop D-Bus notification service, and the tray roster needs a `StatusNotifierItem`-capable panel (KDE, GNOME/COSMIC and most other desktops via their SNI/AppIndicator bridge).
 
 ---
 
@@ -108,13 +110,18 @@ Tiller asks for **Notifications permission** on first launch, so it can alert yo
 
 | Action | Shortcut |
 |--------|----------|
-| New tab in selected worktree | `⌘T` |
-| Close active tab | `⌘W` |
-| Settings | `⌘,` |
-| Open markdown file in selected worktree | `⌘O` |
-| Save markdown file | `⌘S` |
+| New terminal tab | `Ctrl+T` |
+| Close active tab | `Ctrl+W` |
+| Open file | `Ctrl+O` |
+| Save file | `Ctrl+S` |
+| Toggle sidebar | `Ctrl+Shift+S` |
+| Toggle right panel | `Ctrl+Shift+I` |
+| New browser tab | `Ctrl+Shift+L` |
+| Focus browser address bar | `Ctrl+L` |
+| Restore previous launch | `Ctrl+Shift+O` |
+| Settings | `Ctrl+,` |
 
-The menu bar icon is always one click away — it reflects the worst status across every active agent and opens straight into a full roster.
+The tray icon is always one click away — it reflects the worst status across every active agent and opens straight into a full roster.
 
 ---
 
@@ -122,25 +129,33 @@ The menu bar icon is always one click away — it reflects the worst status acro
 
 | Path | Role |
 |------|------|
-| `App/` | Thin app target: bootstrap, windows, menus, SwiftUI views |
-| `Packages/TillerCore/` | Domain models, actors, pure logic (state machine, merge, filtering) |
-| `Packages/TillerTerminal/` | PtyProcess, terminal panes, recursive splits, scrollback, libghostty |
-| `Packages/TillerControl/` | ControlServer (unix socket) + `tillerctl` CLI |
-| `Packages/TillerAgents/` | Adapters for the 5 supported agents, with lifecycle hooks |
-| `Packages/TillerGit/` | Shell-out to git for local worktrees |
-| `Packages/TillerPersistence/` | GRDB/SQLite schema, migrations, records |
+| `rust/crates/tiller/` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
+| `rust/crates/tiller_ui/` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings) |
+| `rust/crates/tiller_terminal/` | Terminal panes backed by `alacritty_terminal`, PTY handling, splits |
+| `rust/crates/tiller_activity/` | Layered agent-activity detection (hooks / title / content / process), no GPUI dependency |
+| `rust/crates/tiller_control/` | `ControlServer` (unix socket) + `PaneRegistry` + `tillerctl` CLI |
+| `rust/crates/tiller_agents/` | Adapters for the 5 supported agents, with lifecycle hooks |
+| `rust/crates/tiller_acp/` | Agent Client Protocol transport for chat-hosted agents |
+| `rust/crates/tiller_git/` | Shell-out to git for local worktrees |
+| `rust/crates/tiller_persistence/` | SQLite (`rusqlite`) schema, migrations, records |
+| `rust/crates/tiller_project/` | Workspace/project domain logic, update-check state machine |
+| `rust/crates/tiller_theme/` | Color palette and theme tokens |
+| `rust/crates/tiller_markdown/` | Markdown parsing/rendering for the editor and chat |
+| `rust/crates/tiller_usage/` | Provider usage-tracking (Claude/Codex/OpenCode/Ollama) |
+
+See `CLAUDE.md`'s Architecture section for the dependency graph between them.
 
 ---
 
 ## Building from Source
 
 ```bash
-brew install xcodegen
-xcodegen generate
-open Tiller.xcodeproj
+cd rust
+cargo build --workspace
+cargo run -p tiller
 ```
 
-Build and run with `⌘R`. Requires macOS 15+ and Xcode 16+ with Swift 6.0.
+Requires a Rust toolchain (2024 edition) and, on Linux, GTK/WebKit development headers for the embedded browser surface (`gtk`, `webkit2gtk` — package names vary by distro).
 
 Single verification gate for the whole repo:
 
@@ -148,10 +163,10 @@ Single verification gate for the whole repo:
 Scripts/ci.sh    # → "CI OK" if everything passes
 ```
 
-To iterate on a single package:
+To iterate on a single crate:
 
 ```bash
-cd Packages/<Package> && swift test
+cd rust && cargo test -p <crate>
 ```
 
 ---
@@ -159,10 +174,10 @@ cd Packages/<Package> && swift test
 ## FAQ
 
 **Why 5 agent adapters instead of one generic CLI wrapper?**
-Each agent CLI (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) has its own lifecycle quirks — startup banners, resume flags, exit signals. A thin per-agent adapter behind a shared protocol keeps that mess contained instead of leaking into the terminal or sidebar code.
+Each agent CLI (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) has its own lifecycle quirks — startup banners, resume flags, exit signals. A thin per-agent adapter behind a shared trait keeps that mess contained instead of leaking into the terminal or sidebar code.
 
 **Does closing the window stop my agents?**
-No. Every agent session runs in its own PTY that keeps running after the window closes — macOS doesn't terminate an app just because its last window closed. The menu bar icon keeps tracking them and can bring you straight back. Only quitting the app (`⌘Q`) ends everything.
+No. Every agent session runs in its own PTY, and closing the window only flushes session state — it does not tear panes down. The tray icon keeps tracking them and can bring you straight back. Only quitting the app ends everything.
 
 **What's `tillerctl` for?**
 It's the CLI side of Tiller's control socket — create a pane, write to it, read its output, wait for a state, or send a notification, all scriptable from outside the app. It's also how agent lifecycle hooks talk back to Tiller.
@@ -180,14 +195,14 @@ Bug reports and pull requests are welcome.
 
 ### Rules
 
-1. **Tests first.** New logic needs `swift-testing` (`@Test` / `#expect`) coverage before implementation.
+1. **Tests first.** New logic needs `#[test]` coverage before implementation.
    ```bash
-   cd Packages/<Package> && swift test
+   cd rust && cargo test -p <crate>
    ```
 
-2. **Respect the package boundaries.** Dependencies flow one way: `TillerAgents` / `TillerGit` / `TillerTerminal` → `TillerCore` → `TillerPersistence`. `App/` is the only consumer that depends on everything; nothing underneath depends back up.
+2. **Respect the crate boundaries.** See `CLAUDE.md`'s Architecture section for the current dependency graph between `rust/crates/*`. `tiller` (the app) is the only crate that depends on everything; nothing underneath depends back up.
 
-3. **Value types for models.** Domain types are structs; classes are reserved for things with real identity (windows, PTY processes) and must be actor-isolated or otherwise protected.
+3. **Keep pure logic pure.** State machines, parsers, and merge/filter logic that don't need a window belong in a crate with no `gpui` dependency (see `tiller_activity` for the pattern) — that is what keeps them unit-testable without spinning up a window.
 
 4. **Commit messages.** Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`. Lower-case, imperative subject.
 
@@ -205,7 +220,7 @@ MIT — see [LICENSE](LICENSE) for details.
 
 Tiller is a fork of [Orca](https://github.com/stability-ai/orca) with a deliberately reduced scope, designed and built with the help of AI pair programmers:
 
-- **[Claude Code](https://claude.ai/code)** by Anthropic — architecture, implementation, and review throughout the project.
+- **[Claude Code](https://claude.ai/code)** by Anthropic — architecture, implementation, and review throughout the project, including the Rust/gpui Linux port.
 - **[OpenCode](https://opencode.ai/)** — parallel subagent execution for isolated, independently-verified feature branches.
 
 > *A fork with its own name and its own terms.*

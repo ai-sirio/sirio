@@ -1510,34 +1510,36 @@ mod tests {
         }
     }
 
-    /// The four state hues are still the ones our own macOS app ships.
+    /// The four state hues are still the ones the original macOS app shipped.
     ///
     /// They are not measurable — neither reference frame contains an error, a
     /// gauge, a starred row or a terminal — so their provenance is that Tiller
     /// already had them, for the same four meanings on the same tab strip.
-    /// A citation in a comment decays; this reads the Swift and fails if the
-    /// two ever part company, which is the only version of "these came from
-    /// our app" that stays true.
+    ///
+    /// This used to read `App/AppTheme.swift` at compile time (`include_str!`)
+    /// so drift between two *live* files would fail the build. The Swift app
+    /// was removed once the Rust port covered the inventory; `App/AppTheme.swift`
+    /// can no longer drift because it no longer exists in the tree. The four
+    /// triples below are copied byte-for-byte from `static let tab* = dynamic(...)`
+    /// in `App/AppTheme.swift` at commit 5430d7bf, the last commit containing the
+    /// Swift tree (`git show 5430d7bf:App/AppTheme.swift`) — this is now a frozen
+    /// provenance record, not a live cross-check, and that is a deliberate
+    /// narrowing of what the test proves, not an oversight.
     #[test]
-    fn the_state_hues_are_the_ones_the_swift_app_ships() {
-        let swift = include_str!("../../../../App/AppTheme.swift");
-        let declared = |token: &str, dark: bool| -> (f32, f32, f32) {
-            let after = swift
-                .split_once(&format!("static let {token} = dynamic("))
-                .unwrap_or_else(|| panic!("{token} is gone from App/AppTheme.swift"))
-                .1;
-            // `dynamic(light:…, dark:…)` — take whichever arm was asked for.
-            let arm = after
-                .split_once(if dark { "dark:" } else { "light:" })
-                .expect("arm")
-                .1;
-            let numbers: Vec<f32> = arm
-                .split(&[',', ':', ')'][..])
-                .filter_map(|piece| piece.trim().parse::<f32>().ok())
-                .take(3)
-                .collect();
-            assert_eq!(numbers.len(), 3, "{token} did not yield an rgb triple");
-            (numbers[0], numbers[1], numbers[2])
+    fn the_state_hues_are_the_ones_the_swift_app_shipped() {
+        // (light r, light g, light b, dark r, dark g, dark b)
+        let declared: [(&str, (f32, f32, f32), (f32, f32, f32)); 4] = [
+            ("tabNeedsInput", (0.67, 0.42, 0.02), (0.95, 0.72, 0.28)),
+            ("tabDone", (0.10, 0.45, 0.22), (0.48, 0.78, 0.57)),
+            ("tabError", (0.68, 0.12, 0.17), (0.94, 0.43, 0.47)),
+            ("tabFocusAccent", (0.24, 0.38, 0.78), (0.55, 0.64, 1.00)),
+        ];
+        let declared_for = |token: &str, dark: bool| -> (f32, f32, f32) {
+            let (_, light, dark_rgb) = declared
+                .iter()
+                .find(|(name, _, _)| *name == token)
+                .unwrap_or_else(|| panic!("{token} is missing from the frozen Swift record"));
+            if dark { *dark_rgb } else { *light }
         };
 
         for (dark_mode, theme) in [(true, Theme::dark()), (false, Theme::light())] {
@@ -1547,7 +1549,7 @@ mod tests {
                 ("tabError", theme.tab_error),
                 ("tabFocusAccent", theme.gauge),
             ] {
-                let (r, g, b) = declared(token, dark_mode);
+                let (r, g, b) = declared_for(token, dark_mode);
                 expect_color(ours, (r, g, b, 1.0));
             }
         }
