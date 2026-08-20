@@ -229,8 +229,15 @@ const SEAM_WIDTH: f32 = 6.;
 const TITLE_BAR_HEIGHT: f32 = 32.;
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
-const CHAT_TAB_WIDTH: f32 = 108.;
-const TERMINAL_TAB_WIDTH: f32 = 132.;
+const CHAT_TAB_MIN_WIDTH: f32 = 108.;
+const TERMINAL_TAB_MIN_WIDTH: f32 = 132.;
+const TAB_MAX_WIDTH: f32 = 220.;
+const TAB_HORIZONTAL_PADDING: f32 = 20.;
+const TAB_ICON_WIDTH: f32 = 14.;
+const TAB_GAP: f32 = 6.;
+const TAB_STATUS_WIDTH: f32 = 16.;
+const TAB_CLOSE_WIDTH: f32 = 14.;
+const TAB_TITLE_ESTIMATED_CHAR_WIDTH: f32 = 7.5;
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_METHODS: [&str; 11] = [
@@ -6261,18 +6268,30 @@ impl TillerWorkspace {
 
     fn tab_width(kind: TabKind) -> f32 {
         match kind {
-            TabKind::AgentChat | TabKind::Editor | TabKind::Diff => CHAT_TAB_WIDTH,
-            TabKind::Terminal => TERMINAL_TAB_WIDTH,
-            TabKind::Browser => CHAT_TAB_WIDTH,
+            TabKind::AgentChat | TabKind::Editor | TabKind::Diff => CHAT_TAB_MIN_WIDTH,
+            TabKind::Terminal => TERMINAL_TAB_MIN_WIDTH,
+            TabKind::Browser => CHAT_TAB_MIN_WIDTH,
         }
     }
 
-    fn tab_render_width(tab: &OpenTab) -> f32 {
-        if tab_has_file(tab) {
+    fn tab_width_for_title(kind: TabKind, title: &str, is_file: bool) -> f32 {
+        let minimum = if is_file {
             180.0
         } else {
-            Self::tab_width(tab.kind)
-        }
+            Self::tab_width(kind)
+        };
+        let fixed_width = TAB_HORIZONTAL_PADDING
+            + TAB_ICON_WIDTH
+            + (3.0 * TAB_GAP)
+            + TAB_STATUS_WIDTH
+            + TAB_CLOSE_WIDTH;
+        let estimated_title_width = title.chars().count() as f32 * TAB_TITLE_ESTIMATED_CHAR_WIDTH;
+
+        (fixed_width + estimated_title_width).clamp(minimum, TAB_MAX_WIDTH)
+    }
+
+    fn tab_render_width(tab: &OpenTab) -> f32 {
+        Self::tab_width_for_title(tab.kind, &tab.title, tab_has_file(tab))
     }
 
     fn select_tab(&mut self, id: usize, cx: &mut Context<Self>) {
@@ -8952,11 +8971,7 @@ impl TillerWorkspace {
         } else {
             theme.meta
         };
-        let width = if is_file {
-            180.0
-        } else {
-            Self::tab_width(tab.kind)
-        };
+        let width = Self::tab_render_width(tab);
         let close_entity = entity.clone();
         let menu_entity = entity.clone();
         let rename_entity = entity.clone();
@@ -8979,6 +8994,7 @@ impl TillerWorkspace {
             .items_center()
             .gap(px(6.0))
             .px(px(10.0))
+            .overflow_hidden()
             .rounded_t(px(6.0))
             .text_size(px(12.0))
             .text_color(if active {
@@ -9038,6 +9054,7 @@ impl TillerWorkspace {
             .child(
                 div()
                     .w(px(14.0))
+                    .flex_none()
                     .text_color(glyph_color)
                     .child(IconElement::new(icon, px(14.0))),
             )
@@ -9045,6 +9062,10 @@ impl TillerWorkspace {
                 this.child(
                     div()
                         .font_weight(FontWeight::NORMAL)
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .child(tab.title.clone()),
                 )
             })
@@ -9080,6 +9101,7 @@ impl TillerWorkspace {
                     .id(format!("workspace-tab-status-{id}"))
                     .debug_selector(move || format!("workspace-tab-status-{id}"))
                     .min_w(px(16.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(3.0))
@@ -9113,6 +9135,7 @@ impl TillerWorkspace {
                         .debug_selector(move || format!("workspace-tab-close-{id}"))
                         .w(px(14.0))
                         .h(px(20.0))
+                        .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
@@ -9135,6 +9158,7 @@ impl TillerWorkspace {
                         .debug_selector(move || format!("workspace-tab-dirty-{id}"))
                         .w(theme.spacing.titlebar_control_spacing)
                         .h(theme.spacing.titlebar_control_spacing)
+                        .flex_none()
                         .rounded(theme.radii.control)
                         .bg(theme.tab_focus_accent),
                 )
@@ -9369,7 +9393,7 @@ impl TillerWorkspace {
             if tab.id == tab_id {
                 break;
             }
-            left += Self::tab_width(tab.kind) + 1.0;
+            left += Self::tab_render_width(tab) + 1.0;
         }
         left
     }
@@ -17023,15 +17047,16 @@ mod tests {
     ) {
         // F-TAB-02 (P104 §Group 1): `has_overflow` used to be decided against
         // `available_width - overflow_width`, reserving room for the chevron
-        // even when it would never be drawn. At this exact window width
-        // three 132px terminal tabs fill the strip's full available width
-        // (396px) with nothing to spare, but the old check still demanded a
-        // further 26px (for a chevron it would then need to show), so it hid
-        // the third tab behind a chevron nothing actually required.
+        // even when it would never be drawn. At the exact window width below,
+        // three test terminal tabs use the same content-derived widths as
+        // production (the two renamed tabs are wider than the first one).
+        // The window is sized to fit those predicted widths, but not the
+        // chevron's extra 26px; reserving that space unconditionally would
+        // still hide the third tab behind a chevron nothing actually needs.
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.simulate_resize(size(px(1164.0), px(600.0)));
+        cx.simulate_resize(size(px(1226.0), px(600.0)));
         cx.run_until_parked();
 
         assert!(
@@ -19219,7 +19244,49 @@ mod tests {
     #[test]
     fn browser_tabs_have_shell_icon_and_width() {
         assert_eq!(tab_icon(TabKind::Browser, false, None), Icon::Globe);
-        assert_eq!(TillerWorkspace::tab_width(TabKind::Browser), CHAT_TAB_WIDTH);
+        assert_eq!(
+            TillerWorkspace::tab_width(TabKind::Browser),
+            CHAT_TAB_MIN_WIDTH
+        );
+    }
+
+    #[test]
+    fn chat_tab_width_contains_the_title_and_controls() {
+        // The title is intentionally the real failing case from the report:
+        // it is long enough to expose the old 108px fixed-width cliff while
+        // still being a normal, non-ellipsis title in the reference UI.
+        let controls_width = 20.0 + 14.0 + (3.0 * 6.0) + 16.0 + 14.0;
+        let claude_code_title_width = 75.0;
+
+        let width = TillerWorkspace::tab_width_for_title(
+            TabKind::AgentChat,
+            "Claude Code — a very long workspace title",
+            false,
+        );
+        assert!(
+            width >= controls_width + claude_code_title_width,
+            "chat tab width must contain the title and fixed controls"
+        );
+        assert_eq!(width, TAB_MAX_WIDTH);
+        assert!(
+            width - controls_width
+                < "Claude Code — a very long workspace title".chars().count() as f32
+                    * TAB_TITLE_ESTIMATED_CHAR_WIDTH,
+            "long titles must use the bounded title slot and ellipsis"
+        );
+    }
+
+    #[test]
+    fn tab_widths_keep_the_overflow_chevron_boundary_consistent() {
+        let widths = [
+            TillerWorkspace::tab_width_for_title(TabKind::AgentChat, "Claude Code", false),
+            TillerWorkspace::tab_width_for_title(TabKind::Terminal, "Terminal", false),
+        ];
+
+        assert_eq!(widths, [164.5, 142.0]);
+        assert_eq!(visible_tab_count(&widths, 306.0, 0.0), 1);
+        assert_eq!(visible_tab_count(&widths, 306.5, 0.0), 2);
+        assert_eq!(visible_tab_count(&widths, 306.0, 24.0), 1);
     }
 
     #[test]
