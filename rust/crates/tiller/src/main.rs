@@ -6298,9 +6298,49 @@ impl TillerWorkspace {
             .expect("workspace tabs must form a valid tab placement model");
     }
 
+    /// F-CORE-WSP-05: every "Insert" affordance (the tab-bar "+" menu's
+    /// New Chat/Terminal/Changes entries, the command palette's mirrors of
+    /// them, and every agent-tab launcher) gates its call to
+    /// `rebuild_tab_machinery` -- the structural pane-tree recompute a real
+    /// Insert requires -- on a genuine `LayoutCommand::Insert` run through
+    /// `classify_layout_command`. This is the structural counterpart of
+    /// `commit_tab_rename`'s `FocusIntent::Tab` gate (F-CORE-WSP-04):
+    /// Rename classifies as nonstructural and so never exercised this leg.
+    /// A wrong classification here is observable -- the new tab would be
+    /// pushed into `self.tabs` but left out of every `TabGroup`, so
+    /// `apply_tab_machinery`'s later reordering (and the tab strip itself,
+    /// which walks `tab_machinery`, not `self.tabs`, for placement) would
+    /// never see it.
+    fn insert_requires_rebuild(
+        &self,
+        tab_id: usize,
+        kind: tiller_project::ContentKind,
+        title: &str,
+    ) -> bool {
+        let command = tiller_project::LayoutCommand::Insert {
+            group: self.tab_machinery.active_group().to_string(),
+            tab: tiller_project::WorkspaceTab {
+                id: tab_id.to_string(),
+                content_id: format!("tab:{tab_id}"),
+                kind,
+                title: title.to_string(),
+                view_state: tiller_project::WorkspaceTabViewState::default(),
+            },
+        };
+        tiller_project::classify_layout_command(&command).structural
+    }
+
     /// Applies a placement transition to the live tab entities, preserving
     /// the pure model's order and making the moved tab active.
-    fn apply_tab_machinery(&mut self, machinery: TabMachinery) {
+    ///
+    /// `rebuild_pane_cache` gates the `F-TERM-PTY-08` structural rebuild
+    /// below. Tab reordering and close pass a literal `true`, unconditional
+    /// exactly as before this row; `move_selected_tab_with_machinery`
+    /// (F-CORE-WSP-05) is the one caller that threads through the real
+    /// `classify_layout_command(&LayoutCommand::Move { .. }).structural`
+    /// answer, so a wrong classification is observable here: the moved
+    /// tab's live pane would go untracked in `terminal_pane_cache`.
+    fn apply_tab_machinery(&mut self, machinery: TabMachinery, rebuild_pane_cache: bool) {
         let mut remaining = std::mem::take(&mut self.tabs);
         let mut ordered = Vec::with_capacity(remaining.len());
         for group in machinery.groups() {
@@ -6323,6 +6363,9 @@ impl TillerWorkspace {
             self.active_tab = 0;
         } else {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
+        if !rebuild_pane_cache {
+            return;
         }
         // F-TERM-PTY-08: every tab placement transition (MoveTabToOtherPane,
         // "Move to New Pane", and tab reordering all funnel through here) is a real seam moment -- record each terminal
@@ -6544,7 +6587,7 @@ impl TillerWorkspace {
             self.next_retained_chat_id += 1;
             self.retained_chats.push(retained_chat);
         }
-        self.apply_tab_machinery(machinery);
+        self.apply_tab_machinery(machinery, true);
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -6615,7 +6658,7 @@ impl TillerWorkspace {
         if !machinery.move_active_tab(direction) {
             return;
         }
-        self.apply_tab_machinery(machinery);
+        self.apply_tab_machinery(machinery, true);
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -6641,7 +6684,7 @@ impl TillerWorkspace {
         machinery
     }
 
-    fn move_selected_tab(&mut self, target: MoveTarget, cx: &mut Context<Self>) {
+    fn move_selected_tab(&mut self, target: MoveTarget, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab_id) = self
             .tab_menu_tab
             .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
@@ -6652,7 +6695,7 @@ impl TillerWorkspace {
         if machinery.move_tab(tab_id, target).is_err() {
             return;
         }
-        self.move_selected_tab_with_machinery(target, machinery, cx);
+        self.move_selected_tab_with_machinery(target, machinery, window, cx);
     }
 
     /// Attaches a fresh, empty pane group and moves the selected tab into
@@ -6660,7 +6703,7 @@ impl TillerWorkspace {
     /// beyond a single group -- everywhere else groups are inherited from
     /// existing tabs' `group_id`, so without this the "Move to Other Pane"
     /// family of actions could never have a second pane to target.
-    fn move_selected_tab_to_new_pane(&mut self, cx: &mut Context<Self>) {
+    fn move_selected_tab_to_new_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab_id) = self
             .tab_menu_tab
             .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
@@ -6684,13 +6727,32 @@ impl TillerWorkspace {
         {
             return;
         }
-        self.move_selected_tab_with_machinery(MoveTarget::Group(new_group_id), machinery, cx);
+        self.move_selected_tab_with_machinery(
+            MoveTarget::Group(new_group_id),
+            machinery,
+            window,
+            cx,
+        );
     }
 
+    /// F-CORE-WSP-05: routes the real tab-placement mutation through
+    /// `LayoutCommand::Move` + `classify_layout_command`, the same
+    /// load-bearing pattern `commit_tab_rename` uses for `Rename`
+    /// (F-CORE-WSP-04). Move classifies as `structural: true` -- unlike
+    /// Rename, which is nonstructural and so never exercised that leg --
+    /// which is why `apply_tab_machinery`'s pane-cache rebuild is gated on
+    /// `.structural` here rather than always running. Its `FocusIntent::Tab`
+    /// answer is what sends keyboard focus back into the moved tab's own
+    /// content: the tab's live view is detached and reattached under a
+    /// different (possibly brand-new) pane group by `apply_tab_machinery`,
+    /// and nothing else claims keyboard focus, so without this a move left
+    /// focus on whatever the tab-menu button last held until the user
+    /// clicked back into the pane.
     fn move_selected_tab_with_machinery(
         &mut self,
         _target: MoveTarget,
         machinery: TabMachinery,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(tab_id) = self
@@ -6699,18 +6761,37 @@ impl TillerWorkspace {
         else {
             return;
         };
-        if machinery
+        let Some(from_group) = self
+            .tab_machinery
             .groups()
             .iter()
-            .all(|group| !group.tabs.contains(&tab_id))
-        {
+            .find(|group| group.tabs.contains(&tab_id))
+            .map(|group| group.id)
+        else {
             return;
-        }
-        self.apply_tab_machinery(machinery);
+        };
+        let Some(to_group) = machinery
+            .groups()
+            .iter()
+            .find(|group| group.tabs.contains(&tab_id))
+            .map(|group| group.id)
+        else {
+            return;
+        };
+        let command = tiller_project::LayoutCommand::Move {
+            tab: tab_id.to_string(),
+            from: from_group.to_string(),
+            to: to_group.to_string(),
+        };
+        let transition = tiller_project::classify_layout_command(&command);
+        self.apply_tab_machinery(machinery, transition.structural);
         self.tab_menu_open = false;
         self.tab_menu_tab = None;
         self.schedule_save(cx);
         self.sync_activity(cx);
+        if transition.focus == tiller_project::FocusIntent::Tab {
+            self.focus_tab_content(tab_id, window, cx);
+        }
         cx.notify();
     }
 
@@ -6774,11 +6855,12 @@ impl TillerWorkspace {
         // activity model — no identity, and so no place for its streaming
         // state to land either.
         register_restored_agent(&mut self.activity, self.next_pane_id, agent_id.as_deref());
+        let tab_id = self.next_tab_id;
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title,
+            title: title.clone(),
             kind: TabKind::AgentChat,
             agent_icon,
             agent_id,
@@ -6790,7 +6872,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Chat, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         window.focus(&composer_focus, cx);
@@ -6829,11 +6913,12 @@ impl TillerWorkspace {
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         register_restored_agent(&mut self.activity, pane_id, agent_id.as_deref());
+        let tab_id = self.next_tab_id;
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title,
+            title: title.clone(),
             kind: TabKind::AgentChat,
             agent_icon,
             agent_id,
@@ -6845,7 +6930,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Chat, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         window.focus(&composer_focus, cx);
@@ -6921,13 +7008,14 @@ impl TillerWorkspace {
     ) {
         let tab_id = self.next_tab_id;
         let pane_id = self.next_pane_id;
+        let title = title.into();
         let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title: title.into(),
+            title: title.clone(),
             kind: TabKind::Terminal,
             agent_icon,
             agent_id,
@@ -6939,7 +7027,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Terminal, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7001,12 +7091,13 @@ impl TillerWorkspace {
         );
         let view = cx.new(|cx| FileView::new(path, cx));
         Self::subscribe_file_view(&view, cx);
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title,
+            title: title.clone(),
             // The existing UI tab model has only chat/terminal kinds. File
             // identity stays in TabContent; the shell overlay adjusts its
             // glyph and width below without changing the menu component.
@@ -7021,7 +7112,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Document, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7036,9 +7129,10 @@ impl TillerWorkspace {
         if let Some(path) = focus_path {
             changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
         }
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: "Changes".to_string(),
@@ -7053,7 +7147,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Diff, "Changes") {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7071,9 +7167,10 @@ impl TillerWorkspace {
         let browser = cx.new(|cx| BrowserSurface::new(&initial_url, window, cx));
         let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
         browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: "Browser".to_string(),
@@ -7088,7 +7185,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Browser, "Browser") {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -9298,10 +9397,10 @@ impl TillerWorkspace {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
             }
             TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
-                self.move_selected_tab(MoveTarget::Group(group_id), cx)
+                self.move_selected_tab(MoveTarget::Group(group_id), window, cx)
             }
             TabContextAction::MoveToPane(_) => {
-                self.move_selected_tab_to_new_pane(cx);
+                self.move_selected_tab_to_new_pane(window, cx);
             }
             TabContextAction::AttachToCurrentTerminal => {
                 if let Some(tab_id) = self.tab_menu_tab {
@@ -9417,7 +9516,7 @@ impl TillerWorkspace {
         if !machinery.move_active_tab(direction) {
             return;
         }
-        self.apply_tab_machinery(machinery);
+        self.apply_tab_machinery(machinery, true);
         self.dismiss_tab_menu(cx);
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -10343,7 +10442,7 @@ impl TillerWorkspace {
     fn handle_move_tab_to_other_pane(
         &mut self,
         _: &MoveTabToOtherPane,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let active_group = self.tab_machinery.active_group();
@@ -10356,7 +10455,7 @@ impl TillerWorkspace {
         else {
             return;
         };
-        self.move_selected_tab(MoveTarget::Group(target), cx);
+        self.move_selected_tab(MoveTarget::Group(target), window, cx);
     }
 
     fn handle_resume_chat(&mut self, _: &ResumeChat, window: &mut Window, cx: &mut Context<Self>) {
@@ -16447,6 +16546,85 @@ mod tests {
         }));
     }
 
+    /// F-CORE-WSP-05: `move_selected_tab_with_machinery` routes the real
+    /// move through `LayoutCommand::Move` + `classify_layout_command`, and
+    /// its `FocusIntent::Tab` answer is what sends keyboard focus to the
+    /// *moved* tab's own content -- the same load-bearing pattern
+    /// `commit_tab_rename` uses for `Rename` (F-CORE-WSP-04). This is a
+    /// distinct bug from the rename one: `TabMachinery::move_tab` makes the
+    /// moved tab the new active tab of its destination group, so after
+    /// moving tab 1 (not the tab that currently holds keyboard focus) the
+    /// *visible* active tab flips to it, but nothing else moves keyboard
+    /// focus off whichever pane held it beforehand -- so before this
+    /// wiring, typing after a move silently went into a pane that was no
+    /// longer even shown as active.
+    #[gpui::test]
+    async fn moving_a_tab_to_another_pane_returns_focus_to_the_moved_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[2].group_id = 1;
+            workspace.tab_machinery = TabMachinery::new(
+                vec![
+                    TabGroup::new(0, vec![0, 1], Some(0)),
+                    TabGroup::new(1, vec![2], Some(2)),
+                ],
+                0,
+            )
+            .expect("test groups are valid");
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let tab_focus = |index: usize, cx: &VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, app| {
+                let mut focus = None;
+                workspace.tabs[index].panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        focus = Some(view.focus_handle(app));
+                    }
+                });
+                focus.unwrap_or_else(|| panic!("tab {index} has a terminal focus handle"))
+            })
+        };
+        let tab0_focus = tab_focus(0, &cx);
+        let tab1_focus = tab_focus(1, &cx);
+        cx.update(|window, app| tab0_focus.focus(window, app));
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| tab0_focus.is_focused(window)));
+        assert!(!cx.update(|window, _| tab1_focus.is_focused(window)));
+
+        right_click_tab(&mut cx, 1);
+        let move_to_pane = cx
+            .debug_bounds("tab-command-move-to-pane-1")
+            .expect("the other pane destination is drawn");
+        cx.simulate_click(move_to_pane.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == 1)
+                    .is_some_and(|tab| tab.group_id == 1)
+            }),
+            "the move itself must still happen"
+        );
+        assert!(
+            cx.update(|window, _| tab1_focus.is_focused(window)),
+            "committing a tab move must hand keyboard focus to the moved tab's own content"
+        );
+    }
+
     /// F-TERM-PTY-08: the exact same UI gesture as the test above (a real
     /// MoveTabToOtherPane through the tab context menu), but asserting on
     /// `terminal_pane_cache` -- the seam row's own row -- rather than only
@@ -20049,6 +20227,56 @@ mod tests {
         );
     }
 
+    /// F-CORE-WSP-05: `insert_terminal_tab_with_agent` -- reached here
+    /// through the real `ctrl-t` chord, exactly like
+    /// `ctrl_t_from_the_empty_worktree_state_creates_a_terminal` above --
+    /// gates its `rebuild_tab_machinery` call on a real
+    /// `LayoutCommand::Insert` run through `classify_layout_command`'s
+    /// `.structural` answer, the leg `commit_tab_rename` (F-CORE-WSP-04)
+    /// could never exercise since Rename classifies as nonstructural.
+    /// `render_group_surfaces` picks which tab's content to paint from
+    /// `tab_machinery`'s own `active_tab`, not from `self.active_tab` --
+    /// so without this wiring, a freshly inserted tab is pushed into
+    /// `self.tabs` and even becomes `self.active_tab`, but the pane
+    /// group's own placement model never learns about it, and the
+    /// content area keeps showing whatever tab was active before.
+    #[gpui::test]
+    async fn ctrl_t_makes_the_new_tab_the_pane_groups_own_active_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_machinery.active_tab()),
+            Some(0),
+            "the fixture's own single tab starts as the pane group's active tab"
+        );
+
+        cx.simulate_keystrokes("ctrl-t");
+        cx.run_until_parked();
+
+        let (tab_count, new_tab_id) = workspace.read_with(&cx.cx, |workspace, _| {
+            (
+                workspace.tabs.len(),
+                workspace.tabs.last().map(|tab| tab.id),
+            )
+        });
+        assert_eq!(tab_count, 2, "ctrl-t must create a second terminal tab");
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_machinery.active_tab()),
+            new_tab_id,
+            "committing a tab insert must make the new tab the pane group's \
+             own active tab, or its content surface keeps showing whatever \
+             tab was active before"
+        );
+    }
+
     /// F-TERM-02: a pane group that lost its last tab to a move -- distinct
     /// from F-SID-18's group-0-with-a-worktree case above, which the comment
     /// on `drawn_selected_worktree_without_tabs_offers_a_new_terminal`
@@ -20074,9 +20302,9 @@ mod tests {
         // group -- `TabMachinery::move_tab` only ever empties a group's
         // `tabs` list, it never removes the group itself -- so this leaves a
         // genuinely detached, non-zero-id, tabless pane group behind.
-        workspace.update(&mut cx.cx, |workspace, cx| {
+        workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.active_tab = 1;
-            workspace.move_selected_tab_to_new_pane(cx);
+            workspace.move_selected_tab_to_new_pane(window, cx);
         });
         cx.run_until_parked();
         let detached_group_id = workspace.read_with(&cx.cx, |workspace, _| {
@@ -20088,8 +20316,8 @@ mod tests {
                 .find(|id| *id != 0)
                 .expect("move_selected_tab_to_new_pane created a second group")
         });
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.move_selected_tab(MoveTarget::Group(0), cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.move_selected_tab(MoveTarget::Group(0), window, cx);
         });
         cx.run_until_parked();
         assert!(
