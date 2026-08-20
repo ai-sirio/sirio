@@ -58,8 +58,8 @@
 //!   [`Editor::preview_locked`], [`Editor::request_preview`].
 //! - F-EDIT-13 (distinct missing/unreadable messages) — [`LoadStatus::Missing`]
 //!   vs [`LoadStatus::Unreadable`] and [`Editor::load_message`].
-//! - F-EDIT-10/11 (Linux adaptations) — [`fs_actions::reveal_command`]
-//!   (xdg-open of the containing directory) and
+//! - F-EDIT-10/11 (platform adaptations) — [`fs_actions::reveal_command`]
+//!   (Finder reveal on macOS or directory open on Linux) and
 //!   [`fs_actions::copy_path_text`] (the clipboard derivation; the X11
 //!   clipboard write itself needs a display and is not exercised).
 
@@ -1022,30 +1022,57 @@ fn registry_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Linux adaptations for the file-explorer context-menu entries
-/// (F-EDIT-10, F-EDIT-11). The *derivations* are testable headlessly; the
-/// actions they feed (opening a directory, writing the X11 clipboard) need
-/// a display and stay `NOT EXERCISED — blocked on display`.
+/// Platform adaptations for file and URL actions (F-EDIT-10, F-EDIT-11).
+/// Command construction is testable headlessly; the actions themselves need
+/// a desktop environment and stay `NOT EXERCISED — blocked on display`.
 pub mod fs_actions {
+    use std::ffi::OsStr;
     use std::path::Path;
+    use std::process::Command;
 
-    /// F-EDIT-10, adapted: "Show in Finder" has no Finder on Linux, so the
-    /// equivalent action is opening the file's *containing directory* with
-    /// `xdg-open`. Building the command is testable; running it requires a
-    /// desktop environment, so the run itself is not exercised.
+    /// Builds the platform command used to open a path or an external URL.
+    pub fn open_command(target: &OsStr) -> Command {
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = Command::new("open");
+            command.arg(target);
+            command
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut command = Command::new("xdg-open");
+            command.arg(target);
+            command
+        }
+    }
+
+    /// F-EDIT-10: builds the platform command for "Show in Finder".
+    /// macOS uses `open -R <path>`; Linux opens the file's containing
+    /// directory with Linux's platform opener.
     ///
     /// Returns `None` when no parent directory exists (a bare relative
-    /// filename with no current directory resolvable).
-    pub fn reveal_command(path: &Path) -> Option<std::process::Command> {
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().ok()?.join(path)
-        };
-        let directory = absolute.parent()?;
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(directory);
-        Some(command)
+    /// filename with no current directory resolvable) on Linux.
+    pub fn reveal_command(path: &Path) -> Option<Command> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = Command::new("open");
+            command.args(["-R"]).arg(path);
+            return Some(command);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir().ok()?.join(path)
+            };
+            let directory = absolute.parent()?;
+            let mut command = Command::new("xdg-open");
+            command.arg(directory);
+            Some(command)
+        }
     }
 
     /// F-EDIT-11, derivation half: the text a "Copy path" action would put
@@ -1066,6 +1093,7 @@ pub mod fs_actions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A real file on disk that cleans itself up. The conflict and save
@@ -1736,25 +1764,46 @@ mod tests {
         );
     }
 
-    // ── F-EDIT-10 / F-EDIT-11: Linux adaptations ───────────────────────
+    // ── F-EDIT-10 / F-EDIT-11: platform adaptations ────────────────────
 
     #[test]
-    fn reveal_command_opens_the_containing_directory_with_xdg_open() {
+    fn reveal_command_uses_the_platform_command() {
         let file = TempFile::new("reveal", "content\n");
         let command = fs_actions::reveal_command(file.path())
             .expect("an absolute path always has a parent directory");
-        assert_eq!(
-            command.get_program(),
-            "xdg-open",
-            "the Linux adaptation of Show in Finder is xdg-open"
-        );
-        let expected_dir = file.path().parent().expect("parent");
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(
-            args,
-            vec![expected_dir],
-            "it opens the containing directory, not the file"
-        );
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(command.get_program(), "open");
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(args, vec![OsStr::new("-R"), file.path().as_os_str()]);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(command.get_program(), "xdg-open");
+            let expected_dir = file.path().parent().expect("parent");
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(args, vec![expected_dir.as_os_str()]);
+        }
+    }
+
+    #[test]
+    fn open_command_uses_the_platform_opener_for_paths_and_urls() {
+        for target in [
+            OsStr::new("/tmp/note.txt"),
+            OsStr::new("https://example.com"),
+        ] {
+            let command = fs_actions::open_command(target);
+
+            #[cfg(target_os = "macos")]
+            assert_eq!(command.get_program(), "open");
+
+            #[cfg(target_os = "linux")]
+            assert_eq!(command.get_program(), "xdg-open");
+
+            assert_eq!(command.get_args().collect::<Vec<_>>(), vec![target]);
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use gpui::{
 };
 use gpui_platform::application;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -43,6 +44,7 @@ use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
+    editor::fs_actions::open_command as platform_open_command,
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     right_panel::{
@@ -2371,14 +2373,45 @@ fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -
 }
 
 fn post_desktop_notification(payload: &NotificationPayload) {
-    if let Err(error) = Command::new("notify-send")
+    #[cfg(target_os = "macos")]
+    let result = {
+        let script = format!(
+            "display notification {} with title {}",
+            apple_script_string_literal(&payload.body),
+            apple_script_string_literal(&payload.title),
+        );
+        Command::new("osascript").args(["-e", &script]).spawn()
+    };
+
+    #[cfg(target_os = "linux")]
+    let result = Command::new("notify-send")
         .arg("--app-name=Tiller")
         .arg(&payload.title)
         .arg(&payload.body)
-        .spawn()
-    {
+        .spawn();
+
+    if let Err(error) = result {
         eprintln!("[notifications] could not deliver desktop notification: {error}");
     }
+}
+
+#[cfg(target_os = "macos")]
+fn apple_script_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '\t' => literal.push_str("\\t"),
+            character if character.is_control() => literal.push(' '),
+            character => literal.push(character),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 /// F-CORE-DOM-07: matches `AutoNamer.summarize`'s wide timeout — `claude -p`
@@ -4675,7 +4708,7 @@ impl TillerWorkspace {
                 SidebarContextTarget::Project { path, .. },
                 SidebarContextAction::RevealInFileManager,
             ) => {
-                if let Err(error) = Command::new("xdg-open").arg(path).spawn() {
+                if let Err(error) = platform_open_command(path.as_os_str()).spawn() {
                     self.sidebar.update(cx, |sidebar, cx| {
                         sidebar.set_notice(format!("could not open file manager: {error}"), cx)
                     });
@@ -7550,7 +7583,8 @@ impl TillerWorkspace {
                         );
                         for event in surface.take_events() {
                             if let BrowserEvent::OpenExternal(url) = event
-                                && let Err(error) = Command::new("xdg-open").arg(url).spawn()
+                                && let Err(error) =
+                                    platform_open_command(OsStr::new(url)).spawn()
                             {
                                 eprintln!("[browser] could not open external link: {error}");
                             }
@@ -12778,6 +12812,18 @@ mod tests {
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_script_string_literal_escapes_notification_text() {
+        let expected = ["\"", "line", "\\n", "\\\\", "\\\"", "\""].concat();
+        assert_eq!(
+            apple_script_string_literal("line\n\\\""),
+            expected,
+            "notification content must stay inside one AppleScript string literal"
+        );
+        assert_eq!(apple_script_string_literal("nul\0"), "\"nul \"");
+    }
 
     struct TerminalReplayFixture {
         terminal: Entity<TerminalView>,
