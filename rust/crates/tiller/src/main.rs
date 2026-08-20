@@ -6,6 +6,7 @@ use gpui::{
 };
 use gpui_platform::application;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -43,6 +44,7 @@ use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
+    editor::fs_actions::open_command as platform_open_command,
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     right_panel::{
@@ -801,7 +803,8 @@ impl ControlState {
         for project in catalog.projects() {
             for (index, worktree) in project.worktrees.iter().enumerate() {
                 let path = worktree.path.to_string_lossy().into_owned();
-                let selected = !selected_path_claimed && worktree.path == working_directory;
+                let selected = !selected_path_claimed
+                    && paths_name_the_same_document(&worktree.path, &working_directory);
                 selected_path_claimed |= selected;
                 workspaces.push(ControlWorkspace {
                     id: format!("{}-wt-{index}", project.id),
@@ -969,7 +972,13 @@ impl ControlState {
     fn path_for_selector(&self, selector: &str) -> Option<PathBuf> {
         self.workspaces
             .iter()
-            .find(|workspace| workspace.id == selector || workspace.path == selector)
+            .find(|workspace| {
+                workspace.id == selector
+                    || paths_name_the_same_document(
+                        Path::new(&workspace.path),
+                        Path::new(selector),
+                    )
+            })
             .map(|workspace| PathBuf::from(&workspace.path))
     }
 
@@ -977,7 +986,9 @@ impl ControlState {
         let Some(index) = self
             .workspaces
             .iter()
-            .position(|workspace| Path::new(&workspace.path) == path)
+            .position(|workspace| {
+                paths_name_the_same_document(Path::new(&workspace.path), path)
+            })
         else {
             return false;
         };
@@ -994,7 +1005,9 @@ impl ControlState {
         let Some(index) = self
             .workspaces
             .iter()
-            .position(|workspace| Path::new(&workspace.path) == path)
+            .position(|workspace| {
+                paths_name_the_same_document(Path::new(&workspace.path), path)
+            })
         else {
             return false;
         };
@@ -2371,14 +2384,51 @@ fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -
 }
 
 fn post_desktop_notification(payload: &NotificationPayload) {
-    if let Err(error) = Command::new("notify-send")
+    #[cfg(target_os = "macos")]
+    let result = {
+        let script = format!(
+            "display notification {} with title {}",
+            apple_script_string_literal(&payload.body),
+            apple_script_string_literal(&payload.title),
+        );
+        Command::new("osascript").args(["-e", &script]).spawn()
+    };
+
+    #[cfg(target_os = "linux")]
+    let result = Command::new("notify-send")
         .arg("--app-name=Tiller")
         .arg(&payload.title)
         .arg(&payload.body)
-        .spawn()
-    {
+        .spawn();
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "desktop notifications are unsupported on this platform",
+    ));
+
+    if let Err(error) = result {
         eprintln!("[notifications] could not deliver desktop notification: {error}");
     }
+}
+
+#[cfg(target_os = "macos")]
+fn apple_script_string_literal(value: &str) -> String {
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '\t' => literal.push_str("\\t"),
+            character if character.is_control() => literal.push(' '),
+            character => literal.push(character),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 /// F-CORE-DOM-07: matches `AutoNamer.summarize`'s wide timeout — `claude -p`
@@ -3017,7 +3067,7 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         project
             .worktrees
             .iter()
-            .find(|worktree| worktree.path == working_directory)
+            .find(|worktree| paths_name_the_same_document(&worktree.path, working_directory))
             .map(|worktree| {
                 (
                     project.name.clone(),
@@ -3460,7 +3510,10 @@ impl TillerWorkspace {
                                     // queued action) moved `working_directory`
                                     // in the interim -- see the enum variant's
                                     // doc comment and the dispatch site's.
-                                    if workspace.working_directory != path
+                                    if !paths_name_the_same_document(
+                                        &workspace.working_directory,
+                                        &path,
+                                    )
                                         && workspace
                                             .select_worktree(path, Some(window), cx)
                                             .is_err()
@@ -4603,11 +4656,11 @@ impl TillerWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let project = path.canonicalize().ok().and_then(|path| {
             state.projects.iter().find(|project| {
-                project.root_path == path
+                paths_name_the_same_document(&project.root_path, &path)
                     || project
                         .worktrees
                         .iter()
-                        .any(|worktree| worktree.path == path)
+                        .any(|worktree| paths_name_the_same_document(&worktree.path, &path))
             })
         });
         let mut result = vec![("added".to_string(), added.to_string())];
@@ -4675,7 +4728,7 @@ impl TillerWorkspace {
                 SidebarContextTarget::Project { path, .. },
                 SidebarContextAction::RevealInFileManager,
             ) => {
-                if let Err(error) = Command::new("xdg-open").arg(path).spawn() {
+                if let Err(error) = platform_open_command(path.as_os_str()).spawn() {
                     self.sidebar.update(cx, |sidebar, cx| {
                         sidebar.set_notice(format!("could not open file manager: {error}"), cx)
                     });
@@ -4688,7 +4741,7 @@ impl TillerWorkspace {
                 self.set_worktree_primary(path, false, cx)
             }
             (SidebarContextTarget::Worktree { path, .. }, SidebarContextAction::NewTab(action)) => {
-                if *path != self.working_directory
+                if !paths_name_the_same_document(path, &self.working_directory)
                     && self.select_worktree(path.clone(), None, cx).is_err()
                 {
                     return;
@@ -5284,7 +5337,7 @@ impl TillerWorkspace {
                     .worktrees
                     .iter()
                     .enumerate()
-                    .find(|(_, worktree)| worktree.path == path)
+                    .find(|(_, worktree)| paths_name_the_same_document(&worktree.path, path))
                     .map(|(worktree_index, _)| project_index * 1000 + worktree_index + 1)
             })
     }
@@ -5355,7 +5408,7 @@ impl TillerWorkspace {
             .projects()
             .iter()
             .flat_map(|project| project.worktrees.iter())
-            .find(|worktree| worktree.path == requested_path)
+            .find(|worktree| paths_name_the_same_document(&worktree.path, &requested_path))
             .map(|worktree| worktree.path.clone())
         else {
             return Err(format!("unknown worktree: {}", requested_path.display()));
@@ -5401,7 +5454,7 @@ impl TillerWorkspace {
         // model, which is a much larger change touching F-SID-14/
         // F-CORE-ACT-26/F-CHG-19/F-TERM-11, previously scoped out for the
         // same reason by the I3-tray-jump wave).
-        if selected_path != old_path {
+        if !paths_name_the_same_document(&selected_path, &old_path) {
             let outgoing_is_safe = !self.tabs.iter().any(|tab| {
                 self.tab_status(tab, cx)
                     .is_some_and(pane_close_needs_confirmation)
@@ -5680,7 +5733,7 @@ impl TillerWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path_for_selector(selector)
             .ok_or_else(|| format!("unknown worktree: {selector}"))?;
-        let was_current = self.working_directory == path
+        let was_current = paths_name_the_same_document(&self.working_directory, &path)
             && self
                 .control_state
                 .lock()
@@ -6075,7 +6128,9 @@ impl TillerWorkspace {
                 project
                     .worktrees
                     .iter()
-                    .any(|worktree| worktree.path == self.working_directory)
+                    .any(|worktree| {
+                        paths_name_the_same_document(&worktree.path, &self.working_directory)
+                    })
             })
             .map(|project| project.name.as_str());
         let Some(mut payload) = self.activity.build_payload(
@@ -7550,7 +7605,8 @@ impl TillerWorkspace {
                         );
                         for event in surface.take_events() {
                             if let BrowserEvent::OpenExternal(url) = event
-                                && let Err(error) = Command::new("xdg-open").arg(url).spawn()
+                                && let Err(error) =
+                                    platform_open_command(OsStr::new(&url)).spawn()
                             {
                                 eprintln!("[browser] could not open external link: {error}");
                             }
@@ -7712,7 +7768,7 @@ impl TillerWorkspace {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .path_for_selector(selector)
                 .ok_or_else(|| format!("unknown worktree: {selector}"))?;
-            if path != self.working_directory {
+            if !paths_name_the_same_document(&path, &self.working_directory) {
                 self.select_worktree(path, window, cx)?;
             } else if !self.has_current_worktree() {
                 // The requested worktree is already the live shell's
@@ -10469,7 +10525,9 @@ impl TillerWorkspace {
             project
                 .worktrees
                 .iter()
-                .find(|worktree| worktree.path == self.working_directory)
+                .find(|worktree| {
+                    paths_name_the_same_document(&worktree.path, &self.working_directory)
+                })
                 .map(|worktree| SidebarPaletteTarget {
                     project_id: project.id.clone(),
                     project_path: project.root_path.clone(),
@@ -10478,13 +10536,15 @@ impl TillerWorkspace {
                     worktree_is_primary: worktree.is_primary,
                 })
                 .or_else(|| {
-                    (project.root_path == self.working_directory).then(|| SidebarPaletteTarget {
-                        project_id: project.id.clone(),
-                        project_path: project.root_path.clone(),
-                        project_is_git: project.is_git,
-                        worktree_path: self.working_directory.clone(),
-                        worktree_is_primary: true,
-                    })
+                    paths_name_the_same_document(&project.root_path, &self.working_directory).then(
+                        || SidebarPaletteTarget {
+                            project_id: project.id.clone(),
+                            project_path: project.root_path.clone(),
+                            project_is_git: project.is_git,
+                            worktree_path: self.working_directory.clone(),
+                            worktree_is_primary: true,
+                        },
+                    )
                 })
         });
         PaletteContext {
@@ -12073,6 +12133,8 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         })
         .collect::<String>();
     std::env::temp_dir()
+        .canonicalize()
+        .expect("canonicalize temp dir")
         .join("tiller-worktrees")
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
@@ -12779,6 +12841,18 @@ mod tests {
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_script_string_literal_escapes_notification_text() {
+        let expected = ["\"", "line", "\\n", "\\\\", "\\\"", "\""].concat();
+        assert_eq!(
+            apple_script_string_literal("line\n\\\""),
+            expected,
+            "notification content must stay inside one AppleScript string literal"
+        );
+        assert_eq!(apple_script_string_literal("nul\0"), "\"nul \"");
+    }
+
     struct TerminalReplayFixture {
         terminal: Entity<TerminalView>,
     }
@@ -13023,7 +13097,10 @@ mod tests {
     }
 
     fn test_repo(tag: &str) -> PathBuf {
-        let repo = std::env::temp_dir().join(format!("tiller-p67-{tag}-{}", std::process::id()));
+        let repo = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonicalize temp dir")
+            .join(format!("tiller-p67-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir_all(&repo).expect("create P67 git fixture");
         git_test(&repo, &["init", "-q", "-b", "main"]);
@@ -13203,10 +13280,13 @@ mod tests {
         tab_count: usize,
     ) -> TillerWorkspace {
         let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
-        let scratch_root = std::env::temp_dir().join(format!(
-            "tiller-command-palette-{}-{unique}",
-            std::process::id()
-        ));
+        let scratch_root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonicalize temp dir")
+            .join(format!(
+                "tiller-command-palette-{}-{unique}",
+                std::process::id()
+            ));
         let working_directory = scratch_root.join("worktree");
         std::fs::create_dir_all(&working_directory).expect("create palette test worktree");
         let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
@@ -13329,10 +13409,13 @@ mod tests {
     /// whose catalog already contains and selects one worktree.
     fn empty_catalog_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
         let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
-        let scratch_root = std::env::temp_dir().join(format!(
-            "tiller-empty-catalog-{}-{unique}",
-            std::process::id()
-        ));
+        let scratch_root = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonicalize temp dir")
+            .join(format!(
+                "tiller-empty-catalog-{}-{unique}",
+                std::process::id()
+            ));
         std::fs::create_dir_all(&scratch_root).expect("create empty-catalog test scratch dir");
         let working_directory = scratch_root.clone();
         let project_catalog = ProjectCatalog::default();
@@ -16999,7 +17082,7 @@ mod tests {
                 let mut found = false;
                 tab.panes.for_each(&mut |_, content| {
                     if let TabContent::File { view } = content {
-                        found |= view.read(app).path() == path.as_path();
+                        found |= paths_name_the_same_document(view.read(app).path(), path.as_path());
                     }
                 });
                 found
@@ -18440,6 +18523,36 @@ mod tests {
                 .map(|workspace| workspace.path.as_str()),
             Some(expected_path.as_str())
         );
+    }
+
+    #[test]
+    fn control_state_matches_worktree_paths_across_symlink_aliases() {
+        let raw_root = std::env::temp_dir().join(format!(
+            "tiller-control-path-alias-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&raw_root);
+        std::fs::create_dir_all(&raw_root).expect("create control path alias fixture");
+        let canonical_root = raw_root.canonicalize().expect("canonicalize fixture root");
+        let catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "path-alias-project".into(),
+            name: "Path Alias Project".into(),
+            root_path: raw_root.clone(),
+            is_git: false,
+            worktrees: vec![session::CatalogWorktree {
+                branch: String::new(),
+                path: raw_root.clone(),
+                is_primary: true,
+            }],
+        }]);
+
+        let mut state = ControlState::from_catalog(&catalog, &canonical_root);
+        assert_eq!(state.current, Some(0));
+        assert!(state.select_worktree(&canonical_root));
+        assert!(state.close_worktree(&canonical_root));
+        assert!(state.current_workspace().is_none());
+
+        let _ = std::fs::remove_dir_all(raw_root);
     }
 
     /// F-CORE-ACT-25: `ControlState::from_catalog` runs the restored
@@ -21051,7 +21164,9 @@ mod tests {
                     state
                         .workspaces
                         .iter()
-                        .find(|workspace| Path::new(&workspace.path) == path)
+                        .find(|workspace| {
+                            paths_name_the_same_document(Path::new(&workspace.path), path)
+                        })
                         .expect("fixture worktree row")
                         .mounted
                 })
@@ -21472,7 +21587,7 @@ mod tests {
             match queued.into_iter().next().unwrap() {
                 WorkspaceAction::NewTab(action) => workspace.open_action(action, window, cx),
                 WorkspaceAction::NewTabForWorktree(path, action) => {
-                    if workspace.working_directory != path {
+                    if !paths_name_the_same_document(&workspace.working_directory, &path) {
                         workspace
                             .select_worktree(path, Some(window), cx)
                             .expect("select_worktree back to the right-clicked worktree succeeds");

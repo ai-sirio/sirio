@@ -57,6 +57,25 @@ fn linux_process_inspection_reads_agent_names_from_proc_children() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_process_inspection_reads_a_real_child_process_name() {
+    use std::process::Command;
+
+    let mut child = Command::new("/bin/sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawn child process");
+    let names = inspect_process_names(std::process::id()).expect("read macOS process tree");
+
+    assert!(
+        names.iter().any(|name| name == "sleep"),
+        "macOS process inspection must report the spawned sleep process, got {names:?}"
+    );
+    child.kill().expect("kill child process");
+    child.wait().expect("reap child process");
+}
+
 fn spinner() -> String {
     "\u{280B}".to_string() // ⠋
 }
