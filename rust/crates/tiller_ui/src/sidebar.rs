@@ -1562,15 +1562,33 @@ impl Sidebar {
         tiller_project::default_project_base()
     }
 
+    /// Whether the Clone popover should stay open once a clone finishes.
+    ///
+    /// A truncated clone is still a success — the project is added to the
+    /// sidebar either way (see `start_clone_project`) — but closing the
+    /// popover in the same frame `CloneStatus::Complete`'s truncation notice
+    /// appears would mean nobody ever reads it. An ordinary (non-truncated)
+    /// completion keeps closing automatically, matching the pre-existing
+    /// behavior; only a truncated one now leaves the form open until the
+    /// user dismisses it via the existing Cancel affordance.
+    fn clone_form_stays_open_after(truncated: bool) -> bool {
+        truncated
+    }
+
     fn start_clone_project(&mut self, cx: &mut Context<Self>) {
         self.add_project_menu = false;
         let form = cx.new(|cx| CloneForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
             |sidebar, _, event: &CloneFormEvent, cx| match event {
-                CloneFormEvent::Cloned(path) => {
-                    sidebar.project_form = None;
-                    cx.emit(SidebarEvent::AddProject(path.clone()));
+                CloneFormEvent::Cloned {
+                    destination,
+                    truncated,
+                } => {
+                    if !Self::clone_form_stays_open_after(*truncated) {
+                        sidebar.project_form = None;
+                    }
+                    cx.emit(SidebarEvent::AddProject(destination.clone()));
                     cx.notify();
                 }
             },
@@ -3958,6 +3976,25 @@ mod tests {
             PickedPath::from_prompt(unavailable),
             PickedPath::Unavailable("no portal".into()),
             "a platform failure must carry a reason to the surface"
+        );
+    }
+
+    /// The other half of the clone-truncation finding: even once
+    /// `GitClone::clone`'s flag survives the call chain, a `Cloned` event
+    /// that always closes the popover would delete the notice before
+    /// anyone reads it (`CloneFormEvent::Cloned` and `Complete`'s auto-close
+    /// used to run unconditionally on every successful clone). A clean
+    /// clone must still close automatically — that part of the existing UX
+    /// stays — but a truncated one must not.
+    #[test]
+    fn only_a_truncated_clone_keeps_the_popover_open() {
+        assert!(
+            !Sidebar::clone_form_stays_open_after(false),
+            "an ordinary completion must keep auto-closing, as it always has"
+        );
+        assert!(
+            Sidebar::clone_form_stays_open_after(true),
+            "a truncated completion must not close before its notice is seen"
         );
     }
 
