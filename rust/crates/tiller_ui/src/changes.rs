@@ -1062,7 +1062,7 @@ impl ChangesTab {
             .items_center()
             .justify_center()
             .gap(px(8.0))
-            .text_size(px(11.5))
+            .text_size(theme.typography.footnote)
             .text_color(theme.meta)
             .bg(theme.diff_hunk_background)
             .hover(|style| style.bg(theme.row_hover))
@@ -1119,9 +1119,11 @@ impl ChangesTab {
                     .items_center()
                     .justify_center()
                     .child(if collapsed {
-                        IconElement::new(Icon::ChevronRight, px(10.0)).text_color(theme.subtitle)
+                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                            .text_color(theme.subtitle)
                     } else {
-                        IconElement::new(Icon::ChevronDown, px(10.0)).text_color(theme.subtitle)
+                        IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                            .text_color(theme.subtitle)
                     }),
             )
             .child(
@@ -1211,9 +1213,11 @@ impl ChangesTab {
                     .items_center()
                     .justify_center()
                     .child(if expanded {
-                        IconElement::new(Icon::ChevronDown, px(10.0)).text_color(theme.subtitle)
+                        IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                            .text_color(theme.subtitle)
                     } else {
-                        IconElement::new(Icon::ChevronRight, px(10.0)).text_color(theme.subtitle)
+                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                            .text_color(theme.subtitle)
                     }),
             )
             .child(
@@ -1224,7 +1228,7 @@ impl ChangesTab {
                     .justify_center()
                     .child(glyph.map_or_else(
                         || {
-                            IconElement::new(Icon::File, px(12.0))
+                            IconElement::new(Icon::File, theme.typography.callout)
                                 .text_color(color)
                                 .into_any_element()
                         },

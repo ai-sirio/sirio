@@ -67,6 +67,9 @@ pub(crate) fn rasterize_symbol(
     tint: (u8, u8, u8),
 ) -> Option<Arc<RenderImage>> {
     let width = (size_pt * RASTER_SCALE as f32).round() as u32;
+    // IconElement currently requests square bounds. `drawInRect` scales the
+    // two axes independently, so a future non-square request would stretch
+    // the symbol rather than preserve its aspect ratio.
     let height = width;
     let key = CacheKey {
         symbol,
@@ -133,7 +136,10 @@ fn rasterize_symbol_mask(symbol: &str, width: u32, height: u32) -> Option<Vec<u8
             )
         }?;
 
-        // Draw the vector symbol into the bitmap, scaled to fill.
+        // Draw the vector symbol into the bitmap, scaled to fill. SF Symbols
+        // have per-symbol intrinsic sizes, all far smaller than this
+        // device-pixel target; `NSRect::ZERO` means "the entire image" in
+        // this overload's source-image coordinate system.
         let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
         NSGraphicsContext::saveGraphicsState_class();
         NSGraphicsContext::setCurrentContext(Some(&context));
@@ -146,7 +152,11 @@ fn rasterize_symbol_mask(symbol: &str, width: u32, height: u32) -> Option<Vec<u8
         };
         image.drawInRect_fromRect_operation_fraction(
             target,
-            target,
+            // `fromRect` is in the NSImage's intrinsic coordinate space, not
+            // the device-pixel destination space. Using `target` here asks
+            // AppKit for a larger source rectangle than an SF Symbol owns,
+            // leaving the glyph tiny and corner-anchored on macOS.
+            NSRect::ZERO,
             NSCompositingOperation::Copy,
             1.0,
         );
@@ -205,9 +215,10 @@ mod tests {
     use super::*;
 
     /// The SF Symbol pipeline end to end: `folder.fill` must rasterize to a
-    /// non-empty, correctly-tinted, correctly-sized bitmap. This is the
-    /// milestone test — if SF Symbols were unreachable from Rust, this is
-    /// where that fact surfaces with evidence.
+    /// correctly-tinted bitmap whose glyph fills the requested canvas. A
+    /// non-empty assertion alone is not enough here: drawing the requested
+    /// target rectangle as the source rectangle leaves a small, corner-
+    /// anchored glyph while still painting plenty of pixels.
     #[test]
     fn folder_fill_rasterizes_with_tint() {
         let Some(image) = rasterize_symbol("folder.fill", 14.0, (255, 128, 0)) else {
@@ -219,12 +230,26 @@ mod tests {
 
         let bytes = image.as_bytes(0).expect("single frame");
         let mut painted = 0;
-        for pixel in bytes.chunks_exact(4) {
+        let bitmap_width = size.width.0 as u32;
+        let bitmap_height = size.height.0 as u32;
+        let mut min_x = bitmap_width;
+        let mut min_y = bitmap_height;
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let width = bitmap_width as usize;
+        let height = bitmap_height as usize;
+        for (index, pixel) in bytes.chunks_exact(4).enumerate() {
             let (b, g, r, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
             if a == 0 {
                 continue;
             }
+            let x = (index % width) as u32;
+            let y = (index / width) as u32;
             painted += 1;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
             // Premultiplied BGRA tint: blue is zero, red is alpha, and
             // green is the orange tint scaled by alpha. A fully opaque
             // correctly tinted pixel is therefore [0, 128, 255, 255], not
@@ -233,9 +258,27 @@ mod tests {
             assert_eq!(r, a, "red channel is the 255 tint scaled by alpha");
             assert_eq!(g, (128u32 * a as u32 / 255) as u8);
         }
+        let bbox_width = max_x - min_x + 1;
+        let bbox_height = max_y - min_y + 1;
+        let coverage = painted as f32 / (width * height) as f32;
+        eprintln!(
+            "folder.fill glyph bbox=({min_x},{min_y})-({max_x},{max_y}), size={bbox_width}x{bbox_height}, coverage={coverage:.1}%",
+            coverage = coverage * 100.0,
+        );
         assert!(
             painted > 100,
             "the folder glyph paints a real shape, got {painted} non-transparent pixels"
+        );
+        assert!(
+            bbox_width >= bitmap_width * 70 / 100 && bbox_height >= bitmap_height * 70 / 100,
+            "the glyph must fill most of the bitmap, got bbox ({min_x},{min_y})-({max_x},{max_y}) in {}x{}",
+            bitmap_width,
+            bitmap_height,
+        );
+        assert!(
+            coverage > 0.40,
+            "the glyph coverage must be well above the corner-anchored regression, got {coverage:.1}%",
+            coverage = coverage * 100.0,
         );
     }
 
