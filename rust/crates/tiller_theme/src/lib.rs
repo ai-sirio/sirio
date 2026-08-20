@@ -613,18 +613,15 @@ impl Default for Radii {
 /// [`Self::cluster_start`] exist only to lay out the three dots
 /// `titlebar.rs::traffic_light` draws — and per
 /// `docs/linux-rewrite/tasks/P102-the-top-bar-belongs-to-the-os.md`, that
-/// happens on Linux/Windows only when `Window::window_decorations()`
-/// reports `Decorations::Client` (nothing else will decorate the window
-/// then). Under `Decorations::Server` — the common case, since the GPUI
-/// revision this app pins already requests server-side decorations by
-/// default — none of these four are read; the row draws no dots and the
-/// icon cluster reuses `traffic_light_inset` as its own leading edge
-/// instead (see `titlebar.rs`'s `cluster_leading_gap`). `traffic_light_inset`
-/// itself is not fallback-only for that reason: it is read in both
-/// branches, on macOS unconditionally. `bar_height` and
-/// `cluster_button_gap` are unaffected either way — they size the row and
-/// the (always-drawn) icon cluster respectively, neither of which is a
-/// window control.
+/// happens when `Window::window_decorations()` reports
+/// `Decorations::Client` (nothing else will decorate the window then).
+/// Under `Decorations::Server` — including macOS, where AppKit owns the
+/// controls — none of these fallback fields are read; the icon cluster uses
+/// `macos_traffic_light_cluster_inset` on macOS and `traffic_light_inset`
+/// elsewhere as its leading edge (see `titlebar.rs`'s
+/// `cluster_leading_gap`). `bar_height` and `cluster_button_gap` are
+/// unaffected either way — they size the row and the always-drawn icon
+/// cluster respectively, neither of which is a window control.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserChrome {
     /// The bar's total height (comet: 38px).
@@ -654,10 +651,26 @@ pub struct BrowserChrome {
     /// size and chrome, not ours.
     ///
     /// Not P102 fallback-only: `titlebar.rs` reads this in **both**
-    /// branches — as the lights' own inset when they are drawn, and as the
-    /// icon cluster's leading inset (its own "first control on the row"
-    /// case) when they are not.
+    /// branches, as the fallback lights' own inset when they are drawn and
+    /// as the icon cluster's leading inset when Linux server-side
+    /// decorations leave the row without fallback lights.
     pub traffic_light_inset: Pixels,
+    /// Leading inset for the icon cluster when macOS AppKit owns the real
+    /// traffic lights. `main.rs` configures AppKit's
+    /// `traffic_light_position` to 12pt from the left edge. On this machine,
+    /// `standardWindowButton` frames measured close=`x=9,w=14`,
+    /// minimize=`x=32,w=14`, and zoom=`x=55,w=14`: a 14pt button frame and
+    /// 9pt inter-button gaps. With the configured position, AppKit's group
+    /// ends at `12 + (3 * 14) + (2 * 9) = 72pt`; adding the theme's 8px
+    /// separating rhythm gives `72 + 8 = 80px`.
+    ///
+    /// The 14pt/9pt values are measured from `standardWindowButton` frames
+    /// on macOS and are OS-version-dependent. gpui re-measures the close and
+    /// minimize frames on every layout pass rather than hardcoding them, so
+    /// this token is a conservative reservation, not a contract. It is read
+    /// only on macOS when `Decorations::Server` is reported, so our cluster
+    /// begins to the right of AppKit's controls.
+    pub macos_traffic_light_cluster_inset: Pixels,
     /// Gap between the last light and the first cluster button (8px — the
     /// same rhythm as `traffic_light_gap`, so the light group reads as one
     /// unit and the handoff to the cluster does not look accidental).
@@ -702,6 +715,7 @@ impl Default for BrowserChrome {
             traffic_light_diameter: px(12.0),
             traffic_light_gap: px(8.0),
             traffic_light_inset: px(10.0),
+            macos_traffic_light_cluster_inset: px(80.0),
             traffic_light_cluster_gap: px(8.0),
             cluster_button_gap: px(2.0),
         }
@@ -2241,6 +2255,11 @@ mod tests {
             chrome.traffic_light_inset,
             px(10.0),
             "comet's own non-macOS cluster_buttons_start baseline"
+        );
+        assert_eq!(
+            chrome.macos_traffic_light_cluster_inset,
+            px(80.0),
+            "AppKit position 12 + 3*14pt buttons + 2*9pt gaps + 8pt separation"
         );
         assert_eq!(
             chrome.cluster_button_gap,
