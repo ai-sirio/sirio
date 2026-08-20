@@ -442,13 +442,24 @@ fi
 # button event arrived", which no screenshot or ctl call can answer: a screenshot shows the
 # *result* of event processing, never the order events were delivered in. Built for P130's modclick
 # investigation; leave it available for the next primitive that needs the same question answered.
-env -u DISPLAY \
+# Launch from a neutral directory, never the caller's. The app's
+# `initial_working_directory()` walks *ancestors* for the nearest git repository and
+# adopts it as the starting project, so an instance launched from anywhere inside this
+# checkout -- which is the natural place to invoke this script from -- comes up with the
+# real working tree registered as a project, and its terminal panes' shells then run
+# inside it. A verification instance must not be able to touch the tree it is verifying.
+# An empty non-repo directory makes that walk find nothing and stop at the directory
+# itself. Found when a drive auto-registered the shared checkout, 2026-08-20.
+LAUNCH_CWD="/tmp/$LABEL-cwd"
+mkdir -p "$LAUNCH_CWD"
+( cd "$LAUNCH_CWD" && exec env -u DISPLAY \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     WAYLAND_DISPLAY="$WD" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
     TILLER_DB="$DB" TILLER_SOCKET="$SOCK" \
     ${TILLER_WL_PROTOCOL_LOG:+WAYLAND_DEBUG=1} \
-    "$BIN" >"$APP_LOG" 2>&1 &
+    "$BIN" ) >"$APP_LOG" 2>&1 &
+# `exec` replaces the subshell, so this is the app's own pid, not a wrapper's.
 APP_PID=$!
 
 for _ in $(seq 1 120); do
