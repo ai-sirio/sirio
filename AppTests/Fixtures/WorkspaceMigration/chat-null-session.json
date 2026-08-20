@@ -1,5 +1,0 @@
-{
-  "worktreeID":"00000000-0000-4000-8000-000000000099",
-  "rows":[{"id":"00000000-0000-4000-8000-000000000031","worktreeID":"00000000-0000-4000-8000-000000000099","title":"Chat","orderIdx":0,"isActive":true,"treeJSON":"","kind":"chat","filePath":null,"chatAgentId":"claude","chatSessionId":null,"titleIsAutoNamed":true}],
-  "expected":{"root":"group:00000000-0000-4000-8000-000000000001","orderedGroupIDs":["00000000-0000-4000-8000-000000000001"],"activeGroupID":"00000000-0000-4000-8000-000000000001","groups":[{"id":"00000000-0000-4000-8000-000000000001","tabIDs":["00000000-0000-4000-8000-000000000031"],"activeTabID":"00000000-0000-4000-8000-000000000031"}],"tabs":[{"id":"00000000-0000-4000-8000-000000000031","title":"Chat","titleIsAutoNamed":true,"contentKind":"chat","contentID":"fresh-chat-1","editor":null}],"terminalContents":[],"diagnostics":[]}
-}
