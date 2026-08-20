@@ -221,12 +221,10 @@ fn bind_window_keys(cx: &mut App) {
     );
 }
 
-/// Column geometry, measured off the frozen reference shots — see
-/// `reference/MEASURED.md`. The seam between columns is 1pt of pure black; at
-/// 2pt, or tinted, or offset by a point, it is visible.
+/// Fixed panel geometry, measured off the frozen reference shots — see
+/// `reference/MEASURED.md`.
 const SIDEBAR_WIDTH: f32 = 325.;
 const RIGHT_PANEL_WIDTH: f32 = 405.;
-const SEAM_WIDTH: f32 = 6.;
 const TITLE_BAR_HEIGHT: f32 = 32.;
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
@@ -239,6 +237,24 @@ const TAB_GAP: f32 = 6.;
 const TAB_STATUS_WIDTH: f32 = 16.;
 const TAB_CLOSE_WIDTH: f32 = 14.;
 const TAB_TITLE_ESTIMATED_CHAR_WIDTH: f32 = 7.5;
+
+fn tab_strip_available_width_for_shell(
+    viewport_width: f32,
+    sidebar_visible: bool,
+    right_panel_visible: bool,
+    outer_inset: f32,
+    gap: f32,
+) -> f32 {
+    let fixed_panels = (if sidebar_visible { SIDEBAR_WIDTH } else { 0.0 })
+        + if right_panel_visible {
+            RIGHT_PANEL_WIDTH
+        } else {
+            0.0
+        };
+    let visible_gaps = usize::from(sidebar_visible) + usize::from(right_panel_visible);
+
+    viewport_width - fixed_panels - (gap * visible_gaps as f32) - (2.0 * outer_inset)
+}
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_METHODS: [&str; 11] = [
@@ -3261,6 +3277,10 @@ struct TillerWorkspace {
     right_panel: Entity<RightPanel>,
     sidebar_visible: bool,
     right_panel_visible: bool,
+    left_panel_focus: FocusHandle,
+    center_panel_focus: FocusHandle,
+    right_panel_focus: FocusHandle,
+    settings_panel_focus: FocusHandle,
     panes: Arc<PaneRegistry>,
     control_state: Arc<Mutex<ControlState>>,
     pending_actions: Arc<Mutex<Vec<WorkspaceAction>>>,
@@ -3922,6 +3942,10 @@ impl TillerWorkspace {
             right_panel,
             sidebar_visible: true,
             right_panel_visible: true,
+            left_panel_focus: cx.focus_handle(),
+            center_panel_focus: cx.focus_handle(),
+            right_panel_focus: cx.focus_handle(),
+            settings_panel_focus: cx.focus_handle(),
             panes,
             control_state,
             pending_actions,
@@ -6305,10 +6329,6 @@ impl TillerWorkspace {
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
-    }
-
-    fn seam(&self) -> impl IntoElement {
-        div().w(px(SEAM_WIDTH)).h_full().bg(gpui::black())
     }
 
     fn tab_width(kind: TabKind) -> f32 {
@@ -9836,14 +9856,13 @@ impl TillerWorkspace {
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
-        let mut width = f32::from(window.bounds().size.width);
-        if self.sidebar_visible {
-            width -= SIDEBAR_WIDTH + SEAM_WIDTH;
-        }
-        if self.right_panel_visible {
-            width -= RIGHT_PANEL_WIDTH + SEAM_WIDTH;
-        }
-        width - f32::from(theme.spacing.titlebar_control_frame.width)
+        tab_strip_available_width_for_shell(
+            f32::from(window.bounds().size.width),
+            self.sidebar_visible,
+            self.right_panel_visible,
+            f32::from(theme.spacing.shell_outer_inset),
+            f32::from(theme.spacing.shell_gap),
+        ) - f32::from(theme.spacing.titlebar_control_frame.width)
     }
 
     fn render_overflow_menu(
@@ -10080,7 +10099,12 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
         window: &Window,
     ) -> impl IntoElement {
-        let mut columns = div().flex().flex_row().size_full();
+        let left_focus_visible =
+            shell_chrome::focus_is_keyboard_visible(&self.left_panel_focus, window, cx);
+        let center_focus_visible =
+            shell_chrome::focus_is_keyboard_visible(&self.center_panel_focus, window, cx);
+        let right_focus_visible =
+            shell_chrome::focus_is_keyboard_visible(&self.right_panel_focus, window, cx);
 
         let centre_surface = if self.has_current_worktree() {
             div()
@@ -10140,90 +10164,83 @@ impl TillerWorkspace {
                 .into_any_element()
         };
 
-        if self.sidebar_visible {
-            columns = columns
-                .child(
-                    div()
-                        .w(px(SIDEBAR_WIDTH))
-                        .h_full()
-                        .bg(theme.canvas)
-                        .child(self.sidebar.clone()),
-                )
-                .child(self.seam());
-        }
-
-        columns = columns.child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .h_full()
-                .bg(theme.background)
-                .child(
-                    div()
-                        .relative()
-                        .h(px(TAB_BAR_HEIGHT))
-                        .w_full()
-                        .child(self.tab_bar.clone())
-                        .child(self.render_open_tabs(*theme, entity.clone(), window, cx))
-                        .when(self.tab_menu_open, |this| {
-                            this.child(self.render_tab_context_menu(*theme, entity.clone()))
-                        }),
-                )
-                .child(
-                    div()
-                        .id("centre-surface")
-                        .debug_selector(|| "centre-surface".into())
-                        .relative()
-                        // F-CHAT (chat surface renders empty): this used to be
-                        // `.flex_1()`, letting Taffy grow this node to fill the
-                        // remaining height of `centre-column` (`h_full` minus
-                        // the tab bar above). That resolves correctly for a
-                        // freshly-created chat tab (`add_chat_tab`), but for a
-                        // pane tree built by `restore_tabs` -- both at app
-                        // startup and via `select_worktree` -- the computed
-                        // height came out oversized (measured ~1656px against
-                        // a real window height in the ~970px range) and never
-                        // self-corrected on later frames. A chat pane's
-                        // transcript is a `flex_1` child of `chat-root`, so it
-                        // grew to fill that wrong height and pushed the
-                        // composer off the bottom of the actually-visible
-                        // area -- present, but invisible. Every other pane
-                        // kind sits under this same node but has no such
-                        // flex_1-vs-fixed-sibling split inside it, so an
-                        // oversized ambient height here never became visibly
-                        // wrong for them.
-                        //
-                        // `window.viewport_size()` is a plain field the
-                        // platform backend writes synchronously on its resize
-                        // callback (`Window::bounds_changed`) -- not a value
-                        // Taffy computes or caches -- so subtracting the two
-                        // fixed bars above and below `centre-column`, plus the
-                        // tab bar, gives the same number flex-grow *should*
-                        // have produced, without going through whatever in
-                        // the flex/percentage chain was producing a stale
-                        // result specifically after `restore_tabs`.
-                        .h(window.viewport_size().height
-                            - px(TITLE_BAR_HEIGHT)
-                            - px(STATUS_BAR_HEIGHT)
-                            - px(TAB_BAR_HEIGHT))
-                        .w_full()
-                        .overflow_hidden()
-                        .child(centre_surface),
-                ),
-        );
-
-        if self.right_panel_visible {
-            columns = columns.child(self.seam()).child(
+        let center_column = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(
                 div()
-                    .w(px(RIGHT_PANEL_WIDTH))
-                    .h_full()
-                    .bg(theme.background)
-                    .child(self.right_panel.clone()),
+                    .relative()
+                    .h(px(TAB_BAR_HEIGHT))
+                    .w_full()
+                    .child(self.tab_bar.clone())
+                    .child(self.render_open_tabs(*theme, entity.clone(), window, cx))
+                    .when(self.tab_menu_open, |this| {
+                        this.child(self.render_tab_context_menu(*theme, entity.clone()))
+                    }),
+            )
+            .child(
+                div()
+                    .id("centre-surface")
+                    .debug_selector(|| "centre-surface".into())
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(centre_surface),
             );
-        }
 
-        columns
+        div()
+            .id("shell-work-area")
+            .debug_selector(|| "shell-work-area".into())
+            .flex()
+            .flex_row()
+            .flex_1()
+            .size_full()
+            .min_h_0()
+            .w_full()
+            .p(theme.spacing.shell_outer_inset)
+            .gap(theme.spacing.shell_gap)
+            .when(self.sidebar_visible, |row| {
+                row.child(
+                    shell_chrome::panel(
+                        "shell-left-panel",
+                        &self.left_panel_focus,
+                        left_focus_visible,
+                        theme,
+                    )
+                    .w(px(SIDEBAR_WIDTH))
+                    .flex_none()
+                    .child(self.sidebar.clone()),
+                )
+            })
+            .child(
+                shell_chrome::panel(
+                    "shell-center-panel",
+                    &self.center_panel_focus,
+                    center_focus_visible,
+                    theme,
+                )
+                .flex_1()
+                .min_w_0()
+                .child(center_column),
+            )
+            .when(self.right_panel_visible, |row| {
+                row.child(
+                    shell_chrome::panel(
+                        "shell-right-panel",
+                        &self.right_panel_focus,
+                        right_focus_visible,
+                        theme,
+                    )
+                    .w(px(RIGHT_PANEL_WIDTH))
+                    .flex_none()
+                    .child(self.right_panel.clone()),
+                )
+            })
     }
 }
 
@@ -17135,13 +17152,15 @@ mod tests {
         // even when it would never be drawn. At the exact window width below,
         // three test terminal tabs use the same content-derived widths as
         // production (the two renamed tabs are wider than the first one).
-        // The window is sized to fit those predicted widths, but not the
-        // chevron's extra 26px; reserving that space unconditionally would
-        // still hide the third tab behind a chevron nothing actually needs.
+        // The window is sized to fit those predicted widths, plus the shell's
+        // extra 4px of outer-inset/gap geometry relative to the retired seam
+        // layout, but not the chevron's extra 26px; reserving that space
+        // unconditionally would still hide the third tab behind a chevron
+        // nothing actually needs.
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.simulate_resize(size(px(1226.0), px(600.0)));
+        cx.simulate_resize(size(px(1230.0), px(600.0)));
         cx.run_until_parked();
 
         assert!(
@@ -19470,9 +19489,133 @@ mod tests {
         assert_eq!(visible_tab_count(&widths, 306.0, 24.0), 1);
     }
 
+    #[gpui::test]
+    async fn workspace_draws_three_inset_panels_with_compact_gaps(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let work = cx.debug_bounds("shell-work-area").expect("work area");
+        let left = cx.debug_bounds("shell-left-panel").expect("left panel");
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        let right = cx.debug_bounds("shell-right-panel").expect("right panel");
+
+        assert_eq!(left.left() - work.left(), px(4.0));
+        assert_eq!(center.left() - left.right(), px(4.0));
+        assert_eq!(right.left() - center.right(), px(4.0));
+        assert_eq!(work.right() - right.right(), px(4.0));
+        assert_eq!(left.top() - work.top(), px(4.0));
+        assert_eq!(work.bottom() - left.bottom(), px(4.0));
+    }
+
+    #[gpui::test]
+    async fn hiding_sidebars_expands_center_but_keeps_its_inset(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let initial = cx.debug_bounds("shell-center-panel").expect("center panel");
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sidebar_visible = false;
+            workspace.right_panel_visible = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("shell-left-panel").is_none());
+        assert!(cx.debug_bounds("shell-right-panel").is_none());
+        let work = cx.debug_bounds("shell-work-area").expect("work area");
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        assert!(center.size.width > initial.size.width);
+        assert_eq!(center.left() - work.left(), px(4.0));
+        assert_eq!(work.right() - center.right(), px(4.0));
+    }
+
+    #[gpui::test]
+    async fn mixed_sidebar_visibility_keeps_the_center_inset_and_gap(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let both_visible_center = cx.debug_bounds("shell-center-panel").expect("center panel");
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sidebar_visible = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("shell-left-panel").is_none());
+        let work = cx.debug_bounds("shell-work-area").expect("work area");
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        let right = cx.debug_bounds("shell-right-panel").expect("right panel");
+        assert_eq!(center.size.width - both_visible_center.size.width, px(SIDEBAR_WIDTH + 4.0));
+        assert_eq!(right.left() - center.right(), px(4.0));
+        assert_eq!(center.left() - work.left(), px(4.0));
+        assert!(center.size.height > px(0.0));
+        assert_eq!(center.top() - work.top(), px(4.0));
+        assert_eq!(work.bottom() - center.bottom(), px(4.0));
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sidebar_visible = true;
+            workspace.right_panel_visible = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("shell-right-panel").is_none());
+        let work = cx.debug_bounds("shell-work-area").expect("work area");
+        let left = cx.debug_bounds("shell-left-panel").expect("left panel");
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        assert_eq!(
+            center.size.width - both_visible_center.size.width,
+            px(RIGHT_PANEL_WIDTH + 4.0)
+        );
+        assert_eq!(center.left() - left.right(), px(4.0));
+        assert_eq!(work.right() - center.right(), px(4.0));
+        assert!(center.size.height > px(0.0));
+        assert_eq!(center.top() - work.top(), px(4.0));
+        assert_eq!(work.bottom() - center.bottom(), px(4.0));
+    }
+
     #[test]
-    fn seam_width_matches_reference_divider() {
-        assert_eq!(SEAM_WIDTH, 6.0);
+    fn tab_strip_available_width_accounts_for_visible_shell_panels_and_gaps() {
+        let viewport_width = 1_000.0;
+        let outer_inset = 4.0;
+        let gap = 4.0;
+
+        assert_eq!(
+            tab_strip_available_width_for_shell(viewport_width, true, true, outer_inset, gap),
+            254.0,
+        );
+        assert_eq!(
+            tab_strip_available_width_for_shell(viewport_width, true, false, outer_inset, gap),
+            663.0,
+        );
+        assert_eq!(
+            tab_strip_available_width_for_shell(viewport_width, false, true, outer_inset, gap),
+            583.0,
+        );
+        assert_eq!(
+            tab_strip_available_width_for_shell(viewport_width, false, false, outer_inset, gap),
+            992.0,
+        );
     }
 
     #[test]
