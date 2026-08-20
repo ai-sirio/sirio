@@ -4272,7 +4272,10 @@ impl Chat {
                             cx.emit(ChatEvent::OpenFile(open_path.clone()));
                         });
                     })
-                    .child(IconElement::new(Icon::File, px(10.0)).text_color(colors.accent))
+                    .child(
+                        IconElement::new(Icon::File, typography.footnote)
+                            .text_color(colors.accent),
+                    )
                     .child(diff.path.display().to_string()),
             );
         for (index, line) in shown.iter().enumerate() {
@@ -4629,7 +4632,7 @@ impl Chat {
                                 } else {
                                     Icon::ChevronRight
                                 },
-                                px(10.0),
+                                typography.callout,
                             )
                             .text_color(colors.meta),
                         )
@@ -5116,7 +5119,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    px(10.0),
+                    typography.footnote,
                 )
                 .text_color(colors.meta),
             )
@@ -5205,7 +5208,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    px(10.0),
+                    typography.footnote,
                 )
                 .text_color(colors.meta),
             )
@@ -5348,7 +5351,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    px(10.0),
+                    typography.footnote,
                 )
                 .text_color(colors.meta),
             )
@@ -5511,7 +5514,10 @@ impl Chat {
                     chat.toggle_turn_unfolded(turn_id, cx);
                 });
             })
-            .child(IconElement::new(Icon::ChevronRight, px(10.0)).text_color(colors.meta))
+            .child(
+                IconElement::new(Icon::ChevronRight, typography.footnote)
+                    .text_color(colors.meta),
+            )
             .child(
                 div()
                     .flex_1()
@@ -5566,7 +5572,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    px(10.0),
+                    typography.callout,
                 )
                 .text_color(colors.meta),
             )
@@ -6640,7 +6646,9 @@ impl Chat {
             .on_click(move |_, window, cx| {
                 attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
             })
-            .child(IconElement::new(Icon::Plus, px(12.0)).text_color(colors.meta));
+            .child(
+                IconElement::new(Icon::Plus, typography.footnote).text_color(colors.title),
+            );
 
         let overflow_button = div()
             .id("composer-overflow")

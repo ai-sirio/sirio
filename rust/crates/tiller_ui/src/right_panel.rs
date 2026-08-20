@@ -585,9 +585,15 @@ impl RightPanel {
         });
         let disclosure = if is_dir {
             if row.node.expanded {
-                Some(IconElement::new(Icon::ChevronDown, px(10.0)).text_color(theme.subtitle))
+                Some(
+                    IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                        .text_color(theme.subtitle),
+                )
             } else {
-                Some(IconElement::new(Icon::ChevronRight, px(10.0)).text_color(theme.subtitle))
+                Some(
+                    IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                        .text_color(theme.subtitle),
+                )
             }
         } else {
             None
@@ -682,7 +688,10 @@ impl RightPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(IconElement::new(glyph, px(14.0)).text_color(theme.subtitle)),
+                    .child(
+                        IconElement::new(glyph, theme.typography.callout)
+                            .text_color(theme.subtitle),
+                    ),
             )
             .child(div().flex_1().overflow_hidden().text_ellipsis().child(name))
             .when(read_error.is_some(), |this| {
@@ -794,7 +803,10 @@ impl RightPanel {
                     .text_size(px(16.0))
                     .text_color(theme.subtitle)
                     .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
-                    .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.subtitle)),
+                    .child(
+                        IconElement::new(Icon::Close, theme.typography.footnote)
+                            .text_color(theme.title),
+                    ),
             )
     }
 
@@ -977,9 +989,11 @@ impl RightPanel {
                         toggle_entity.update(cx, |panel, cx| panel.toggle_activity(cx));
                     })
                     .child(if self.activity_expanded {
-                        IconElement::new(Icon::ChevronDown, px(12.0)).text_color(theme.meta)
+                        IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                            .text_color(theme.title)
                     } else {
-                        IconElement::new(Icon::ChevronRight, px(12.0)).text_color(theme.meta)
+                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                            .text_color(theme.title)
                     })
                     .child("Activity")
                     // F-CHG-20: the running count. A quiet meta label beside
@@ -1065,7 +1079,7 @@ impl RightPanel {
                 div()
                     .w(px(15.0))
                     .text_color(theme.tab_focus_accent)
-                    .child(IconElement::new(surface.icon, px(14.0))),
+                    .child(IconElement::new(surface.icon, theme.typography.headline)),
             )
             .child(
                 div()
@@ -1106,7 +1120,10 @@ impl RightPanel {
                             cx.emit(RightPanelEvent::CloseActivity(index));
                         });
                     })
-                    .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.subtitle)),
+                    .child(
+                        IconElement::new(Icon::Close, theme.typography.footnote)
+                            .text_color(theme.title),
+                    ),
             )
     }
 }
@@ -1149,8 +1166,11 @@ impl Render for RightPanel {
                     .gap(theme.spacing.card_gap)
                     .p(theme.spacing.card_gap)
                     .text_size(theme.typography.headline)
-                    .text_color(theme.meta)
-                    .child(IconElement::new(Icon::PanelRight, px(24.0)).text_color(theme.meta))
+                    .text_color(theme.title)
+                    .child(
+                        IconElement::new(Icon::PanelRight, theme.typography.large_title)
+                            .text_color(theme.title),
+                    )
                     .child("No worktree selected")
                     .child(
                         div()

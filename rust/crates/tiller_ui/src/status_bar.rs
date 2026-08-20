@@ -358,10 +358,12 @@ impl Render for StatusBar {
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .text_size(px(11.5))
-                .text_color(theme.meta)
+                .text_size(theme.typography.footnote)
+                .text_color(theme.title)
                 .hover(|style| style.bg(theme.row_hover))
-                .child(IconElement::new(icon, px(12.0)).text_color(theme.meta))
+                .child(
+                    IconElement::new(icon, theme.typography.footnote).text_color(theme.title),
+                )
         };
 
         // The four provider segments, in the reference order: Claude,
@@ -422,7 +424,7 @@ impl Render for StatusBar {
                         })
                         .into()
                     })
-                    .child(IconElement::new(mark, px(12.0)))
+                    .child(IconElement::new(mark, theme.typography.caption2))
                     .child(text!(id = text_id, text))
             };
 

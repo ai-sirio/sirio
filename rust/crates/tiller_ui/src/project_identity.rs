@@ -685,7 +685,7 @@ impl ProjectIconPicker {
                         glyph_entity.update(cx, |picker, cx| picker.select_glyph(glyph, cx));
                     })
                     .child(
-                        IconElement::new(glyph.icon(), px(16.0))
+                        IconElement::new(glyph.icon(), theme.typography.title3)
                             .text_color(self.value.tint.resolve(theme)),
                     ),
             );
