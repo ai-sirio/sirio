@@ -1202,10 +1202,12 @@ mod tests {
             cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
         let mut server_cx = VisualTestContext::from_window(server_window.into(), cx);
         server_cx.run_until_parked();
+        let macos_draws_native_controls = cfg!(target_os = "macos");
         for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
-            assert!(
-                server_cx.debug_bounds(id).is_none(),
-                "{id} must not draw when the platform reports Decorations::Server"
+            assert_eq!(
+                server_cx.debug_bounds(id).is_some(),
+                macos_draws_native_controls,
+                "{id} follows the platform window-control contract under Decorations::Server"
             );
         }
         assert!(
@@ -1255,12 +1257,11 @@ mod tests {
         );
     }
 
-    /// With no traffic lights reserving the row's leading edge, the icon
-    /// cluster becomes the row's own leftmost control and must not stay
-    /// pinned to where the lights would have ended -- it should shift left
-    /// to the same edge inset the lights themselves would have used.
+    /// The icon cluster starts after the traffic-light group on macOS, where
+    /// native controls are drawn, and at its own leading inset on Linux when
+    /// server-side decorations leave the window controls to the OS.
     #[gpui::test]
-    async fn the_cluster_shifts_left_when_no_traffic_lights_are_drawn(cx: &mut TestAppContext) {
+    async fn the_cluster_position_tracks_platform_traffic_lights(cx: &mut TestAppContext) {
         let server_window =
             cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
         let mut server_cx = VisualTestContext::from_window(server_window.into(), cx);
@@ -1278,12 +1279,19 @@ mod tests {
             .debug_bounds("titlebar-sidebar")
             .expect("cluster is drawn under Client");
 
-        assert!(
-            sidebar_server.origin.x < sidebar_client.origin.x,
-            "with no traffic lights ahead of it, the cluster starts closer to \
-             the left edge (Server: {:?}, Client: {:?})",
-            sidebar_server.origin.x,
-            sidebar_client.origin.x
-        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                sidebar_server.origin.x, sidebar_client.origin.x,
+                "macOS draws native traffic lights for both decoration reports"
+            );
+        } else {
+            assert!(
+                sidebar_server.origin.x < sidebar_client.origin.x,
+                "Linux server-side decorations omit fallback traffic lights, so the cluster \
+                 starts closer to the left edge (Server: {:?}, Client: {:?})",
+                sidebar_server.origin.x,
+                sidebar_client.origin.x
+            );
+        }
     }
 }
