@@ -2923,7 +2923,10 @@ impl Sidebar {
                             sidebar.request_remove_project(remove_project_id.clone(), window, cx);
                         });
                     })
-                    .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.diff_deletion))
+                    .child(
+                        IconElement::new(Icon::Close, theme.typography.footnote)
+                            .text_color(theme.diff_deletion),
+                    )
                     .child("Remove Project"),
             )
             .child(
@@ -3279,7 +3282,7 @@ impl Sidebar {
         let context_entity = entity.clone();
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
-        let mark_size = px(if is_project { 14.0 } else { 13.0 });
+        let mark_size = theme.typography.headline;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
                 .text_size(px(14.0))
@@ -3430,7 +3433,7 @@ impl Sidebar {
                             .bg(color)
                             .into_any_element(),
                         RowStatusGlyph::None => match disclosure {
-                            Some(icon) => IconElement::new(icon, px(11.0))
+                            Some(icon) => IconElement::new(icon, theme.typography.footnote)
                                 .text_color(theme.meta)
                                 .invisible()
                                 .group_hover(hover_group.clone(), |icon| icon.visible())
@@ -3490,7 +3493,10 @@ impl Sidebar {
                         .text_color(theme.meta)
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
-                        .child(IconElement::new(Icon::Settings, px(12.0)).text_color(theme.meta))
+                        .child(
+                            IconElement::new(Icon::Settings, theme.typography.footnote)
+                                .text_color(theme.title),
+                        )
                         .on_click(move |_, _window, cx| {
                             if let Some(project_id) = project_id.clone() {
                                 remove_entity.update(cx, |_, cx| {
@@ -3530,7 +3536,7 @@ impl Sidebar {
                                 // Claude's colour. Shape carried identity;
                                 // colour actively contradicted it.
                                 .child(
-                                    IconElement::new(mark.icon, px(12.0))
+                                    IconElement::new(mark.icon, theme.typography.footnote)
                                         .text_color(mark.brand.color()),
                                 )
                         })),
@@ -3556,7 +3562,10 @@ impl Sidebar {
                                 sidebar.request_remove_worktree_row(row_id, window, cx);
                             });
                         })
-                        .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.meta)),
+                        .child(
+                            IconElement::new(Icon::Close, theme.typography.footnote)
+                                .text_color(theme.meta),
+                        ),
                 )
             })
             .when_some(tab_id, |this, tab_id| {
@@ -3578,7 +3587,10 @@ impl Sidebar {
                                 cx.emit(SidebarEvent::CloseTab(tab_id));
                             });
                         })
-                        .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.subtitle)),
+                        .child(
+                            IconElement::new(Icon::Close, theme.typography.footnote)
+                                .text_color(theme.title),
+                        ),
                 )
             });
 
