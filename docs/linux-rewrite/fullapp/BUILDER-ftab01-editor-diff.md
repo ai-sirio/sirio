@@ -81,11 +81,86 @@ of the screenshots.
 Torn down: `dbus-daemon`, `sway`, virtual-pointer client, and app binary all
 killed by PID under label `ftab01-610923`, confirmed via `pgrep`.
 
-## Second deliverable: the Ctrl-O/native-picker leg (F-TAB-09)
+## Second deliverable: the Ctrl-O/native-picker leg (F-TAB-09) — reproduced
 
-See the section below (added after this one, once attempted) for whether the
-two-layer portal recipe reproduces wave P's PASSED result on this host. This
-is deliberately kept as a separate verdict from the row above: if it fails,
-that reads as "could not reproduce the recipe", not as a regression of
-F-TAB-09's own PASSED status, and it does not reopen F-TAB-01, which is
-closable on the no-portal routes alone.
+Separate instance, separate label (`ftab09-610923`), same binary snapshot,
+same worktree. Kept independent of the row above by design: this is an
+attempt against F-TAB-09's recipe, not a precondition for F-TAB-01, which was
+already closable on the no-portal routes alone.
+
+**A stale portal appeared exactly as F-TAB-09's own write-up describes.**
+`wayland-drive.sh TILLER_WL_PORTAL=1` starts `xdg-desktop-portal` before the
+compositor's real `WAYLAND_DISPLAY` is in the bus's activation environment —
+so when the app's first `OpenFile` call activated the GTK backend, it died
+immediately (`Gtk-WARNING: cannot open display: `) and the frontend latched
+"No skeleton to export" for the rest of its process lifetime. Confirmed, not
+assumed: `dbus-send ... GetNameOwner org.freedesktop.portal.Desktop` named
+the frontend's PID, and `/proc/<pid>/environ` had no `WAYLAND_DISPLAY` at
+all.
+
+**The fix, applied by hand rather than via `TILLER_WL_PORTAL=1` alone** (that
+flag starts a portal blindly — it performs neither of the two steps below,
+which is exactly why it produces this trap):
+
+```bash
+dbus-update-activation-environment --verbose WAYLAND_DISPLAY=wayland-5 GDK_BACKEND=wayland \
+    XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/ftab09-610923-dbus.sock \
+    XDG_CURRENT_DESKTOP=GNOME
+kill -9 <stale xdg-desktop-portal pid>
+XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY=wayland-5 nohup /usr/libexec/xdg-desktop-portal -v \
+    >/tmp/ftab09-610923-portal2.log 2>&1 &
+```
+
+Verified the fix landed before touching the UI: `GetNameOwner` on the new PID,
+then `/proc/<gtk-backend-pid>/environ` showing `WAYLAND_DISPLAY=wayland-5
+GDK_BACKEND=wayland` this time — not inferred from the dialog rendering
+later, checked directly first.
+
+**Driving the picker required a small technique change.** `wayland-drive.sh`
+has no attach mode — a second invocation under the same label kills and
+relaunches sway (`kill_ours` at start-of-run), which would have picked a new
+`wayland-N` and orphaned the portal fix above (bound to `wayland-5`
+specifically). Instead of restarting, I wrote a small driver
+(`/tmp/attach-ftab09.sh`, not committed — a throwaway harness, not app code)
+that copies `pointer_command`/`click`/`rightclick`/`shot`'s bodies verbatim
+from `Scripts/wayland-drive.sh` and points them at the already-running,
+`TILLER_WL_KEEP=1` session's existing `$VP_FIFO`/`$SWAYSOCK`/`$SOCK`, so
+gestures land in the same coordinate space and protocol without touching the
+compositor.
+
+**Result:** `rightclick` on the Terminal tab opened its context menu
+(`05-portal-context-menu.png`) with "Open File" as the top entry — clicking
+it opened a **real native GTK file-chooser** (`06-portal-native-picker.png`):
+titled "Open File", a genuine sidebar (Recenti/Home/Documenti/…), and —
+conclusive that this is the real desktop portal and not a mock — a Recent
+Files list populated with actual files from *other* agents' sessions on this
+host (`wf-rest4-files/notes.md`, `wf-tab-fixture/README.md`, etc.), which
+only a live `org.freedesktop.impl.portal.desktop.gtk` talking to the real
+GTK recent-files store could produce. Selecting `notes.md` and clicking
+"Open File" closed the dialog and opened a new tab titled `notes.md` in the
+tab bar, with a close control and file icon matching `add_file_tab`'s pattern
+from the no-portal route above (`07-portal-editor-tab-opened.png`).
+
+One honest caveat, stated rather than smoothed over: this instance never had
+a project/worktree added (I only booted it and fixed the portal — no
+`project.add`), so the content pane still shows the app's workspace-level
+"No worktree selected" placeholder under the new tab. That's expected and
+orthogonal to what this deliverable is testing — the picker/portal path,
+proven above — not a sign `add_file_tab` failed; the Editor tab's *content*
+rendering was already fully proven separately in the no-portal section, on
+an instance that had a real fixture worktree open.
+
+**Verdict: reproduced.** F-TAB-09's two-layer recipe holds independently of
+the predecessor's run — a second, cold instance, fixed by hand rather than
+copy-pasting a working config, produced the same real dialog. One process
+note for whoever runs this recipe next: the very first `TILLER_WL_PORTAL=1`
+boot attempt for this instance hung for 90s with zero output (no `SAFE:`/
+`SHOT` lines, no log files at all) under concurrent load from another
+agent's own `wayland-drive.sh` session on this box (load average ~5–7 at the
+time); a plain retry a few minutes later booted normally in under 10s. Not
+investigated further since it didn't reproduce — logged here in case it
+recurs for someone else under similar contention.
+
+Cleanup: `dbus-daemon`, `sway`, the two portal generations, the GTK backend,
+the virtual-pointer client and the app binary were all killed by PID and
+confirmed gone via `pgrep`; `/tmp/ftab09-610923*` files removed.
