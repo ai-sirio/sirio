@@ -26,25 +26,20 @@
 //! our icon cluster (still drawn, unconditionally — the directive is "OS
 //! top bar **+ our icons**", not "OS top bar only").
 //!
-//! **macOS is carved out of this decision, deliberately.** AppKit's own
-//! `PlatformWindow` never overrides `window_decorations()`, so it inherits
-//! gpui's blanket default of `Decorations::Server` — the same value Server
-//! reports on Linux — which would make this file stop drawing its own dots
-//! there too. That is very likely already correct (`main.rs`'s
+//! **macOS follows the same decision.** AppKit's own `PlatformWindow` never
+//! overrides `window_decorations()`, so it inherits gpui's blanket default of
+//! `Decorations::Server` — the same value Server reports on Linux. That is
+//! the correct result here: `main.rs`'s
 //! `TitlebarOptions { appears_transparent: true, traffic_light_position }`
-//! already gives macOS AppKit's real traffic lights occupying this same
-//! screen region), but P102's mandate is Linux, and «MUST NOT BE TOUCHED»
-//! applies to the macOS path specifically — so this file does not let
-//! `Decorations` decide anything on macOS. `cfg!(target_os = "macos")`
-//! keeps macOS on its literal pre-P102 code path (draw the three dots
-//! unconditionally, exactly as before), matching Zed's own
-//! `PlatformStyle::Mac => None` carve-out in `render_right_window_controls`
-//! — Zed, too, does not let a generic `Decorations` match decide Mac's
-//! window-control story.
+//! gives macOS AppKit the real traffic lights, so this file must not construct
+//! a second set. The icon cluster reserves
+//! [`tiller_theme::BrowserChrome::macos_traffic_light_cluster_inset`] before
+//! its first button so it begins to the right of AppKit's controls.
 //!
-//! Geometry comes from [`tiller_theme::BrowserChrome`] (bar height, light
-//! size/gap/inset, `BrowserChrome::cluster_start` for the derivation of
-//! where the light group hands off to the button cluster) and
+//! Geometry comes from [`tiller_theme::BrowserChrome`] (bar height, fallback
+//! light size/gap/inset, `BrowserChrome::cluster_start` for the derivation of
+//! where a fallback light group hands off to the button cluster, and the
+//! macOS AppKit reserve) and
 //! `Spacing::compact_action` (the 24px cluster-button frame). Colour comes
 //! from `Theme::get(cx).cosmic`: the bar sits on `containers.background`
 //! (not `primary` — a deliberate override of COSMIC's usual raised-bar
@@ -360,6 +355,7 @@ fn cluster_button(
     id: &'static str,
     icon: Icon,
     size: gpui::Pixels,
+    icon_size: gpui::Pixels,
     radius: gpui::Pixels,
     icon_button: CosmicComponent,
     handler: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
@@ -368,7 +364,7 @@ fn cluster_button(
     let color = if enabled {
         icon_button.on
     } else {
-        icon_button.on.opacity(0.35)
+        icon_button.on.opacity(0.55)
     };
     let mut element = div()
         .id(id)
@@ -379,7 +375,7 @@ fn cluster_button(
         .items_center()
         .justify_center()
         .rounded(radius)
-        .child(icon.element(px(14.0)).text_color(color));
+        .child(icon.element(icon_size).text_color(color));
     if let Some(handler) = handler {
         element = element
             .hover(|style| style.bg(icon_button.hover))
@@ -401,11 +397,7 @@ impl Render for Titlebar {
         let decorations = self
             .decorations_override
             .unwrap_or_else(|| window.window_decorations());
-        // macOS is carved out of the decision entirely -- see the module
-        // docs' "macOS is carved out" section for why `Decorations` must
-        // not be allowed to decide anything there.
-        let show_traffic_lights =
-            cfg!(target_os = "macos") || matches!(decorations, Decorations::Client { .. });
+        let show_traffic_lights = matches!(decorations, Decorations::Client { .. });
 
         let theme = Theme::get(cx);
         let cosmic = theme.cosmic;
@@ -414,6 +406,10 @@ impl Render for Titlebar {
         let icon_button = cosmic.semantic.icon_button;
         let control_radius = px(cosmic.radii.radius_xs[0]);
         let button_size = theme.spacing.compact_action;
+        // The title3 step is the icon-sized type-scale value immediately
+        // above footnote UI text (11.5px), so icons remain legible beside
+        // the adjacent titlebar labels without another hardcoded dimension.
+        let icon_size = theme.typography.title3;
         let trailing_inset = px(cosmic.spacing.xs as f32);
         let entity = cx.entity();
 
@@ -475,14 +471,13 @@ impl Render for Titlebar {
                 ))
         });
 
-        // With no traffic lights reserving the leading edge, the cluster
-        // becomes the row's own leftmost control and takes the same
-        // "how close to the edge do our own, non-OS-drawn controls sit"
-        // inset the lights would otherwise have used -- not the smaller
-        // gap meant to separate the cluster from a light group that, in
-        // this branch, was never drawn.
+        // With no fallback traffic lights, the cluster either clears the
+        // system-owned macOS controls or becomes the row's own leftmost
+        // control. Linux keeps its existing leading inset byte-for-byte.
         let cluster_leading_gap = if show_traffic_lights {
             chrome.traffic_light_cluster_gap
+        } else if cfg!(target_os = "macos") {
+            chrome.macos_traffic_light_cluster_inset
         } else {
             chrome.traffic_light_inset
         };
@@ -497,6 +492,7 @@ impl Render for Titlebar {
                 "titlebar-sidebar",
                 Icon::SidebarLeft,
                 button_size,
+                icon_size,
                 control_radius,
                 icon_button,
                 Some(on_sidebar),
@@ -505,6 +501,7 @@ impl Render for Titlebar {
                 "titlebar-back",
                 Icon::ChevronLeft,
                 button_size,
+                icon_size,
                 control_radius,
                 icon_button,
                 on_back,
@@ -513,6 +510,7 @@ impl Render for Titlebar {
                 "titlebar-forward",
                 Icon::ChevronRight,
                 button_size,
+                icon_size,
                 control_radius,
                 icon_button,
                 on_forward,
@@ -521,6 +519,7 @@ impl Render for Titlebar {
                 "titlebar-new-tab",
                 Icon::Plus,
                 button_size,
+                icon_size,
                 control_radius,
                 icon_button,
                 on_new_tab,
@@ -602,6 +601,7 @@ impl Render for Titlebar {
                         "titlebar-history",
                         Icon::RefreshCw,
                         button_size,
+                        icon_size,
                         control_radius,
                         icon_button,
                         on_history,
@@ -610,6 +610,7 @@ impl Render for Titlebar {
                         "titlebar-right-panel",
                         Icon::PanelRight,
                         button_size,
+                        icon_size,
                         control_radius,
                         icon_button,
                         Some(on_right_panel),
@@ -1202,12 +1203,10 @@ mod tests {
             cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
         let mut server_cx = VisualTestContext::from_window(server_window.into(), cx);
         server_cx.run_until_parked();
-        let macos_draws_native_controls = cfg!(target_os = "macos");
         for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
-            assert_eq!(
-                server_cx.debug_bounds(id).is_some(),
-                macos_draws_native_controls,
-                "{id} follows the platform window-control contract under Decorations::Server"
+            assert!(
+                server_cx.debug_bounds(id).is_none(),
+                "{id} must not draw under Decorations::Server, including on macOS where AppKit owns the controls"
             );
         }
         assert!(
@@ -1257,9 +1256,9 @@ mod tests {
         );
     }
 
-    /// The icon cluster starts after the traffic-light group on macOS, where
-    /// native controls are drawn, and at its own leading inset on Linux when
-    /// server-side decorations leave the window controls to the OS.
+    /// The icon cluster starts after the system traffic-light group on macOS,
+    /// where AppKit draws native controls, and at its own leading inset on
+    /// Linux when server-side decorations leave the window controls to the OS.
     #[gpui::test]
     async fn the_cluster_position_tracks_platform_traffic_lights(cx: &mut TestAppContext) {
         let server_window =
@@ -1280,9 +1279,20 @@ mod tests {
             .expect("cluster is drawn under Client");
 
         if cfg!(target_os = "macos") {
+            let appkit_reserve = cx.update(|cx| {
+                Theme::get(cx)
+                    .browser_chrome
+                    .macos_traffic_light_cluster_inset
+            });
             assert_eq!(
-                sidebar_server.origin.x, sidebar_client.origin.x,
-                "macOS draws native traffic lights for both decoration reports"
+                sidebar_server.origin.x, appkit_reserve,
+                "Server-side macOS chrome must reserve the AppKit traffic-light width"
+            );
+            assert!(
+                sidebar_server.origin.x > sidebar_client.origin.x,
+                "macOS must reserve AppKit's traffic lights before the cluster (Server: {:?}, Client: {:?})",
+                sidebar_server.origin.x,
+                sidebar_client.origin.x
             );
         } else {
             assert!(
@@ -1293,5 +1303,36 @@ mod tests {
                 sidebar_client.origin.x
             );
         }
+    }
+
+    /// AppKit owns the macOS traffic lights when the platform reports Server:
+    /// the fallback controls must be absent and the first icon must begin at
+    /// the theme's documented system-light reserve.
+    #[gpui::test]
+    async fn macos_cluster_clears_appkit_traffic_lights(cx: &mut TestAppContext) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+
+        let window =
+            cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
+            assert!(
+                cx.debug_bounds(id).is_none(),
+                "{id} must be left to AppKit on macOS"
+            );
+        }
+        let cluster = cx
+            .debug_bounds("titlebar-sidebar")
+            .expect("the icon cluster remains ours on macOS");
+        let appkit_reserve = cx.update(|_, cx| {
+            Theme::get(cx)
+                .browser_chrome
+                .macos_traffic_light_cluster_inset
+        });
+        assert_eq!(cluster.origin.x, appkit_reserve);
     }
 }
