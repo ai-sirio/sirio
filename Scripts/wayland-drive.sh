@@ -452,10 +452,30 @@ fi
 # itself. Found when a drive auto-registered the shared checkout, 2026-08-20.
 LAUNCH_CWD="/tmp/$LABEL-cwd"
 mkdir -p "$LAUNCH_CWD"
+# Same isolation argument as the cwd above, for the other filesystem footprint the
+# app has. Unset, `TILLER_PROJECTS_DIR` falls back to the app's own default of
+# `$HOME/Tiller/projects` -- the user's real home -- so every drive that creates or
+# clones a project writes there. That is not hypothetical: it is where fifteen
+# directories from earlier verification rounds accumulated over two days, and a clone
+# landed there again on 2026-08-20 when one Bash call started without the override.
+# Relying on each caller to remember an env var cannot work when every tool call is a
+# fresh shell, so the default belongs here, next to every other label-scoped path.
+# An explicit value from the caller is always respected -- including deliberately
+# pointing at the app's own default when a row is specifically about where projects
+# land by default. The banner prints whichever is in force so that choice can never be
+# silently wrong.
+if [ -n "${TILLER_PROJECTS_DIR:-}" ]; then
+  echo "NOTE: TILLER_PROJECTS_DIR from the caller: $TILLER_PROJECTS_DIR"
+else
+  TILLER_PROJECTS_DIR="/tmp/$LABEL-projects"
+  echo "NOTE: TILLER_PROJECTS_DIR defaulted to $TILLER_PROJECTS_DIR (not \$HOME/Tiller/projects)"
+fi
+mkdir -p "$TILLER_PROJECTS_DIR"
 ( cd "$LAUNCH_CWD" && exec env -u DISPLAY \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     WAYLAND_DISPLAY="$WD" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+    TILLER_PROJECTS_DIR="$TILLER_PROJECTS_DIR" \
     TILLER_DB="$DB" TILLER_SOCKET="$SOCK" \
     ${TILLER_WL_PROTOCOL_LOG:+WAYLAND_DEBUG=1} \
     "$BIN" ) >"$APP_LOG" 2>&1 &
