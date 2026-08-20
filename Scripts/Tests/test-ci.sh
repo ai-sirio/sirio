@@ -6,47 +6,67 @@ REPO_ROOT="$SCRIPT_DIR/../.."
 FIXTURE=$(mktemp -d)
 trap 'rm -rf "$FIXTURE"' EXIT
 
+# A fake cargo that records every invocation and succeeds immediately, so this test
+# exercises Scripts/ci.sh's own control flow (which commands it runs, in what order, and
+# whether "CI OK" only appears after both succeed) without needing a real multi-minute
+# workspace build.
 mkdir -p "$FIXTURE/bin"
-cat > "$FIXTURE/bin/xcodegen" <<'EOF'
+cat > "$FIXTURE/bin/cargo" <<'EOF'
 #!/bin/bash
+printf '%s\n' "$*" >> "$CI_CARGO_ARGS"
 exit 0
 EOF
-cat > "$FIXTURE/bin/swift" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-cat > "$FIXTURE/bin/xcodebuild" <<'EOF'
-#!/bin/bash
-printf '%s\n' "$*" >> "$CI_XCODEBUILD_ARGS"
-case " $* " in
-  *" test "*) printf 'Test run with 1 tests\n' ;;
-  *) printf '** BUILD SUCCEEDED **\n' ;;
-esac
-EOF
-chmod +x "$FIXTURE/bin/"*
+chmod +x "$FIXTURE/bin/cargo"
 
-CI_XCODEBUILD_ARGS="$FIXTURE/xcodebuild.args" \
+CI_CARGO_ARGS="$FIXTURE/cargo.args" \
 PATH="$FIXTURE/bin:$PATH" \
   bash "$REPO_ROOT/Scripts/ci.sh" > "$FIXTURE/ci.log"
 
-build_args=$(sed -n '1p' "$FIXTURE/xcodebuild.args")
-test_args=$(sed -n '2p' "$FIXTURE/xcodebuild.args")
+build_args=$(sed -n '1p' "$FIXTURE/cargo.args")
+test_args=$(sed -n '2p' "$FIXTURE/cargo.args")
 
 case "$build_args" in
-  *" -skipPackageUpdates "*) ;;
-  *) echo "FAIL: app build does not skip remote package updates" >&2; exit 1 ;;
+  "build --workspace") ;;
+  *) echo "FAIL: expected 'cargo build --workspace' first, got: $build_args" >&2; exit 1 ;;
 esac
 case "$test_args" in
-  *" -skipPackageUpdates "*) ;;
-  *) echo "FAIL: app tests do not skip remote package updates" >&2; exit 1 ;;
+  "test --workspace") ;;
+  *) echo "FAIL: expected 'cargo test --workspace' second, got: $test_args" >&2; exit 1 ;;
 esac
-case "$test_args" in
-  *" -clonedSourcePackagesDirPath DerivedData/SourcePackages"*) ;;
-  *) echo "FAIL: app tests do not use the build package checkout" >&2; exit 1 ;;
-esac
-case "$test_args" in
-  *" -derivedDataPath "*) echo "FAIL: app tests share derived data" >&2; exit 1 ;;
-esac
+# Exactly two cargo invocations: this gate is deliberately narrower than
+# Scripts/ci-linux.sh and must not silently grow a fmt/clippy stage that isn't
+# verified clean (see the comment at the top of ci.sh for why).
+[[ $(wc -l < "$FIXTURE/cargo.args") -eq 2 ]] || {
+    echo "FAIL: expected exactly 2 cargo invocations, got:" >&2
+    cat "$FIXTURE/cargo.args" >&2
+    exit 1
+}
 
 grep -q '^CI OK$' "$FIXTURE/ci.log"
-echo "PASS: app xcodebuild actions use bounded local package resolution"
+echo "PASS: ci.sh runs cargo build --workspace then cargo test --workspace and prints CI OK"
+
+# Failure path: a nonzero exit from either cargo invocation must fail the gate and must
+# never let "CI OK" print anyway.
+cat > "$FIXTURE/bin/cargo" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$CI_CARGO_ARGS"
+echo "boom" >&2
+exit 1
+EOF
+chmod +x "$FIXTURE/bin/cargo"
+: > "$FIXTURE/cargo.args"
+
+set +e
+CI_CARGO_ARGS="$FIXTURE/cargo.args" \
+PATH="$FIXTURE/bin:$PATH" \
+  bash "$REPO_ROOT/Scripts/ci.sh" > "$FIXTURE/ci-fail.log" 2>&1
+fail_status=$?
+set -e
+
+[[ "$fail_status" -ne 0 ]] || { echo "FAIL: ci.sh exited 0 despite cargo failing" >&2; exit 1; }
+if grep -q '^CI OK$' "$FIXTURE/ci-fail.log"; then
+    echo "FAIL: ci.sh printed CI OK despite cargo failing" >&2
+    exit 1
+fi
+
+echo "PASS: ci.sh fails without printing CI OK when cargo fails"

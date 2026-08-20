@@ -1,109 +1,57 @@
 #!/bin/bash
-# Single verification entrypoint: regenerates the project, builds the app,
-# and runs every package's tests. Used as the gate for every task.
+# Single verification gate for the whole repo -- run before considering any task done.
+#
+# This used to xcodegen/xcodebuild the Swift/Xcode project. That project is gone; the only
+# build target left in this repo is the Rust/gpui workspace under rust/, and this gate now
+# builds and tests it.
+#
+# This is deliberately narrower than Scripts/ci-linux.sh, the fuller Rust gate that already
+# existed alongside the Swift project (see docs/superpowers/plans/2026-08-13-linux-
+# verification-gate.md and Scripts/Tests/test-ci-linux.sh) and additionally checks
+# formatting, lints, macOS/Windows cross-target compilation, and drives a real headless
+# instance of the app. Two of those checks are not clean on this tree right now, for
+# reasons that have nothing to do with removing the Swift project:
+#
+#   - `cargo fmt --check` currently reports pre-existing drift in crates/tiller,
+#     crates/tiller_agents, crates/tiller_git, crates/tiller_terminal, crates/tiller_theme,
+#     crates/tiller_ui, and crates/tiller_usage.
+#   - `cargo clippy` is not clean workspace-wide either -- ci-linux.sh's own
+#     `--exclude tiller --exclude tiller_ui` already documents current warnings in those
+#     two crates, routed to their current owners rather than gated here.
+#
+# Wiring either check into the one gate every task is told to pass before either is
+# actually clean would make "CI OK" permanently unreachable for reasons unrelated to
+# whatever change is under review -- which teaches people to ignore the gate, the same
+# failure mode ci-linux.sh's own sccache-fallback and opt-in-ACP stages exist to avoid. Add
+# fmt/clippy stages here once they are clean workspace-wide; until then, run
+# `Scripts/ci-linux.sh` for the fuller, stricter check (it stays a separate, heavier gate on
+# purpose -- see its own header for what else it covers and why some of its stages are
+# allowed to SKIP or report BLOCKED rather than FAILED).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-xcodegen generate
-bash Scripts/check-migration-fixtures.sh
-bash Scripts/check-module-boundaries.sh
-
-# Build tillerctl so dev-build fallback exists for pane spawns.
-swift build --package-path Packages/TillerControl --product tillerctl
-# CODE_SIGNING_ALLOWED=NO: this build only needs to compile, not run or be
-# distributed — avoids requiring a "Mac Development" cert on CI runners
-# that only carry the Developer ID Application cert used for releases.
-xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
-  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates build | tail -5
-
-tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
-trap 'rm -rf "$tmpdir"' EXIT
-
-# App-target tests (TillerTests, sources in AppTests/). Deliberately NOT
-# passing CODE_SIGNING_ALLOWED=NO or -derivedDataPath: with either one the
-# test host hangs in dyld before test discovery on managed Macs.
-# The package checkout is shared with the build above, but derived data remains
-# separate so the test host keeps the managed-Mac workaround.
-#
-# The log lands in gitignored DerivedData rather than a trap-deleted tmpdir:
-# when this step fails, the failure detail is the whole point, and a tail of
-# the last lines is usually xcodebuild epilogue, not the failing assertion.
-app_test_log=DerivedData/apptests.log
-mkdir -p DerivedData
-set +e
-xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates \
-  -clonedSourcePackagesDirPath DerivedData/SourcePackages > "$app_test_log" 2>&1
-app_test_status=$?
-set -e
-if [ "$app_test_status" != 0 ]; then
-    echo "==> App tests FAILED (full log: $app_test_log)"
-    grep -E "✘|error:|Test Case .* failed" "$app_test_log" | head -40
+if [[ -n "${HOME:-}" && -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo not found; run source ~/.cargo/env"
     exit 1
 fi
-# [1-9][0-9]* not [0-9]+: a misconfigured selector exits "TEST SUCCEEDED"
-# having run zero tests, which this assertion exists to catch.
-grep -qE "Test run with [1-9][0-9]* tests" "$app_test_log" || {
-    echo "FAILED: App test run reported no tests (full log: $app_test_log)"; exit 1; }
-tail -3 "$app_test_log"
 
-# --- Parallel package tests ---
-# TillerTerminal is excluded from the parallel batch and run on its own afterwards.
-# Its PtyProcessTests spawn real PTYs and assert on wall-clock deadlines and on output
-# arriving within a timeout, so they fail whenever the machine is saturated — and this
-# batch saturates it. They pass consistently when run alone.
+cd rust
 
-serial_pkg=TillerTerminal
+echo "==> cargo build --workspace"
+cargo build --workspace
 
-: > "$tmpdir/jobs"
-for pkg in Packages/*/; do
-    name=${pkg%/}; name=${name##*/}
-    [ "$name" = "$serial_pkg" ] && continue
-    {
-        cd "$pkg"
-        set +e
-        start=$SECONDS
-        swift test > "$tmpdir/$name.log" 2>&1
-        status=$?
-        printf '%s %s\n' "$status" "$((SECONDS - start))" > "$tmpdir/$name.status"
-    } &
-    echo "$!:$name" >> "$tmpdir/jobs"
-done
-
-failed_names=""
-while IFS=: read -r pid name; do
-    wait "$pid" 2>/dev/null || true
-    read -r status elapsed < "$tmpdir/$name.status" || {
-        status=1
-        elapsed='?'
-    }
-    echo "==> swift test: Packages/$name/ (${elapsed}s)"
-    cat "$tmpdir/$name.log"
-    if [ "$status" != "0" ]; then
-        failed_names="$failed_names $name"
-    fi
-done < "$tmpdir/jobs"
-
-if [ -d "Packages/$serial_pkg" ]; then
-    echo "==> swift test: Packages/$serial_pkg/ (serial — timing-sensitive PTY tests)"
-    serial_start=$SECONDS
-    set +e
-    timeout 900 bash -c "cd 'Packages/$serial_pkg' && swift test"
-    serial_status=$?
-    set -e
-    echo "==> swift test: Packages/$serial_pkg/ completed in $((SECONDS - serial_start))s"
-    if [ "$serial_status" = 124 ]; then
-        echo "TIMEOUT: serial tests hung for >900s (15 minutes)"
-        failed_names="$failed_names $serial_pkg"
-    elif [ "$serial_status" != 0 ]; then
-        failed_names="$failed_names $serial_pkg"
-    fi
-fi
-
-if [ -n "$failed_names" ]; then
-    echo "FAILED packages:$failed_names"
-    exit 1
-fi
+# Whole-workspace, not per-crate: that is what this repo's own verification instructions
+# run. The tradeoff is two known timing-sensitive tests documented in Scripts/ci-linux.sh --
+# tiller_terminal's shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group
+# and tiller_acp's chat_session_expires_a_permission_left_open_by_a_dead_transport -- which
+# pass reliably alone but can lose a race when every crate's test binary runs at once. If
+# this gate ever fails on exactly those two tests, rerun `cargo test -p tiller_terminal` /
+# `-p tiller_acp` alone before treating it as a real regression, or use ci-linux.sh's
+# per-crate loop, which sequences around the same race.
+echo "==> cargo test --workspace"
+cargo test --workspace
 
 echo "CI OK"
