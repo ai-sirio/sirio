@@ -16496,6 +16496,85 @@ mod tests {
         }));
     }
 
+    /// F-CORE-WSP-05: `move_selected_tab_with_machinery` routes the real
+    /// move through `LayoutCommand::Move` + `classify_layout_command`, and
+    /// its `FocusIntent::Tab` answer is what sends keyboard focus to the
+    /// *moved* tab's own content -- the same load-bearing pattern
+    /// `commit_tab_rename` uses for `Rename` (F-CORE-WSP-04). This is a
+    /// distinct bug from the rename one: `TabMachinery::move_tab` makes the
+    /// moved tab the new active tab of its destination group, so after
+    /// moving tab 1 (not the tab that currently holds keyboard focus) the
+    /// *visible* active tab flips to it, but nothing else moves keyboard
+    /// focus off whichever pane held it beforehand -- so before this
+    /// wiring, typing after a move silently went into a pane that was no
+    /// longer even shown as active.
+    #[gpui::test]
+    async fn moving_a_tab_to_another_pane_returns_focus_to_the_moved_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[2].group_id = 1;
+            workspace.tab_machinery = TabMachinery::new(
+                vec![
+                    TabGroup::new(0, vec![0, 1], Some(0)),
+                    TabGroup::new(1, vec![2], Some(2)),
+                ],
+                0,
+            )
+            .expect("test groups are valid");
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let tab_focus = |index: usize, cx: &VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, app| {
+                let mut focus = None;
+                workspace.tabs[index].panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        focus = Some(view.focus_handle(app));
+                    }
+                });
+                focus.unwrap_or_else(|| panic!("tab {index} has a terminal focus handle"))
+            })
+        };
+        let tab0_focus = tab_focus(0, &cx);
+        let tab1_focus = tab_focus(1, &cx);
+        cx.update(|window, app| tab0_focus.focus(window, app));
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| tab0_focus.is_focused(window)));
+        assert!(!cx.update(|window, _| tab1_focus.is_focused(window)));
+
+        right_click_tab(&mut cx, 1);
+        let move_to_pane = cx
+            .debug_bounds("tab-command-move-to-pane-1")
+            .expect("the other pane destination is drawn");
+        cx.simulate_click(move_to_pane.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == 1)
+                    .is_some_and(|tab| tab.group_id == 1)
+            }),
+            "the move itself must still happen"
+        );
+        assert!(
+            cx.update(|window, _| tab1_focus.is_focused(window)),
+            "committing a tab move must hand keyboard focus to the moved tab's own content"
+        );
+    }
+
     /// F-TERM-PTY-08: the exact same UI gesture as the test above (a real
     /// MoveTabToOtherPane through the tab context menu), but asserting on
     /// `terminal_pane_cache` -- the seam row's own row -- rather than only
