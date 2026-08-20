@@ -2390,6 +2390,12 @@ fn post_desktop_notification(payload: &NotificationPayload) {
         .arg(&payload.body)
         .spawn();
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "desktop notifications are unsupported on this platform",
+    ));
+
     if let Err(error) = result {
         eprintln!("[notifications] could not deliver desktop notification: {error}");
     }

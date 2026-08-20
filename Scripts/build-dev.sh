@@ -12,10 +12,10 @@ LOG="/tmp/tiller-dev.log"
 
 pkill -x tiller || true
 
-# `open` detaches the app from the shell on macOS; `setsid` provides the same
-# behavior on Linux.
+# `nohup` keeps the direct app process alive after this script exits and sends
+# its output to the log on macOS; `setsid` provides the same behavior on Linux.
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  open "$BIN" >"$LOG" 2>&1 &
+  nohup "$BIN" >"$LOG" 2>&1 </dev/null &
 else
   setsid "$BIN" >"$LOG" 2>&1 &
 fi
