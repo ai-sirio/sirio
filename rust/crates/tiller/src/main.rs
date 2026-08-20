@@ -71,6 +71,7 @@ mod command_palette;
 mod display_backend;
 mod panes;
 mod session;
+mod shell_chrome;
 mod tab_machinery;
 mod tray;
 
