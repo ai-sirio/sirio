@@ -1035,13 +1035,20 @@ pub mod fs_actions {
         #[cfg(target_os = "macos")]
         {
             let mut command = Command::new("open");
-            command.arg(target);
+            command.args(["--"]).arg(target);
             command
         }
 
         #[cfg(target_os = "linux")]
         {
             let mut command = Command::new("xdg-open");
+            command.arg(target);
+            command
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let mut command = Command::new("__tiller_unsupported_platform_open__");
             command.arg(target);
             command
         }
@@ -1052,26 +1059,34 @@ pub mod fs_actions {
     /// directory with Linux's platform opener.
     ///
     /// Returns `None` when no parent directory exists (a bare relative
-    /// filename with no current directory resolvable) on Linux.
+    /// filename with no current directory resolvable) on Linux, or on an
+    /// unsupported platform.
     pub fn reveal_command(path: &Path) -> Option<Command> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
+
         #[cfg(target_os = "macos")]
         {
             let mut command = Command::new("open");
-            command.args(["-R"]).arg(path);
+            command.args(["-R", "--"]).arg(absolute);
             return Some(command);
         }
 
         #[cfg(target_os = "linux")]
         {
-            let absolute = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir().ok()?.join(path)
-            };
             let directory = absolute.parent()?;
             let mut command = Command::new("xdg-open");
             command.arg(directory);
             Some(command)
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
         }
     }
 
@@ -1776,7 +1791,10 @@ mod tests {
         {
             assert_eq!(command.get_program(), "open");
             let args: Vec<_> = command.get_args().collect();
-            assert_eq!(args, vec![OsStr::new("-R"), file.path().as_os_str()]);
+            assert_eq!(
+                args,
+                vec![OsStr::new("-R"), OsStr::new("--"), file.path().as_os_str()]
+            );
         }
 
         #[cfg(target_os = "linux")]
@@ -1797,13 +1815,35 @@ mod tests {
             let command = fs_actions::open_command(target);
 
             #[cfg(target_os = "macos")]
-            assert_eq!(command.get_program(), "open");
+            {
+                assert_eq!(command.get_program(), "open");
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    vec![OsStr::new("--"), target]
+                );
+            }
 
             #[cfg(target_os = "linux")]
-            assert_eq!(command.get_program(), "xdg-open");
-
-            assert_eq!(command.get_args().collect::<Vec<_>>(), vec![target]);
+            {
+                assert_eq!(command.get_program(), "xdg-open");
+                assert_eq!(command.get_args().collect::<Vec<_>>(), vec![target]);
+            }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reveal_command_absolutizes_relative_paths() {
+        let relative = Path::new("relative/note.txt");
+        let expected = std::env::current_dir()
+            .expect("current directory")
+            .join(relative);
+        let command = fs_actions::reveal_command(relative).expect("macOS reveal command");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            vec![OsStr::new("-R"), OsStr::new("--"), expected.as_os_str()]
+        );
     }
 
     #[test]
