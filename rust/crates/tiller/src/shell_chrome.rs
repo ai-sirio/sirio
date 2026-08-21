@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, App, Div, FocusHandle, Stateful, Window, WindowBackgroundAppearance};
+use gpui::{App, Div, FocusHandle, Stateful, Window, WindowBackgroundAppearance, div, prelude::*};
 use tiller_theme::Theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

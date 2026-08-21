@@ -10285,10 +10285,10 @@ impl TillerWorkspace {
             .overflow_hidden()
             .child(centre_surface);
         #[cfg(test)]
-        let centre_surface = centre_surface.when_some(
-            shell_paint_probe("centre-surface", cx),
-            |this, probe| this.child(probe),
-        );
+        let centre_surface = centre_surface
+            .when_some(shell_paint_probe("centre-surface", cx), |this, probe| {
+                this.child(probe)
+            });
 
         let center_column = div()
             .flex()
@@ -11573,11 +11573,8 @@ impl Render for TillerWorkspace {
         self.hide_offscreen_browsers(self.show_settings, cx);
 
         if self.show_settings {
-            let settings_focus_visible = shell_chrome::focus_is_keyboard_visible(
-                &self.settings_panel_focus,
-                window,
-                cx,
-            );
+            let settings_focus_visible =
+                shell_chrome::focus_is_keyboard_visible(&self.settings_panel_focus, window, cx);
             return div()
                 .id("shell-frame")
                 .debug_selector(|| "shell-frame".into())
@@ -17317,9 +17314,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn settings_uses_one_shell_panel_and_keeps_both_frame_bars(
-        cx: &mut TestAppContext,
-    ) {
+    async fn settings_uses_one_shell_panel_and_keeps_both_frame_bars(cx: &mut TestAppContext) {
         cx.set_global(Theme::dark());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -17339,9 +17334,7 @@ mod tests {
         let panel = cx
             .debug_bounds("shell-settings-panel")
             .expect("settings shell panel");
-        let status_bar = cx
-            .debug_bounds("tiller-status-bar")
-            .expect("status bar");
+        let status_bar = cx.debug_bounds("tiller-status-bar").expect("status bar");
         assert!(
             frame.left() <= panel.left()
                 && panel.right() <= frame.right()
@@ -17376,13 +17369,16 @@ mod tests {
                 .expect("workspace root")
         });
 
-        workspace.update(&mut cx.cx, |workspace, cx| workspace.open_settings(None, cx));
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.open_settings(None, cx)
+        });
         cx.run_until_parked();
         let back = cx
             .debug_bounds("settings-back")
             .expect("Settings renders a Back control");
         cx.simulate_click(back.center(), Modifiers::none());
-        cx.background_executor.advance_clock(Duration::from_millis(50));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(50));
         cx.run_until_parked();
 
         assert!(
@@ -18053,9 +18049,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn applying_translucency_updates_workspace_and_window_material(
-        cx: &mut TestAppContext,
-    ) {
+    async fn applying_translucency_updates_workspace_and_window_material(cx: &mut TestAppContext) {
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = cx.update(|window, _| {
@@ -18082,9 +18076,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn settings_translucency_toggle_reaches_the_live_workspace(
-        cx: &mut TestAppContext,
-    ) {
+    async fn settings_translucency_toggle_reaches_the_live_workspace(cx: &mut TestAppContext) {
         cx.set_global(Theme::dark());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -19976,7 +19968,10 @@ mod tests {
         let work = cx.debug_bounds("shell-work-area").expect("work area");
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
         let right = cx.debug_bounds("shell-right-panel").expect("right panel");
-        assert_eq!(center.size.width - both_visible_center.size.width, px(SIDEBAR_WIDTH + 4.0));
+        assert_eq!(
+            center.size.width - both_visible_center.size.width,
+            px(SIDEBAR_WIDTH + 4.0)
+        );
         assert_eq!(right.left() - center.right(), px(4.0));
         assert_eq!(center.left() - work.left(), px(4.0));
         assert!(center.size.height > px(0.0));
