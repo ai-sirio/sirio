@@ -55,7 +55,7 @@ use tiller_ui::{
     sidebar::{
         AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
-        icons::{Icon, IconElement},
+        icons::{Icon, IconElement, IconSize},
     },
     status_bar::{StatusBar, UsageBarData},
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
@@ -9030,7 +9030,7 @@ impl TillerWorkspace {
                             .gap(theme.spacing.card_gap)
                             .text_color(theme.meta)
                             .child(
-                                IconElement::new(Icon::SquareTerminal, px(32.0))
+                                IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
                                     .text_color(theme.meta),
                             )
                             .child(
@@ -9237,7 +9237,7 @@ impl TillerWorkspace {
                     .w(px(14.0))
                     .flex_none()
                     .text_color(glyph_color)
-                    .child(IconElement::new(icon, px(14.0))),
+                    .child(IconElement::new(icon, IconSize::Small)),
             )
             .when(!renaming, |this| {
                 this.child(
@@ -9329,7 +9329,10 @@ impl TillerWorkspace {
                                 this.request_close_tab_by_id(id, window, cx)
                             });
                         })
-                        .child(IconElement::new(Icon::Close, px(12.0)).text_color(theme.subtitle)),
+                        .child(
+                            IconElement::new(Icon::Close, IconSize::XSmall)
+                                .text_color(theme.subtitle),
+                        ),
                 )
             })
             .when(dirty, |this| {
@@ -10208,7 +10211,7 @@ impl TillerWorkspace {
                     });
                 })
                 .child(
-                    IconElement::new(Icon::ChevronDown, theme.spacing.title_strip_icon_size)
+                    IconElement::new(Icon::ChevronDown, IconSize::XSmall)
                         .text_color(theme.meta),
                 );
             tabs = tabs.child(overflow_button);
@@ -10287,7 +10290,10 @@ impl TillerWorkspace {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_color(theme.meta)
-                .child(IconElement::new(Icon::SquareTerminal, px(32.0)).text_color(theme.meta))
+                .child(
+                    IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
+                        .text_color(theme.meta),
+                )
                 .child(
                     div()
                         .text_size(theme.typography.headline)
