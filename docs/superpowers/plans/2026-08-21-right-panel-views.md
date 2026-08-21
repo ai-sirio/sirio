@@ -1015,7 +1015,7 @@ In `right_panel/mod.rs`'s test module:
 ```rust
 #[gpui::test]
 fn the_rail_switches_the_selected_view(cx: &mut TestAppContext) {
-    tiller_theme::Theme::init(cx);
+    cx.update(Theme::init);
 
     cx.update(|cx| {
         assert_eq!(PanelView::get(cx), PanelView::Files, "Files is the default");
@@ -1026,7 +1026,7 @@ fn the_rail_switches_the_selected_view(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn the_selection_survives_rebinding_to_another_worktree(cx: &mut TestAppContext) {
-    tiller_theme::Theme::init(cx);
+    cx.update(Theme::init);
     let dir = TempDir::new();
     let other = TempDir::new();
     let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
@@ -1039,7 +1039,7 @@ fn the_selection_survives_rebinding_to_another_worktree(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn the_activity_badge_appears_only_for_attention_states(cx: &mut TestAppContext) {
-    tiller_theme::Theme::init(cx);
+    cx.update(Theme::init);
     let dir = TempDir::new();
     let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
 
@@ -1214,7 +1214,15 @@ Replace `render_header` with the rail (title text and the `✕` both go away):
     }
 ```
 
-In `Render::render`, replace the fixed body and the always-present activity footer with a match on `PanelView::get(cx)`, keeping the existing no-worktree empty state ahead of it:
+In `Render::render`, gate the tree walk on the active view — the spec requires the other three views not to pay for the once-a-second walk, and today the call is made whenever a worktree is selected:
+
+```rust
+        if self.worktree_selected && PanelView::get(cx) == PanelView::Files {
+            self.ensure_tree_refresh(cx);
+        }
+```
+
+Then replace the fixed body and the always-present activity footer with a match on `PanelView::get(cx)`, keeping the existing no-worktree empty state ahead of it:
 
 ```rust
             .child(self.render_header(entity.clone(), theme, cx))
@@ -1287,7 +1295,7 @@ In `right_panel/mod.rs`'s tests:
 ```rust
 #[gpui::test]
 fn the_changes_entity_is_built_only_when_the_diff_view_is_selected(cx: &mut TestAppContext) {
-    tiller_theme::Theme::init(cx);
+    cx.update(Theme::init);
     let dir = TempDir::new();
     let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
 
@@ -1302,7 +1310,7 @@ fn the_changes_entity_is_built_only_when_the_diff_view_is_selected(cx: &mut Test
 
 #[gpui::test]
 fn rebinding_a_worktree_drops_the_changes_entity(cx: &mut TestAppContext) {
-    tiller_theme::Theme::init(cx);
+    cx.update(Theme::init);
     let dir = TempDir::new();
     let other = TempDir::new();
     let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
@@ -1382,11 +1390,11 @@ In `main.rs`, extend the existing `RightPanelActionEvent` subscription (near `ma
 
 ```rust
                 RightPanelActionEvent::ResolveInTerminal(path) => {
-                    workspace.resolve_conflict_in_terminal(path.clone(), cx)
+                    workspace.add_conflict_terminal_tab(path.clone(), cx)
                 }
 ```
 
-Use the exact method name found at `main.rs:6727`; do not invent one.
+This is the method the existing `ChangesTabActionEvent::ResolveInTerminal` arm calls at `main.rs:6728`; verified, do not substitute another name.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1498,7 +1506,7 @@ mod tests {
 
     #[gpui::test]
     fn a_repository_without_commits_reports_the_empty_state(cx: &mut TestAppContext) {
-        tiller_theme::Theme::init(cx);
+        cx.update(Theme::init);
         let dir = TempDir::new();
         git(&dir.0, &["init", "-q", "-b", "main"]);
         let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
@@ -1514,7 +1522,7 @@ mod tests {
 
     #[gpui::test]
     fn a_directory_without_git_reports_not_a_repository(cx: &mut TestAppContext) {
-        tiller_theme::Theme::init(cx);
+        cx.update(Theme::init);
         let dir = TempDir::new();
         let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
 
@@ -1527,7 +1535,7 @@ mod tests {
 
     #[gpui::test]
     fn commits_are_loaded_with_a_graph_row_each(cx: &mut TestAppContext) {
-        tiller_theme::Theme::init(cx);
+        cx.update(Theme::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
         let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
@@ -1544,7 +1552,7 @@ mod tests {
 
     #[gpui::test]
     fn a_failed_follow_up_chunk_keeps_the_commits_already_shown(cx: &mut TestAppContext) {
-        tiller_theme::Theme::init(cx);
+        cx.update(Theme::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
         let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
@@ -1552,13 +1560,22 @@ mod tests {
             history.read_with(cx, |history, _| !history.commits.is_empty())
         });
 
+        // Break the repository underneath a *second* chunk, then drive the
+        // real load path. Calling a setter that assigns `pagination_error`
+        // would pass even if the production branch discarded the commits —
+        // this is the only version of the test that can actually fail.
+        std::fs::remove_dir_all(dir.0.join(".git")).expect("remove .git");
         history.update(cx, |history, cx| {
-            history.apply_chunk_failure("boom".to_owned(), cx);
+            history.exhausted = false;
+            history.load_next_chunk(cx);
+        });
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.pagination_error.is_some())
         });
 
         history.read_with(cx, |history, _| {
-            assert_eq!(history.commits.len(), 2, "existing rows survive");
-            assert!(history.pagination_error.is_some());
+            assert_eq!(history.commits.len(), 2, "existing rows survive a failed chunk");
+            assert!(history.error.is_none(), "the whole view is not an error state");
         });
     }
 }
@@ -1694,11 +1711,6 @@ impl GitHistory {
         }));
     }
 
-    /// Records a failed follow-up chunk without discarding what is shown.
-    pub(crate) fn apply_chunk_failure(&mut self, message: String, cx: &mut Context<Self>) {
-        self.pagination_error = Some(message);
-        cx.notify();
-    }
 }
 
 impl EventEmitter<GitHistoryEvent> for GitHistory {}
@@ -1755,6 +1767,21 @@ fn a_single_lane_column_is_one_lane_wide() {
 
     assert_eq!(graph_width(std::slice::from_ref(&narrow)), LANE_WIDTH);
 }
+
+#[test]
+fn holes_left_by_ended_lanes_do_not_widen_the_column() {
+    // Two branches ended; only column 0 is still live. The lane vector keeps
+    // their holes, and the column must not stay three lanes wide for them.
+    let settled = GraphRow {
+        lane: 0,
+        color: 0,
+        through: vec![Some(0), None, None],
+        joins_in: Vec::new(),
+        edges_out: Vec::new(),
+    };
+
+    assert_eq!(graph_width(std::slice::from_ref(&settled)), LANE_WIDTH);
+}
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1776,7 +1803,18 @@ const NODE_RADIUS: f32 = 3.5;
 fn graph_width(rows: &[GraphRow]) -> f32 {
     let peak = rows
         .iter()
-        .map(|row| row.through.len().max(row.lane + 1))
+        .map(|row| {
+            // Occupied columns, not `through.len()`: the lane vector keeps
+            // holes forever (it never shrinks), so its length would make the
+            // column grow monotonically and stay wide long after the branches
+            // that caused it ended.
+            let occupied = row
+                .through
+                .iter()
+                .rposition(Option::is_some)
+                .map_or(0, |index| index + 1);
+            occupied.max(row.lane + 1)
+        })
         .max()
         .unwrap_or(1)
         .clamp(1, MAX_LANES);
@@ -1784,7 +1822,7 @@ fn graph_width(rows: &[GraphRow]) -> f32 {
 }
 ```
 
-`graph_column` returns a `canvas(|_, _| (), move |bounds, _, window, _| { ... })` that paints, for the row's height:
+`graph_column` returns a `canvas(|_, _, _| (), move |bounds, _, window, _| { ... })` that paints, for the row's height:
 
 - one vertical line per `Some(colour)` in `through`, from the row's vertical centre to its bottom edge, at `x = column * LANE_WIDTH + LANE_WIDTH / 2`, skipping columns `>= MAX_LANES`;
 - one vertical line from the top edge to the centre for every column that was continuing above (pass the previous row's `through` in, or paint top halves from the same `through` of the row above — whichever the element structure makes available; the visual requirement is that a lane is continuous across the row boundary);
@@ -1826,23 +1864,34 @@ In `changes.rs`'s tests:
 ```rust
 #[gpui::test]
 fn a_commit_view_lists_that_commit_s_files_and_forbids_staging(cx: &mut TestAppContext) {
-    tiller_theme::Theme::init(cx);
+    cx.update(Theme::init);
     let dir = TempDir::new();
     seed_two_commits(&dir.0);
     let sha = rev_parse(&dir.0, "HEAD");
 
     let tab = cx.new(|cx| ChangesTab::for_commit(dir.0.clone(), sha, cx));
-    pump_until(cx, || tab.read_with(cx, |tab, _| !tab.report().files.is_empty()));
+    pump_until(cx, || {
+        tab.read_with(cx, |tab, _| {
+            tab.report().sections.iter().any(|section| !section.files.is_empty())
+        })
+    });
 
     tab.read_with(cx, |tab, _| {
         let report = tab.report();
-        assert!(report.files.iter().any(|file| file.path.ends_with("b.txt")));
+        let files: Vec<_> = report
+            .sections
+            .iter()
+            .flat_map(|section| section.files.iter())
+            .collect();
+        assert!(files.iter().any(|file| file.path.ends_with("b.txt")));
         assert!(!tab.allows_staging(), "a commit is immutable");
     });
 }
 ```
 
-Reuse `ChangesReport` (`changes.rs:221`) rather than inventing an accessor; add `allows_staging()` as part of this task.
+`ChangesReport` (`changes.rs:221`) has no `files` field — it has `sections: Vec<ChangesSectionReport>`, and the files live one level down. Add `allows_staging()` as part of this task.
+
+`changes.rs`'s test module has `TempDir` and `pump_until` but no `seed_two_commits` or `rev_parse`. Add both there, in the shape used by `right_panel/history.rs`'s tests: `seed_two_commits` runs `init -q -b main`, two `config` calls, then two write/add/commit cycles producing `a.txt` ("first") and `b.txt` ("second"); `rev_parse` shells out to `git rev-parse <revision>` and returns the trimmed stdout.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1870,15 +1919,22 @@ In `main.rs`, handle the new event next to the existing `RightPanelActionEvent::
 
 ```rust
                 RightPanelActionEvent::OpenCommit(sha) => {
-                    let repo_root = workspace.working_directory.clone();
-                    let sha = sha.clone();
-                    let tab = cx.new(|cx| ChangesTab::for_commit(repo_root, sha, cx));
-                    Self::subscribe_changes_tab(&tab, cx);
-                    workspace.add_changes_tab(tab, cx);
+                    workspace.add_commit_tab(sha.clone(), cx)
                 }
 ```
 
-Use the exact tab-adding helper the existing `OpenDiff` arm uses; if none exists as a single call, follow the sequence at `main.rs:12149` where a `ChangesTab` is put into `PaneContent::Changes`.
+The existing helper cannot be reused: `add_changes_tab(&mut self, focus_path: Option<PathBuf>, cx)` (`main.rs:7351`) builds its own `ChangesTab::new` internally and accepts no pre-built entity. Add a sibling next to it, copying its body and changing only how the entity is constructed:
+
+```rust
+    /// Opens a read-only Changes tab showing one commit.
+    fn add_commit_tab(&mut self, sha: String, cx: &mut Context<Self>) {
+        let changes = cx.new(|cx| ChangesTab::for_commit(self.working_directory.clone(), sha, cx));
+        Self::subscribe_changes_tab(&changes, cx);
+        // Mirror the remainder of `add_changes_tab` verbatim from
+        // `main.rs:7351` onward: same tab title path, same `PaneContent::Changes`
+        // insertion, same focus handling.
+    }
+```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1906,3 +1962,43 @@ git commit -m "feat: open a commit's diff in a tab"
 **Known deviation from the spec.** The spec's `graph_lanes: [Rgba; 6]` field became `Theme::graph_lane(index)` over existing measured hues; the spec was updated to match before this plan was written.
 
 **Type consistency.** `CommitRecord` fields are used identically in Tasks 1, 2, 3, 10. `GraphRow`'s five fields are produced in Task 3 and consumed in Tasks 10-11 under the same names. `PanelView::{get,set}` are defined in Task 7 and used in Tasks 8 and 10. `ensure_changes` / `ensure_history` follow one shape. `commit_files` returns `Vec<(char, PathBuf)>` in Task 4 and is consumed as such in Task 12.
+
+---
+
+## Plan corrections (2026-08-21, after review)
+
+Applied to the tasks above after a read-only review checked every invented
+API against the source. Each was verified in this repository before the
+change was made:
+
+1. `Theme::init` takes `&mut App` (`tiller_theme/src/lib.rs:989`), so
+   `Theme::init(cx)` inside a `#[gpui::test]` does not compile. All test
+   snippets now use this repo's convention, `cx.update(Theme::init)`
+   (`right_panel.rs:1791`).
+2. Task 8 named a non-existent `resolve_conflict_in_terminal`. The real
+   handler is `add_conflict_terminal_tab` (`main.rs:6728`).
+3. Task 7 was missing the spec's requirement that `ensure_tree_refresh` runs
+   only while Files is active. Added.
+4. Task 11's `canvas` prepaint closure takes three arguments, not two.
+5. Task 11's `graph_width` measured `through.len()`, which never shrinks —
+   the column would grow monotonically and stay wide after branches ended.
+   It now measures occupied columns, with a test for the hole case.
+6. Task 10's pagination-failure test called a setter and so could not fail.
+   It now breaks the repository and drives the real load path; the setter
+   (`apply_chunk_failure`) is deleted.
+7. Task 12 used `ChangesReport::files`, which does not exist — files live in
+   `sections[].files` (`changes.rs:213-226`) — and reused
+   `add_changes_tab`, whose signature (`main.rs:7351`) builds its own entity
+   and cannot accept a pre-built one. Both corrected, and the two missing
+   test helpers are now specified.
+
+### Correction pending in Task 3's delivered code
+
+`a_closed_lane_leaves_a_hole_that_is_reused` asserts the reused column is
+`1`. That assertion is wrong: after every lane has closed, leftmost-free
+reuse yields column `0`, which is what the algorithm should do and what the
+graph should draw. The implementer satisfied the assertion by adding a
+special case to `free_column` that returns the rightmost historical column
+when all lanes are empty — a disconnected history would then be drawn at the
+far right instead of at the left edge. At integration: delete that special
+case and change the assertion to `0`.
