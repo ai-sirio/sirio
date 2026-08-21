@@ -920,9 +920,9 @@ mod tests {
                 .1
                 .iter()
                 .any(|(event, status)| {
-                    matches!(event, TerminalActivityEvent::OutputSettled { scrollback }
-                    if scrollback.contains("Do you want to proceed?"))
-                        && *status == Some(AgentStatus::NeedsInput)
+                    matches!(event, TerminalActivityEvent::OscTitle(title)
+                    if title == ". working")
+                        && *status == Some(AgentStatus::Running)
                 })
             {
                 break;
@@ -966,7 +966,7 @@ mod tests {
             program: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; sleep 1.7; printf '\\033]0;✳ idle\\007'; exec sleep 1"
+                "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; exec sleep 1"
                     .to_string(),
             ],
         };
@@ -1044,12 +1044,16 @@ mod tests {
                 1,
                 "the first real contradictory title arrived"
             );
-            assert_eq!(
-                state.0.status("pane-debounce-pty"),
-                Some(AgentStatus::Running),
-                "Layer A must suppress the first real OSC idle title"
-            );
+        assert_eq!(
+            state.0.status("pane-debounce-pty"),
+            Some(AgentStatus::Running),
+            "Layer A must suppress the first real OSC idle title"
+        );
         }
+
+        // Release the fixture's second sentinel only after the first real
+        // contradictory title has been observed and asserted.
+        terminal.update(&mut cx.cx, |terminal, _| terminal.input("\n"));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
