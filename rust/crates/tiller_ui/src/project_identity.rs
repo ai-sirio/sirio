@@ -19,7 +19,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::controls;
 use crate::settings::AgentAccentColor;
-use crate::sidebar::icons::{Icon, IconElement};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// F-PRJ-15: a curated subset of this app's own shipped glyphs offered as
 /// project icons — not [`crate::sidebar::icons::ALL_ICONS`]. Most of that
@@ -685,7 +685,7 @@ impl ProjectIconPicker {
                         glyph_entity.update(cx, |picker, cx| picker.select_glyph(glyph, cx));
                     })
                     .child(
-                        IconElement::new(glyph.icon(), theme.typography.title3)
+                        IconElement::new(glyph.icon(), IconSize::Small)
                             .text_color(self.value.tint.resolve(theme)),
                     ),
             );

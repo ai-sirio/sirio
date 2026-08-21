@@ -54,7 +54,7 @@ use tiller_git::{
 use tiller_theme::Theme;
 
 use crate::controls;
-use crate::sidebar::icons::{Icon, IconElement};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// Context lines fetched for each change. Generous enough that the
 /// collapsed-context bands carry real counts ("27 hidden lines"), cheap
@@ -1119,10 +1119,10 @@ impl ChangesTab {
                     .items_center()
                     .justify_center()
                     .child(if collapsed {
-                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
                             .text_color(theme.subtitle)
                     } else {
-                        IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
                             .text_color(theme.subtitle)
                     }),
             )
@@ -1213,10 +1213,10 @@ impl ChangesTab {
                     .items_center()
                     .justify_center()
                     .child(if expanded {
-                        IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
                             .text_color(theme.subtitle)
                     } else {
-                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
                             .text_color(theme.subtitle)
                     }),
             )
@@ -1228,7 +1228,7 @@ impl ChangesTab {
                     .justify_center()
                     .child(glyph.map_or_else(
                         || {
-                            IconElement::new(Icon::File, theme.typography.callout)
+                            IconElement::new(Icon::File, IconSize::Small)
                                 .text_color(color)
                                 .into_any_element()
                         },

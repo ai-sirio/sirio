@@ -34,7 +34,7 @@ use tiller_theme::Theme;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::editor::Language;
 use crate::file_view::{CodeSpanKind, code_spans};
-use crate::sidebar::icons::{Icon, IconElement};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -2268,9 +2268,7 @@ impl Chat {
             !matches!(
                 entry,
                 Entry::Error {
-                    kind: ErrorKind::Connection
-                        | ErrorKind::AuthRequired
-                        | ErrorKind::Disconnected,
+                    kind: ErrorKind::Connection | ErrorKind::AuthRequired | ErrorKind::Disconnected,
                     ..
                 }
             )
@@ -4272,10 +4270,7 @@ impl Chat {
                             cx.emit(ChatEvent::OpenFile(open_path.clone()));
                         });
                     })
-                    .child(
-                        IconElement::new(Icon::File, typography.footnote)
-                            .text_color(colors.accent),
-                    )
+                    .child(IconElement::new(Icon::File, IconSize::Small).text_color(colors.accent))
                     .child(diff.path.display().to_string()),
             );
         for (index, line) in shown.iter().enumerate() {
@@ -4632,7 +4627,7 @@ impl Chat {
                                 } else {
                                     Icon::ChevronRight
                                 },
-                                typography.callout,
+                                IconSize::XSmall,
                             )
                             .text_color(colors.meta),
                         )
@@ -5058,7 +5053,11 @@ impl Chat {
                                     // states rather than two mechanisms.
                                     retry_entity.update(cx, |chat, cx| chat.retry(cx));
                                 })
-                                .child(if is_disconnected { "Restart agent" } else { "Retry" }),
+                                .child(if is_disconnected {
+                                    "Restart agent"
+                                } else {
+                                    "Retry"
+                                }),
                         )
                     })
                     // F-CHAT-33: "OK to dismiss" -- present for every error,
@@ -5119,7 +5118,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    typography.footnote,
+                    IconSize::XSmall,
                 )
                 .text_color(colors.meta),
             )
@@ -5208,7 +5207,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    typography.footnote,
+                    IconSize::XSmall,
                 )
                 .text_color(colors.meta),
             )
@@ -5351,7 +5350,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    typography.footnote,
+                    IconSize::XSmall,
                 )
                 .text_color(colors.meta),
             )
@@ -5514,10 +5513,7 @@ impl Chat {
                     chat.toggle_turn_unfolded(turn_id, cx);
                 });
             })
-            .child(
-                IconElement::new(Icon::ChevronRight, typography.footnote)
-                    .text_color(colors.meta),
-            )
+            .child(IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(colors.meta))
             .child(
                 div()
                     .flex_1()
@@ -5572,7 +5568,7 @@ impl Chat {
                     } else {
                         Icon::ChevronRight
                     },
-                    typography.callout,
+                    IconSize::XSmall,
                 )
                 .text_color(colors.meta),
             )
@@ -6646,9 +6642,7 @@ impl Chat {
             .on_click(move |_, window, cx| {
                 attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
             })
-            .child(
-                IconElement::new(Icon::Plus, typography.footnote).text_color(colors.title),
-            );
+            .child(IconElement::new(Icon::Plus, IconSize::XSmall).text_color(colors.title));
 
         let overflow_button = div()
             .id("composer-overflow")
@@ -8761,9 +8755,7 @@ mod tests {
     /// permission dismissed by a real simulated click, and asserts the
     /// first turn's three entries are still there afterwards.
     #[gpui::test]
-    async fn dismissing_a_later_permission_does_not_wipe_earlier_turns(
-        cx: &mut TestAppContext,
-    ) {
+    async fn dismissing_a_later_permission_does_not_wipe_earlier_turns(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["permission-unrenderable"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         refresh_frame(cx);

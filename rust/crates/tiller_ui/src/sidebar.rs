@@ -35,7 +35,7 @@ use crate::tab_bar::NewTabAction;
 #[path = "icons.rs"]
 pub mod icons;
 
-use self::icons::{Icon, IconElement};
+use self::icons::{Icon, IconElement, IconSize};
 use crate::right_panel::ActivityStatus;
 
 /// One agent's brand mark: the silhouette **and** the colour it is drawn in,
@@ -1246,7 +1246,6 @@ impl Sidebar {
         self.emit_project_settings_changed(cx);
         cx.notify();
     }
-
 }
 
 /// What a platform path prompt came back with, reduced to the three cases the
@@ -1318,7 +1317,8 @@ impl Sidebar {
                 PickedPath::Nothing => return,
                 PickedPath::Unavailable(reason) => {
                     let _ = sidebar.update(cx, |sidebar, cx| {
-                        sidebar.notice = Some(format!("could not open the folder picker: {reason}"));
+                        sidebar.notice =
+                            Some(format!("could not open the folder picker: {reason}"));
                         cx.notify();
                     });
                     return;
@@ -1410,9 +1410,7 @@ impl Sidebar {
             is_git: row.is_git,
             icon,
             icon_picker,
-            default_worktree_base: Rc::new(RefCell::new(
-                default_worktree_base.unwrap_or_default(),
-            )),
+            default_worktree_base: Rc::new(RefCell::new(default_worktree_base.unwrap_or_default())),
             worktree_base_focus: cx.focus_handle(),
             primary_branch,
             worktree_location_override: Rc::new(RefCell::new(
@@ -1498,7 +1496,8 @@ impl Sidebar {
                 PickedPath::Nothing => {}
                 PickedPath::Unavailable(reason) => {
                     let _ = sidebar.update(cx, |sidebar, cx| {
-                        sidebar.notice = Some(format!("could not open the folder picker: {reason}"));
+                        sidebar.notice =
+                            Some(format!("could not open the folder picker: {reason}"));
                         cx.notify();
                     });
                 }
@@ -2919,7 +2918,9 @@ impl Sidebar {
             )
             .when(card.is_git, |this| {
                 this.child(Self::render_worktree_base_section(&card, &entity, &theme))
-                    .child(Self::render_worktree_location_section(&card, &entity, &theme))
+                    .child(Self::render_worktree_location_section(
+                        &card, &entity, &theme,
+                    ))
             })
             .child(
                 div()
@@ -2943,7 +2944,7 @@ impl Sidebar {
                         });
                     })
                     .child(
-                        IconElement::new(Icon::Close, theme.typography.footnote)
+                        IconElement::new(Icon::Close, IconSize::XSmall)
                             .text_color(theme.diff_deletion),
                     )
                     .child("Remove Project"),
@@ -2987,7 +2988,9 @@ impl Sidebar {
         let effective_base = if !draft.trim().is_empty() {
             draft.clone()
         } else {
-            card.primary_branch.clone().unwrap_or_else(|| "—".to_string())
+            card.primary_branch
+                .clone()
+                .unwrap_or_else(|| "—".to_string())
         };
         let subtitle = if !draft.trim().is_empty() {
             "Pinned".to_string()
@@ -3302,6 +3305,7 @@ impl Sidebar {
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
         let mark_size = theme.typography.headline;
+        let icon_size = IconSize::Small;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
                 .text_size(px(14.0))
@@ -3317,7 +3321,7 @@ impl Sidebar {
                 .h(mark_size)
                 .rounded(theme.radii.control)
                 .into_any_element(),
-            _ => IconElement::new(glyph, mark_size)
+            _ => IconElement::new(glyph, icon_size)
                 .text_color(glyph_color)
                 .into_any_element(),
         };
@@ -3456,8 +3460,7 @@ impl Sidebar {
                                 .invisible()
                                 .group_hover(hover_group.clone(), |element| element.visible())
                                 .child(
-                                    IconElement::new(icon, theme.typography.footnote)
-                                        .text_color(theme.meta),
+                                    IconElement::new(icon, IconSize::XSmall).text_color(theme.meta),
                                 )
                                 .into_any_element(),
                             None => div().into_any_element(),
@@ -3516,7 +3519,7 @@ impl Sidebar {
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .child(
-                            IconElement::new(Icon::Settings, theme.typography.footnote)
+                            IconElement::new(Icon::Settings, IconSize::XSmall)
                                 .text_color(theme.title),
                         )
                         .on_click(move |_, _window, cx| {
@@ -3558,7 +3561,7 @@ impl Sidebar {
                                 // Claude's colour. Shape carried identity;
                                 // colour actively contradicted it.
                                 .child(
-                                    IconElement::new(mark.icon, theme.typography.footnote)
+                                    IconElement::new(mark.icon, IconSize::Small)
                                         .text_color(mark.brand.color()),
                                 )
                         })),
@@ -3585,8 +3588,7 @@ impl Sidebar {
                             });
                         })
                         .child(
-                            IconElement::new(Icon::Close, theme.typography.footnote)
-                                .text_color(theme.meta),
+                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.meta),
                         ),
                 )
             })
@@ -3610,8 +3612,7 @@ impl Sidebar {
                             });
                         })
                         .child(
-                            IconElement::new(Icon::Close, theme.typography.footnote)
-                                .text_color(theme.title),
+                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title),
                         ),
                 )
             });

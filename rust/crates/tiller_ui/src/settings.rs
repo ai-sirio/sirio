@@ -1,7 +1,7 @@
 //! Full-window settings surface and its small fixture model.
 
 use crate::controls;
-use crate::sidebar::icons::{Icon, IconElement};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, FontWeight, KeyBinding, KeyDownEvent,
     MouseButton, Render, Rgba, Window, actions, div, prelude::*, px, text,
@@ -2137,7 +2137,7 @@ impl Settings {
                         }
                     })
                     .child(
-                        IconElement::new(Icon::ChevronLeft, theme.typography.headline)
+                        IconElement::new(Icon::ChevronLeft, IconSize::Small)
                             .text_color(theme.title),
                     )
                     .child(text!("Back")),
@@ -2198,12 +2198,13 @@ impl Settings {
                             .items_center()
                             .justify_center()
                             .child(
-                                IconElement::new(category.glyph(), theme.typography.headline)
-                                    .text_color(if selected {
+                                IconElement::new(category.glyph(), IconSize::Small).text_color(
+                                    if selected {
                                         theme.title
                                     } else {
                                         theme.subtitle
-                                    }),
+                                    },
+                                ),
                             ),
                     )
                     .child(text!(
@@ -3369,7 +3370,7 @@ impl Settings {
             })
             .child(text!(selected.title()))
             .child(
-                IconElement::new(Icon::ChevronDown, theme.typography.callout).text_color(if enabled {
+                IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(if enabled {
                     theme.title
                 } else {
                     theme.hairline

@@ -71,7 +71,7 @@ use std::rc::Rc;
 use tiller_theme::Theme;
 use tiller_theme::cosmic::CosmicComponent;
 
-use crate::sidebar::icons::Icon;
+use crate::sidebar::icons::{Icon, IconSize};
 
 /// F-WIN-09: the Linux counterpart of macOS's `AppleActionOnDoubleClick`.
 /// GPUI's own `Window::titlebar_double_click`/`PlatformWindow::
@@ -355,7 +355,7 @@ fn cluster_button(
     id: &'static str,
     icon: Icon,
     size: gpui::Pixels,
-    icon_size: gpui::Pixels,
+    icon_size: IconSize,
     radius: gpui::Pixels,
     icon_button: CosmicComponent,
     handler: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
@@ -406,10 +406,7 @@ impl Render for Titlebar {
         let icon_button = cosmic.semantic.icon_button;
         let control_radius = px(cosmic.radii.radius_xs[0]);
         let button_size = theme.spacing.compact_action;
-        // The title3 step is the icon-sized type-scale value immediately
-        // above footnote UI text (11.5px), so icons remain legible beside
-        // the adjacent titlebar labels without another hardcoded dimension.
-        let icon_size = theme.typography.title3;
+        let icon_size = IconSize::Medium;
         let trailing_inset = px(cosmic.spacing.xs as f32);
         let entity = cx.entity();
 

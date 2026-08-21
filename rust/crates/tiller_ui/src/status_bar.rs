@@ -17,7 +17,7 @@ use tiller_usage::{
     ProviderUsageState, UsageFetchOutcome, UsageReason, reduce,
 };
 
-use crate::sidebar::icons::{Icon, IconElement};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 pub(crate) const HEIGHT: f32 = 40.0;
 
@@ -361,9 +361,7 @@ impl Render for StatusBar {
                 .text_size(theme.typography.footnote)
                 .text_color(theme.title)
                 .hover(|style| style.bg(theme.row_hover))
-                .child(
-                    IconElement::new(icon, theme.typography.footnote).text_color(theme.title),
-                )
+                .child(IconElement::new(icon, IconSize::XSmall).text_color(theme.title))
         };
 
         // The four provider segments, in the reference order: Claude,
@@ -424,7 +422,7 @@ impl Render for StatusBar {
                         })
                         .into()
                     })
-                    .child(IconElement::new(mark, theme.typography.caption2))
+                    .child(IconElement::new(mark, IconSize::XSmall))
                     .child(text!(id = text_id, text))
             };
 
