@@ -44,6 +44,8 @@ mod diff;
 mod directory_status;
 mod error;
 mod git;
+mod graph;
+mod log;
 mod remote;
 mod side_by_side;
 mod status;
@@ -54,11 +56,14 @@ pub use branches::{GitBranches, list_branches};
 pub use clone::{GitClone, clone_repository};
 pub use diff::{
     DEFAULT_CONTEXT_LINES, DiffLine, DiffOrigin, DiffStat, FileDiff, Hunk,
-    WHOLE_FILE_CONTEXT_LINES, diff_entry, parse_diff, parse_numstat, stats,
+    WHOLE_FILE_CONTEXT_LINES, commit_diff_entry, commit_files, diff_entry, parse_diff, parse_numstat,
+    stats,
 };
 pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, directory_statuses};
 pub use error::{GitActionError, GitError};
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
+pub use graph::{GraphRow, layout};
+pub use log::{CommitRecord, GitLog, parse_log};
 pub use remote::{GitRemote, github_owner, project_name};
 pub use side_by_side::{
     DiffSideBySideLine, DiffSideBySideRow, GitDiffSideBySide, GitDiffSideBySideLine,
