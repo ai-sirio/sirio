@@ -44,6 +44,7 @@ mod diff;
 mod directory_status;
 mod error;
 mod git;
+mod graph;
 mod log;
 mod remote;
 mod side_by_side;
@@ -60,6 +61,7 @@ pub use diff::{
 pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, directory_statuses};
 pub use error::{GitActionError, GitError};
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
+pub use graph::{GraphRow, layout};
 pub use log::{CommitRecord, GitLog, parse_log};
 pub use remote::{GitRemote, github_owner, project_name};
 pub use side_by_side::{
