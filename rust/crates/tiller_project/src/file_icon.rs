@@ -103,6 +103,54 @@ impl FileIconKey {
     pub fn for_directory_name(name: &str) -> Self {
         directory_name(&name.to_lowercase()).unwrap_or(Self::Folder)
     }
+
+    /// Returns the Material icon asset stem for file keys that have a
+    /// polychrome vendored asset. `None` means the UI should use its normal
+    /// monochrome fallback.
+    pub const fn material_asset(self) -> Option<&'static str> {
+        use FileIconKey::*;
+        match self {
+            Swift => Some("swift"),
+            C => Some("c"),
+            Cpp => Some("cpp"),
+            CSharp => Some("csharp"),
+            Java => Some("java"),
+            Kotlin => Some("kotlin"),
+            Python => Some("python"),
+            Ruby => Some("ruby"),
+            Rust => Some("rust"),
+            Go => Some("go"),
+            JavaScript => Some("javascript"),
+            TypeScript => Some("typescript"),
+            React => Some("react"),
+            Vue => Some("vue"),
+            Html => Some("html"),
+            Css => Some("css"),
+            Sass => Some("sass"),
+            Json => Some("json"),
+            Yaml => Some("yaml"),
+            Toml => Some("toml"),
+            Xml => Some("xml"),
+            Markdown => Some("markdown"),
+            Pdf => Some("pdf"),
+            Image => Some("image"),
+            Video => Some("video"),
+            Audio => Some("audio"),
+            Font => Some("font"),
+            Archive => Some("zip"),
+            Sql => Some("database"),
+            Database => Some("database"),
+            Docker => Some("docker"),
+            Log => Some("log"),
+            Settings => Some("settings"),
+            Lock => Some("lock"),
+            Makefile => Some("makefile"),
+            Text | Shell | Git | Env | Folder | FolderSrc | FolderTests | FolderDocs
+            | FolderGithub | FolderNodeModules | FolderDist | FolderScripts | FolderConfig
+            | FolderAssets | FolderPublic | FolderPackages | FolderVscode | FolderGit
+            | FolderLib | FolderTools | File | Symlink => None,
+        }
+    }
 }
 
 fn exact_file_name(lower: &str) -> Option<FileIconKey> {
@@ -268,6 +316,21 @@ mod tests {
                 "for_file_name({name:?})"
             );
         }
+    }
+
+    #[test]
+    fn material_assets_cover_common_file_types_and_leave_generic_keys_unmatched() {
+        let cases = [
+            ("a.java", "java"), ("a.py", "python"), ("a.rs", "rust"),
+            ("a.go", "go"), ("a.ts", "typescript"), ("a.js", "javascript"),
+            ("a.json", "json"), ("a.yaml", "yaml"), ("a.md", "markdown"),
+            ("a.html", "html"), ("a.css", "css"), ("a.toml", "toml"),
+        ];
+        for (name, asset) in cases {
+            assert_eq!(FileIconKey::for_file_name(name).material_asset(), Some(asset));
+        }
+        assert_eq!(FileIconKey::for_file_name("README").material_asset(), None);
+        assert_eq!(FileIconKey::for_file_name("a.txt").material_asset(), None);
     }
 
     #[test]
