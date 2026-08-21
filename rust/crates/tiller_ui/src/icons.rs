@@ -12,22 +12,20 @@
 //!   rasterizes the real symbol through AppKit (`NSImage(systemSymbolName:)`,
 //!   see `crate::sfsymbol`) tinted with the caller's theme colour — the same
 //!   visual as the reference app.
-//! - **Embedded Phosphor SVGs** (every platform): the same enum falls back
-//!   to the vendored SVGs (MIT, see `THIRD_PARTY_NOTICES.md`) on non-Apple
-//!   targets, and for any icon without a system symbol. The SVG path is
-//!   always compiled, so a future Linux/Windows build degrades to the
-//!   embedded set instead of failing to compile.
+//! - **Embedded Zed SVGs** (every platform): the same enum falls back to the
+//!   pinned, vendored Zed catalog on non-Apple targets, and for any icon
+//!   without a system symbol. The SVG path is always compiled, so a future
+//!   Linux/Windows build degrades to the embedded set instead of failing to
+//!   compile.
 //!
 //! # Agent marks are different
 //!
 //! The agent brand marks (Claude Code, Codex, OpenCode, Pi, omp) are
 //! embedded SVGs on *every* platform — SF Symbols has no marks for them.
-//! Marks with their own chromatic colours (the Anthropic sunburst, omp's
-//! three-stop gradient) are rendered **full-colour, never tinted**: brand
-//! logos keep their identity and must not be recoloured by a theme. Marks
-//! that are monochrome by design (Codex's knot, OpenCode's frame, Pi's
-//! monogram — the Swift app renders these with `.primary`) go through the
-//! normal tinted path like the reference does.
+//! Oh My Pi's three-stop gradient is rendered **full-colour, never tinted**:
+//! its brand logo keeps its identity and must not be recoloured by a theme.
+//! Zed's monochrome marks and Tiller's Pi monogram go through the normal
+//! tinted path like the reference does.
 //!
 //! The SVG bytes are embedded with `include_bytes!`, so icons ship inside
 //! the binary and render through GPUI's own SVG pipeline (`paint_svg` for
@@ -57,86 +55,70 @@ mod sfsymbol;
 /// [`Icon::system_symbol`] additionally names the SF Symbol that replaces
 /// the SVG for that icon.
 ///
-/// # P76 — comet replaces Phosphor as the generic-icon source
+/// # Pinned Zed catalog
 ///
-/// `docs/linux-rewrite/tasks/P76-the-comet-top-bar-and-icon-set.md` swaps 14
-/// of these from Tiller's original vendored Phosphor *thin* set to
-/// `rust/assets/icons/comet/` (63 SVGs, MIT, Copyright (c) 2026 Wing,
-/// `assets/icons/comet/ATTRIBUTION.md`) — a *replacement*, not an addition:
-/// mixing the two families reads as an unfinished port. Three variants keep
-/// their Phosphor SVG because comet ships no equivalent shape at all
-/// (`Sparkles`, `Shield`, `SunMoon` — no sparkle/shield/sun glyph anywhere
-/// in the 63); two more keep their existing brand-mark asset on purpose —
-/// see `has_own_colours` and each variant's own doc comment.
+/// Generic icons and available agent marks resolve to byte-identical SVGs
+/// vendored from Zed's pinned upstream catalog; see
+/// `rust/assets/icons/zed/ATTRIBUTION.md`. Pi and Oh My Pi deliberately keep
+/// their Tiller assets because the catalog does not provide their marks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
-    /// A project directory (SF `folder.fill`, comet `folder`).
+    /// A project directory (SF `folder.fill`, Zed `folder`).
     FolderFill,
-    /// A git worktree (comet `git-branch`; no SF equivalent in the
+    /// A git worktree (Zed `git_branch`; no SF equivalent in the
     /// reference app).
     GitBranch,
-    /// A chat surface (SF `bubble.left`, comet `chat-round-line`).
+    /// A chat surface (SF `bubble.left`, Zed `chat`).
     MessageSquare,
-    /// A terminal surface (SF `terminal`, comet `terminal`).
+    /// A terminal surface (SF `terminal`, Zed `terminal`).
     SquareTerminal,
-    /// Close (SF `xmark`, comet `close`).
+    /// Close (SF `xmark`, Zed `close`).
     Close,
-    /// Collapse (SF `chevron.down`, comet `alt-arrow-down`).
+    /// Collapse (SF `chevron.down`, Zed `chevron_down`).
     ChevronDown,
-    /// Expand (SF `chevron.right`, comet `alt-arrow-right`).
+    /// Expand (SF `chevron.right`, Zed `chevron_right`).
     ChevronRight,
-    /// Back (SF `chevron.left`, comet `alt-arrow-left`).
+    /// Back (SF `chevron.left`, Zed `chevron_left`).
     ChevronLeft,
-    /// Settings gear (SF `gearshape`, comet `settings-minimalistic`).
+    /// Settings gear (SF `gearshape`, Zed `settings`).
     Settings,
-    /// Refresh (SF `arrow.clockwise`, comet `refresh`).
+    /// Refresh (SF `arrow.clockwise`, Zed `rotate_cw`).
     RefreshCw,
-    /// Add (SF `plus`, comet `plus`).
+    /// Add (SF `plus`, Zed `plus`).
     Plus,
-    /// A generic file (SF `doc.text`, comet `document`).
+    /// A generic file (SF `doc.text`, Zed `file`).
     File,
-    /// AI providers. **No comet equivalent** (no sparkle glyph in the
-    /// 63-icon set) — stays Phosphor `sparkle-thin`, declared, not a silent
-    /// leftover.
+    /// AI providers (Zed `sparkle`).
     Sparkles,
-    /// Permissions. **No comet equivalent** — stays Phosphor `shield-thin`.
+    /// Permissions (Zed `lock`).
     Shield,
-    /// Appearance. **No comet equivalent** — stays Phosphor `sun-dim-thin`.
+    /// Appearance (Zed `screen`).
     SunMoon,
-    /// A browser surface (SF `globe`, comet `global`).
+    /// A browser surface (SF `globe`, Zed `public`).
     Globe,
-    /// Anthropic's mark — comet's `claude-mark.svg`, `fill="currentColor"`
-    /// (monochrome, unlike Tiller's old chromatic sunburst asset it
-    /// replaces) — see `has_own_colours`.
+    /// Anthropic's monochrome Zed mark.
     ClaudeCode,
-    /// OpenAI's mark — comet's `openai-mark.svg`, monochrome, like the
-    /// Swift app's `.primary` rendering.
+    /// OpenAI's monochrome Zed mark, like the Swift app's `.primary`
+    /// rendering.
     Codex,
-    /// OpenCode's mark (simple-icons, CC0) — monochrome. **No comet
-    /// equivalent** (comet ships no opencode mark) — brand identity, not
-    /// set iconography, so it stays put rather than being dropped.
+    /// OpenCode's monochrome Zed mark.
     OpenCode,
-    /// Pi's monogram — comet's `pi-mark.svg`, monochrome.
+    /// Pi's Tiller monogram fallback, monochrome.
     Pi,
     /// Oh-My-Pi's mark with the pink→purple→cyan gradient, ported from
-    /// `App/AgentIcon.swift` — full colour. **No comet equivalent** (comet
-    /// ships no omp mark) — kept for the same brand-identity reason as
-    /// `OpenCode`.
+    /// `App/AgentIcon.swift` — full colour. It remains a Tiller fallback
+    /// because Zed does not provide an Oh My Pi mark.
     OhMyPi,
-    /// Left-sidebar toggle (comet `sidebar-minimalistic-left` — "the exact
-    /// sidebar toggle in the screenshot"; P76's titlebar cluster). No SF
-    /// mapping: this variant did not exist before P76.
+    /// Left-sidebar toggle (Zed `threads_sidebar_left_open`). No SF mapping.
     SidebarLeft,
-    /// Right-panel toggle (comet `sidebar-minimalistic`, the same shape
-    /// mirrored — its divider sits on the opposite side, see the SVG diff
-    /// in the P76 report). No SF mapping.
+    /// Right-panel toggle (Zed `threads_sidebar_right_open`). No SF mapping.
     PanelRight,
     /// An archive file in the Files tree — zip, tar, 7z, … (SF
-    /// `archivebox`, comet `archive-minimalistic`). Added for F-CORE-FILE-08
+    /// `archivebox`, Zed `archive`). Added for F-CORE-FILE-08
     /// (`FileIconKey::Archive`); no Phosphor predecessor.
     Archive,
     /// A lock file in the Files tree — `Cargo.lock`, `package-lock.json`, …
-    /// (SF `key`, comet `key-minimalistic`). Added for F-CORE-FILE-08
+    /// (SF `key`, Zed `lock`). Added for F-CORE-FILE-08
     /// (`FileIconKey::Lock`); no Phosphor predecessor.
     Lock,
 }
@@ -179,74 +161,66 @@ impl Icon {
     /// The asset path (also the file name inside `rust/assets/icons`).
     pub fn path(self) -> &'static str {
         match self {
-            Icon::FolderFill => "icons/comet/folder.svg",
-            Icon::GitBranch => "icons/comet/git-branch.svg",
-            Icon::MessageSquare => "icons/comet/chat-round-line.svg",
-            Icon::SquareTerminal => "icons/comet/terminal.svg",
-            Icon::Close => "icons/comet/close.svg",
-            Icon::ChevronDown => "icons/comet/alt-arrow-down.svg",
-            Icon::ChevronRight => "icons/comet/alt-arrow-right.svg",
-            Icon::ChevronLeft => "icons/comet/alt-arrow-left.svg",
-            Icon::Settings => "icons/comet/settings-minimalistic.svg",
-            Icon::RefreshCw => "icons/comet/refresh.svg",
-            Icon::Plus => "icons/comet/plus.svg",
-            Icon::File => "icons/comet/document.svg",
-            Icon::Sparkles => "icons/sparkle-thin.svg",
-            Icon::Shield => "icons/shield-thin.svg",
-            Icon::SunMoon => "icons/sun-dim-thin.svg",
-            Icon::Globe => "icons/comet/global.svg",
-            Icon::ClaudeCode => "icons/comet/claude-mark.svg",
-            Icon::Codex => "icons/comet/openai-mark.svg",
-            Icon::OpenCode => "icons/agent-opencode.svg",
-            Icon::Pi => "icons/comet/pi-mark.svg",
+            Icon::FolderFill => "icons/zed/folder.svg",
+            Icon::GitBranch => "icons/zed/git_branch.svg",
+            Icon::MessageSquare => "icons/zed/chat.svg",
+            Icon::SquareTerminal => "icons/zed/terminal.svg",
+            Icon::Close => "icons/zed/close.svg",
+            Icon::ChevronDown => "icons/zed/chevron_down.svg",
+            Icon::ChevronRight => "icons/zed/chevron_right.svg",
+            Icon::ChevronLeft => "icons/zed/chevron_left.svg",
+            Icon::Settings => "icons/zed/settings.svg",
+            Icon::RefreshCw => "icons/zed/rotate_cw.svg",
+            Icon::Plus => "icons/zed/plus.svg",
+            Icon::File => "icons/zed/file.svg",
+            Icon::Sparkles => "icons/zed/sparkle.svg",
+            Icon::Shield => "icons/zed/lock.svg",
+            Icon::SunMoon => "icons/zed/screen.svg",
+            Icon::Globe => "icons/zed/public.svg",
+            Icon::ClaudeCode => "icons/zed/ai_claude.svg",
+            Icon::Codex => "icons/zed/ai_open_ai.svg",
+            Icon::OpenCode => "icons/zed/ai_open_code.svg",
+            Icon::Pi => "icons/agent-pi.svg",
             Icon::OhMyPi => "icons/agent-omp.svg",
-            Icon::SidebarLeft => "icons/comet/sidebar-minimalistic-left.svg",
-            Icon::PanelRight => "icons/comet/sidebar-minimalistic.svg",
-            Icon::Archive => "icons/comet/archive-minimalistic.svg",
-            Icon::Lock => "icons/comet/key-minimalistic.svg",
+            Icon::SidebarLeft => "icons/zed/threads_sidebar_left_open.svg",
+            Icon::PanelRight => "icons/zed/threads_sidebar_right_open.svg",
+            Icon::Archive => "icons/zed/archive.svg",
+            Icon::Lock => "icons/zed/lock.svg",
         }
     }
 
     /// The embedded SVG payload.
     pub fn svg(self) -> &'static [u8] {
         match self {
-            Icon::FolderFill => include_bytes!("../../../assets/icons/comet/folder.svg"),
-            Icon::GitBranch => include_bytes!("../../../assets/icons/comet/git-branch.svg"),
-            Icon::MessageSquare => {
-                include_bytes!("../../../assets/icons/comet/chat-round-line.svg")
-            }
-            Icon::SquareTerminal => include_bytes!("../../../assets/icons/comet/terminal.svg"),
-            Icon::Close => include_bytes!("../../../assets/icons/comet/close.svg"),
-            Icon::ChevronDown => include_bytes!("../../../assets/icons/comet/alt-arrow-down.svg"),
-            Icon::ChevronRight => {
-                include_bytes!("../../../assets/icons/comet/alt-arrow-right.svg")
-            }
-            Icon::ChevronLeft => include_bytes!("../../../assets/icons/comet/alt-arrow-left.svg"),
-            Icon::Settings => {
-                include_bytes!("../../../assets/icons/comet/settings-minimalistic.svg")
-            }
-            Icon::RefreshCw => include_bytes!("../../../assets/icons/comet/refresh.svg"),
-            Icon::Plus => include_bytes!("../../../assets/icons/comet/plus.svg"),
-            Icon::File => include_bytes!("../../../assets/icons/comet/document.svg"),
-            Icon::Sparkles => include_bytes!("../../../assets/icons/sparkle-thin.svg"),
-            Icon::Shield => include_bytes!("../../../assets/icons/shield-thin.svg"),
-            Icon::SunMoon => include_bytes!("../../../assets/icons/sun-dim-thin.svg"),
-            Icon::Globe => include_bytes!("../../../assets/icons/comet/global.svg"),
-            Icon::ClaudeCode => include_bytes!("../../../assets/icons/comet/claude-mark.svg"),
-            Icon::Codex => include_bytes!("../../../assets/icons/comet/openai-mark.svg"),
-            Icon::OpenCode => include_bytes!("../../../assets/icons/agent-opencode.svg"),
-            Icon::Pi => include_bytes!("../../../assets/icons/comet/pi-mark.svg"),
+            Icon::FolderFill => include_bytes!("../../../assets/icons/zed/folder.svg"),
+            Icon::GitBranch => include_bytes!("../../../assets/icons/zed/git_branch.svg"),
+            Icon::MessageSquare => include_bytes!("../../../assets/icons/zed/chat.svg"),
+            Icon::SquareTerminal => include_bytes!("../../../assets/icons/zed/terminal.svg"),
+            Icon::Close => include_bytes!("../../../assets/icons/zed/close.svg"),
+            Icon::ChevronDown => include_bytes!("../../../assets/icons/zed/chevron_down.svg"),
+            Icon::ChevronRight => include_bytes!("../../../assets/icons/zed/chevron_right.svg"),
+            Icon::ChevronLeft => include_bytes!("../../../assets/icons/zed/chevron_left.svg"),
+            Icon::Settings => include_bytes!("../../../assets/icons/zed/settings.svg"),
+            Icon::RefreshCw => include_bytes!("../../../assets/icons/zed/rotate_cw.svg"),
+            Icon::Plus => include_bytes!("../../../assets/icons/zed/plus.svg"),
+            Icon::File => include_bytes!("../../../assets/icons/zed/file.svg"),
+            Icon::Sparkles => include_bytes!("../../../assets/icons/zed/sparkle.svg"),
+            Icon::Shield => include_bytes!("../../../assets/icons/zed/lock.svg"),
+            Icon::SunMoon => include_bytes!("../../../assets/icons/zed/screen.svg"),
+            Icon::Globe => include_bytes!("../../../assets/icons/zed/public.svg"),
+            Icon::ClaudeCode => include_bytes!("../../../assets/icons/zed/ai_claude.svg"),
+            Icon::Codex => include_bytes!("../../../assets/icons/zed/ai_open_ai.svg"),
+            Icon::OpenCode => include_bytes!("../../../assets/icons/zed/ai_open_code.svg"),
+            Icon::Pi => include_bytes!("../../../assets/icons/agent-pi.svg"),
             Icon::OhMyPi => include_bytes!("../../../assets/icons/agent-omp.svg"),
             Icon::SidebarLeft => {
-                include_bytes!("../../../assets/icons/comet/sidebar-minimalistic-left.svg")
+                include_bytes!("../../../assets/icons/zed/threads_sidebar_left_open.svg")
             }
             Icon::PanelRight => {
-                include_bytes!("../../../assets/icons/comet/sidebar-minimalistic.svg")
+                include_bytes!("../../../assets/icons/zed/threads_sidebar_right_open.svg")
             }
-            Icon::Archive => {
-                include_bytes!("../../../assets/icons/comet/archive-minimalistic.svg")
-            }
-            Icon::Lock => include_bytes!("../../../assets/icons/comet/key-minimalistic.svg"),
+            Icon::Archive => include_bytes!("../../../assets/icons/zed/archive.svg"),
+            Icon::Lock => include_bytes!("../../../assets/icons/zed/lock.svg"),
         }
     }
 
@@ -265,11 +239,8 @@ impl Icon {
     /// the remaining marks are monochrome by design and follow the tinted
     /// path, exactly as the Swift app renders them with `.primary`.
     ///
-    /// `ClaudeCode` **left this set in P76**: comet's `claude-mark.svg` is
-    /// `fill="currentColor"` — monochrome, unlike Tiller's old chromatic
-    /// Anthropic-sunburst asset it replaces — so it now tints like `Codex`
-    /// and `Pi` instead of painting full-colour. `OhMyPi` keeps its
-    /// original chromatic asset (comet ships no omp mark) and stays here.
+    /// Only `OhMyPi` stays in this set. Every Zed-provided mark and Tiller's
+    /// Pi fallback are monochrome and follow the theme tint.
     pub fn has_own_colours(self) -> bool {
         matches!(self, Icon::OhMyPi)
     }
@@ -579,35 +550,11 @@ pub struct TillerAssets;
 
 impl AssetSource for TillerAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        let icon = match path {
-            "icons/comet/folder.svg" => Icon::FolderFill,
-            "icons/comet/git-branch.svg" => Icon::GitBranch,
-            "icons/comet/chat-round-line.svg" => Icon::MessageSquare,
-            "icons/comet/terminal.svg" => Icon::SquareTerminal,
-            "icons/comet/close.svg" => Icon::Close,
-            "icons/comet/alt-arrow-down.svg" => Icon::ChevronDown,
-            "icons/comet/alt-arrow-right.svg" => Icon::ChevronRight,
-            "icons/comet/alt-arrow-left.svg" => Icon::ChevronLeft,
-            "icons/comet/settings-minimalistic.svg" => Icon::Settings,
-            "icons/comet/refresh.svg" => Icon::RefreshCw,
-            "icons/comet/plus.svg" => Icon::Plus,
-            "icons/comet/document.svg" => Icon::File,
-            "icons/sparkle-thin.svg" => Icon::Sparkles,
-            "icons/shield-thin.svg" => Icon::Shield,
-            "icons/sun-dim-thin.svg" => Icon::SunMoon,
-            "icons/comet/global.svg" => Icon::Globe,
-            "icons/comet/claude-mark.svg" => Icon::ClaudeCode,
-            "icons/comet/openai-mark.svg" => Icon::Codex,
-            "icons/agent-opencode.svg" => Icon::OpenCode,
-            "icons/comet/pi-mark.svg" => Icon::Pi,
-            "icons/agent-omp.svg" => Icon::OhMyPi,
-            "icons/comet/sidebar-minimalistic-left.svg" => Icon::SidebarLeft,
-            "icons/comet/sidebar-minimalistic.svg" => Icon::PanelRight,
-            "icons/comet/archive-minimalistic.svg" => Icon::Archive,
-            "icons/comet/key-minimalistic.svg" => Icon::Lock,
-            _ => return Ok(None),
-        };
-        Ok(Some(Cow::Borrowed(icon.svg())))
+        Ok(ALL_ICONS
+            .iter()
+            .copied()
+            .find(|icon| icon.path() == path)
+            .map(|icon| Cow::Borrowed(icon.svg())))
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
@@ -669,8 +616,70 @@ mod tests {
                 "{} starts with an svg root",
                 icon.path()
             );
-            assert!(text.contains("viewBox=\""), "{} has a viewBox", icon.path());
         }
+    }
+
+    #[test]
+    fn catalog_uses_the_approved_zed_and_tiller_assets() {
+        let expected = [
+            (Icon::FolderFill, "icons/zed/folder.svg"),
+            (Icon::GitBranch, "icons/zed/git_branch.svg"),
+            (Icon::MessageSquare, "icons/zed/chat.svg"),
+            (Icon::SquareTerminal, "icons/zed/terminal.svg"),
+            (Icon::Close, "icons/zed/close.svg"),
+            (Icon::ChevronDown, "icons/zed/chevron_down.svg"),
+            (Icon::ChevronRight, "icons/zed/chevron_right.svg"),
+            (Icon::ChevronLeft, "icons/zed/chevron_left.svg"),
+            (Icon::Settings, "icons/zed/settings.svg"),
+            (Icon::RefreshCw, "icons/zed/rotate_cw.svg"),
+            (Icon::Plus, "icons/zed/plus.svg"),
+            (Icon::File, "icons/zed/file.svg"),
+            (Icon::Sparkles, "icons/zed/sparkle.svg"),
+            (Icon::Shield, "icons/zed/lock.svg"),
+            (Icon::SunMoon, "icons/zed/screen.svg"),
+            (Icon::Globe, "icons/zed/public.svg"),
+            (Icon::ClaudeCode, "icons/zed/ai_claude.svg"),
+            (Icon::Codex, "icons/zed/ai_open_ai.svg"),
+            (Icon::OpenCode, "icons/zed/ai_open_code.svg"),
+            (Icon::Pi, "icons/agent-pi.svg"),
+            (Icon::OhMyPi, "icons/agent-omp.svg"),
+            (Icon::SidebarLeft, "icons/zed/threads_sidebar_left_open.svg"),
+            (Icon::PanelRight, "icons/zed/threads_sidebar_right_open.svg"),
+            (Icon::Archive, "icons/zed/archive.svg"),
+            (Icon::Lock, "icons/zed/lock.svg"),
+        ];
+
+        assert_eq!(expected.len(), ALL_ICONS.len());
+        for (icon, path) in expected {
+            assert_eq!(icon.path(), path, "wrong asset for {icon:?}");
+        }
+    }
+
+    #[test]
+    fn every_zed_icon_keeps_its_upstream_16px_canvas() {
+        for icon in ALL_ICONS {
+            if !icon.path().starts_with("icons/zed/") {
+                continue;
+            }
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            let has_16px_dimensions = svg.contains("width=\"16\"")
+                && svg.contains("height=\"16\"");
+            let has_16px_view_box = svg.contains("viewBox=\"0 0 16 16\"");
+            assert!(
+                has_16px_dimensions || has_16px_view_box,
+                "{} must keep Zed's 16px canvas",
+                icon.path()
+            );
+        }
+    }
+
+    #[test]
+    fn agent_catalog_uses_zed_where_available_and_tiller_for_pi_family() {
+        assert_eq!(Icon::ClaudeCode.path(), "icons/zed/ai_claude.svg");
+        assert_eq!(Icon::Codex.path(), "icons/zed/ai_open_ai.svg");
+        assert_eq!(Icon::OpenCode.path(), "icons/zed/ai_open_code.svg");
+        assert_eq!(Icon::Pi.path(), "icons/agent-pi.svg");
+        assert_eq!(Icon::OhMyPi.path(), "icons/agent-omp.svg");
     }
 
     #[test]
@@ -689,10 +698,17 @@ mod tests {
     }
 
     #[test]
-    fn icon_paths_are_unique() {
+    fn catalog_path_aliases_are_deliberate() {
         let mut seen = std::collections::HashSet::new();
         for icon in ALL_ICONS {
-            assert!(seen.insert(icon.path()), "duplicate path {}", icon.path());
+            if !seen.insert(icon.path()) {
+                assert!(
+                    matches!(icon, Icon::Lock),
+                    "unexpected duplicate path {}",
+                    icon.path()
+                );
+                assert_eq!(icon.path(), Icon::Shield.path());
+            }
         }
     }
 
@@ -716,11 +732,8 @@ mod tests {
 
     #[test]
     fn chromatic_marks_carry_their_own_colours() {
-        // Only omp's gradient stays chromatic post-P76: comet ships no omp
-        // mark, so it keeps the original full-colour asset, baked in and
-        // never resolved through currentColor. ClaudeCode left this group
-        // in P76 — comet's claude-mark.svg is `fill="currentColor"`,
-        // monochrome — see `monochrome_marks_keep_the_reference_shapes`.
+        // Oh My Pi is the sole full-colour fallback; its gradient asset is
+        // baked in and never resolved through currentColor.
         let omp = std::str::from_utf8(Icon::OhMyPi.svg()).expect("utf-8");
         assert!(omp.contains("linearGradient"), "omp is a gradient mark");
         assert!(omp.contains("#ED4ABF") && omp.contains("#9B4DFF") && omp.contains("#5AD8E6"));
@@ -728,39 +741,21 @@ mod tests {
             !omp.contains("currentColor"),
             "omp must not resolve through the theme tint"
         );
-        assert!(
-            !Icon::ClaudeCode.has_own_colours(),
-            "claude-mark.svg is monochrome — must not take the full-colour path"
-        );
     }
 
     #[test]
-    fn monochrome_marks_keep_the_reference_shapes() {
-        // Codex, ClaudeCode and Pi resolve through currentColor and must
-        // not carry a baked-in colour that would fight the theme tint.
-        let claude = std::str::from_utf8(Icon::ClaudeCode.svg()).expect("utf-8");
-        assert!(
-            claude.contains("currentColor"),
-            "comet's claude-mark.svg tints like Codex and Pi"
-        );
-        assert!(
-            claude.contains("viewBox=\"0 0 256 257\""),
-            "claude-mark's own viewBox"
-        );
-        let codex = std::str::from_utf8(Icon::Codex.svg()).expect("utf-8");
-        assert!(
-            codex.contains("currentColor"),
-            "comet's openai-mark.svg tints, unlike the wordmark knot it replaced"
-        );
-        assert!(
-            codex.contains("viewBox=\"0 0 256 260\""),
-            "openai-mark's own viewBox"
-        );
-        let pi = std::str::from_utf8(Icon::Pi.svg()).expect("utf-8");
-        assert!(
-            pi.contains("viewBox=\"0 0 800 800\""),
-            "comet's pi-mark.svg happens to keep the same 800x800 viewBox"
-        );
+    fn monochrome_agent_marks_use_the_approved_sources() {
+        for icon in [Icon::ClaudeCode, Icon::Codex, Icon::OpenCode] {
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            assert!(icon.path().starts_with("icons/zed/"));
+            assert!(svg.contains("width=\"16\"") && svg.contains("height=\"16\""));
+            assert!(
+                !icon.has_own_colours(),
+                "{icon:?} must follow the theme tint"
+            );
+        }
+        assert_eq!(Icon::Pi.path(), "icons/agent-pi.svg");
+        assert!(!Icon::Pi.has_own_colours());
     }
 
     #[test]
@@ -787,33 +782,10 @@ mod tests {
     #[test]
     fn view_box_size_parses_embedded_svgs() {
         assert!(
-            (view_box_size(Icon::FolderFill) - 24.0).abs() < 1.0,
-            "comet's 24x24 home format"
+            (view_box_size(Icon::FolderFill) - 16.0).abs() < 1.0,
+            "zed's 16x16 home format"
         );
         assert!((view_box_size(Icon::Pi) - 800.0).abs() < 1.0, "pi viewBox");
     }
 
-    /// P76 orchestrator correction: the 63 comet SVGs are not one uniform
-    /// format. 52 are 24x24 at `stroke-width="1.5"` (the majority, and the
-    /// unmodified home format); the 3 directly-mapped 16x16 line icons
-    /// (`close`, `plus`, `terminal`) were `stroke-width="1.25"` as shipped,
-    /// which renders ~25% heavier than the 24x24 set at the same pixel box
-    /// (1.25/16 vs 1.5/24 effective weight) — exactly the Phosphor/Solar
-    /// mixed-weight defect P76 exists to avoid, just recreated inside the
-    /// new set. Normalized to `1.0` (1.0/16 == 1.5*(16/24)/16) instead of
-    /// normalizing the 52-icon majority down to 16x16.
-    #[test]
-    fn directly_mapped_16px_icons_match_the_24px_sets_effective_stroke_weight() {
-        for icon in [Icon::Close, Icon::Plus, Icon::SquareTerminal] {
-            let svg = std::str::from_utf8(icon.svg()).expect("utf-8");
-            assert!(
-                svg.contains("stroke-width=\"1.0\""),
-                "{icon:?} must be re-weighted to 1.0 to match the 24x24 set, got: {svg}"
-            );
-            assert!(
-                !svg.contains("stroke-width=\"1.25\"") && !svg.contains("stroke-width=\"1.6\""),
-                "{icon:?} must not keep its original heavier weight"
-            );
-        }
-    }
 }
