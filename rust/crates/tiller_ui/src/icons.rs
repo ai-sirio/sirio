@@ -119,14 +119,6 @@ impl IconSize {
     }
 }
 
-// Transitional only: Tasks 3 and 4 remove every raw-pixel caller, then
-// delete this impl so the compiler enforces semantic sizes.
-impl From<Pixels> for IconSize {
-    fn from(size: Pixels) -> Self {
-        Self::Custom(size)
-    }
-}
-
 impl Icon {
     /// The asset path (also the file name inside `rust/assets/icons`).
     pub fn path(self) -> &'static str {
@@ -229,7 +221,7 @@ impl Icon {
 
     /// Builds a sized element; colour is applied by the caller with
     /// [`Styled::text_color`] (theme-sourced).
-    pub fn element(self, size: impl Into<IconSize>) -> IconElement {
+    pub fn element(self, size: IconSize) -> IconElement {
         IconElement::new(self, size)
     }
 }
@@ -243,11 +235,11 @@ pub struct IconElement {
 }
 
 impl IconElement {
-    pub fn new(icon: Icon, size: impl Into<IconSize>) -> Self {
+    pub fn new(icon: Icon, size: IconSize) -> Self {
         Self {
             style: StyleRefinement::default(),
             icon,
-            size: size.into(),
+            size,
         }
     }
 }
