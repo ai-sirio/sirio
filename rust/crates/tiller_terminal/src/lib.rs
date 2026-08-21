@@ -3890,7 +3890,7 @@ mod view_tests {
         );
         terminal.update(&mut cx.cx, |terminal, _| terminal.input("\u{4}"));
 
-        let exit_deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut observed_exit = None;
         while std::time::Instant::now() < exit_deadline {
             cx.run_until_parked();

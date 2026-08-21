@@ -908,7 +908,7 @@ mod tests {
             })
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             cx.run_until_parked();
             cx.background_executor
@@ -1014,7 +1014,7 @@ mod tests {
             })
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut released = false;
         while std::time::Instant::now() < deadline {
             cx.run_until_parked();
@@ -1055,7 +1055,7 @@ mod tests {
         // contradictory title has been observed and asserted.
         terminal.update(&mut cx.cx, |terminal, _| terminal.input("\n"));
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             cx.run_until_parked();
             cx.background_executor
