@@ -84,6 +84,13 @@ impl Composer {
         &self.parts
     }
 
+    /// Where the caret sits: `(part index, char offset in that part)`, with
+    /// `part == parts.len()` meaning end-of-document. Read by the renderer
+    /// to place the blinking bar between the draft's inline parts.
+    pub(crate) fn cursor(&self) -> (usize, usize) {
+        (self.cursor.part, self.cursor.offset)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.parts.is_empty()
     }

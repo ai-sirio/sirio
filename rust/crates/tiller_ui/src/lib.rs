@@ -4,6 +4,7 @@
 //! and do not edit it from a piece worktree — the integrator owns it.
 
 pub mod browser;
+pub mod caret;
 pub mod changes;
 pub mod chat;
 pub mod composer;
