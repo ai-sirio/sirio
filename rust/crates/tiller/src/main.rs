@@ -10133,7 +10133,6 @@ impl TillerWorkspace {
             .top_0()
             .h_full()
             .right(theme.spacing.titlebar_control_frame.width)
-            .pl(px(5.0))
             .flex()
             .items_start()
             .gap(px(1.0))
