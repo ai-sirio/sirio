@@ -1,5 +1,12 @@
 //! `git log` reading: commit records for the History view.
 
+use std::path::Path;
+
+use crate::GitError;
+use crate::git;
+
+const LOG_FORMAT: &str = "--format=%x1e%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s";
+
 /// Field separator inside one record: ASCII US.
 const FIELD: char = '\u{1f}';
 /// Record separator between commits: ASCII RS. Deliberately not `NUL`, which
@@ -25,6 +32,47 @@ pub struct CommitRecord {
     pub subject: String,
 }
 
+/// Namespace for commit-history operations.
+pub struct GitLog;
+
+impl GitLog {
+    /// Reads local-branch commits in date order, including merge parents.
+    pub fn commits(repo: &Path, skip: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
+        let skip_arg = format!("--skip={skip}");
+        let limit_arg = format!("-n{limit}");
+        match git::run_accepting(
+            &[
+                "log",
+                "--branches",
+                "--date-order",
+                &skip_arg,
+                &limit_arg,
+                LOG_FORMAT,
+            ],
+            repo,
+            &[0],
+        ) {
+            Ok(output) => Ok(parse_log(&output.stdout_string())),
+            Err(error) if is_unborn_head(&error) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether `HEAD` resolves to a commit.
+    pub fn has_commits(repo: &Path) -> bool {
+        git::run_accepting(&["rev-parse", "--verify", "HEAD"], repo, &[0]).is_ok()
+    }
+}
+
+fn is_unborn_head(error: &GitError) -> bool {
+    matches!(
+        error,
+        GitError::CommandFailed { stderr, .. }
+            if stderr.contains("does not have any commits yet")
+                || stderr.contains("unknown revision or path not in the working tree")
+    )
+}
+
 /// Parses the output of the `--format` this module sends. A record whose
 /// field count is short is dropped rather than partially filled: a truncated
 /// capture (see `GitCommandResult::truncated`) must not produce a commit with
@@ -33,7 +81,7 @@ pub fn parse_log(output: &str) -> Vec<CommitRecord> {
     output
         .split(RECORD)
         .filter_map(|record| {
-            let record = record.trim_start_matches('\n');
+            let record = record.trim_matches('\n');
             if record.is_empty() {
                 return None;
             }
