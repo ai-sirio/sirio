@@ -79,6 +79,8 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 ## Conventions
 
-- **Tests first**, standard Rust `#[test]` (see `Scripts/ci-linux.sh`'s comment on the two workspace-wide tests that need to run per-crate rather than concurrently with every other test binary).
+- **Tests first**, standard Rust `#[test]`. The historical terminal-shutdown and ACP
+  dead-transport races are fixed at their fixture synchronization points; the common
+  gate now uses `cargo test --workspace --no-fail-fast` so every binary reports results.
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
 - `Scripts/ci.sh` must print `CI OK` before a PR is opened.

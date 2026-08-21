@@ -2305,7 +2305,7 @@ mod tests {
     #[test]
     fn silent_agent_hits_startup_timeout_and_is_terminated() {
         let started = std::time::Instant::now();
-        let timeout = Duration::from_secs(1);
+        let timeout = Duration::from_millis(100);
         let result = AcpClient::launch_with_timeout(
             AgentCommand::new("/bin/sh").args(["-c", "sleep 60"]),
             ".",

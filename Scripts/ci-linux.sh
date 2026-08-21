@@ -197,21 +197,12 @@ run_cargo_stage "cargo clippy (owned crates)" cargo clippy --workspace --all-tar
 run_cargo_stage "cargo build" cargo build -p tiller -p tiller_control
 # Per-crate, not `cargo test --workspace`.
 #
-# Two tests are timing-sensitive and fail only when cargo runs every crate's test binary
-# concurrently: `shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group`
-# (tiller_terminal) and `chat_session_expires_a_permission_left_open_by_a_dead_transport`
-# (tiller_acp). Both pass reliably per-crate and both predate this gate. Measured over
-# three consecutive runs, `--workspace` went red twice on a tree whose per-crate tests
-# were all green — so the gate was reporting a defect that did not exist.
+# Historical note: these two tests were once timing-sensitive when every crate's test
+# binary ran concurrently. Their fixture synchronization is now deterministic; this
+# per-crate loop remains conservative context for diagnosing future load failures.
 #
-# Every agent working in this repo is already told to run tests per crate for exactly
-# this reason; the gate was the last place still doing the thing the house rule forbids.
-# A gate that cries wolf two times in three teaches people to ignore it, which costs more
-# than the real failures it would otherwise catch.
-#
-# This is a workaround, not a fix: the two races are real and still worth fixing at the
-# source. Sequencing here only stops them from being attributed to whatever change
-# happens to be in the tree.
+# This remains a diagnostic/per-crate mode; the common gate is responsible for the
+# workspace-wide no-fail-fast result.
 WORKSPACE_CRATES=(
     tiller tiller_acp tiller_persistence tiller_activity tiller_agents tiller_control
     tiller_git tiller_project tiller_terminal tiller_theme tiller_ui tiller_markdown

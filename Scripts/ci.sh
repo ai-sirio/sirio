@@ -43,15 +43,10 @@ cd rust
 echo "==> cargo build --workspace"
 cargo build --workspace
 
-# Whole-workspace, not per-crate: that is what this repo's own verification instructions
-# run. The tradeoff is two known timing-sensitive tests documented in Scripts/ci-linux.sh --
-# tiller_terminal's shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group
-# and tiller_acp's chat_session_expires_a_permission_left_open_by_a_dead_transport -- which
-# pass reliably alone but can lose a race when every crate's test binary runs at once. If
-# this gate ever fails on exactly those two tests, rerun `cargo test -p tiller_terminal` /
-# `-p tiller_acp` alone before treating it as a real regression, or use ci-linux.sh's
-# per-crate loop, which sequences around the same race.
-echo "==> cargo test --workspace"
-cargo test --workspace
+# Whole-workspace, not per-crate: run every test binary even when one fails, so this
+# gate reports the complete failure set under load. The two formerly timing-sensitive
+# tests are now race-free at their roots; ci-linux.sh retains a short historical note.
+echo "==> cargo test --workspace --no-fail-fast"
+cargo test --workspace --no-fail-fast
 
 echo "CI OK"

@@ -4074,13 +4074,27 @@ mod tests {
         );
 
         terminate_login_process_group(launcher_pid);
-        std::thread::sleep(std::time::Duration::from_millis(400));
         // Reap the launcher: SIGTERM already ended it, but as its real
         // parent this process, not `kill -0`, is the one that decides
         // whether its pid stays occupied as a zombie — reap it before
         // checking liveness so the check reflects "terminated", not
         // "terminated but not yet reaped".
         let _ = launcher.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let all_gone = found.iter().all(|pid| {
+                std::process::Command::new("kill")
+                    .arg("-0")
+                    .arg(pid.to_string())
+                    .status()
+                    .map(|status| !status.success())
+                    .unwrap_or(true)
+            });
+            if all_gone {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         for pid in found {
             let status = std::process::Command::new("kill")
                 .arg("-0")
