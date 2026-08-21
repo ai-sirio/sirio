@@ -80,8 +80,9 @@ fn streaming_runner_delivers_stderr_before_the_child_exits() {
     std::fs::write(
         &fake_git,
         format!(
-            "#!/bin/sh\nprintf 'first\\r' >&2\ntouch '{}'\nfor i in $(seq 1 200); do [ -f '{}' ] && break; sleep 0.05; done\nprintf 'second\\n' >&2\n",
+            "#!/bin/sh\nprintf 'first\\r' >&2\ntouch '{}'\nfor i in $(seq 1 200); do [ -f '{}' ] && break; sleep 0.05; done\n[ -f '{}' ] || exit 42\nprintf 'second\\n' >&2\n",
             first_seen.display(),
+            release.display(),
             release.display()
         ),
     )

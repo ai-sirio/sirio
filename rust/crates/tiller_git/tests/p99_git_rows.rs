@@ -126,7 +126,8 @@ fn streaming_lines_arrive_incrementally_before_completion() {
     // around it: no file is written, so no writer fd can be inherited.
     let sentinel = dir.path().join("alpha-seen");
     let emitter = format!(
-        "echo alpha >&2; while [ ! -f '{}' ]; do :; done; echo beta >&2; printf 'gamma\\rdelta\\n' >&2",
+        "echo alpha >&2; for i in $(seq 1 200); do [ -f '{}' ] && break; sleep 0.05; done; [ -f '{}' ] || exit 42; echo beta >&2; printf 'gamma\\rdelta\\n' >&2",
+        sentinel.display(),
         sentinel.display()
     );
 

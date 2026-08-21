@@ -30,8 +30,8 @@ case "$build_args" in
   *) echo "FAIL: expected 'cargo build --workspace' first, got: $build_args" >&2; exit 1 ;;
 esac
 case "$test_args" in
-  "test --workspace") ;;
-  *) echo "FAIL: expected 'cargo test --workspace' second, got: $test_args" >&2; exit 1 ;;
+  "test --workspace --no-fail-fast") ;;
+  *) echo "FAIL: expected 'cargo test --workspace --no-fail-fast' second, got: $test_args" >&2; exit 1 ;;
 esac
 # Exactly two cargo invocations: this gate is deliberately narrower than
 # Scripts/ci-linux.sh and must not silently grow a fmt/clippy stage that isn't
