@@ -2470,6 +2470,7 @@ impl Sidebar {
             Icon::PanelRight => "sidebar-minimalistic",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
+            Icon::FileType(_) => "file-type",
         }
     }
 

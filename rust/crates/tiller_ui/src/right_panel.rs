@@ -1254,6 +1254,9 @@ fn file_glyph(path: &Path, is_dir: bool) -> Icon {
     } else {
         FileIconKey::for_file_name(&name)
     };
+    if !is_dir && let Some(asset) = key.material_asset() {
+        return Icon::file_type(asset);
+    }
     match key {
         FileIconKey::Shell => Icon::SquareTerminal,
         FileIconKey::Git | FileIconKey::FolderGit => Icon::GitBranch,
@@ -1542,12 +1545,12 @@ mod tests {
         // original icon theme, so most kinds share the generic file mark —
         // see `file_glyph`'s doc comment for which few don't.
         let cases: &[(&str, bool, Icon)] = &[
-            ("/repo/src/main.rs", false, Icon::File),
+            ("/repo/src/main.rs", false, Icon::file_type("rust")),
             ("/repo/deploy.sh", false, Icon::SquareTerminal),
             (".gitignore", false, Icon::GitBranch),
-            ("Dockerfile", false, Icon::File), // no dedicated Zed Docker glyph
-            ("Cargo.lock", false, Icon::Lock),
-            ("release.zip", false, Icon::Archive),
+            ("Dockerfile", false, Icon::file_type("docker")),
+            ("Cargo.lock", false, Icon::file_type("lock")),
+            ("release.zip", false, Icon::file_type("zip")),
             (".env", false, Icon::Settings),
             ("service.env", false, Icon::Settings),
             // Not in the original's tables — `pathExtension` treats a name
@@ -1559,7 +1562,7 @@ mod tests {
             (".editorconfig", false, Icon::File),
             (".env.local", false, Icon::File),
             ("gitmodules", false, Icon::File), // no leading dot: not the exact-name key
-            ("Cargo.toml", false, Icon::File), // no dedicated Zed TOML glyph
+            ("Cargo.toml", false, Icon::file_type("toml")),
         ];
         for (path, is_dir, expected) in cases {
             assert_eq!(
@@ -1575,7 +1578,7 @@ mod tests {
         assert_eq!(file_row_glyph(Path::new("/repo/src"), true), None);
         assert_eq!(
             file_row_glyph(Path::new("/repo/main.rs"), false),
-            Some(Icon::File)
+            Some(Icon::file_type("rust"))
         );
     }
 
