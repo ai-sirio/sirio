@@ -184,8 +184,23 @@ excess lanes are not drawn, because a 12-column graph in 405px is noise, not
 information. Right of the graph: subject (`flex_1`, truncated), author, date.
 Merge commits render in `theme.meta`.
 
-`Theme` gains `graph_lanes: [Rgba; 6]`, populated in both palettes. No
-hardcoded colour in the renderer, per the crate's existing rule.
+Lane colours come from `Theme`, but as an accessor over hues the palette
+already measures rather than six new palette entries:
+
+```rust
+impl Theme {
+    /// Lane colour `index`, cycling. Reuses measured hues; adds no new
+    /// palette entry, so the frozen provenance record stays untouched.
+    pub fn graph_lane(&self, index: usize) -> Rgba
+}
+```
+
+Order: `tab_focus_accent`, `git_untracked`, `tab_done`, `tab_needs_input`,
+`tab_error`, `favorite`. This matters beyond taste: `tiller_theme` has
+provenance tests that pin exact RGB triples for four tokens against a frozen
+Swift record (`lib.rs:1625`), and every added colour is a colour someone must
+measure and justify. No hardcoded colour in the renderer either way, per the
+crate's existing rule.
 
 Pagination: 500-commit chunks; reaching the end of the list fetches the next
 chunk and re-runs `layout` over the accumulated list. `layout` is O(commits);
