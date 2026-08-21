@@ -946,6 +946,25 @@ impl Theme {
         cx.global::<Self>()
     }
 
+    /// Colour of commit-graph lane `index`, cycling.
+    ///
+    /// Deliberately an accessor over hues this palette already measures
+    /// rather than six new tokens: the palettes are pinned against a frozen
+    /// provenance record (see `dark_palette_matches_recorded_provenance`),
+    /// so every added colour is a colour someone has to measure and justify.
+    /// The graph only needs its lanes to be mutually distinguishable.
+    pub fn graph_lane(&self, index: usize) -> Rgba {
+        let lanes = [
+            self.tab_focus_accent,
+            self.git_untracked,
+            self.tab_done,
+            self.tab_needs_input,
+            self.tab_error,
+            self.favorite,
+        ];
+        lanes[index % lanes.len()]
+    }
+
     /// Installs a theme, resolving `System` against the current window
     /// appearance. On Linux the resolution is dark-biased until the portal
     /// is heard from (see [`ThemeMode::resolve_system`]).
@@ -1313,6 +1332,20 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_lane_colours_cycle_and_stay_distinct() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let lanes: Vec<_> = (0..6).map(|index| theme.graph_lane(index)).collect();
+
+            for (position, first) in lanes.iter().enumerate() {
+                for second in lanes.iter().skip(position + 1) {
+                    assert_ne!(first, second, "lane colours must be distinguishable");
+                }
+            }
+            assert_eq!(theme.graph_lane(6), theme.graph_lane(0), "the palette cycles");
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
