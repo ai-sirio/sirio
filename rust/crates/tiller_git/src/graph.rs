@@ -142,11 +142,6 @@ pub fn layout(commits: &[CommitRecord]) -> Vec<GraphRow> {
 /// The leftmost hole, or a new column at the right edge. Reserved by leaving
 /// the slot `None`; the caller fills it.
 fn free_column(lanes: &mut Vec<Option<Lane>>) -> usize {
-    if !lanes.is_empty() && lanes.iter().all(Option::is_none) {
-        // Keep an established graph's width when every prior lane has ended;
-        // a new disconnected history then reuses its rightmost historical slot.
-        return lanes.len() - 1;
-    }
     match lanes.iter().position(Option::is_none) {
         Some(column) => column,
         None => {
@@ -243,9 +238,9 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_lane_leaves_a_hole_that_is_reused() {
-        // `side` ends at row 2; a later unrelated root opens a lane and must
-        // take column 1 back rather than widening the graph to column 2.
+    fn a_disconnected_history_starts_in_the_leftmost_column() {
+        // All earlier lanes have ended; a disconnected root starts at column
+        // 0 rather than inheriting the width of unrelated history.
         let commits = [
             commit("m", &["main", "side"]),
             commit("main", &["base"]),
@@ -256,7 +251,23 @@ mod tests {
 
         let rows = layout(&commits);
 
-        assert_eq!(rows[4].lane, 1, "the freed column is reused, not widened past");
+        assert_eq!(rows[4].lane, 0);
+    }
+
+    #[test]
+    fn a_closed_lane_reuses_its_hole_while_another_lane_stays_live() {
+        let commits = [
+            commit("m", &["main", "side"]),
+            commit("main", &["base"]),
+            commit("side", &[]),
+            commit("unrelated", &[]),
+            commit("base", &[]),
+        ];
+
+        let rows = layout(&commits);
+
+        assert_eq!(rows[2].lane, 1, "the side lane closes in column 1");
+        assert_eq!(rows[3].lane, 1, "the hole is reused while main stays live");
     }
 
     #[test]
