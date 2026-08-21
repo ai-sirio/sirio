@@ -39,30 +39,29 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// their Tiller assets because the catalog does not provide their marks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
-    /// A project directory (SF `folder.fill`, Zed `folder`).
+    /// A project directory (`zed/folder.svg`).
     FolderFill,
-    /// A git worktree (Zed `git_branch`; no SF equivalent in the
-    /// reference app).
+    /// A git worktree (`zed/git_branch.svg`).
     GitBranch,
-    /// A chat surface (SF `bubble.left`, Zed `chat`).
+    /// A chat surface (`zed/chat.svg`).
     MessageSquare,
-    /// A terminal surface (SF `terminal`, Zed `terminal`).
+    /// A terminal surface (`zed/terminal.svg`).
     SquareTerminal,
-    /// Close (SF `xmark`, Zed `close`).
+    /// Close (`zed/close.svg`).
     Close,
-    /// Collapse (SF `chevron.down`, Zed `chevron_down`).
+    /// Collapse (`zed/chevron_down.svg`).
     ChevronDown,
-    /// Expand (SF `chevron.right`, Zed `chevron_right`).
+    /// Expand (`zed/chevron_right.svg`).
     ChevronRight,
-    /// Back (SF `chevron.left`, Zed `chevron_left`).
+    /// Back (`zed/chevron_left.svg`).
     ChevronLeft,
-    /// Settings gear (SF `gearshape`, Zed `settings`).
+    /// Settings gear (`zed/settings.svg`).
     Settings,
-    /// Refresh (SF `arrow.clockwise`, Zed `rotate_cw`).
+    /// Refresh (`zed/rotate_cw.svg`).
     RefreshCw,
-    /// Add (SF `plus`, Zed `plus`).
+    /// Add (`zed/plus.svg`).
     Plus,
-    /// A generic file (SF `doc.text`, Zed `file`).
+    /// A generic file (`zed/file.svg`).
     File,
     /// AI providers (Zed `sparkle`).
     Sparkles,
@@ -70,7 +69,7 @@ pub enum Icon {
     Shield,
     /// Appearance (Zed `screen`).
     SunMoon,
-    /// A browser surface (SF `globe`, Zed `public`).
+    /// A browser surface (`zed/public.svg`).
     Globe,
     /// Anthropic's monochrome Zed mark.
     ClaudeCode,
@@ -85,17 +84,16 @@ pub enum Icon {
     /// `App/AgentIcon.swift` — full colour. It remains a Tiller fallback
     /// because Zed does not provide an Oh My Pi mark.
     OhMyPi,
-    /// Left-sidebar toggle (Zed `threads_sidebar_left_open`). No SF mapping.
+    /// Left-sidebar toggle (`zed/threads_sidebar_left_open.svg`).
     SidebarLeft,
-    /// Right-panel toggle (Zed `threads_sidebar_right_open`). No SF mapping.
+    /// Right-panel toggle (`zed/threads_sidebar_right_open.svg`).
     PanelRight,
-    /// An archive file in the Files tree — zip, tar, 7z, … (SF
-    /// `archivebox`, Zed `archive`). Added for F-CORE-FILE-08
-    /// (`FileIconKey::Archive`); no Phosphor predecessor.
+    /// An archive file in the Files tree — zip, tar, 7z, … (`zed/archive.svg`).
+    /// Added for F-CORE-FILE-08 (`FileIconKey::Archive`); no Phosphor predecessor.
     Archive,
     /// A lock file in the Files tree — `Cargo.lock`, `package-lock.json`, …
-    /// (SF `key`, Zed `lock`). Added for F-CORE-FILE-08
-    /// (`FileIconKey::Lock`); no Phosphor predecessor.
+    /// (`zed/lock.svg`). Added for F-CORE-FILE-08 (`FileIconKey::Lock`);
+    /// no Phosphor predecessor.
     Lock,
 }
 
@@ -187,8 +185,7 @@ impl Icon {
     }
 
     /// Whether this icon is an agent brand mark. Marks are embedded SVGs on
-    /// every platform — SF Symbols has no marks for them — and they never
-    /// go through the system-symbol path.
+    /// every platform and never go through a platform-specific symbol path.
     pub fn is_agent_mark(self) -> bool {
         matches!(
             self,
