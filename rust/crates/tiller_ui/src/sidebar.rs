@@ -2443,16 +2443,35 @@ impl Sidebar {
             .max_by_key(|status| urgency(*status))
     }
 
-    /// The icon's asset stem (`claude-mark`, `git-branch`). Worktree-row
-    /// marks name themselves with it in their `debug_selector`, so a drawn
-    /// test can assert *which* agent a row is showing rather than only that
-    /// some glyph is present.
+    /// Stable semantic debug/test names, independent of vendored filenames.
     fn icon_selector_name(icon: Icon) -> &'static str {
-        icon.path()
-            .rsplit('/')
-            .next()
-            .and_then(|file| file.strip_suffix(".svg"))
-            .unwrap_or("unknown")
+        match icon {
+            Icon::FolderFill => "folder",
+            Icon::GitBranch => "git-branch",
+            Icon::MessageSquare => "chat-round-line",
+            Icon::SquareTerminal => "terminal",
+            Icon::Close => "close",
+            Icon::ChevronDown => "alt-arrow-down",
+            Icon::ChevronRight => "alt-arrow-right",
+            Icon::ChevronLeft => "alt-arrow-left",
+            Icon::Settings => "settings-minimalistic",
+            Icon::RefreshCw => "refresh",
+            Icon::Plus => "plus",
+            Icon::File => "document",
+            Icon::Sparkles => "sparkle-thin",
+            Icon::Shield => "shield-thin",
+            Icon::SunMoon => "sun-dim-thin",
+            Icon::Globe => "global",
+            Icon::ClaudeCode => "claude-mark",
+            Icon::Codex => "openai-mark",
+            Icon::OpenCode => "agent-opencode",
+            Icon::Pi => "pi-mark",
+            Icon::OhMyPi => "agent-omp",
+            Icon::SidebarLeft => "sidebar-minimalistic-left",
+            Icon::PanelRight => "sidebar-minimalistic",
+            Icon::Archive => "archive-minimalistic",
+            Icon::Lock => "key-minimalistic",
+        }
     }
 
     fn row_icon(row: &SidebarRow) -> Icon {
@@ -3433,10 +3452,13 @@ impl Sidebar {
                             .bg(color)
                             .into_any_element(),
                         RowStatusGlyph::None => match disclosure {
-                            Some(icon) => IconElement::new(icon, theme.typography.footnote)
-                                .text_color(theme.meta)
+                            Some(icon) => div()
                                 .invisible()
-                                .group_hover(hover_group.clone(), |icon| icon.visible())
+                                .group_hover(hover_group.clone(), |element| element.visible())
+                                .child(
+                                    IconElement::new(icon, theme.typography.footnote)
+                                        .text_color(theme.meta),
+                                )
                                 .into_any_element(),
                             None => div().into_any_element(),
                         },

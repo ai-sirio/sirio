@@ -2,58 +2,34 @@
 //!
 //! # Two families, one typed enum
 //!
-//! [`Icon`] is the single place that knows how an icon resolves. Two
-//! mechanisms exist behind it:
-//!
-//! - **SF Symbols** (macOS only): the Swift app renders its bar and tab
-//!   icons with `Image(systemName:)`, and the user's complaint is that our
-//!   Phosphor thin-outline substitutes do not match those dense, filled
-//!   system glyphs. On macOS, every `Icon` with a [`system_symbol`] mapping
-//!   rasterizes the real symbol through AppKit (`NSImage(systemSymbolName:)`,
-//!   see `crate::sfsymbol`) tinted with the caller's theme colour — the same
-//!   visual as the reference app.
-//! - **Embedded Zed SVGs** (every platform): the same enum falls back to the
-//!   pinned, vendored Zed catalog on non-Apple targets, and for any icon
-//!   without a system symbol. The SVG path is always compiled, so a future
-//!   Linux/Windows build degrades to the embedded set instead of failing to
-//!   compile.
+//! [`Icon`] resolves through the pinned, vendored Zed SVG catalog on every
+//! platform. GPUI's stock `svg()` element provides the normal monochrome,
+//! caller-tinted rendering path.
 //!
 //! # Agent marks are different
 //!
 //! The agent brand marks (Claude Code, Codex, OpenCode, Pi, omp) are
-//! embedded SVGs on *every* platform — SF Symbols has no marks for them.
+//! embedded SVGs on every platform.
 //! Oh My Pi's three-stop gradient is rendered **full-colour, never tinted**:
 //! its brand logo keeps its identity and must not be recoloured by a theme.
 //! Zed's monochrome marks and Tiller's Pi monogram go through the normal
 //! tinted path like the reference does.
 //!
 //! The SVG bytes are embedded with `include_bytes!`, so icons ship inside
-//! the binary and render through GPUI's own SVG pipeline (`paint_svg` for
-//! tinted masks, `svg_renderer().render_single_frame` + `paint_image` for
-//! full-colour marks). Colour comes from the caller's `text_color` — which
-//! must come from `Theme::get(cx)` — never from a hardcoded value, or light
-//! mode breaks for that icon alone.
+//! the binary. Colour comes from the caller's `text_color` — which must come
+//! from `Theme::get(cx)` — never from a hardcoded value, or light mode breaks
+//! for that icon alone.
 
 use gpui::{
-    App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
-    InteractiveElement, Interactivity, IntoElement, LayoutId, Pixels, RenderImage, SharedString,
-    StyleRefinement, Styled, Window,
+    App, AssetSource, Bounds, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce,
+    SharedString, StyleRefinement, Styled, Window, canvas, px, svg,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// macOS-only SF Symbol rasterization (NSImage -> bitmap). Nested here with
-/// an explicit path so the icons module tree stays self-contained and the
-/// integrator-owned `lib.rs` does not have to declare it.
-#[path = "sfsymbol.rs"]
-#[cfg(target_os = "macos")]
-mod sfsymbol;
-
 /// The named icon set. `path` is the asset file name served by
-/// [`TillerAssets`]; `svg` is the embedded byte payload; on macOS
-/// [`Icon::system_symbol`] additionally names the SF Symbol that replaces
-/// the SVG for that icon.
+/// [`TillerAssets`]; `svg` is the embedded byte payload.
 ///
 /// # Pinned Zed catalog
 ///
@@ -123,37 +99,31 @@ pub enum Icon {
     Lock,
 }
 
-/// The SF Symbol that replaces this icon's SVG on macOS, if any. This is
-/// the ONE place the symbol-name mapping lives: call sites say
-/// `Icon::FolderFill` and know nothing about the platform.
-#[cfg(target_os = "macos")]
-pub fn system_symbol(icon: Icon) -> Option<&'static str> {
-    match icon {
-        Icon::FolderFill => Some("folder.fill"),
-        Icon::MessageSquare => Some("bubble.left"),
-        Icon::SquareTerminal => Some("terminal"),
-        Icon::Close => Some("xmark"),
-        Icon::ChevronDown => Some("chevron.down"),
-        Icon::ChevronRight => Some("chevron.right"),
-        Icon::ChevronLeft => Some("chevron.left"),
-        Icon::Settings => Some("gearshape"),
-        Icon::RefreshCw => Some("arrow.clockwise"),
-        Icon::Plus => Some("plus"),
-        Icon::File => Some("doc.text"),
-        Icon::Globe => Some("globe"),
-        Icon::Archive => Some("archivebox"),
-        Icon::Lock => Some("key"),
-        Icon::GitBranch
-        | Icon::Sparkles
-        | Icon::Shield
-        | Icon::SunMoon
-        | Icon::ClaudeCode
-        | Icon::Codex
-        | Icon::OpenCode
-        | Icon::Pi
-        | Icon::OhMyPi
-        | Icon::SidebarLeft
-        | Icon::PanelRight => None,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IconSize {
+    XSmall,
+    Small,
+    Medium,
+    Custom(Pixels),
+}
+
+impl IconSize {
+    pub fn resolve(self, typography: tiller_theme::Typography) -> Pixels {
+        let delta = f32::from(typography.base_size) - 13.5;
+        match self {
+            Self::XSmall => px((12.0 + delta).max(6.0)),
+            Self::Small => px((14.0 + delta).max(6.0)),
+            Self::Medium => px((16.0 + delta).max(6.0)),
+            Self::Custom(size) => size,
+        }
+    }
+}
+
+// Transitional only: Tasks 3 and 4 remove every raw-pixel caller, then
+// delete this impl so the compiler enforces semantic sizes.
+impl From<Pixels> for IconSize {
+    fn from(size: Pixels) -> Self {
+        Self::Custom(size)
     }
 }
 
@@ -259,47 +229,26 @@ impl Icon {
 
     /// Builds a sized element; colour is applied by the caller with
     /// [`Styled::text_color`] (theme-sourced).
-    pub fn element(self, size: Pixels) -> IconElement {
+    pub fn element(self, size: impl Into<IconSize>) -> IconElement {
         IconElement::new(self, size)
     }
 }
 
-/// An element that paints one icon at a fixed size.
-///
-/// Resolution order in paint (see the module docs for the rationale):
-/// 1. chromatic agent marks → full-colour SVG, tint ignored;
-/// 2. on macOS, icons with a system symbol → SF Symbol rasterized with the
-///    caller's colour baked in;
-/// 3. everything else → the tinted SVG mask path (the original behaviour).
-///
-/// The colour is read from the element's text style in paint, falling back
-/// to the window's inherited text style because a custom element's
-/// interactivity does not automatically receive a parent's refinement.
+/// A lightweight adapter around GPUI's stock SVG element.
+#[derive(IntoElement)]
 pub struct IconElement {
-    interactivity: Interactivity,
+    style: StyleRefinement,
     icon: Icon,
+    size: IconSize,
 }
 
 impl IconElement {
-    pub fn new(icon: Icon, size: Pixels) -> Self {
-        let mut interactivity = Interactivity::new();
-        interactivity.base_style.size.width = Some(size.into());
-        interactivity.base_style.size.height = Some(size.into());
+    pub fn new(icon: Icon, size: impl Into<IconSize>) -> Self {
         Self {
-            interactivity,
+            style: StyleRefinement::default(),
             icon,
+            size: size.into(),
         }
-    }
-
-    /// The resolved paint colour for a tinted icon: the caller's explicit
-    /// text colour, else the window's inherited one. Mirrors GPUI's own
-    /// `Svg` element. Kept as a free helper because `paint` borrows
-    /// `self.interactivity` mutably while reading the style.
-    fn paint_color(style: &gpui::Style, window: &mut Window) -> gpui::Hsla {
-        style
-            .text
-            .color
-            .unwrap_or_else(|| window.text_style().color)
     }
 }
 
@@ -326,148 +275,35 @@ fn paint_agent_mark(icon: Icon, bounds: Bounds<Pixels>, window: &mut Window, cx:
     let _ = window.paint_image(bounds, bounds, Default::default(), image, 0, false);
 }
 
-/// Path 2: the tinted SVG mask (original behaviour): rasterize the
-/// alpha mask once per (path, size) in the sprite atlas, tint per paint.
-fn paint_tinted_svg(
-    icon: Icon,
-    bounds: Bounds<Pixels>,
-    color: gpui::Hsla,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let _ = window.paint_svg(
-        bounds,
-        icon.path().into(),
-        Some(icon.svg()),
-        gpui::TransformationMatrix::default(),
-        color,
-        cx,
-    );
+impl Styled for IconElement {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
 }
 
-/// Path 3 (macOS): SF Symbols. Rasterize the real system symbol with
-/// the paint colour baked in (cached per symbol/size/tint), then paint
-/// the bitmap — the same premultiplied result the SVG tint path would
-/// produce, at the system's own glyph quality.
-#[cfg(target_os = "macos")]
-fn paint_system_symbol(
-    icon: Icon,
-    bounds: Bounds<Pixels>,
-    color: gpui::Hsla,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let rgba = gpui::Rgba::from(color);
-    let tint = (
-        (rgba.r * 255.0).round().clamp(0.0, 255.0) as u8,
-        (rgba.g * 255.0).round().clamp(0.0, 255.0) as u8,
-        (rgba.b * 255.0).round().clamp(0.0, 255.0) as u8,
-    );
-    let Some(symbol) = system_symbol(icon) else {
-        return;
-    };
-    let Some(image) = sfsymbol::rasterize_symbol(symbol, f32::from(bounds.size.width), tint) else {
-        // Unknown symbol name on this system: degrade to the embedded
-        // SVG rather than paint nothing.
-        paint_tinted_svg(icon, bounds, color, window, cx);
-        return;
-    };
-    let _ = window.paint_image(bounds, bounds, Default::default(), image, 0, false);
-}
-
-impl Element for IconElement {
-    type RequestLayoutState = ();
-    type PrepaintState = Option<Hitbox>;
-
-    fn id(&self) -> Option<ElementId> {
-        self.interactivity.element_id.clone()
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        self.interactivity.source_location()
-    }
-
-    fn request_layout(
-        &mut self,
-        global_id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let layout_id = self.interactivity.request_layout(
-            global_id,
-            inspector_id,
-            window,
-            cx,
-            |style, window, cx| window.request_layout(style, None, cx),
-        );
-        (layout_id, ())
-    }
-
-    fn prepaint(
-        &mut self,
-        global_id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<Hitbox> {
-        self.interactivity.prepaint(
-            global_id,
-            inspector_id,
-            bounds,
-            bounds.size,
-            window,
-            cx,
-            |_, _, hitbox, _, _| hitbox,
-        )
-    }
-
-    fn paint(
-        &mut self,
-        global_id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        hitbox: &mut Option<Hitbox>,
-        window: &mut Window,
-        cx: &mut App,
-    ) where
-        Self: Sized,
-    {
-        self.interactivity.paint(
-            global_id,
-            inspector_id,
-            bounds,
-            hitbox.as_ref(),
-            window,
-            cx,
-            |style, window, cx| {
-                let color = Self::paint_color(style, window);
-
-                if self.icon.is_agent_mark() {
-                    if self.icon.has_own_colours() {
-                        // Brand identity: never recolour the sunburst or the
-                        // gradient with a theme tint.
-                        paint_agent_mark(self.icon, bounds, window, cx);
-                    } else {
-                        // Monochrome marks render in the window's primary
-                        // text colour — the Swift app's `.primary`.
-                        paint_tinted_svg(self.icon, bounds, window.text_style().color, window, cx);
-                    }
-                    return;
-                }
-
-                #[cfg(target_os = "macos")]
-                if system_symbol(self.icon).is_some() {
-                    paint_system_symbol(self.icon, bounds, color, window, cx);
-                    return;
-                }
-
-                paint_tinted_svg(self.icon, bounds, color, window, cx);
-            },
-        )
+impl RenderOnce for IconElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let size = self.size.resolve(tiller_theme::Theme::get(cx).typography);
+        if self.icon.has_own_colours() {
+            let icon = self.icon;
+            let mut element = canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| paint_agent_mark(icon, bounds, window, cx),
+            )
+            .size(size)
+            .flex_none();
+            element.style().refine(&self.style);
+            element.into_any_element()
+        } else {
+            let mut element = svg()
+                .size(size)
+                .flex_none()
+                .path(self.icon.path())
+                .data(self.icon.svg())
+                .text_color(window.text_style().color);
+            element.style().refine(&self.style);
+            element.into_any_element()
+        }
     }
 }
 
@@ -520,26 +356,6 @@ fn view_box_size(icon: Icon) -> f32 {
     match parts.as_slice() {
         [_, _, w, h] => w.max(*h),
         _ => 24.0,
-    }
-}
-
-impl Styled for IconElement {
-    fn style(&mut self) -> &mut StyleRefinement {
-        &mut self.interactivity.base_style
-    }
-}
-
-impl InteractiveElement for IconElement {
-    fn interactivity(&mut self) -> &mut Interactivity {
-        &mut self.interactivity
-    }
-}
-
-impl IntoElement for IconElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 
@@ -662,8 +478,7 @@ mod tests {
                 continue;
             }
             let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            let has_16px_dimensions = svg.contains("width=\"16\"")
-                && svg.contains("height=\"16\"");
+            let has_16px_dimensions = svg.contains("width=\"16\"") && svg.contains("height=\"16\"");
             let has_16px_view_box = svg.contains("viewBox=\"0 0 16 16\"");
             assert!(
                 has_16px_dimensions || has_16px_view_box,
@@ -723,11 +538,17 @@ mod tests {
     }
 
     #[test]
-    fn layout_size_matches_constructor() {
-        let element = IconElement::new(Icon::FolderFill, px(14.0));
-        let size = element.interactivity.base_style.size;
-        assert_eq!(size.width, Some(px(14.0).into()));
-        assert_eq!(size.height, Some(px(14.0).into()));
+    fn semantic_icon_sizes_follow_tiller_typography_scale() {
+        let default = tiller_theme::Typography::default_scale();
+        assert_eq!(IconSize::XSmall.resolve(default), px(12.0));
+        assert_eq!(IconSize::Small.resolve(default), px(14.0));
+        assert_eq!(IconSize::Medium.resolve(default), px(16.0));
+        assert_eq!(IconSize::Custom(px(32.0)).resolve(default), px(32.0));
+
+        let enlarged = tiller_theme::Typography::for_base_size(15.5);
+        assert_eq!(IconSize::XSmall.resolve(enlarged), px(14.0));
+        assert_eq!(IconSize::Small.resolve(enlarged), px(16.0));
+        assert_eq!(IconSize::Medium.resolve(enlarged), px(18.0));
     }
 
     #[test]
@@ -759,24 +580,20 @@ mod tests {
     }
 
     #[test]
-    fn sf_symbols_map_only_on_macos_and_never_for_marks() {
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(system_symbol(Icon::FolderFill), Some("folder.fill"));
-            assert_eq!(system_symbol(Icon::SquareTerminal), Some("terminal"));
-            assert_eq!(system_symbol(Icon::RefreshCw), Some("arrow.clockwise"));
-            assert_eq!(system_symbol(Icon::Settings), Some("gearshape"));
-            // Marks never resolve to system symbols.
-            for icon in ALL_ICONS {
-                if icon.is_agent_mark() {
-                    assert_eq!(system_symbol(icon), None, "{icon:?} stays an embedded SVG");
-                }
-            }
+    fn only_oh_my_pi_uses_the_full_colour_path() {
+        for icon in ALL_ICONS {
+            assert_eq!(
+                icon.has_own_colours(),
+                icon == Icon::OhMyPi,
+                "unexpected full-colour icon: {icon:?}"
+            );
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = Icon::FolderFill;
-        }
+    }
+
+    #[test]
+    fn constructor_keeps_the_semantic_size_until_render() {
+        let element = IconElement::new(Icon::FolderFill, IconSize::Small);
+        assert_eq!(element.size, IconSize::Small);
     }
 
     #[test]
@@ -787,5 +604,4 @@ mod tests {
         );
         assert!((view_box_size(Icon::Pi) - 800.0).abs() < 1.0, "pi viewBox");
     }
-
 }
