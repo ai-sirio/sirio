@@ -2467,6 +2467,10 @@ impl Sidebar {
             Icon::PanelRight => "sidebar-minimalistic",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
+            Icon::FileTree => "file-tree",
+            Icon::Thread => "thread",
+            Icon::Diff => "diff",
+            Icon::GitGraph => "git-graph",
             Icon::FileType(_) => "file-type",
         }
     }
