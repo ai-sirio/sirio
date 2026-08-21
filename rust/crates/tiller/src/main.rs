@@ -18149,6 +18149,8 @@ mod tests {
             cx.debug_bounds("settings-category-General").is_none(),
             "Escape returns to the workspace, exactly like Back"
         );
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
         let focus = palette_test_sidebar_focus(&workspace, &cx);
         assert!(
             cx.update(|window, _| focus.is_focused(window)),
