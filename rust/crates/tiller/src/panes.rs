@@ -920,9 +920,9 @@ mod tests {
                 .1
                 .iter()
                 .any(|(event, status)| {
-                    matches!(event, TerminalActivityEvent::OscTitle(title)
-                    if title == ". working")
-                        && *status == Some(AgentStatus::Running)
+                    matches!(event, TerminalActivityEvent::OutputSettled { scrollback }
+                    if scrollback.contains("Do you want to proceed?"))
+                        && *status == Some(AgentStatus::NeedsInput)
                 })
             {
                 break;

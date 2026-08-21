@@ -3883,12 +3883,12 @@ mod view_tests {
             observed_running,
             "the pill must report Running while `sleep 2` holds the PTY's foreground process group"
         );
-        terminal.update(&mut cx.cx, |terminal, _| terminal.input("\u{4}"));
         assert_eq!(
             terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status()),
             None,
             "the running command has not exited yet -- the exit pill must not appear early"
         );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.input("\u{4}"));
 
         let exit_deadline = std::time::Instant::now() + Duration::from_secs(6);
         let mut observed_exit = None;
