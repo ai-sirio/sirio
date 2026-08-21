@@ -10852,9 +10852,9 @@ impl TillerWorkspace {
 
     /// F-SET-02: Escape closes the settings surface, the same way Back
     /// does. The global binding dispatches here regardless of what holds
-    /// focus; Back routes through the CloseSettings action. Focus returns
-    /// to the sidebar immediately (it is rendered again on the next frame),
-    /// so the shell's ctrl-k handling keeps working without a click.
+    /// focus; Back routes through the CloseSettings action. Focus is restored
+    /// on the next frame to the visible sidebar, the active centre pane, or
+    /// the shell root fallback, so shortcuts keep working without a click.
     ///
     /// F-TAB-24: also cancels an in-progress tab drag, checked first. This
     /// has to be an `on_action` listener, not a raw `capture_key_down` one
