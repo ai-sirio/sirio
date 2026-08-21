@@ -31,6 +31,7 @@ use tiller_persistence::{
 };
 use tiller_theme::Theme;
 
+use crate::caret;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::editor::Language;
 use crate::file_view::{CodeSpanKind, code_spans};
@@ -904,6 +905,12 @@ pub struct Chat {
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
     composer: Composer,
+    /// Blink state of the composer's insertion caret, and the cursor
+    /// signature it was last rendered against (part index, char offset,
+    /// part count) — a changed signature means the user moved/edited, so
+    /// the bar must wake instead of blinking off mid-interaction.
+    composer_blink: caret::Blink,
+    composer_caret_sig: (usize, usize, usize),
     composer_focus: FocusHandle,
     /// F-CHAT-25: the question answer field (focus, draft, owner request).
     question_answer: QuestionAnswerState,
@@ -1126,6 +1133,8 @@ impl Chat {
             agent_cwd: cwd,
             entries: Vec::new(),
             composer: Composer::new(),
+            composer_blink: caret::Blink::new(),
+            composer_caret_sig: (0, 0, 0),
             composer_focus: cx.focus_handle().tab_stop(true),
             question_answer: QuestionAnswerState {
                 focus: cx.focus_handle().tab_stop(true),
@@ -5634,8 +5643,15 @@ impl Chat {
         column.into_any_element()
     }
 
+    /// Blink timer tick for the composer's insertion caret: flips the bar
+    /// and repaints (caret::schedule re-arms from the next render).
+    fn flip_composer_blink(&mut self, cx: &mut Context<Self>) {
+        self.composer_blink.flip();
+        cx.notify();
+    }
+
     fn render_composer(
-        &self,
+        &mut self,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -5646,6 +5662,32 @@ impl Chat {
         let can_send = self.can_send();
         let entity = cx.entity();
         let entity_for_focus = entity.clone();
+
+        // The composer's insertion caret. A cursor move or edit since the
+        // last frame wakes the blink (the bar must be solid right after the
+        // user interacts), then exactly one toggle timer is armed while the
+        // composer owns focus.
+        let caret_sig = (
+            self.composer.cursor().0,
+            self.composer.cursor().1,
+            self.composer.parts().len(),
+        );
+        if caret_sig != self.composer_caret_sig {
+            self.composer_blink.wake();
+            self.composer_caret_sig = caret_sig;
+        }
+        caret::schedule(
+            &mut self.composer_blink,
+            focused,
+            Self::flip_composer_blink,
+            cx,
+        );
+        let caret_visible = focused && self.composer_blink.visible();
+        let caret_bar =
+            || caret::bar(typography.body_line_height, colors.accent, caret_visible);
+        // Where the insertion caret sits in the draft: `(part index, char
+        // offset inside that Text part)`, `part == parts.len()` at the end.
+        let (caret_part, caret_offset) = self.composer.cursor();
 
         // Swift's `modePill` (ComposerControlBar.swift) always pairs a
         // status dot with a label, whether that label is a raw state word
@@ -5739,6 +5781,11 @@ impl Chat {
         // label, no chevron, no picker.
         let model_control = if self.has_completed_turn && !self.available_models.is_empty() {
             let effort_for_chip = effort_label.clone();
+            let model_selection_id = self
+                .selected_model
+                .as_deref()
+                .map(|id| format!("model-selection-{id}"))
+                .unwrap_or_else(|| "model-selection-none".into());
             div()
                 .id("model-chip")
                 .debug_selector(|| "model-chip".into())
@@ -5757,17 +5804,8 @@ impl Chat {
                 .child(div().text_color(colors.meta).child("Model"))
                 .child(
                     div()
-                        .id(self
-                            .selected_model
-                            .as_deref()
-                            .map(|id| format!("model-selection-{id}"))
-                            .unwrap_or_else(|| "model-selection-none".into()))
-                        .debug_selector(move || {
-                            self.selected_model
-                                .as_deref()
-                                .map(|id| format!("model-selection-{id}"))
-                                .unwrap_or_else(|| "model-selection-none".into())
-                        })
+                        .id(model_selection_id.clone())
+                        .debug_selector(move || model_selection_id)
                         .text_color(colors.title)
                         .child(selected_model_name.clone()),
                 )
@@ -6669,7 +6707,7 @@ impl Chat {
         // inline, chips as removable tokens. The placeholder shows only when
         // the whole draft is empty, so a chip-only draft still reads as
         // content.
-        let composer_parts: Vec<AnyElement> = if self.composer.is_empty() {
+        let mut composer_parts: Vec<AnyElement> = if self.composer.is_empty() {
             // D-CHAT-03 / F-CHAT-05: the empty composer's placeholder names
             // what state it's actually in — permission-wait is not ordinary
             // mid-turn queueing, so it gets its own text, distinct selector,
@@ -6724,12 +6762,47 @@ impl Chat {
                 .parts()
                 .iter()
                 .enumerate()
-                .map(|(index, part)| match part {
-                    ComposerPart::Text(text) => div()
-                        .text_color(colors.primary_text_color)
-                        .child(text.clone())
-                        .into_any_element(),
+                .flat_map(|(index, part)| match part {
+                    ComposerPart::Text(text) => {
+                        // The caret splits its own text part: the bar is
+                        // rendered inline at the exact char offset, so the
+                        // draft reads as one continuous line.
+                        if index == caret_part {
+                            let before: String =
+                                text.chars().take(caret_offset).collect();
+                            let after: String =
+                                text.chars().skip(caret_offset).collect();
+                            let mut split = Vec::with_capacity(3);
+                            if !before.is_empty() {
+                                split.push(
+                                    div()
+                                        .text_color(colors.primary_text_color)
+                                        .child(before)
+                                        .into_any_element(),
+                                );
+                            }
+                            split.push(caret_bar());
+                            if !after.is_empty() {
+                                split.push(
+                                    div()
+                                        .text_color(colors.primary_text_color)
+                                        .child(after)
+                                        .into_any_element(),
+                                );
+                            }
+                            return split;
+                        }
+                        vec![div()
+                            .text_color(colors.primary_text_color)
+                            .child(text.clone())
+                            .into_any_element()]
+                    }
                     ComposerPart::Chip(chip) => {
+                        // On a chip part the caret always sits just before it.
+                        let mut run: Vec<AnyElement> = Vec::new();
+                        if index == caret_part {
+                            run.push(caret_bar());
+                        }
                         let remove_entity = entity.clone();
                         let (glyph, kind) = match chip {
                             ComposerChip::Skill { .. } => ("✦", "skill"),
@@ -6737,7 +6810,7 @@ impl Chat {
                             ComposerChip::Image { .. } => ("▣", "image"),
                         };
                         let label = chip.label();
-                        div()
+                        let chip_div = div()
                             .id(format!("composer-chip-{kind}"))
                             .debug_selector(move || format!("composer-chip-{kind}"))
                             .flex()
@@ -6780,11 +6853,23 @@ impl Chat {
                                     })
                                     .child("×"),
                             )
-                            .into_any_element()
+                            .into_any_element();
+                        run.push(chip_div);
+                        run
                     }
                 })
                 .collect()
         };
+        // End-of-document caret (part index past the last part), and the
+        // empty-draft caret beside the placeholder — a permission-wait
+        // refuses input by design, so its placeholder stands alone.
+        if self.composer.is_empty() {
+            if focused && self.pending_question().is_none() {
+                composer_parts.insert(0, caret_bar());
+            }
+        } else if caret_part >= self.composer.parts().len() {
+            composer_parts.push(caret_bar());
+        }
 
         // The composer is the visual anchor: a raised card with a roomy
         // input and one row of labelled chips — status, model, context —
