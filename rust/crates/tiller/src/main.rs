@@ -317,7 +317,6 @@ fn bind_window_keys(cx: &mut App) {
 /// `reference/MEASURED.md`.
 const SIDEBAR_WIDTH: f32 = 325.;
 const RIGHT_PANEL_WIDTH: f32 = 405.;
-const TITLE_BAR_HEIGHT: f32 = 32.;
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
@@ -3680,9 +3679,7 @@ impl TillerWorkspace {
                                     workspace.open_settings(Some(SettingsCategory::Agents), cx);
                                 }
                                 WorkspaceAction::CloseSettings => {
-                                    workspace.show_settings = false;
-                                    workspace.restore_focus_pending = true;
-                                    cx.notify();
+                                    workspace.close_settings_surface(cx);
                                 }
                                 WorkspaceAction::OpenBrowserLink(url) => {
                                     workspace.add_browser_tab(url, window, cx);
@@ -7903,6 +7900,15 @@ impl TillerWorkspace {
         cx.notify();
     }
 
+    /// Closes the replacement Settings surface and defers focus restoration
+    /// until the main frame has mounted again. Both the Settings Back button
+    /// and the global Escape binding route through this one transition.
+    fn close_settings_surface(&mut self, cx: &mut Context<Self>) {
+        self.show_settings = false;
+        self.restore_focus_pending = true;
+        cx.notify();
+    }
+
     fn active_changes_view(&self) -> Option<(&OpenTab, Entity<ChangesTab>)> {
         let tab = self.tabs.get(self.active_tab)?;
         let mut view = None;
@@ -8521,6 +8527,24 @@ impl TillerWorkspace {
             self.schedule_save(cx);
             cx.notify();
         }
+    }
+
+    fn active_pane_focus_handle(&self, cx: &mut Context<Self>) -> Option<FocusHandle> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let target = tab.focused_pane;
+        let mut handle = None;
+        tab.panes.for_each(&mut |id, content| {
+            if id == target {
+                handle = match content {
+                    TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
+                    TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
+                        None
+                    }
+                };
+            }
+        });
+        handle
     }
 
     /// Puts keyboard focus back on `tab_index`'s currently focused pane.
@@ -10872,12 +10896,7 @@ impl TillerWorkspace {
             cx.propagate();
             return;
         }
-        self.show_settings = false;
-        if self.sidebar_visible {
-            let focus = self.sidebar.focus_handle(cx);
-            window.focus(&focus, cx);
-        }
-        cx.notify();
+        self.close_settings_surface(cx);
     }
 
     fn handle_open_settings_shortcut(
@@ -11447,6 +11466,21 @@ impl TillerWorkspace {
                 .into_any_element(),
         )
     }
+
+    /// Root-level transient surfaces must outlive whichever main content
+    /// branch is mounted. In particular, Settings replaces the columns but
+    /// must not hide an already-open confirmation, prompt, or toast.
+    fn render_global_overlays(&self, theme: Theme, entity: Entity<Self>) -> Vec<AnyElement> {
+        [
+            self.render_pane_close_confirm(theme, entity.clone()),
+            self.render_title_prompt(theme, entity.clone()),
+            self.render_toast(theme, entity.clone()),
+            self.render_update_toast(theme, entity),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
 }
 
 impl TillerWorkspace {
@@ -11618,7 +11652,8 @@ impl Render for TillerWorkspace {
                 )
                 .when(self.palette_open, |this| {
                     this.child(self.render_command_palette(theme, cx.entity()))
-                });
+                })
+                .children(self.render_global_overlays(theme, cx.entity()));
         }
 
         self.schedule_restored_scrollback(window, cx);
@@ -11628,10 +11663,13 @@ impl Render for TillerWorkspace {
         // working without an extra click.
         if self.restore_focus_pending {
             self.restore_focus_pending = false;
-            if self.sidebar_visible {
-                let focus = self.sidebar.focus_handle(cx);
-                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
-            }
+            let focus = if self.sidebar_visible {
+                self.sidebar.focus_handle(cx)
+            } else {
+                self.active_pane_focus_handle(cx)
+                    .unwrap_or_else(|| self.root_focus.clone())
+            };
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
         }
 
         div()
@@ -11695,7 +11733,7 @@ impl Render for TillerWorkspace {
             .on_action(cx.listener(Self::handle_resume_chat))
             .child(
                 div()
-                    .h(px(TITLE_BAR_HEIGHT))
+                    .h(theme.browser_chrome.bar_height)
                     .w_full()
                     .child(self.titlebar.clone()),
             )
@@ -11714,10 +11752,7 @@ impl Render for TillerWorkspace {
             .when(self.palette_open, |this| {
                 this.child(self.render_command_palette(theme, cx.entity()))
             })
-            .children(self.render_pane_close_confirm(theme, cx.entity()))
-            .children(self.render_title_prompt(theme, cx.entity()))
-            .children(self.render_toast(theme, cx.entity()))
-            .children(self.render_update_toast(theme, cx.entity()))
+            .children(self.render_global_overlays(theme, cx.entity()))
     }
 }
 
@@ -17391,6 +17426,134 @@ mod tests {
         assert!(
             cx.update(|window, _| sidebar_focus.is_focused(window)),
             "Back returns focus to the sidebar in the restored main frame"
+        );
+    }
+
+    #[gpui::test]
+    async fn closing_settings_without_a_sidebar_restores_focus_to_the_active_center_pane(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let center_focus = palette_test_terminal_focus(&workspace, &cx);
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sidebar_visible = false;
+            workspace.right_panel_visible = false;
+            workspace.open_settings(None, cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("shell-settings-panel").is_none());
+        assert!(
+            cx.update(|window, _| center_focus.is_focused(window)),
+            "Escape must not leave focus on the unmounted Settings surface when no sidebar is visible"
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.open_settings(None, cx)
+        });
+        cx.run_until_parked();
+        let back = cx
+            .debug_bounds("settings-back")
+            .expect("Settings renders a Back control");
+        cx.simulate_click(back.center(), Modifiers::none());
+        cx.background_executor
+            .advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("shell-settings-panel").is_none());
+        assert!(
+            cx.update(|window, _| center_focus.is_focused(window)),
+            "Back must use the same mounted center-pane focus restoration as Escape"
+        );
+    }
+
+    #[gpui::test]
+    async fn workspace_and_settings_use_the_same_titlebar_work_area_origin(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let workspace_titlebar = cx.debug_bounds("tiller-titlebar").expect("titlebar");
+        let workspace_panel = cx
+            .debug_bounds("shell-center-panel")
+            .expect("workspace center panel");
+        let workspace_work_area = cx
+            .debug_bounds("shell-work-area")
+            .expect("workspace work area");
+        assert!(
+            workspace_titlebar.bottom() <= workspace_panel.top(),
+            "the normal workspace titlebar must finish before its shell panel begins"
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.open_settings(None, cx)
+        });
+        cx.run_until_parked();
+        let settings_work_area = cx
+            .debug_bounds("shell-settings-work-area")
+            .expect("settings work area");
+        assert_eq!(
+            workspace_work_area.top(),
+            settings_work_area.top(),
+            "workspace and Settings must reserve the same browser_chrome bar height"
+        );
+    }
+
+    #[gpui::test]
+    async fn settings_keeps_the_update_toast_as_a_root_overlay(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.update_state = UpdateState::Available {
+                version: "1.4.0".into(),
+            };
+            workspace.open_settings(None, cx);
+        });
+        cx.run_until_parked();
+
+        let settings_panel = cx
+            .debug_bounds("shell-settings-panel")
+            .expect("settings shell panel");
+        let toast = cx
+            .debug_bounds("update-toast")
+            .expect("Settings must retain the global update toast");
+        assert!(toast.size.width > px(0.0) && toast.size.height > px(0.0));
+        assert!(
+            toast.top() < settings_panel.top(),
+            "the update toast must remain a root overlay above the Settings panel"
         );
     }
 
