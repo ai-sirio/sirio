@@ -1263,8 +1263,8 @@ fn file_glyph(path: &Path, is_dir: bool) -> Icon {
         // Every other file key — the per-language kinds (Swift, Python,
         // Rust, …), markup/data kinds (Json, Yaml, Markdown, …), media
         // kinds (Image, Video, Audio, Font) and the remaining exact-name
-        // kinds (Docker, Makefile, Sql, Database, Log) — has no comet
-        // equivalent and shares the generic file mark.
+        // kinds (Docker, Makefile, Sql, Database, Log) — has no dedicated
+        // glyph in the approved Zed subset and shares the generic file mark.
         FileIconKey::Swift
         | FileIconKey::C
         | FileIconKey::Cpp
@@ -1303,7 +1303,7 @@ fn file_glyph(path: &Path, is_dir: bool) -> Icon {
         // Every folder key beyond `.git` (Src, Tests, Docs, Github,
         // NodeModules, Dist, Scripts, Config, Assets, Public, Packages,
         // Vscode, Lib, Tools, and the plain default) shares the folder
-        // mark: comet has one folder shape, not fifteen.
+        // mark: the approved Zed subset has one folder shape, not fifteen.
         FileIconKey::Folder
         | FileIconKey::FolderSrc
         | FileIconKey::FolderTests
@@ -1538,14 +1538,14 @@ mod tests {
     fn file_glyph_resolves_known_kinds_from_the_embedded_set() {
         // The Files tree's per-type glyphs are driven by `FileIconKey`
         // (F-CORE-FILE-08), ported from the original's `FileIconKey.swift`.
-        // Comet ships far fewer shapes than the original's icon theme, so
-        // most kinds share the generic file mark — see `file_glyph`'s doc
-        // comment for which few don't.
+        // The approved Zed subset intentionally maps fewer shapes than the
+        // original icon theme, so most kinds share the generic file mark —
+        // see `file_glyph`'s doc comment for which few don't.
         let cases: &[(&str, bool, Icon)] = &[
             ("/repo/src/main.rs", false, Icon::File),
             ("/repo/deploy.sh", false, Icon::SquareTerminal),
             (".gitignore", false, Icon::GitBranch),
-            ("Dockerfile", false, Icon::File), // no comet docker shape
+            ("Dockerfile", false, Icon::File), // no dedicated Zed Docker glyph
             ("Cargo.lock", false, Icon::Lock),
             ("release.zip", false, Icon::Archive),
             (".env", false, Icon::Settings),
@@ -1559,7 +1559,7 @@ mod tests {
             (".editorconfig", false, Icon::File),
             (".env.local", false, Icon::File),
             ("gitmodules", false, Icon::File), // no leading dot: not the exact-name key
-            ("Cargo.toml", false, Icon::File), // toml has no comet shape either
+            ("Cargo.toml", false, Icon::File), // no dedicated Zed TOML glyph
         ];
         for (path, is_dir, expected) in cases {
             assert_eq!(
