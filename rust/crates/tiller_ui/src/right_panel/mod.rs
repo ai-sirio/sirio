@@ -18,6 +18,7 @@ use gpui::{
 use std::path::PathBuf;
 use tiller_theme::Theme;
 
+use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 // ROW_HEIGHT stays reachable at the module root for the conformance
@@ -61,6 +62,8 @@ pub enum RightPanelEvent {
 pub enum RightPanelActionEvent {
     /// Open a modified file in the host application's Diff tab.
     OpenDiff(PathBuf),
+    /// Open a terminal prepared to resolve this conflicted path.
+    ResolveInTerminal(PathBuf),
 }
 
 /// A surface shown in the Activity section.
@@ -192,6 +195,11 @@ pub struct RightPanel {
     /// One polling loop per panel, armed on first render.
     refresh_loop_started: bool,
     file_context_menu: Option<files::FileContextMenu>,
+    /// Built on first selection of the Diff view, dropped when the checkout
+    /// changes. A user who never opens Diff never pays for a git status here.
+    changes: Option<gpui::Entity<crate::changes::ChangesTab>>,
+    /// Kept alive so the child's events keep reaching `re_emit`.
+    changes_subscriptions: Vec<gpui::Subscription>,
 }
 
 
@@ -214,6 +222,8 @@ impl RightPanel {
             walk_generation: 0,
             refresh_loop_started: false,
             file_context_menu: None,
+            changes: None,
+            changes_subscriptions: Vec::new(),
         }
     }
 
@@ -250,6 +260,8 @@ impl RightPanel {
         self.selected_path = None;
         self.refresh_error = None;
         self.file_context_menu = None;
+        self.changes = None;
+        self.changes_subscriptions.clear();
         cx.notify();
     }
 
@@ -280,6 +292,8 @@ impl RightPanel {
         self.selected_path = None;
         self.refresh_error = None;
         self.file_context_menu = None;
+        self.changes = None;
+        self.changes_subscriptions.clear();
         self.settled = false;
         self.walk_generation += 1;
         cx.notify();
@@ -408,9 +422,41 @@ impl RightPanel {
             )
     }
 
-    /// Filled in by Task 8.
-    fn render_diff(&mut self, theme: Theme, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_placeholder("Diff", theme)
+    /// Builds the Diff view's `ChangesTab` if it is not built yet, and wires
+    /// its events onto the channels the host already handles.
+    fn ensure_changes(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<crate::changes::ChangesTab> {
+        if let Some(changes) = self.changes.clone() {
+            return changes;
+        }
+        let repo_root = self.repo_root.clone();
+        let changes = cx.new(|cx| crate::changes::ChangesTab::new(repo_root, cx));
+        self.changes_subscriptions = vec![
+            cx.subscribe(&changes, |_, _, event: &ChangesTabEvent, cx| match event {
+                ChangesTabEvent::OpenFile(path) => {
+                    cx.emit(RightPanelEvent::OpenFile(path.clone()))
+                }
+            }),
+            cx.subscribe(&changes, |_, _, event: &ChangesTabActionEvent, cx| match event {
+                ChangesTabActionEvent::OpenDiff(path) => {
+                    cx.emit(RightPanelActionEvent::OpenDiff(path.clone()))
+                }
+                ChangesTabActionEvent::ResolveInTerminal(path) => {
+                    cx.emit(RightPanelActionEvent::ResolveInTerminal(path.clone()))
+                }
+            }),
+        ];
+        self.changes = Some(changes.clone());
+        changes
+    }
+
+    fn render_diff(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(self.ensure_changes(cx))
     }
 
     /// Filled in by Task 10.
@@ -685,5 +731,38 @@ mod tests {
             );
         });
     }
-}
 
+    #[gpui::test]
+    fn the_changes_entity_is_built_only_when_the_diff_view_is_selected(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        panel.update(cx, |panel, _| {
+            assert!(panel.changes.is_none(), "nothing built up front");
+        });
+
+        cx.update(|cx| PanelView::set(PanelView::Diff, cx));
+        panel.update(cx, |panel, cx| {
+            panel.ensure_changes(cx);
+            assert!(panel.changes.is_some(), "selecting Diff builds it");
+        });
+    }
+
+    #[gpui::test]
+    fn rebinding_a_worktree_drops_the_changes_entity(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let other = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        panel.update(cx, |panel, cx| {
+            panel.ensure_changes(cx);
+            panel.bind_worktree(other.0.clone(), cx);
+            assert!(
+                panel.changes.is_none(),
+                "a stale checkout's diff must not survive"
+            );
+        });
+    }
+}

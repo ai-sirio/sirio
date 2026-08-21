@@ -4283,6 +4283,9 @@ impl TillerWorkspace {
                 RightPanelActionEvent::OpenDiff(path) => {
                     workspace.add_changes_tab(Some(path.clone()), cx)
                 }
+                RightPanelActionEvent::ResolveInTerminal(path) => {
+                    workspace.add_conflict_terminal_tab(path.clone(), cx)
+                }
             },
         )
         .detach();
