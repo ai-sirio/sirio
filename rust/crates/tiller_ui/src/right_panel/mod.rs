@@ -1,0 +1,768 @@
+//! The checkout right panel: filesystem browsing, git changes, and activity.
+//!
+//! `mod.rs` owns the panel's lifecycle, its header, and the choice of
+//! surface below it; the Files and Activity surfaces live in their
+//! sibling modules (`files`, `activity`).
+//!
+//! The data model deliberately stays local to this panel. Git operations are
+//! delegated to `tiller_git`; the host application can later replace the
+//! refresh callbacks with its project store without changing the row layout.
+
+mod activity;
+mod files;
+
+use gpui::{
+    App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*,
+    px,
+};
+use std::path::PathBuf;
+use tiller_theme::Theme;
+
+use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
+
+// ROW_HEIGHT stays reachable at the module root for the conformance
+// suite (`crate::right_panel::ROW_HEIGHT`) even though the file-tree
+// rows that use it live in `files`. Only that test module reads it.
+#[cfg(test)]
+pub(crate) use files::ROW_HEIGHT;
+
+const PANEL_WIDTH: f32 = 405.0;
+const HEADER_HEIGHT: f32 = 40.0;
+/// Two-line activity row: 5 + 18 + 2 + 15 + 5, waku's card math.
+const ACTIVITY_ROW_HEIGHT: f32 = 48.0;
+/// Status shown at the trailing edge of an activity row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivityStatus {
+    /// The surface is waiting for input.
+    Idle,
+    /// The surface is currently running.
+    Running,
+    /// The agent is blocked on a user decision or answer.
+    NeedsInput,
+    /// The surface completed successfully.
+    Done,
+    /// The surface reported an error.
+    Error,
+}
+
+/// User actions originating from an activity row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RightPanelEvent {
+    /// Select the open tab at this activity index.
+    SelectActivity(usize),
+    /// Close the open tab at this activity index.
+    CloseActivity(usize),
+    /// Open a file from the Files tree in the host application's tab strip.
+    OpenFile(PathBuf),
+}
+
+/// Actions that need a host-owned surface beyond the existing file-open door.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RightPanelActionEvent {
+    /// Open a modified file in the host application's Diff tab.
+    OpenDiff(PathBuf),
+    /// Open a terminal prepared to resolve this conflicted path.
+    ResolveInTerminal(PathBuf),
+}
+
+/// A surface shown in the Activity section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivitySurface {
+    /// The typed surface icon from the shared embedded icon set.
+    pub icon: Icon,
+    /// Surface title.
+    pub title: String,
+    /// Project/worktree subtitle.
+    pub location: String,
+    /// Current surface status.
+    pub status: ActivityStatus,
+}
+
+impl ActivitySurface {
+    /// Build one activity row.
+    #[must_use]
+    pub fn new(
+        icon: Icon,
+        title: impl Into<String>,
+        location: impl Into<String>,
+        status: ActivityStatus,
+    ) -> Self {
+        Self {
+            icon,
+            title: title.into(),
+            location: location.into(),
+            status,
+        }
+    }
+}
+
+/// Which view the right panel is showing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelView {
+    #[default]
+    Files,
+    Activity,
+    Diff,
+    History,
+}
+
+/// App-wide selection. A GPUI global rather than a field, for the same
+/// reason `DiffViewMode` is one: `select_worktree` throws the whole
+/// `RightPanel` entity away and builds a fresh one, so a field would snap
+/// back to Files on every worktree switch.
+struct PanelViewSetting(PanelView);
+
+impl gpui::Global for PanelViewSetting {}
+
+impl PanelView {
+    /// Rail order, left to right.
+    const ORDER: [PanelView; 4] = [
+        PanelView::Files,
+        PanelView::Activity,
+        PanelView::Diff,
+        PanelView::History,
+    ];
+
+    fn icon(self) -> Icon {
+        match self {
+            PanelView::Files => Icon::FileTree,
+            PanelView::Activity => Icon::Thread,
+            PanelView::Diff => Icon::Diff,
+            PanelView::History => Icon::GitGraph,
+        }
+    }
+
+    fn element_id(self) -> &'static str {
+        match self {
+            PanelView::Files => "right-panel-tab-files",
+            PanelView::Activity => "right-panel-tab-activity",
+            PanelView::Diff => "right-panel-tab-diff",
+            PanelView::History => "right-panel-tab-history",
+        }
+    }
+
+    pub fn get(cx: &App) -> Self {
+        if cx.has_global::<PanelViewSetting>() {
+            cx.global::<PanelViewSetting>().0
+        } else {
+            Self::default()
+        }
+    }
+
+    pub fn set(view: Self, cx: &mut App) {
+        cx.set_global(PanelViewSetting(view));
+    }
+}
+
+/// The GPUI right panel: the filesystem tree and the activity section.
+pub struct RightPanel {
+    repo_root: PathBuf,
+    /// A panel is constructed for a selected checkout. Closing that checkout
+    /// must explicitly revoke the binding; retaining its path would make the
+    /// Files/Changes surface look current while serving stale data.
+    worktree_selected: bool,
+    file_tree: Vec<files::FileNode>,
+    git_markers: files::GitMarkers,
+    activity: Vec<ActivitySurface>,
+    /// The in-flight folder-expansion walk, if any. Replaced (never
+    /// queued) on every new expansion request.
+    walk_task: Option<Task<()>>,
+    /// Whether the top-level tree refresh is currently in flight. This is
+    /// the single-flight guard. It is deliberately *not* the loading state
+    /// rendered to users — see `settled`.
+    refresh_started: bool,
+    /// Whether any top-level walk has ever finished, successfully or not.
+    ///
+    /// This, and not `refresh_started`, is what "Loading files…" is about.
+    /// `ensure_tree_refresh` re-walks every second, so gating the
+    /// placeholder on "a walk is in flight" put a full-panel placeholder
+    /// over a perfectly good tree once a second — on this 4-core box the
+    /// tree was visible roughly one frame in three, for minutes. Gating it
+    /// on "no walk has ever finished" also covers the two cases an
+    /// `is_empty()` test gets wrong: a directory that is genuinely empty
+    /// (which would say "Loading files…" forever) and a root that failed to
+    /// read (whose error panel would be replaced by the placeholder on every
+    /// tick, hiding the Retry the user is trying to click).
+    settled: bool,
+    refresh_error: Option<String>,
+    selected_path: Option<PathBuf>,
+    file_focus: Option<FocusHandle>,
+    /// Bumped on every walk request (and on collapse): a walk that
+    /// completes after a newer one was requested must not apply its
+    /// result late.
+    walk_generation: u64,
+    /// One polling loop per panel, armed on first render.
+    refresh_loop_started: bool,
+    file_context_menu: Option<files::FileContextMenu>,
+    /// Built on first selection of the Diff view, dropped when the checkout
+    /// changes. A user who never opens Diff never pays for a git status here.
+    changes: Option<gpui::Entity<crate::changes::ChangesTab>>,
+    /// Kept alive so the child's events keep reaching `re_emit`.
+    changes_subscriptions: Vec<gpui::Subscription>,
+}
+
+
+impl RightPanel {
+
+    /// Creates the panel for one checkout.
+    pub fn new(repo_root: impl Into<PathBuf>) -> Self {
+        Self {
+            repo_root: repo_root.into(),
+            worktree_selected: true,
+            file_tree: Vec::new(),
+            git_markers: files::GitMarkers::default(),
+            activity: Vec::new(),
+            walk_task: None,
+            refresh_started: false,
+            settled: false,
+            refresh_error: None,
+            selected_path: None,
+            file_focus: None,
+            walk_generation: 0,
+            refresh_loop_started: false,
+            file_context_menu: None,
+            changes: None,
+            changes_subscriptions: Vec::new(),
+        }
+    }
+
+    /// Creates the panel with an initial activity section.
+    pub fn with_activity(repo_root: impl Into<PathBuf>, activity: Vec<ActivitySurface>) -> Self {
+        Self {
+            activity,
+            ..Self::new(repo_root)
+        }
+    }
+
+    /// Replace the host-provided activity rows. The host (`main.rs`) calls
+    /// this every render to stay live with `Chat`'s own state; it no-ops on
+    /// an unchanged value to avoid notifying every render.
+    pub fn set_activity(&mut self, activity: Vec<ActivitySurface>, cx: &mut Context<Self>) {
+        if self.activity == activity {
+            return;
+        }
+        self.activity = activity;
+        cx.notify();
+    }
+
+    /// Remove the panel's checkout binding after its selected worktree
+    /// closes. This clears both already drawn rows and any in-flight result's
+    /// visible destination; a later worktree selection replaces the panel
+    /// with a new bound instance.
+    pub fn clear_worktree(&mut self, cx: &mut Context<Self>) {
+        if !self.worktree_selected {
+            return;
+        }
+        self.worktree_selected = false;
+        self.file_tree.clear();
+        self.git_markers = files::GitMarkers::default();
+        self.selected_path = None;
+        self.refresh_error = None;
+        self.file_context_menu = None;
+        self.changes = None;
+        self.changes_subscriptions.clear();
+        cx.notify();
+    }
+
+    /// The mirror of [`Self::clear_worktree`]: (re-)bind the panel to a
+    /// genuinely selected checkout. F-CHG-02: `select_worktree` already
+    /// covers a real, explicit worktree switch by throwing this whole entity
+    /// away and building a fresh one via [`Self::with_activity`] -- but a
+    /// worktree can also become the *current* one passively, e.g.
+    /// `sync_control_state` re-matching `working_directory` against a
+    /// project the user just added over the control socket, with no dedicated
+    /// switch call in between. `TillerWorkspace::sync_activity` -- already
+    /// the app's one continuous reconciliation point, run after essentially
+    /// every state-changing action -- calls this every time so the panel
+    /// cannot drift from `has_current_worktree()`'s answer no matter which
+    /// path changed it. Idempotent when neither the selection state nor the
+    /// bound path actually changed, so a tree the user has been expanding is
+    /// left alone on the other 44-and-counting call sites that were already
+    /// unrelated to worktree selection.
+    pub fn bind_worktree(&mut self, repo_root: impl Into<PathBuf>, cx: &mut Context<Self>) {
+        let repo_root = repo_root.into();
+        if self.worktree_selected && self.repo_root == repo_root {
+            return;
+        }
+        self.worktree_selected = true;
+        self.repo_root = repo_root;
+        self.file_tree.clear();
+        self.git_markers = files::GitMarkers::default();
+        self.selected_path = None;
+        self.refresh_error = None;
+        self.file_context_menu = None;
+        self.changes = None;
+        self.changes_subscriptions.clear();
+        self.settled = false;
+        self.walk_generation += 1;
+        cx.notify();
+    }
+
+}
+
+
+impl RightPanel {
+    /// The colour of the Activity rail badge, or `None` when nothing wants
+    /// attention. Error outranks NeedsInput: one failed surface is the more
+    /// urgent fact.
+    pub(crate) fn activity_badge(&self) -> Option<ActivityStatus> {
+        if self
+            .activity
+            .iter()
+            .any(|row| row.status == ActivityStatus::Error)
+        {
+            return Some(ActivityStatus::Error);
+        }
+        if self
+            .activity
+            .iter()
+            .any(|row| row.status == ActivityStatus::NeedsInput)
+        {
+            return Some(ActivityStatus::NeedsInput);
+        }
+        None
+    }
+
+    fn render_header(
+        &self,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = PanelView::get(cx);
+        let badge = self.activity_badge();
+        div()
+            .h(px(HEADER_HEIGHT))
+            .w_full()
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .border_b_1()
+            .border_color(theme.hairline)
+            .children(PanelView::ORDER.map(|view| {
+                let is_active = view == active;
+                let badge_color = (view == PanelView::Activity)
+                    .then_some(badge)
+                    .flatten()
+                    .map(|status| match status {
+                        ActivityStatus::Error => theme.tab_error,
+                        _ => theme.tab_needs_input,
+                    });
+                div()
+                    .id(view.element_id())
+                    .debug_selector(move || view.element_id().to_owned())
+                    .relative()
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .when(is_active, |this| this.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.row_hover))
+                    .child(
+                        IconElement::new(view.icon(), IconSize::Small).text_color(if is_active {
+                            theme.title
+                        } else {
+                            theme.subtitle
+                        }),
+                    )
+                    .when_some(badge_color, |this, color| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(4.0))
+                                .right(px(4.0))
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(color),
+                        )
+                    })
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            PanelView::set(view, cx);
+                            entity.update(cx, |_, cx| cx.notify());
+                        }
+                    })
+            }))
+    }
+
+    fn render_no_worktree(&self, theme: Theme) -> impl IntoElement {
+        div()
+            .id("right-panel-no-worktree")
+            .debug_selector(|| "right-panel-no-worktree".to_owned())
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(theme.spacing.card_gap)
+            .p(theme.spacing.card_gap)
+            .text_size(theme.typography.headline)
+            .text_color(theme.title)
+            .child(
+                IconElement::new(
+                    Icon::PanelRight,
+                    IconSize::Custom(theme.typography.large_title),
+                )
+                .text_color(theme.title),
+            )
+            .child("No worktree selected")
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child("Select a worktree to inspect its files and changes."),
+            )
+    }
+
+    /// Builds the Diff view's `ChangesTab` if it is not built yet, and wires
+    /// its events onto the channels the host already handles.
+    fn ensure_changes(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<crate::changes::ChangesTab> {
+        if let Some(changes) = self.changes.clone() {
+            return changes;
+        }
+        let repo_root = self.repo_root.clone();
+        let changes = cx.new(|cx| crate::changes::ChangesTab::new(repo_root, cx));
+        self.changes_subscriptions = vec![
+            cx.subscribe(&changes, |_, _, event: &ChangesTabEvent, cx| match event {
+                ChangesTabEvent::OpenFile(path) => {
+                    cx.emit(RightPanelEvent::OpenFile(path.clone()))
+                }
+            }),
+            cx.subscribe(&changes, |_, _, event: &ChangesTabActionEvent, cx| match event {
+                ChangesTabActionEvent::OpenDiff(path) => {
+                    cx.emit(RightPanelActionEvent::OpenDiff(path.clone()))
+                }
+                ChangesTabActionEvent::ResolveInTerminal(path) => {
+                    cx.emit(RightPanelActionEvent::ResolveInTerminal(path.clone()))
+                }
+            }),
+        ];
+        self.changes = Some(changes.clone());
+        changes
+    }
+
+    fn render_diff(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(self.ensure_changes(cx))
+    }
+
+    /// Filled in by Task 10.
+    fn render_history(&mut self, theme: Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_placeholder("History", theme)
+    }
+
+    fn render_placeholder(&self, label: &'static str, theme: Theme) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(theme.meta)
+            .child(label)
+    }
+}
+
+
+impl EventEmitter<RightPanelEvent> for RightPanel {}
+impl EventEmitter<RightPanelActionEvent> for RightPanel {}
+
+
+impl Render for RightPanel {
+
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        if self.worktree_selected {
+            self.ensure_tree_refresh(cx);
+        }
+        if self.worktree_selected && self.file_focus.is_none() {
+            self.file_focus = Some(cx.focus_handle().tab_stop(true));
+        }
+        let entity = cx.entity();
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .w(px(PANEL_WIDTH))
+            .h_full()
+            .overflow_hidden()
+            .bg(theme.background)
+            .child(self.render_header(entity.clone(), theme, cx))
+            .child(if !self.worktree_selected {
+                self.render_no_worktree(theme).into_any_element()
+            } else {
+                match PanelView::get(cx) {
+                    PanelView::Files => self
+                        .render_files(entity.clone(), theme, cx)
+                        .into_any_element(),
+                    PanelView::Activity => {
+                        self.render_activity(entity.clone(), theme).into_any_element()
+                    }
+                    PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
+                    PanelView::History => self.render_history(theme, cx).into_any_element(),
+                }
+            })
+            .when(self.worktree_selected, |this| {
+                this.when_some(self.file_context_menu.clone(), |this, menu| {
+                    this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
+                })
+            })
+    }
+
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TestAppContext,
+        VisualTestContext,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // ── F-EDIT-12 harness capability: payload drags ─────────────────────
+    //
+    // The inventory's drag entry needs a drop target in a *pane* — that
+    // lives in the shell (`tiller/src/main.rs`), so the product half is
+    // routed to codex12 (a file row becomes the drag source, a pane the
+    // drop target). What this crate owns is the proof that the harness can
+    // express a payload drag at all: a source element with `on_drag`, a
+    // target with `on_drop`, and the real mouse-down / move / up sequence
+    // between them. The shell's F-EDIT-12 test then uses exactly this
+    // recipe against its workspace.
+
+    /// The drag preview view GPUI requires from `on_drag`.
+    struct EmptyDragPreview;
+
+    impl Render for EmptyDragPreview {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    struct DragFixture {
+        dropped: Rc<RefCell<Vec<PathBuf>>>,
+    }
+
+    impl DragFixture {
+        fn new() -> Self {
+            Self {
+                dropped: Default::default(),
+            }
+        }
+    }
+
+    impl Render for DragFixture {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let dropped = self.dropped.clone();
+            div()
+                .size_full()
+                .flex()
+                .child(
+                    div()
+                        .id("drag-source")
+                        .w(px(100.0))
+                        .h(px(100.0))
+                        .debug_selector(|| "drag-source".into())
+                        .on_drag(PathBuf::from("/repo/file.txt"), |_, _, _, cx| {
+                            cx.new(|_| EmptyDragPreview)
+                        }),
+                )
+                .child(
+                    div()
+                        .id("drag-target")
+                        .w(px(100.0))
+                        .h(px(100.0))
+                        .debug_selector(|| "drag-target".into())
+                        .on_drag_move(|_event: &gpui::DragMoveEvent<PathBuf>, _, _| {})
+                        .on_drop(move |path: &PathBuf, _, _| {
+                            dropped.borrow_mut().push(path.clone());
+                        }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    async fn a_payload_drag_reaches_the_drop_target_through_real_mouse_events(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| DragFixture::new());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<DragFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+
+        let source = cx
+            .debug_bounds("drag-source")
+            .expect("the drag source is in the drawn frame");
+        let target = cx
+            .debug_bounds("drag-target")
+            .expect("the drop target is in the drawn frame");
+
+        // The real gesture: press on the source, move past the 2px drag
+        // threshold (which starts the payload drag), move over the target,
+        // release. No drag convenience method exists — this is the mouse
+        // sequence GPUI itself uses, dispatched through the same window
+        // event path as production input.
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: gpui::point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let dropped = fixture.read_with(&cx.cx, |fixture, _| fixture.dropped.borrow().clone());
+        assert_eq!(
+            dropped,
+            vec![PathBuf::from("/repo/file.txt")],
+            "the drop target receives the drag payload through the real event path"
+        );
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "tiller-right-panel-module-test-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[gpui::test]
+    fn the_rail_switches_the_selected_view(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+
+        cx.update(|cx| {
+            assert_eq!(PanelView::get(cx), PanelView::Files, "Files is the default");
+            PanelView::set(PanelView::History, cx);
+            assert_eq!(PanelView::get(cx), PanelView::History);
+        });
+    }
+
+    #[gpui::test]
+    fn the_selection_survives_rebinding_to_another_worktree(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let other = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        cx.update(|cx| PanelView::set(PanelView::Diff, cx));
+        panel.update(cx, |panel, cx| panel.bind_worktree(other.0.clone(), cx));
+
+        cx.update(|cx| assert_eq!(PanelView::get(cx), PanelView::Diff));
+    }
+
+    #[gpui::test]
+    fn the_activity_badge_appears_only_for_attention_states(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        let idle = ActivitySurface::new(
+            Icon::SquareTerminal,
+            "one",
+            "",
+            ActivityStatus::Idle,
+        );
+        let waiting = ActivitySurface::new(
+            Icon::SquareTerminal,
+            "two",
+            "",
+            ActivityStatus::NeedsInput,
+        );
+
+        panel.update(cx, |panel, cx| {
+            panel.set_activity(vec![idle.clone()], cx);
+            assert!(panel.activity_badge().is_none(), "idle rows raise no badge");
+            panel.set_activity(vec![idle, waiting], cx);
+            assert!(
+                panel.activity_badge().is_some(),
+                "a waiting agent raises a badge"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_changes_entity_is_built_only_when_the_diff_view_is_selected(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        panel.update(cx, |panel, _| {
+            assert!(panel.changes.is_none(), "nothing built up front");
+        });
+
+        cx.update(|cx| PanelView::set(PanelView::Diff, cx));
+        panel.update(cx, |panel, cx| {
+            panel.ensure_changes(cx);
+            assert!(panel.changes.is_some(), "selecting Diff builds it");
+        });
+    }
+
+    #[gpui::test]
+    fn rebinding_a_worktree_drops_the_changes_entity(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let other = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        panel.update(cx, |panel, cx| {
+            panel.ensure_changes(cx);
+            panel.bind_worktree(other.0.clone(), cx);
+            assert!(
+                panel.changes.is_none(),
+                "a stale checkout's diff must not survive"
+            );
+        });
+    }
+}
