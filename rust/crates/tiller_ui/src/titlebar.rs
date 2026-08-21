@@ -557,7 +557,7 @@ impl Render for Titlebar {
             .h(chrome.bar_height)
             .flex()
             .items_center()
-            .bg(bar.base)
+            .bg(gpui::transparent_black())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.should_move = true),

@@ -48,23 +48,14 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
 
 /// Creates the rounded surface containing a group of settings rows.
 ///
-/// **Container-level decision**: COSMIC's own container doc comment names
-/// the mapping directly — `secondary` is "the layer nested in `primary` —
-/// cards, popovers, menus" — so every card this function draws is flat-
-/// mapped to `theme.cosmic.containers.secondary`, matching `titlebar.rs`'s
-/// choice of `primary` for the chrome one level up. This is deliberately
-/// wrong for a card nested inside another card (it would need a fourth,
-/// nonexistent layer): `card()` takes `Theme` by value with no way to know
-/// its own nesting depth, and threading a container-level parameter through
-/// its ~80 call sites in files this piece cannot touch was not affordable —
-/// a known, disclosed limit rather than a silent one.
+/// Cards remain opaque above their enclosing Settings panel by using the
+/// semantic raised-surface token.
 pub fn card(theme: Theme) -> Div {
-    let secondary = theme.cosmic.containers.secondary;
     div()
         .w_full()
         .rounded(px(theme.cosmic.radii.radius_s[0]))
         .overflow_hidden()
-        .bg(secondary.base)
+        .bg(theme.raised)
 }
 
 /// Creates one labelled row. `description` adds the secondary line used by
@@ -556,69 +547,44 @@ pub fn color_picker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, Render, TestAppContext, VisualTestContext};
-    use tiller_theme::ThemeMode;
+    use gpui::Styled;
 
-    /// A minimal window root that draws exactly one production widget —
-    /// `card()` — with a probe child so the drawn card can be located.
-    struct CardHarness;
-
-    impl Render for CardHarness {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let theme = *Theme::get(cx);
-            card(theme).child(
-                div()
-                    .id("card-harness-probe")
-                    .debug_selector(|| "card-harness-probe".to_string())
-                    .size_full(),
-            )
-        }
-    }
-
-    /// UI-tier evidence for COSMIC-02 piece 1: `card()` — a real,
-    /// production widget with ~17 call sites in `settings.rs` alone — draws
-    /// its corner radius and fill from the installed `Theme::cosmic`, not a
-    /// hardcoded value or the retired `theme.radii.user_pill`. Installing
-    /// `Theme` explicitly before `CardHarness` exists (rather than letting
-    /// any lazy bootstrap run) means this only passes if `card()` truly
-    /// reads back the already-installed global.
-    #[gpui::test]
-    async fn card_draws_the_cosmic_secondary_container_in_dark_mode(cx: &mut TestAppContext) {
-        cx.update(|cx| Theme::install(ThemeMode::Dark, cx));
-        let window = cx.add_window(|_window, _cx| CardHarness);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let theme = cx.update(|_, cx| *Theme::get(cx));
+    /// `card()` exposes its final style refinement directly. Inspecting that
+    /// stored background proves the last `.bg(...)` wins, including a future
+    /// override after the raised fill has been applied.
+    #[test]
+    fn card_uses_the_raised_surface_in_dark_mode() {
+        let theme = Theme::dark();
         assert!(theme.cosmic.is_dark);
         assert_eq!(
             theme.cosmic.radii.radius_s[0], 8.0,
             "card()'s radius token must still be the measured COSMIC radius_s step"
         );
-
-        cx.debug_bounds("card-harness-probe")
-            .expect("card() drew its child under the installed dark cosmic theme");
+        let mut card = card(theme);
+        assert_eq!(
+            Styled::style(&mut card).background,
+            Some(theme.raised.into()),
+            "card()'s final dark background must be the raised surface"
+        );
     }
 
     /// The light half of the same proof — a dark-only pass would leave half
     /// the design system unverified.
-    #[gpui::test]
-    async fn card_draws_the_cosmic_secondary_container_in_light_mode(cx: &mut TestAppContext) {
-        cx.update(|cx| Theme::install(ThemeMode::Light, cx));
-        let window = cx.add_window(|_window, _cx| CardHarness);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let theme = cx.update(|_, cx| *Theme::get(cx));
+    #[test]
+    fn card_uses_the_raised_surface_in_light_mode() {
+        let theme = Theme::light();
         assert!(!theme.cosmic.is_dark);
         assert_ne!(
-            theme.cosmic.containers.secondary.base,
-            Theme::dark().cosmic.containers.secondary.base,
-            "light and dark secondary containers must not collapse to the same fill"
+            theme.raised,
+            Theme::dark().raised,
+            "light and dark raised surfaces must not collapse to the same fill"
         );
-
-        cx.debug_bounds("card-harness-probe")
-            .expect("card() drew its child under the installed light cosmic theme");
+        let mut card = card(theme);
+        assert_eq!(
+            Styled::style(&mut card).background,
+            Some(theme.raised.into()),
+            "card()'s final light background must be the raised surface"
+        );
     }
 
     /// `row_view` used to hardcode every literal despite taking `_theme`;

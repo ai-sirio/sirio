@@ -11441,6 +11441,8 @@ impl Render for TillerWorkspace {
         // Fetched fresh every frame from the global, so a change of appearance
         // is picked up without the workspace holding a stale copy.
         let theme = *Theme::get(cx);
+        let material = shell_chrome::current_platform_material(self.translucency_enabled);
+        let frame_fill = material.frame_fill(&theme);
 
         // `Chat`'s streaming/completed state changes on its own schedule (an
         // ACP event arriving), not through any of this workspace's own
@@ -11455,22 +11457,52 @@ impl Render for TillerWorkspace {
         self.hide_offscreen_browsers(self.show_settings, cx);
 
         if self.show_settings {
+            let settings_focus_visible = shell_chrome::focus_is_keyboard_visible(
+                &self.settings_panel_focus,
+                window,
+                cx,
+            );
             return div()
+                .id("shell-frame")
+                .debug_selector(|| "shell-frame".into())
                 .relative()
                 .flex()
                 .flex_col()
                 .size_full()
-                .bg(theme.canvas)
+                .bg(frame_fill)
                 .track_focus(&self.root_focus)
                 .capture_key_down(cx.listener(Self::handle_root_key_down))
                 .on_action(cx.listener(Self::handle_close_settings_surface))
                 .child(
                     div()
-                        .h(px(TITLE_BAR_HEIGHT))
+                        .h(theme.browser_chrome.bar_height)
                         .w_full()
                         .child(self.titlebar.clone()),
                 )
-                .child(div().flex_1().w_full().child(self.settings.clone()))
+                .child(
+                    div()
+                        .id("shell-settings-work-area")
+                        .debug_selector(|| "shell-settings-work-area".into())
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .p(theme.spacing.shell_outer_inset)
+                        .child(
+                            shell_chrome::panel(
+                                "shell-settings-panel",
+                                &self.settings_panel_focus,
+                                settings_focus_visible,
+                                &theme,
+                            )
+                            .child(self.settings.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(STATUS_BAR_HEIGHT))
+                        .w_full()
+                        .child(self.status_bar.clone()),
+                )
                 .when(self.palette_open, |this| {
                     this.child(self.render_command_palette(theme, cx.entity()))
                 });
@@ -11490,11 +11522,13 @@ impl Render for TillerWorkspace {
         }
 
         div()
+            .id("shell-frame")
+            .debug_selector(|| "shell-frame".into())
             .relative()
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.canvas)
+            .bg(frame_fill)
             .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::handle_root_key_down))
             .on_action(cx.listener(Self::handle_new_terminal_tab))
@@ -13480,12 +13514,19 @@ mod tests {
             })
         });
         let pending_for_settings_change = pending_actions.clone();
+        let pending_for_settings_back = pending_actions.clone();
         let settings = cx.new(|cx| {
-            Settings::new(cx).on_change(move |snapshot| {
-                if let Ok(mut actions) = pending_for_settings_change.lock() {
-                    actions.push(WorkspaceAction::SetTranslucency(snapshot.translucency));
-                }
-            })
+            Settings::new(cx)
+                .on_change(move |snapshot| {
+                    if let Ok(mut actions) = pending_for_settings_change.lock() {
+                        actions.push(WorkspaceAction::SetTranslucency(snapshot.translucency));
+                    }
+                })
+                .on_back(move || {
+                    if let Ok(mut actions) = pending_for_settings_back.lock() {
+                        actions.push(WorkspaceAction::CloseSettings);
+                    }
+                })
         });
         let right_panel = cx.new(|_| RightPanel::new(working_directory.clone()));
         TillerWorkspace::new(
@@ -17065,6 +17106,88 @@ mod tests {
         assert!(
             cx.debug_bounds("settings-category-General").is_some(),
             "Linux ctrl-, must open the settings surface"
+        );
+    }
+
+    #[gpui::test]
+    async fn settings_uses_one_shell_panel_and_keeps_both_frame_bars(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.open_settings(None, cx)
+        });
+        cx.run_until_parked();
+
+        let frame = cx.debug_bounds("shell-frame").expect("shell frame");
+        let titlebar = cx.debug_bounds("tiller-titlebar").expect("titlebar");
+        let panel = cx
+            .debug_bounds("shell-settings-panel")
+            .expect("settings shell panel");
+        let status_bar = cx
+            .debug_bounds("tiller-status-bar")
+            .expect("status bar");
+        assert!(
+            frame.left() <= panel.left()
+                && panel.right() <= frame.right()
+                && frame.top() <= panel.top()
+                && panel.bottom() <= frame.bottom(),
+            "the settings panel remains contained by the shell frame"
+        );
+        assert!(
+            titlebar.bottom() <= panel.top()
+                && panel.top() < panel.bottom()
+                && panel.bottom() <= status_bar.top(),
+            "Settings must keep the frame order: titlebar={titlebar:?}, panel={panel:?}, \
+             status_bar={status_bar:?}"
+        );
+        assert!(cx.debug_bounds("shell-left-panel").is_none());
+        assert!(cx.debug_bounds("shell-center-panel").is_none());
+        assert!(cx.debug_bounds("shell-right-panel").is_none());
+    }
+
+    #[gpui::test]
+    async fn clicking_settings_back_closes_the_shell_panel_and_restores_sidebar_focus(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| workspace.open_settings(None, cx));
+        cx.run_until_parked();
+        let back = cx
+            .debug_bounds("settings-back")
+            .expect("Settings renders a Back control");
+        cx.simulate_click(back.center(), Modifiers::none());
+        cx.background_executor.advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("shell-settings-panel").is_none(),
+            "clicking the drawn Back control closes Settings"
+        );
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let sidebar_focus = palette_test_sidebar_focus(&workspace, &cx);
+        assert!(
+            cx.update(|window, _| sidebar_focus.is_focused(window)),
+            "Back returns focus to the sidebar in the restored main frame"
         );
     }
 

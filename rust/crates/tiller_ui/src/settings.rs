@@ -2122,6 +2122,7 @@ impl Settings {
             .child(
                 div()
                     .id("settings-back")
+                    .debug_selector(|| "settings-back".into())
                     .h(px(24.0))
                     .flex()
                     .items_center()
