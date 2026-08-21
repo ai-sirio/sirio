@@ -107,6 +107,43 @@ fn repo_with_a_merge() -> TempDir {
     dir
 }
 
+fn repo_with_a_rename() -> TempDir {
+    let dir = TempDir::new();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "t@example.com"]);
+    git(dir.path(), &["config", "user.name", "Tester"]);
+    std::fs::write(dir.path().join("old.txt"), "content").expect("write");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "initial"]);
+    std::fs::rename(dir.path().join("old.txt"), dir.path().join("new.txt")).expect("rename");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "rename"]);
+    dir
+}
+
+fn repo_with_a_utf8_path() -> TempDir {
+    let dir = TempDir::new();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "t@example.com"]);
+    git(dir.path(), &["config", "user.name", "Tester"]);
+    std::fs::write(dir.path().join("café.txt"), "content").expect("write");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "utf8 path"]);
+    dir
+}
+
+fn repo_with_a_glob_path() -> TempDir {
+    let dir = TempDir::new();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "t@example.com"]);
+    git(dir.path(), &["config", "user.name", "Tester"]);
+    std::fs::write(dir.path().join("star*.txt"), "literal").expect("write");
+    std::fs::write(dir.path().join("star-match.txt"), "wildcard").expect("write");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "glob path"]);
+    dir
+}
+
 #[test]
 fn reads_commits_newest_first_with_parents() {
     let dir = repo_with_a_merge();
@@ -145,6 +182,68 @@ fn a_directory_that_is_not_a_repository_is_an_error() {
     let dir = TempDir::new();
 
     assert!(GitLog::commits(dir.path(), 0, 10).is_err());
+}
+
+#[test]
+fn commit_files_returns_the_current_path_for_a_rename() {
+    let dir = repo_with_a_rename();
+    let sha = head_sha(dir.path(), "HEAD");
+
+    let files = tiller_git::commit_files(dir.path(), &sha).expect("files");
+
+    assert_eq!(files, vec![('R', PathBuf::from("new.txt"))]);
+}
+
+#[test]
+fn commit_files_and_diff_support_merge_commits() {
+    let dir = repo_with_a_merge();
+    let sha = head_sha(dir.path(), "HEAD");
+
+    let files = tiller_git::commit_files(dir.path(), &sha).expect("files");
+    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, Path::new("b.txt"))
+        .expect("diff");
+
+    assert!(files.iter().any(|(status, path)| {
+        *status == 'A' && path == Path::new("b.txt")
+    }));
+    assert!(!diff.hunks.is_empty());
+}
+
+#[test]
+fn commit_files_and_diff_preserve_utf8_paths() {
+    let dir = repo_with_a_utf8_path();
+    let sha = head_sha(dir.path(), "HEAD");
+    let path = Path::new("café.txt");
+
+    let files = tiller_git::commit_files(dir.path(), &sha).expect("files");
+    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, path).expect("diff");
+
+    assert_eq!(files, vec![('A', path.to_path_buf())]);
+    assert!(!diff.hunks.is_empty());
+}
+
+#[test]
+fn commit_diff_entry_treats_glob_characters_as_literal() {
+    let dir = repo_with_a_glob_path();
+    let sha = head_sha(dir.path(), "HEAD");
+    let path = Path::new("star*.txt");
+
+    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, path).expect("diff");
+
+    assert_eq!(diff.additions, 1);
+    assert_eq!(diff.hunks[0].lines[0].content, "literal");
+}
+
+#[test]
+fn commit_diff_entry_ignores_forced_git_colors() {
+    let dir = repo_with_a_utf8_path();
+    git(dir.path(), &["config", "color.ui", "always"]);
+    let sha = head_sha(dir.path(), "HEAD");
+
+    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, Path::new("café.txt"))
+        .expect("diff");
+
+    assert!(!diff.hunks.is_empty());
 }
 
 #[test]
