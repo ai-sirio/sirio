@@ -59,6 +59,7 @@ pub fn create_project(parent: &Path, name: &str) -> Result<PathBuf, ProjectCreat
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{ProjectCreationError, create_project};
 
@@ -66,14 +67,17 @@ mod tests {
 
     impl TempDir {
         fn new() -> Self {
+            // Wall-clock nanos alone are not unique: under load the clock can
+            // return the same value for back-to-back calls in this process,
+            // colliding into AlreadyExists. A process-local counter cannot.
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "tiller-project-create-test-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("clock is after epoch")
-                    .as_nanos()
+                id
             ));
+            let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir(&path).expect("create test parent");
             Self(path)
         }
