@@ -1378,9 +1378,7 @@ impl Sidebar {
             .get(project_id)
             .cloned()
             .unwrap_or_else(|| row.title.clone());
-        let display_name = (row.title != base_name)
-            .then(|| row.title.clone())
-            .unwrap_or_default();
+        let display_name = if row.title != base_name { row.title.clone() } else { Default::default() };
         // F-PRJ-17: the primary worktree's branch, for the "Following
         // primary (…)" subtitle — scanned from this project's own child
         // rows, the same `rows[project_index+1..]` traversal
@@ -1445,8 +1443,8 @@ impl Sidebar {
             return;
         }
         if action == SidebarContextAction::RemoveWorktree {
-            if let SidebarContextTarget::Worktree { path, .. } = &target {
-                if let Some(row_id) = self
+            if let SidebarContextTarget::Worktree { path, .. } = &target
+                && let Some(row_id) = self
                     .rows
                     .iter()
                     .find(|row| {
@@ -1456,7 +1454,6 @@ impl Sidebar {
                 {
                     self.request_remove_worktree_row(row_id, window, cx);
                 }
-            }
             return;
         }
         cx.emit(SidebarEvent::ContextAction { target, action });
@@ -2470,6 +2467,7 @@ impl Sidebar {
             Icon::PanelRight => "sidebar-minimalistic",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
+            Icon::FileType(_) => "file-type",
         }
     }
 
@@ -3232,13 +3230,17 @@ impl Sidebar {
         let worktree_path = path.clone();
         let is_project = kind == RowKind::Project;
         let is_worktree = kind == RowKind::Worktree;
-        let guide = matches!(kind, RowKind::Worktree | RowKind::Tab);
+        let guide = matches!(kind, RowKind::Worktree | RowKind::Tab | RowKind::NewWorktree);
         // waku's card rhythm: projects and worktrees are two-line cards
         // (13.5px title over an 11.5px context line); leaf rows are
         // single-line at the 32px action-row height.
         let is_card = path.is_some() && matches!(kind, RowKind::Project | RowKind::Worktree);
         let row_height = Self::row_height(&row);
-        let row_left_inset = ROW_LEFT_INSET + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
+        // Projects are the tree root. Every child level, including
+        // worktrees, must move right from the project row; the previous
+        // saturating subtraction made depth-one worktrees share the project's
+        // inset, hiding the project -> worktree relationship.
+        let row_left_inset = ROW_LEFT_INSET + row.depth as f32 * TAB_INDENT;
         let row_width = SIDEBAR_WIDTH - row_left_inset - ROW_RIGHT_INSET;
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
         // per distinct running agent, 3px apart, 7px clear of the title. It
@@ -3673,10 +3675,11 @@ impl Sidebar {
 
         let mut container = div().relative().w_full().h(px(row_height));
         if guide {
+            let guide_left = GUIDE_LEFT + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
             container = container.child(
                 div()
                     .absolute()
-                    .left(px(GUIDE_LEFT))
+                    .left(px(guide_left))
                     .top(px(0.0))
                     .w(px(GUIDE_WIDTH))
                     .h_full()
@@ -4125,6 +4128,126 @@ mod tests {
             .expect("git");
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[gpui::test]
+    async fn multi_project_worktree_fixture_preserves_project_root_hierarchy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let projects = vec![
+            SidebarProject {
+                id: "first".to_string(),
+                name: "First Project".to_string(),
+                is_git: true,
+                root_path: PathBuf::from("/tmp/first"),
+                worktrees: vec![
+                    SidebarWorktree {
+                        branch: "main".to_string(),
+                        path: PathBuf::from("/tmp/first-main"),
+                        is_primary: true,
+                        comment: None,
+                    },
+                    SidebarWorktree {
+                        branch: "feature".to_string(),
+                        path: PathBuf::from("/tmp/first-feature"),
+                        is_primary: false,
+                        comment: None,
+                    },
+                ],
+            },
+            SidebarProject {
+                id: "second".to_string(),
+                name: "Second Project".to_string(),
+                is_git: true,
+                root_path: PathBuf::from("/tmp/second"),
+                worktrees: vec![SidebarWorktree {
+                    branch: "main".to_string(),
+                    path: PathBuf::from("/tmp/second-main"),
+                    is_primary: true,
+                    comment: None,
+                }],
+            },
+        ];
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(projects, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // Exercise the exact row-building boundary that feeds rendering.
+        let actual = cx.update(|window, cx| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+                .update(cx, |sidebar, _| {
+                    sidebar
+                        .visible_rows()
+                        .into_iter()
+                        .map(|row| (row.kind, row.depth, row.title))
+                        .collect::<Vec<_>>()
+                })
+        });
+        assert_eq!(
+            actual,
+            vec![
+                (RowKind::Project, 0, "First Project".to_string()),
+                (RowKind::Worktree, 1, "main".to_string()),
+                (RowKind::Worktree, 1, "feature".to_string()),
+                (RowKind::NewWorktree, 1, "New Worktree...".to_string()),
+                (RowKind::Project, 0, "Second Project".to_string()),
+                (RowKind::Worktree, 1, "main".to_string()),
+                (RowKind::NewWorktree, 1, "New Worktree...".to_string()),
+            ],
+            "row data already contains project roots and depth-one worktree children"
+        );
+    }
+
+    #[test]
+    fn child_rows_have_a_distinct_project_root_inset_and_guide_level() {
+        let project = SidebarRow {
+            id: 0,
+            kind: RowKind::Project,
+            depth: 0,
+            title: "project".to_string(),
+            selected: false,
+            expanded: true,
+            is_primary: false,
+            agent_status: None,
+            is_git: true,
+            path: Some(PathBuf::from("/tmp/project")),
+            tab_id: None,
+            tab_kind: None,
+            agent_icon: None,
+            agent_brand: None,
+            comment: None,
+            running_agents: Vec::new(),
+        };
+        let worktree = SidebarRow {
+            depth: 1,
+            kind: RowKind::Worktree,
+            id: 1,
+            title: "main".to_string(),
+            path: Some(PathBuf::from("/tmp/project-main")),
+            selected: false,
+            expanded: false,
+            is_primary: true,
+            agent_status: None,
+            is_git: true,
+            tab_id: None,
+            tab_kind: None,
+            agent_icon: None,
+            agent_brand: None,
+            comment: None,
+            running_agents: Vec::new(),
+        };
+        let inset = |row: &SidebarRow| ROW_LEFT_INSET + row.depth as f32 * TAB_INDENT;
+        let guide = |row: &SidebarRow| GUIDE_LEFT + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
+
+        assert_eq!(inset(&project), ROW_LEFT_INSET);
+        assert_eq!(inset(&worktree), ROW_LEFT_INSET + TAB_INDENT);
+        assert_eq!(guide(&worktree), GUIDE_LEFT);
+        assert_ne!(inset(&project), inset(&worktree));
     }
 
     #[test]
