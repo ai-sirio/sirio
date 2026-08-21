@@ -138,6 +138,36 @@ pub fn diff_entry(
     Ok(parse_diff(&result.stdout_string(), &entry.path))
 }
 
+/// Lists the files changed by one commit.
+pub fn commit_files(repo: &Path, sha: &str) -> Result<Vec<(char, PathBuf)>, GitError> {
+    let result = git::run_accepting(
+        &["show", "--name-status", "--format=", sha],
+        repo,
+        &[0],
+    )?;
+
+    Ok(result
+        .stdout_string()
+        .lines()
+        .filter_map(|line| {
+            let (status, path) = line.split_once('\t')?;
+            Some((status.chars().next()?, PathBuf::from(path)))
+        })
+        .collect())
+}
+
+/// Loads the unified diff for one file in one commit.
+pub fn commit_diff_entry(repo: &Path, sha: &str, path: &Path) -> Result<FileDiff, GitError> {
+    let path_arg = path.to_string_lossy().into_owned();
+    let result = git::run_accepting(
+        &["show", "--format=", "--patch", sha, "--", &path_arg],
+        repo,
+        &[0],
+    )?;
+
+    Ok(parse_diff(&result.stdout_string(), path))
+}
+
 /// Parses the text of a unified diff into hunks.
 ///
 /// Handles the full git diff preamble (`diff --git`, `index`, `--- a/`,
