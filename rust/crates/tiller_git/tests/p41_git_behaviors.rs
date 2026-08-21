@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use tiller_git::{
     DiffOrigin, DirectoryGitStatus, DirectoryStatusAggregator, GitBranches, GitClone,
@@ -70,38 +69,47 @@ fn streaming_runner_delivers_stderr_before_the_child_exits() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = TempDir::new("stream");
+    // Deterministic handshake instead of wall-clock thresholds: the child
+    // writes the first stderr line, publishes `first-seen`, and stays alive
+    // until the delivery callback creates `release`. The first line therefore
+    // provably arrives while the child is still running -- the property this
+    // test guards -- regardless of machine load or scheduling latency.
+    let first_seen = scratch.path().join("first-seen.marker");
+    let release = scratch.path().join("release.marker");
     let fake_git = scratch.path().join("git");
     std::fs::write(
         &fake_git,
-        "#!/bin/sh\nprintf 'first\\r' >&2\nsleep 0.30\nprintf 'second\\n' >&2\n",
+        format!(
+            "#!/bin/sh\nprintf 'first\\r' >&2\ntouch '{}'\nfor i in $(seq 1 200); do [ -f '{}' ] && break; sleep 0.05; done\nprintf 'second\\n' >&2\n",
+            first_seen.display(),
+            release.display()
+        ),
     )
     .expect("write fake git");
     std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
         .expect("make fake git executable");
 
-    let started = Instant::now();
     let arrival = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&arrival);
+    let release_from_callback = release.clone();
     let result =
         GitRunner::run_streaming_with_binary(&fake_git, &[], scratch.path(), move |line| {
-            seen.lock().unwrap().push((line, started.elapsed()));
+            if line == "first" {
+                std::fs::write(&release_from_callback, b"go").expect("release child");
+            }
+            seen.lock().unwrap().push(line);
         })
         .expect("streaming command succeeds");
 
+    assert!(first_seen.exists(), "child published first-seen before exit");
     let lines = arrival.lock().unwrap();
     assert_eq!(
         lines
             .iter()
-            .map(|(line, _)| line.as_str())
+            .map(|line| line.as_str())
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
-    assert!(
-        lines[0].1 < Duration::from_millis(250),
-        "first line arrived after exit: {:?}",
-        lines[0].1
-    );
-    assert!(started.elapsed() >= Duration::from_millis(250));
     assert_eq!(result.stderr, "first\rsecond\n");
 }
 
