@@ -1236,13 +1236,12 @@ fn files_action_button(
 /// exact-name/extension/directory-name tables and their fallback rule.
 ///
 /// The *rendering* of each logical key is necessarily narrower than the
-/// original's: `rust/assets/icons/comet` (P76's replacement for the old
-/// Phosphor set) ships about fifty general-purpose UI glyphs, not a
+/// original's: the pinned `rust/assets/icons/zed/` catalog ships a focused
+/// set of general-purpose UI glyphs, not a
 /// per-language icon font, so most [`FileIconKey`] variants collapse onto
 /// the generic [`Icon::File`] / [`Icon::FolderFill`] marks below rather than
-/// getting an invented shape that doesn't exist in the set — mixing a
-/// invented shape in among comet's glyphs is exactly what P76 ruled out.
-/// Only the handful of keys with an unambiguous comet shape (a terminal for
+/// getting an invented shape that doesn't exist in the pinned catalog.
+/// Only the handful of keys with an unambiguous Zed shape (a terminal for
 /// shell scripts, a branch for git files, a gear for env/settings, an
 /// archive box, a key for lock files) get their own icon.
 fn file_glyph(path: &Path, is_dir: bool) -> Icon {

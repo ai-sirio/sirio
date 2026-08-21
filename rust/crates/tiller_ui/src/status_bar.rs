@@ -471,7 +471,7 @@ impl Render for StatusBar {
             ));
         }
         if self.prefs.ollama_visible {
-            // F-SET-13: no Ollama brand mark exists in the comet icon set —
+            // F-SET-13: no Ollama brand mark exists in the pinned Zed catalog —
             // the globe is a declared stand-in for a cloud service, not a
             // silent leftover.
             left = left.child(provider_segment(
