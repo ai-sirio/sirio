@@ -444,22 +444,22 @@ fn chat_session_expires_a_permission_left_open_by_a_dead_transport() {
     .expect("launch death chat session");
     session.send("which color?").expect("send the prompt");
 
-    // The fixture dies while the question is open: the session must expire
-    // the pending permission and surface the transport error, never leave
-    // the card answerable.
-    let snapshot = wait_for(&session, |snapshot| {
-        snapshot.transcript.turns.iter().any(|turn| {
-            turn.entries.iter().any(|entry| {
-                matches!(
-                    entry,
-                    tiller_persistence::ChatEntry::Permission {
-                        outcome: tiller_persistence::ChatPermissionOutcome::Expired,
-                        ..
-                    }
-                )
-            })
+    // The fixture dies while the question is open. Wait for the terminal
+    // transport state, then inspect the same settled snapshot: this avoids
+    // depending on whether the short-lived Pending callback is observable
+    // before run_connection processes EOF under workspace load.
+    let snapshot = wait_for(&session, |snapshot| snapshot.status == ChatStatus::Error);
+    assert!(snapshot.transcript.turns.iter().any(|turn| {
+        turn.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                tiller_persistence::ChatEntry::Permission {
+                    outcome: tiller_persistence::ChatPermissionOutcome::Expired,
+                    ..
+                }
+            )
         })
-    });
+    }));
     assert!(snapshot.transcript.turns.iter().any(|turn| {
         turn.entries
             .iter()

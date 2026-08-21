@@ -15,11 +15,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tiller_git::{
-    DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, GitRunner, diff_entry,
-    directory_statuses, list_branches, run_streaming, status,
+    diff_entry, directory_statuses, list_branches, run_streaming, status, DiffOrigin,
+    DirectoryGitStatus, GitBranches, GitRunner, DEFAULT_CONTEXT_LINES,
 };
 
 struct TempDir(PathBuf);
@@ -124,15 +124,23 @@ fn streaming_lines_arrive_incrementally_before_completion() {
     // not at its `fork`. It cost one red workspace run at load 24. Passing
     // the body as an argument removes the precondition instead of retrying
     // around it: no file is written, so no writer fd can be inherited.
-    let emitter = "echo alpha >&2\nsleep 1.2\necho beta >&2\nprintf 'gamma\\rdelta\\n' >&2\n";
+    let sentinel = dir.path().join("alpha-seen");
+    let emitter = format!(
+        "echo alpha >&2; while [ ! -f '{}' ]; do :; done; echo beta >&2; printf 'gamma\\rdelta\\n' >&2",
+        sentinel.display()
+    );
 
     let mut arrivals: Vec<(String, Instant)> = Vec::new();
     let result = GitRunner::run_streaming_with_binary(
         Path::new("/bin/sh"),
-        &["-c", emitter],
+        &["-c", &emitter],
         dir.path(),
         |line| {
+            let first = arrivals.is_empty();
             arrivals.push((line, Instant::now()));
+            if first {
+                std::fs::write(&sentinel, "seen").expect("release emitter sentinel");
+            }
         },
     )
     .expect("the emitter runs");
@@ -146,11 +154,9 @@ fn streaming_lines_arrive_incrementally_before_completion() {
         ["alpha", "beta", "gamma", "delta"],
         "lines split on LF and CR alike, in emission order"
     );
-    let lead = finished.duration_since(arrivals[0].1);
     assert!(
-        lead >= Duration::from_millis(600),
-        "the first line must arrive while the command still runs; it arrived \
-         only {lead:?} before completion"
+        finished >= arrivals[0].1,
+        "first line precedes command completion"
     );
     assert_eq!(result.exit_code, 0);
     assert!(result.stderr.contains("alpha") && result.stderr.contains("delta"));

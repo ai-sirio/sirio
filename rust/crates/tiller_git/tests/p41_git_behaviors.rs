@@ -84,7 +84,7 @@ fn streaming_runner_delivers_stderr_before_the_child_exits() {
     let seen = Arc::clone(&arrival);
     let result =
         GitRunner::run_streaming_with_binary(&fake_git, &[], scratch.path(), move |line| {
-            seen.lock().unwrap().push((line, started.elapsed()))
+            seen.lock().unwrap().push((line, started.elapsed()));
         })
         .expect("streaming command succeeds");
 
