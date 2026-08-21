@@ -95,6 +95,14 @@ pub enum Icon {
     /// (`zed/lock.svg`). Added for F-CORE-FILE-08 (`FileIconKey::Lock`);
     /// no Phosphor predecessor.
     Lock,
+    /// The Files view in the right panel's rail (`zed/file_tree.svg`).
+    FileTree,
+    /// The Activity view in the right panel's rail (`zed/thread.svg`).
+    Thread,
+    /// The Diff view in the right panel's rail (`zed/diff.svg`).
+    Diff,
+    /// The History view in the right panel's rail (`zed/git_graph.svg`).
+    GitGraph,
     /// A full-colour Material icon for a file type.
     FileType(&'static str),
 }
@@ -151,6 +159,10 @@ impl Icon {
             Icon::PanelRight => "icons/zed/threads_sidebar_right_open.svg",
             Icon::Archive => "icons/zed/archive.svg",
             Icon::Lock => "icons/zed/lock.svg",
+            Icon::FileTree => "icons/zed/file_tree.svg",
+            Icon::Thread => "icons/zed/thread.svg",
+            Icon::Diff => "icons/zed/diff.svg",
+            Icon::GitGraph => "icons/zed/git_graph.svg",
             Icon::FileType(name) => match name {
                 "audio" => "icons/file-types/audio.svg", "c" => "icons/file-types/c.svg",
                 "console" => "icons/file-types/console.svg", "cpp" => "icons/file-types/cpp.svg",
@@ -207,6 +219,10 @@ impl Icon {
             }
             Icon::Archive => include_bytes!("../../../assets/icons/zed/archive.svg"),
             Icon::Lock => include_bytes!("../../../assets/icons/zed/lock.svg"),
+            Icon::FileTree => include_bytes!("../../../assets/icons/zed/file_tree.svg"),
+            Icon::Thread => include_bytes!("../../../assets/icons/zed/thread.svg"),
+            Icon::Diff => include_bytes!("../../../assets/icons/zed/diff.svg"),
+            Icon::GitGraph => include_bytes!("../../../assets/icons/zed/git_graph.svg"),
             Icon::FileType(name) => match name {
                 "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"), "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
                 "console" => include_bytes!("../../../assets/icons/file-types/console.svg"), "cpp" => include_bytes!("../../../assets/icons/file-types/cpp.svg"),
@@ -648,5 +664,17 @@ mod tests {
             "zed's 16x16 home format"
         );
         assert!((view_box_size(Icon::Pi) - 800.0).abs() < 1.0, "pi viewBox");
+    }
+
+    #[test]
+    fn the_panel_rail_icons_resolve_to_embedded_zed_assets() {
+        for icon in [Icon::FileTree, Icon::Thread, Icon::Diff, Icon::GitGraph] {
+            assert!(icon.path().starts_with("icons/zed/"), "{icon:?} must come from the Zed catalog");
+            assert!(!icon.svg().is_empty(), "{icon:?} must embed its bytes");
+            assert!(
+                icon.svg().starts_with(b"<svg"),
+                "{icon:?} must embed an SVG document"
+            );
+        }
     }
 }

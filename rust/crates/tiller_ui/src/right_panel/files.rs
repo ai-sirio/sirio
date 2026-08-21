@@ -1,12 +1,10 @@
-//! The checkout right panel: filesystem browsing, git changes, and activity.
-//!
-//! The data model deliberately stays local to this panel. Git operations are
-//! delegated to `tiller_git`; the host application can later replace the
-//! refresh callbacks with its project store without changing the row layout.
+//! The Files surface of the right panel: the filesystem tree walk, its
+//! git markers, and the file-row interactions (open, diff, context menu,
+//! drag).
 
+use super::*;
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, KeyDownEvent,
-    MouseButton, Pixels, Point, Render, Rgba, Task, Window, anchored, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, anchored,
     uniform_list,
 };
 use std::collections::HashMap;
@@ -15,83 +13,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tiller_git::{DirectoryGitStatus, directory_statuses, status};
 use tiller_project::FileIconKey;
-use tiller_theme::Theme;
 
 use crate::editor::fs_actions;
-use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
-const PANEL_WIDTH: f32 = 405.0;
-const HEADER_HEIGHT: f32 = 40.0;
 /// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
 const TOOLBAR_HEIGHT: f32 = 34.0;
 /// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 30.0;
-const ACTIVITY_HEADER_HEIGHT: f32 = 27.0;
-/// Two-line activity row: 5 + 18 + 2 + 15 + 5, waku's card math.
-const ACTIVITY_ROW_HEIGHT: f32 = 48.0;
-/// Status shown at the trailing edge of an activity row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActivityStatus {
-    /// The surface is waiting for input.
-    Idle,
-    /// The surface is currently running.
-    Running,
-    /// The agent is blocked on a user decision or answer.
-    NeedsInput,
-    /// The surface completed successfully.
-    Done,
-    /// The surface reported an error.
-    Error,
-}
-
-/// User actions originating from an activity row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RightPanelEvent {
-    /// Select the open tab at this activity index.
-    SelectActivity(usize),
-    /// Close the open tab at this activity index.
-    CloseActivity(usize),
-    /// Open a file from the Files tree in the host application's tab strip.
-    OpenFile(PathBuf),
-}
-
-/// Actions that need a host-owned surface beyond the existing file-open door.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RightPanelActionEvent {
-    /// Open a modified file in the host application's Diff tab.
-    OpenDiff(PathBuf),
-}
-
-/// A surface shown in the Activity section.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ActivitySurface {
-    /// The typed surface icon from the shared embedded icon set.
-    pub icon: Icon,
-    /// Surface title.
-    pub title: String,
-    /// Project/worktree subtitle.
-    pub location: String,
-    /// Current surface status.
-    pub status: ActivityStatus,
-}
-
-impl ActivitySurface {
-    /// Build one activity row.
-    #[must_use]
-    pub fn new(
-        icon: Icon,
-        title: impl Into<String>,
-        location: impl Into<String>,
-        status: ActivityStatus,
-    ) -> Self {
-        Self {
-            icon,
-            title: title.into(),
-            location: location.into(),
-            status,
-        }
-    }
-}
 
 /// The git state the Files tree paints, for both halves of the tree.
 ///
@@ -115,7 +43,7 @@ impl ActivitySurface {
 /// `StatusEntry::original_path` entirely, so the source directories of a
 /// `git mv` were marked as nothing at all.
 #[derive(Clone, Debug, Default)]
-struct GitMarkers {
+pub(super) struct GitMarkers {
     files: HashMap<PathBuf, DirectoryGitStatus>,
     directories: HashMap<PathBuf, DirectoryGitStatus>,
 }
@@ -133,7 +61,7 @@ impl GitMarkers {
 }
 
 #[derive(Clone, Debug)]
-struct FileNode {
+pub(super) struct FileNode {
     path: PathBuf,
     name: String,
     is_dir: bool,
@@ -156,143 +84,13 @@ struct FileRow {
 }
 
 #[derive(Clone, Debug)]
-struct FileContextMenu {
+pub(super) struct FileContextMenu {
     path: PathBuf,
     position: Point<Pixels>,
 }
 
-/// The GPUI right panel: the filesystem tree and the activity section.
-pub struct RightPanel {
-    repo_root: PathBuf,
-    /// A panel is constructed for a selected checkout. Closing that checkout
-    /// must explicitly revoke the binding; retaining its path would make the
-    /// Files/Changes surface look current while serving stale data.
-    worktree_selected: bool,
-    file_tree: Vec<FileNode>,
-    git_markers: GitMarkers,
-    activity_expanded: bool,
-    activity: Vec<ActivitySurface>,
-    /// The in-flight folder-expansion walk, if any. Replaced (never
-    /// queued) on every new expansion request.
-    walk_task: Option<Task<()>>,
-    /// Whether the top-level tree refresh is currently in flight. This is
-    /// the single-flight guard. It is deliberately *not* the loading state
-    /// rendered to users — see `settled`.
-    refresh_started: bool,
-    /// Whether any top-level walk has ever finished, successfully or not.
-    ///
-    /// This, and not `refresh_started`, is what "Loading files…" is about.
-    /// `ensure_tree_refresh` re-walks every second, so gating the
-    /// placeholder on "a walk is in flight" put a full-panel placeholder
-    /// over a perfectly good tree once a second — on this 4-core box the
-    /// tree was visible roughly one frame in three, for minutes. Gating it
-    /// on "no walk has ever finished" also covers the two cases an
-    /// `is_empty()` test gets wrong: a directory that is genuinely empty
-    /// (which would say "Loading files…" forever) and a root that failed to
-    /// read (whose error panel would be replaced by the placeholder on every
-    /// tick, hiding the Retry the user is trying to click).
-    settled: bool,
-    refresh_error: Option<String>,
-    selected_path: Option<PathBuf>,
-    file_focus: Option<FocusHandle>,
-    /// Bumped on every walk request (and on collapse): a walk that
-    /// completes after a newer one was requested must not apply its
-    /// result late.
-    walk_generation: u64,
-    /// One polling loop per panel, armed on first render.
-    refresh_loop_started: bool,
-    file_context_menu: Option<FileContextMenu>,
-}
 
 impl RightPanel {
-    /// Creates the panel for one checkout.
-    pub fn new(repo_root: impl Into<PathBuf>) -> Self {
-        Self {
-            repo_root: repo_root.into(),
-            worktree_selected: true,
-            file_tree: Vec::new(),
-            git_markers: GitMarkers::default(),
-            activity_expanded: false,
-            activity: Vec::new(),
-            walk_task: None,
-            refresh_started: false,
-            settled: false,
-            refresh_error: None,
-            selected_path: None,
-            file_focus: None,
-            walk_generation: 0,
-            refresh_loop_started: false,
-            file_context_menu: None,
-        }
-    }
-
-    /// Creates the panel with an initial activity section.
-    pub fn with_activity(repo_root: impl Into<PathBuf>, activity: Vec<ActivitySurface>) -> Self {
-        Self {
-            activity,
-            ..Self::new(repo_root)
-        }
-    }
-
-    /// Replace the host-provided activity rows. The host (`main.rs`) calls
-    /// this every render to stay live with `Chat`'s own state; it no-ops on
-    /// an unchanged value to avoid notifying every render.
-    pub fn set_activity(&mut self, activity: Vec<ActivitySurface>, cx: &mut Context<Self>) {
-        if self.activity == activity {
-            return;
-        }
-        self.activity = activity;
-        cx.notify();
-    }
-
-    /// Remove the panel's checkout binding after its selected worktree
-    /// closes. This clears both already drawn rows and any in-flight result's
-    /// visible destination; a later worktree selection replaces the panel
-    /// with a new bound instance.
-    pub fn clear_worktree(&mut self, cx: &mut Context<Self>) {
-        if !self.worktree_selected {
-            return;
-        }
-        self.worktree_selected = false;
-        self.file_tree.clear();
-        self.git_markers = GitMarkers::default();
-        self.selected_path = None;
-        self.refresh_error = None;
-        self.file_context_menu = None;
-        cx.notify();
-    }
-
-    /// The mirror of [`Self::clear_worktree`]: (re-)bind the panel to a
-    /// genuinely selected checkout. F-CHG-02: `select_worktree` already
-    /// covers a real, explicit worktree switch by throwing this whole entity
-    /// away and building a fresh one via [`Self::with_activity`] -- but a
-    /// worktree can also become the *current* one passively, e.g.
-    /// `sync_control_state` re-matching `working_directory` against a
-    /// project the user just added over the control socket, with no dedicated
-    /// switch call in between. `TillerWorkspace::sync_activity` -- already
-    /// the app's one continuous reconciliation point, run after essentially
-    /// every state-changing action -- calls this every time so the panel
-    /// cannot drift from `has_current_worktree()`'s answer no matter which
-    /// path changed it. Idempotent when neither the selection state nor the
-    /// bound path actually changed, so a tree the user has been expanding is
-    /// left alone on the other 44-and-counting call sites that were already
-    /// unrelated to worktree selection.
-    pub fn bind_worktree(&mut self, repo_root: impl Into<PathBuf>, cx: &mut Context<Self>) {
-        let repo_root = repo_root.into();
-        if self.worktree_selected && self.repo_root == repo_root {
-            return;
-        }
-        self.worktree_selected = true;
-        self.repo_root = repo_root;
-        self.file_tree.clear();
-        self.git_markers = GitMarkers::default();
-        self.selected_path = None;
-        self.refresh_error = None;
-        self.file_context_menu = None;
-        self.settled = false;
-        self.walk_generation += 1;
-        cx.notify();
-    }
 
     /// Refreshes the changed-paths set and the directory tree off the
     /// render thread. Single-flight on the walk task.
@@ -363,7 +161,7 @@ impl RightPanel {
 
     /// Arms the periodic tree refresh: once immediately, then on a fixed
     /// interval so external edits show up in the tree.
-    fn ensure_tree_refresh(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn ensure_tree_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_loop_started {
             return;
         }
@@ -469,7 +267,7 @@ impl RightPanel {
         }
     }
 
-    fn render_file_context_menu(
+    pub(super) fn render_file_context_menu(
         menu: FileContextMenu,
         entity: gpui::Entity<Self>,
         theme: Theme,
@@ -792,40 +590,12 @@ impl RightPanel {
         }
     }
 
-    fn render_header(&self, theme: Theme) -> impl IntoElement {
-        div()
-            .h(px(HEADER_HEIGHT))
-            .w_full()
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .border_b_1()
-            .border_color(theme.hairline)
-            .child(
-                div()
-                    .flex_1()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(11.5))
-                    .text_color(theme.title)
-                    .child("Files"),
-            )
-            .child(
-                div()
-                    .id("close-right-panel")
-                    .w(px(20.0))
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(16.0))
-                    .text_color(theme.subtitle)
-                    .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
-                    .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
-            )
-    }
+}
 
-    fn render_files(
+
+impl RightPanel {
+
+    pub(super) fn render_files(
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
@@ -948,261 +718,9 @@ impl RightPanel {
             .child(body)
             .into_any_element()
     }
+
 }
 
-impl RightPanel {
-    fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        self.activity_expanded = !self.activity_expanded;
-        cx.notify();
-    }
-
-    fn render_activity(&self, entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
-        let toggle_entity = entity.clone();
-        let running_count = self
-            .activity
-            .iter()
-            .filter(|surface| surface.status == ActivityStatus::Running)
-            .count();
-        let mut section = div()
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .right_0()
-            .h(px(ACTIVITY_HEADER_HEIGHT
-                + if self.activity_expanded {
-                    // F-CHG-20: even with zero rows, the expanded section
-                    // still renders one "No activity" placeholder row, so
-                    // the height must reserve space for at least one row —
-                    // otherwise that row is squeezed into near-zero visible
-                    // height and its text renders as illegible specks.
-                    self.activity.len().max(1) as f32 * ACTIVITY_ROW_HEIGHT
-                } else {
-                    0.0
-                }))
-            .flex()
-            .flex_col()
-            .w_full()
-            .flex_none()
-            .bg(theme.background)
-            .border_t_1()
-            .border_color(theme.hairline)
-            .child(
-                div()
-                    .id("activity-header")
-                    .debug_selector(|| "activity-header".into())
-                    .h(px(ACTIVITY_HEADER_HEIGHT))
-                    .w_full()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(theme.typography.footnote)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
-                    .hover(|style| style.bg(theme.row_hover))
-                    .on_click(move |_, _, cx| {
-                        toggle_entity.update(cx, |panel, cx| panel.toggle_activity(cx));
-                    })
-                    .child(if self.activity_expanded {
-                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.title)
-                    } else {
-                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.title)
-                    })
-                    .child("Activity")
-                    // F-CHG-20: the running count. A quiet meta label beside
-                    // the header, present only while something is running,
-                    // so a live worktree is visible from the collapsed
-                    // header alone.
-                    .when(running_count > 0, |this| {
-                        this.child(
-                            div()
-                                .id("activity-running-count")
-                                .debug_selector(|| "activity-running-count".into())
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.meta)
-                                .child(format!("{running_count} running")),
-                        )
-                    }),
-            );
-        if self.activity_expanded {
-            if self.activity.is_empty() {
-                // F-CHG-20: the no-activity empty state, only visible while
-                // the section is expanded — the collapsed header stays
-                // silent instead of shouting about nothing.
-                section = section.child(
-                    div()
-                        .id("activity-empty")
-                        .debug_selector(|| "activity-empty".into())
-                        .h(px(ACTIVITY_ROW_HEIGHT))
-                        .w_full()
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.meta)
-                        .child("No activity"),
-                );
-            } else {
-                for (index, surface) in self.activity.iter().cloned().enumerate() {
-                    section = section.child(Self::render_activity_row(
-                        surface,
-                        index,
-                        entity.clone(),
-                        theme,
-                    ));
-                }
-            }
-        }
-        section
-    }
-
-    fn render_activity_row(
-        surface: ActivitySurface,
-        index: usize,
-        entity: gpui::Entity<Self>,
-        theme: Theme,
-    ) -> impl IntoElement {
-        let status = activity_status(surface.status, theme);
-        let status_name = match surface.status {
-            ActivityStatus::Idle => "idle",
-            ActivityStatus::Running => "running",
-            ActivityStatus::NeedsInput => "needs-input",
-            ActivityStatus::Done => "done",
-            ActivityStatus::Error => "error",
-        };
-        let status_id = format!("activity-status-{status_name}-{index}");
-        let select_entity = entity.clone();
-        let close_entity = entity;
-        div()
-            .id(format!("activity-{index}"))
-            .debug_selector(move || format!("activity-{index}"))
-            .h(px(ACTIVITY_ROW_HEIGHT))
-            .w_full()
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .hover(|style| style.bg(theme.row_hover))
-            .on_click(move |_, _, cx| {
-                select_entity.update(cx, |_, cx| {
-                    cx.emit(RightPanelEvent::SelectActivity(index));
-                });
-            })
-            .child(
-                div()
-                    .w(px(15.0))
-                    .text_color(theme.tab_focus_accent)
-                    .child(IconElement::new(surface.icon, IconSize::Small)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(theme.typography.headline)
-                            .text_color(theme.title)
-                            .child(surface.title),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
-                            .child(surface.location),
-                    ),
-            )
-            .child(
-                div()
-                    .id(status_id.clone())
-                    .debug_selector(move || status_id.clone())
-                    .text_size(px(11.0))
-                    .text_color(status)
-                    .child(activity_status_glyph(surface.status)),
-            )
-            .child(
-                div()
-                    .id(format!("activity-close-{index}"))
-                    .text_size(px(16.0))
-                    .text_color(theme.subtitle)
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        close_entity.update(cx, |_, cx| {
-                            cx.emit(RightPanelEvent::CloseActivity(index));
-                        });
-                    })
-                    .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
-            )
-    }
-}
-
-impl EventEmitter<RightPanelEvent> for RightPanel {}
-impl EventEmitter<RightPanelActionEvent> for RightPanel {}
-
-impl Render for RightPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *Theme::get(cx);
-        if self.worktree_selected {
-            self.ensure_tree_refresh(cx);
-        }
-        if self.worktree_selected && self.file_focus.is_none() {
-            self.file_focus = Some(cx.focus_handle().tab_stop(true));
-        }
-        let entity = cx.entity();
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .w(px(PANEL_WIDTH))
-            .h_full()
-            .overflow_hidden()
-            .bg(theme.background)
-            .child(self.render_header(theme))
-            .child(if self.worktree_selected {
-                self.render_files(entity.clone(), theme, cx)
-                    .into_any_element()
-            } else {
-                div()
-                    .id("right-panel-no-worktree")
-                    .debug_selector(|| "right-panel-no-worktree".to_owned())
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(theme.spacing.card_gap)
-                    .p(theme.spacing.card_gap)
-                    .text_size(theme.typography.headline)
-                    .text_color(theme.title)
-                    .child(
-                        IconElement::new(
-                            Icon::PanelRight,
-                            IconSize::Custom(theme.typography.large_title),
-                        )
-                        .text_color(theme.title),
-                    )
-                    .child("No worktree selected")
-                    .child(
-                        div()
-                            .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
-                            .child("Select a worktree to inspect its files and changes."),
-                    )
-                    .into_any_element()
-            })
-            .when(self.worktree_selected, |this| {
-                this.when_some(self.file_context_menu.clone(), |this, menu| {
-                    this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
-                })
-            })
-            .child(self.render_activity(entity, theme))
-    }
-}
 
 fn files_action_button(
     label: &'static str,
@@ -1429,25 +947,7 @@ fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
     crate::git_status_style::status_color(status, theme)
 }
 
-fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
-    match status {
-        ActivityStatus::Idle => theme.meta,
-        ActivityStatus::Running => theme.accent,
-        ActivityStatus::NeedsInput => theme.tab_needs_input,
-        ActivityStatus::Done => theme.tab_done,
-        ActivityStatus::Error => theme.tab_error,
-    }
-}
 
-fn activity_status_glyph(status: ActivityStatus) -> &'static str {
-    match status {
-        ActivityStatus::Idle => "○",
-        ActivityStatus::Running => "●",
-        ActivityStatus::NeedsInput => "?",
-        ActivityStatus::Done => "✓",
-        ActivityStatus::Error => "!",
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2399,240 +1899,7 @@ mod tests {
         );
     }
 
-    // ── F-EDIT-12 harness capability: payload drags ─────────────────────
-    //
-    // The inventory's drag entry needs a drop target in a *pane* — that
-    // lives in the shell (`tiller/src/main.rs`), so the product half is
-    // routed to codex12 (a file row becomes the drag source, a pane the
-    // drop target). What this crate owns is the proof that the harness can
-    // express a payload drag at all: a source element with `on_drag`, a
-    // target with `on_drop`, and the real mouse-down / move / up sequence
-    // between them. The shell's F-EDIT-12 test then uses exactly this
-    // recipe against its workspace.
 
-    /// The drag preview view GPUI requires from `on_drag`.
-    struct EmptyDragPreview;
-
-    impl Render for EmptyDragPreview {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
-    struct DragFixture {
-        dropped: Rc<RefCell<Vec<PathBuf>>>,
-    }
-
-    impl DragFixture {
-        fn new() -> Self {
-            Self {
-                dropped: Default::default(),
-            }
-        }
-    }
-
-    impl Render for DragFixture {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            let dropped = self.dropped.clone();
-            div()
-                .size_full()
-                .flex()
-                .child(
-                    div()
-                        .id("drag-source")
-                        .w(px(100.0))
-                        .h(px(100.0))
-                        .debug_selector(|| "drag-source".into())
-                        .on_drag(PathBuf::from("/repo/file.txt"), |_, _, _, cx| {
-                            cx.new(|_| EmptyDragPreview)
-                        }),
-                )
-                .child(
-                    div()
-                        .id("drag-target")
-                        .w(px(100.0))
-                        .h(px(100.0))
-                        .debug_selector(|| "drag-target".into())
-                        .on_drag_move(|_event: &gpui::DragMoveEvent<PathBuf>, _, _| {})
-                        .on_drop(move |path: &PathBuf, _, _| {
-                            dropped.borrow_mut().push(path.clone());
-                        }),
-                )
-        }
-    }
-
-    #[gpui::test]
-    async fn a_payload_drag_reaches_the_drop_target_through_real_mouse_events(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| DragFixture::new());
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let fixture = cx.update(|window, _| {
-            window
-                .root::<DragFixture>()
-                .flatten()
-                .expect("fixture root")
-        });
-
-        let source = cx
-            .debug_bounds("drag-source")
-            .expect("the drag source is in the drawn frame");
-        let target = cx
-            .debug_bounds("drag-target")
-            .expect("the drop target is in the drawn frame");
-
-        // The real gesture: press on the source, move past the 2px drag
-        // threshold (which starts the payload drag), move over the target,
-        // release. No drag convenience method exists — this is the mouse
-        // sequence GPUI itself uses, dispatched through the same window
-        // event path as production input.
-        cx.simulate_event(MouseDownEvent {
-            position: source.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        cx.simulate_event(MouseMoveEvent {
-            position: gpui::point(source.center().x + px(30.0), source.center().y),
-            pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::none(),
-        });
-        cx.simulate_event(MouseMoveEvent {
-            position: target.center(),
-            pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::none(),
-        });
-        cx.simulate_event(MouseUpEvent {
-            position: target.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-        });
-        cx.run_until_parked();
-
-        let dropped = fixture.read_with(&cx.cx, |fixture, _| fixture.dropped.borrow().clone());
-        assert_eq!(
-            dropped,
-            vec![PathBuf::from("/repo/file.txt")],
-            "the drop target receives the drag payload through the real event path"
-        );
-    }
-
-    /// F-CHG-20 (empty half): with no activity rows, the expanded section
-    /// states No activity instead of showing nothing, and no running count
-    /// is offered.
-    #[gpui::test]
-    async fn activity_section_states_no_activity_when_empty(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx
-            .add_window(|_window, _cx| RightPanel::with_activity(std::env::temp_dir(), Vec::new()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("activity-empty").is_some(),
-            "an expanded section with no rows states No activity (F-CHG-20)"
-        );
-        assert!(
-            cx.debug_bounds("activity-running-count").is_none(),
-            "nothing runs, so no running count is offered"
-        );
-    }
-
-    /// F-CHG-20 (running-count half): with a running row in the list, the
-    /// header states the count while rows render below it.
-    #[gpui::test]
-    async fn activity_section_states_the_running_count(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| {
-            RightPanel::with_activity(
-                std::env::temp_dir(),
-                vec![
-                    ActivitySurface::new(
-                        Icon::MessageSquare,
-                        "Chat",
-                        "/repo",
-                        ActivityStatus::Running,
-                    ),
-                    ActivitySurface::new(Icon::File, "Changes", "/repo", ActivityStatus::Done),
-                ],
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        // The count is visible from the collapsed header alone.
-        assert!(
-            cx.debug_bounds("activity-running-count").is_some(),
-            "the running count is stated beside the header"
-        );
-
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("activity-0").is_some() && cx.debug_bounds("activity-1").is_some(),
-            "the activity rows render under the expanded header"
-        );
-        assert!(
-            cx.debug_bounds("activity-empty").is_none(),
-            "rows exist, so the empty state is not shown"
-        );
-        assert!(
-            cx.debug_bounds("activity-running-count").is_some(),
-            "the running count stays visible with rows present"
-        );
-    }
-
-    /// F-CHG-22: NeedsInput has its own drawn status marker and is not the
-    /// same visual state as Idle.
-    #[gpui::test]
-    async fn activity_section_draws_needs_input_as_distinct_from_idle(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, _cx| {
-            RightPanel::with_activity(
-                std::env::temp_dir(),
-                vec![
-                    ActivitySurface::new(
-                        Icon::MessageSquare,
-                        "Waiting agent",
-                        "/repo",
-                        ActivityStatus::NeedsInput,
-                    ),
-                    ActivitySurface::new(Icon::File, "Idle surface", "/repo", ActivityStatus::Idle),
-                ],
-            )
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("activity-status-needs-input-0").is_some(),
-            "NeedsInput reaches a dedicated status marker in the drawn panel"
-        );
-        assert_ne!(
-            activity_status_glyph(ActivityStatus::NeedsInput),
-            activity_status_glyph(ActivityStatus::Idle),
-            "NeedsInput is not rendered with Idle's glyph"
-        );
-    }
 
     /// F-CHG-13: a modified file row exposes an Open diff action and sends
     /// the exact repo-relative path to the shell boundary.
@@ -3237,4 +2504,6 @@ mod tests {
             "Retry stays exactly where the user was about to click it"
         );
     }
+
 }
+
