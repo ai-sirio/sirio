@@ -73,6 +73,98 @@ mod panes;
 mod session;
 mod shell_chrome;
 mod tab_machinery;
+
+/// Test-only trace of GPUI's actual paint phase. The zero-layout probe is
+/// deliberately inert in production builds, but its `Element::paint` callback
+/// runs only when GPUI composes the scene, after layout and prepaint.
+#[cfg(test)]
+struct ShellPaintTrace {
+    entries: Rc<std::cell::RefCell<Vec<&'static str>>>,
+}
+
+#[cfg(test)]
+impl gpui::Global for ShellPaintTrace {}
+
+#[cfg(test)]
+struct ShellPaintProbe {
+    label: &'static str,
+    entries: Rc<std::cell::RefCell<Vec<&'static str>>>,
+}
+
+#[cfg(test)]
+impl gpui::IntoElement for ShellPaintProbe {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+#[cfg(test)]
+impl gpui::Element for ShellPaintProbe {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        (
+            window.request_layout(
+                gpui::Style {
+                    display: gpui::Display::None,
+                    ..Default::default()
+                },
+                None,
+                cx,
+            ),
+            (),
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+        self.entries.borrow_mut().push(self.label);
+    }
+}
+
+#[cfg(test)]
+fn shell_paint_probe(label: &'static str, cx: &App) -> Option<ShellPaintProbe> {
+    cx.has_global::<ShellPaintTrace>().then(|| ShellPaintProbe {
+        label,
+        entries: cx.global::<ShellPaintTrace>().entries.clone(),
+    })
+}
 mod tray;
 
 use command_palette::{
@@ -9463,7 +9555,14 @@ impl TillerWorkspace {
         left
     }
 
-    fn render_tab_context_menu(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
+    fn render_tab_context_menu(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        cx: &App,
+    ) -> impl IntoElement {
+        #[cfg(not(test))]
+        let _ = cx;
         let action_entity = entity.clone();
         let on_action = Rc::new(move |action, window: &mut Window, cx: &mut App| {
             action_entity.update(cx, |workspace, cx| {
@@ -9486,6 +9585,10 @@ impl TillerWorkspace {
                 on_action,
                 theme,
             ));
+        #[cfg(test)]
+        let menu = menu.when_some(shell_paint_probe("tab-context-menu", cx), |this, probe| {
+            this.child(probe)
+        });
         // Same shared defect as `render_overflow_menu` above: this popover is
         // positioned `top(TAB_BAR_HEIGHT)`, which places it squarely over
         // `#centre-surface`, a *later* sibling of the tab-bar row it is
@@ -9871,7 +9974,10 @@ impl TillerWorkspace {
         active_tab_id: Option<usize>,
         entity: Entity<Self>,
         theme: Theme,
+        cx: &App,
     ) -> impl IntoElement {
+        #[cfg(not(test))]
+        let _ = cx;
         let dismiss_entity = entity.clone();
         let mut menu = div()
             .id("tab-overflow-menu")
@@ -9943,6 +10049,10 @@ impl TillerWorkspace {
                 });
             menu = menu.child(row);
         }
+        #[cfg(test)]
+        let menu = menu.when_some(shell_paint_probe("tab-overflow-menu", cx), |this, probe| {
+            this.child(probe)
+        });
         // The tab strip lives in an earlier flex-col sibling of
         // `#centre-surface` (see `columns()`); this popover's own bounds
         // overflow below the strip into that sibling's area. Painted inline
@@ -10084,6 +10194,7 @@ impl TillerWorkspace {
                     active_tab_id,
                     entity.clone(),
                     theme,
+                    cx,
                 ));
             }
         }
@@ -10164,6 +10275,21 @@ impl TillerWorkspace {
                 .into_any_element()
         };
 
+        let centre_surface = div()
+            .id("centre-surface")
+            .debug_selector(|| "centre-surface".into())
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .child(centre_surface);
+        #[cfg(test)]
+        let centre_surface = centre_surface.when_some(
+            shell_paint_probe("centre-surface", cx),
+            |this, probe| this.child(probe),
+        );
+
         let center_column = div()
             .flex()
             .flex_col()
@@ -10178,20 +10304,10 @@ impl TillerWorkspace {
                     .child(self.tab_bar.clone())
                     .child(self.render_open_tabs(*theme, entity.clone(), window, cx))
                     .when(self.tab_menu_open, |this| {
-                        this.child(self.render_tab_context_menu(*theme, entity.clone()))
+                        this.child(self.render_tab_context_menu(*theme, entity.clone(), cx))
                     }),
             )
-            .child(
-                div()
-                    .id("centre-surface")
-                    .debug_selector(|| "centre-surface".into())
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(centre_surface),
-            );
+            .child(centre_surface);
 
         div()
             .id("shell-work-area")
@@ -15419,7 +15535,20 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("ctrl-shift-p");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("command-palette").is_some());
+        let palette = cx
+            .debug_bounds("command-palette")
+            .expect("the command palette is drawn as a root overlay");
+        let center = cx
+            .debug_bounds("shell-center-panel")
+            .expect("the shell center panel is drawn beneath the overlay");
+        assert!(
+            palette.size.width > px(0.0) && palette.size.height > px(0.0),
+            "the command palette overlay must paint a non-empty surface"
+        );
+        assert!(
+            palette.left() < center.left(),
+            "the command palette must extend beyond the overflow-hidden center panel"
+        );
     }
 
     #[gpui::test]
@@ -15499,7 +15628,85 @@ mod tests {
             click_count: 1,
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("tab-context-menu").is_some());
+        let menu_selector: &'static str =
+            Box::leak(format!("workspace-tab-menu-{tab_id}").into_boxed_str());
+        let menu = cx
+            .debug_bounds(&menu_selector)
+            .expect("the tab context menu is drawn");
+        let surface = cx
+            .debug_bounds("centre-surface")
+            .expect("the later center surface is drawn beneath the deferred menu");
+        assert!(
+            menu.top() < surface.bottom() && menu.bottom() > surface.top(),
+            "the tab context menu must occupy the center-content region above the clipped panel child"
+        );
+        assert!(
+            menu.size.width > px(0.0) && menu.size.height > px(0.0),
+            "the tab context menu wrapper must paint a non-empty surface"
+        );
+    }
+
+    fn assert_painted_after_centre_surface(trace: &Rc<RefCell<Vec<&'static str>>>, overlay: &str) {
+        let entries = trace.borrow();
+        let centre_index = entries
+            .iter()
+            .rposition(|entry| *entry == "centre-surface")
+            .expect("the center surface paint probe must run");
+        let overlay_index = entries
+            .iter()
+            .rposition(|entry| *entry == overlay)
+            .unwrap_or_else(|| panic!("the {overlay} paint probe must run"));
+        assert!(
+            centre_index < overlay_index,
+            "{overlay} must paint after centre-surface so its overlapping area remains visible; \
+             actual GPUI paint order was {entries:?}"
+        );
+    }
+
+    /// The context and overflow menus physically overlap `centre-surface`.
+    /// Bounds and hit routing cannot distinguish inline painting from a
+    /// `deferred(...)` draw, so this observes the GPUI paint phase itself:
+    /// each test-only, zero-layout `ShellPaintProbe` records only from
+    /// `Element::paint`. Removing either `deferred(menu)` reverses the
+    /// corresponding order below while leaving the bounds unchanged.
+    #[gpui::test]
+    async fn deferred_tab_context_menu_paints_after_centre_surface(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let paint_trace = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, app| {
+            app.set_global(ShellPaintTrace {
+                entries: paint_trace.clone(),
+            });
+        });
+
+        paint_trace.borrow_mut().clear();
+        right_click_tab(&mut cx, 0);
+        assert_painted_after_centre_surface(&paint_trace, "tab-context-menu");
+    }
+
+    #[gpui::test]
+    async fn deferred_tab_overflow_menu_paints_after_centre_surface(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 10));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        cx.run_until_parked();
+        let paint_trace = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, app| {
+            app.set_global(ShellPaintTrace {
+                entries: paint_trace.clone(),
+            });
+        });
+        paint_trace.borrow_mut().clear();
+        let overflow = cx
+            .debug_bounds("tab-overflow-button")
+            .expect("the overflow button is pointer reachable");
+        cx.simulate_click(overflow.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_painted_after_centre_surface(&paint_trace, "tab-overflow-menu");
     }
 
     #[gpui::test]
@@ -17260,7 +17467,20 @@ mod tests {
         cx.simulate_click(overflow.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("tab-overflow-menu").is_some());
+        let menu = cx
+            .debug_bounds("tab-overflow-menu")
+            .expect("the overflow menu is drawn");
+        let surface = cx
+            .debug_bounds("centre-surface")
+            .expect("the later center surface is drawn beneath the deferred menu");
+        assert!(
+            menu.top() < surface.bottom() && menu.bottom() > surface.top(),
+            "the overflow menu must occupy the center-content region above the clipped panel child"
+        );
+        assert!(
+            menu.size.width > px(0.0) && menu.size.height > px(0.0),
+            "the overflow menu must paint a non-empty surface"
+        );
         assert!(cx.debug_bounds("tab-overflow-item-0").is_some());
         assert!(cx.debug_bounds("tab-overflow-item-9").is_some());
         assert!(cx.debug_bounds("tab-overflow-selected-0").is_some());
@@ -17479,7 +17699,11 @@ mod tests {
         // F-WIN-10: the same error must also raise a floating, transient
         // toast -- distinct from the sidebar's persistent inline banner
         // asserted above, and it must disappear on its own.
-        wait_for_drawn(&mut cx, "workspace-toast");
+        let toast = wait_for_drawn(&mut cx, "workspace-toast");
+        assert!(
+            toast.size.width > px(0.0) && toast.size.height > px(0.0),
+            "the workspace toast must paint a non-empty root overlay"
+        );
         cx.background_executor.advance_clock(Duration::from_secs(5));
         cx.run_until_parked();
         assert!(
@@ -17525,9 +17749,19 @@ mod tests {
                 cx.notify();
             });
             cx.run_until_parked();
+            let toast = cx
+                .debug_bounds("update-toast")
+                .expect("the update toast is drawn for every non-Idle state");
+            let center = cx
+                .debug_bounds("shell-center-panel")
+                .expect("the shell center panel is drawn beneath the root toast");
             assert!(
-                cx.debug_bounds("update-toast").is_some(),
-                "the update toast must draw for every non-Idle state"
+                toast.top() < center.top(),
+                "the root toast must extend above the overflow-hidden center panel"
+            );
+            assert!(
+                toast.size.width > px(0.0) && toast.size.height > px(0.0),
+                "the root update toast must paint a non-empty surface"
             );
         }
         // The last transition above (`Failed`) left a clamped 100% progress
@@ -19632,6 +19866,60 @@ mod tests {
         assert_eq!(work.right() - right.right(), px(4.0));
         assert_eq!(left.top() - work.top(), px(4.0));
         assert_eq!(work.bottom() - left.bottom(), px(4.0));
+    }
+
+    #[gpui::test]
+    async fn shell_panel_focus_ring_is_keyboard_only(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let selected_worktrees = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+        let expected_worktree =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        let _sidebar_selection_listener = workspace.update(&mut cx, |workspace, cx| {
+            let selected_worktrees = selected_worktrees.clone();
+            cx.subscribe(&workspace.sidebar, move |_, _, event: &SidebarEvent, _| {
+                if let SidebarEvent::SelectWorktree(path) = event {
+                    selected_worktrees.borrow_mut().push(path.clone());
+                }
+            })
+        });
+
+        // A real keyboard event establishes focus-visible input before the
+        // existing sidebar child focus fixture enters the left shell panel.
+        cx.simulate_keystrokes("tab");
+        let sidebar_focus = palette_test_sidebar_focus(&workspace, &cx);
+        cx.update(|window, app| sidebar_focus.focus(window, app));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("shell-left-panel-focus-ring").is_some(),
+            "keyboard focus inside the sidebar must make the enclosing shell panel visible"
+        );
+
+        // Click a live sidebar row rather than changing the input-mode flag
+        // directly: this proves the panel's child remains pointer reachable
+        // while mouse input removes the focus-visible treatment.
+        let sidebar_row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the live sidebar worktree row is pointer reachable");
+        cx.simulate_click(sidebar_row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            &*selected_worktrees.borrow(),
+            &[expected_worktree],
+            "the real sidebar row click must reach its SelectWorktree handler"
+        );
+        assert!(cx.debug_bounds("shell-left-panel-focus-ring").is_none());
+        assert!(cx.debug_bounds("shell-left-panel").is_some());
     }
 
     #[gpui::test]
