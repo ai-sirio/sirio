@@ -4,115 +4,39 @@
 use super::*;
 use gpui::Rgba;
 
-const ACTIVITY_HEADER_HEIGHT: f32 = 27.0;
-
 impl RightPanel {
-
-    fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        self.activity_expanded = !self.activity_expanded;
-        cx.notify();
-    }
-
-    pub(super) fn render_activity(&self, entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
-        let toggle_entity = entity.clone();
-        let running_count = self
-            .activity
-            .iter()
-            .filter(|surface| surface.status == ActivityStatus::Running)
-            .count();
-        let mut section = div()
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .right_0()
-            .h(px(ACTIVITY_HEADER_HEIGHT
-                + if self.activity_expanded {
-                    // F-CHG-20: even with zero rows, the expanded section
-                    // still renders one "No activity" placeholder row, so
-                    // the height must reserve space for at least one row —
-                    // otherwise that row is squeezed into near-zero visible
-                    // height and its text renders as illegible specks.
-                    self.activity.len().max(1) as f32 * ACTIVITY_ROW_HEIGHT
-                } else {
-                    0.0
-                }))
-            .flex()
-            .flex_col()
-            .w_full()
-            .flex_none()
-            .bg(theme.background)
-            .border_t_1()
-            .border_color(theme.hairline)
-            .child(
-                div()
-                    .id("activity-header")
-                    .debug_selector(|| "activity-header".into())
-                    .h(px(ACTIVITY_HEADER_HEIGHT))
-                    .w_full()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(theme.typography.footnote)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
-                    .hover(|style| style.bg(theme.row_hover))
-                    .on_click(move |_, _, cx| {
-                        toggle_entity.update(cx, |panel, cx| panel.toggle_activity(cx));
-                    })
-                    .child(if self.activity_expanded {
-                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.title)
-                    } else {
-                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.title)
-                    })
-                    .child("Activity")
-                    // F-CHG-20: the running count. A quiet meta label beside
-                    // the header, present only while something is running,
-                    // so a live worktree is visible from the collapsed
-                    // header alone.
-                    .when(running_count > 0, |this| {
-                        this.child(
-                            div()
-                                .id("activity-running-count")
-                                .debug_selector(|| "activity-running-count".into())
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.meta)
-                                .child(format!("{running_count} running")),
-                        )
-                    }),
-            );
-        if self.activity_expanded {
-            if self.activity.is_empty() {
-                // F-CHG-20: the no-activity empty state, only visible while
-                // the section is expanded — the collapsed header stays
-                // silent instead of shouting about nothing.
-                section = section.child(
-                    div()
-                        .id("activity-empty")
-                        .debug_selector(|| "activity-empty".into())
-                        .h(px(ACTIVITY_ROW_HEIGHT))
-                        .w_full()
-                        .px(px(10.0))
-                        .flex()
-                        .items_center()
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.meta)
-                        .child("No activity"),
-                );
-            } else {
-                for (index, surface) in self.activity.iter().cloned().enumerate() {
-                    section = section.child(Self::render_activity_row(
-                        surface,
-                        index,
-                        entity.clone(),
-                        theme,
-                    ));
-                }
+    pub(super) fn render_activity(
+        &self,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        if self.activity.is_empty() {
+            // F-CHG-20: the empty activity view states the absence instead
+            // of drawing nothing at all.
+            div()
+                .id("activity-empty")
+                .debug_selector(|| "activity-empty".into())
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.meta)
+                .child("No activity")
+                .into_any_element()
+        } else {
+            let mut list = div().flex_1().min_h(px(0.0)).flex().flex_col();
+            for (index, surface) in self.activity.iter().cloned().enumerate() {
+                list = list.child(Self::render_activity_row(
+                    surface,
+                    index,
+                    entity.clone(),
+                    theme,
+                ));
             }
+            list.into_any_element()
         }
-        section
     }
 
     fn render_activity_row(
@@ -224,40 +148,36 @@ fn activity_status_glyph(status: ActivityStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext};
 
-    /// F-CHG-20 (empty half): with no activity rows, the expanded section
-    /// states No activity instead of showing nothing, and no running count
-    /// is offered.
+    /// F-CHG-20 (empty half): with no activity rows, the Activity view
+    /// states No activity instead of showing nothing.
     #[gpui::test]
     async fn activity_section_states_no_activity_when_empty(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(|cx| PanelView::set(PanelView::Activity, cx));
         let window = cx
             .add_window(|_window, _cx| RightPanel::with_activity(std::env::temp_dir(), Vec::new()));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
-        cx.run_until_parked();
-
         assert!(
             cx.debug_bounds("activity-empty").is_some(),
-            "an expanded section with no rows states No activity (F-CHG-20)"
+            "an empty activity view states No activity (F-CHG-20)"
         );
         assert!(
-            cx.debug_bounds("activity-running-count").is_none(),
-            "nothing runs, so no running count is offered"
+            cx.debug_bounds("activity-0").is_none(),
+            "nothing runs, so no row is drawn"
         );
     }
 
-    /// F-CHG-20 (running-count half): with a running row in the list, the
-    /// header states the count while rows render below it.
+    /// The collapsible footer is gone: with rows present, the Activity view
+    /// draws every row as a full-height list, and the header is no longer a
+    /// separate element to click open.
     #[gpui::test]
-    async fn activity_section_states_the_running_count(cx: &mut TestAppContext) {
+    async fn activity_view_lists_rows_at_full_height(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(|cx| PanelView::set(PanelView::Activity, cx));
         let window = cx.add_window(|_window, _cx| {
             RightPanel::with_activity(
                 std::env::temp_dir(),
@@ -275,29 +195,17 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        // The count is visible from the collapsed header alone.
-        assert!(
-            cx.debug_bounds("activity-running-count").is_some(),
-            "the running count is stated beside the header"
-        );
-
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
-        cx.run_until_parked();
-
         assert!(
             cx.debug_bounds("activity-0").is_some() && cx.debug_bounds("activity-1").is_some(),
-            "the activity rows render under the expanded header"
+            "the activity rows render as a full-height list"
         );
         assert!(
             cx.debug_bounds("activity-empty").is_none(),
             "rows exist, so the empty state is not shown"
         );
         assert!(
-            cx.debug_bounds("activity-running-count").is_some(),
-            "the running count stays visible with rows present"
+            cx.debug_bounds("activity-header").is_none(),
+            "the collapsible header is gone"
         );
     }
 
@@ -306,6 +214,7 @@ mod tests {
     #[gpui::test]
     async fn activity_section_draws_needs_input_as_distinct_from_idle(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(|cx| PanelView::set(PanelView::Activity, cx));
         let window = cx.add_window(|_window, _cx| {
             RightPanel::with_activity(
                 std::env::temp_dir(),
@@ -322,11 +231,6 @@ mod tests {
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
-        cx.run_until_parked();
 
         assert!(
             cx.debug_bounds("activity-status-needs-input-0").is_some(),
@@ -338,6 +242,5 @@ mod tests {
             "NeedsInput is not rendered with Idle's glyph"
         );
     }
-
 }
 

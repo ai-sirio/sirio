@@ -12,7 +12,7 @@ mod activity;
 mod files;
 
 use gpui::{
-    Context, EventEmitter, FocusHandle, FontWeight, Render, Task, Window, div, prelude::*,
+    App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*,
     px,
 };
 use std::path::PathBuf;
@@ -94,7 +94,63 @@ impl ActivitySurface {
     }
 }
 
+/// Which view the right panel is showing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelView {
+    #[default]
+    Files,
+    Activity,
+    Diff,
+    History,
+}
 
+/// App-wide selection. A GPUI global rather than a field, for the same
+/// reason `DiffViewMode` is one: `select_worktree` throws the whole
+/// `RightPanel` entity away and builds a fresh one, so a field would snap
+/// back to Files on every worktree switch.
+struct PanelViewSetting(PanelView);
+
+impl gpui::Global for PanelViewSetting {}
+
+impl PanelView {
+    /// Rail order, left to right.
+    const ORDER: [PanelView; 4] = [
+        PanelView::Files,
+        PanelView::Activity,
+        PanelView::Diff,
+        PanelView::History,
+    ];
+
+    fn icon(self) -> Icon {
+        match self {
+            PanelView::Files => Icon::FileTree,
+            PanelView::Activity => Icon::Thread,
+            PanelView::Diff => Icon::Diff,
+            PanelView::History => Icon::GitGraph,
+        }
+    }
+
+    fn element_id(self) -> &'static str {
+        match self {
+            PanelView::Files => "right-panel-tab-files",
+            PanelView::Activity => "right-panel-tab-activity",
+            PanelView::Diff => "right-panel-tab-diff",
+            PanelView::History => "right-panel-tab-history",
+        }
+    }
+
+    pub fn get(cx: &App) -> Self {
+        if cx.has_global::<PanelViewSetting>() {
+            cx.global::<PanelViewSetting>().0
+        } else {
+            Self::default()
+        }
+    }
+
+    pub fn set(view: Self, cx: &mut App) {
+        cx.set_global(PanelViewSetting(view));
+    }
+}
 
 /// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
@@ -105,7 +161,6 @@ pub struct RightPanel {
     worktree_selected: bool,
     file_tree: Vec<files::FileNode>,
     git_markers: files::GitMarkers,
-    activity_expanded: bool,
     activity: Vec<ActivitySurface>,
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
@@ -149,7 +204,6 @@ impl RightPanel {
             worktree_selected: true,
             file_tree: Vec::new(),
             git_markers: files::GitMarkers::default(),
-            activity_expanded: false,
             activity: Vec::new(),
             walk_task: None,
             refresh_started: false,
@@ -235,40 +289,144 @@ impl RightPanel {
 
 
 impl RightPanel {
+    /// The colour of the Activity rail badge, or `None` when nothing wants
+    /// attention. Error outranks NeedsInput: one failed surface is the more
+    /// urgent fact.
+    pub(crate) fn activity_badge(&self) -> Option<ActivityStatus> {
+        if self
+            .activity
+            .iter()
+            .any(|row| row.status == ActivityStatus::Error)
+        {
+            return Some(ActivityStatus::Error);
+        }
+        if self
+            .activity
+            .iter()
+            .any(|row| row.status == ActivityStatus::NeedsInput)
+        {
+            return Some(ActivityStatus::NeedsInput);
+        }
+        None
+    }
 
-    fn render_header(&self, theme: Theme) -> impl IntoElement {
+    fn render_header(
+        &self,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = PanelView::get(cx);
+        let badge = self.activity_badge();
         div()
             .h(px(HEADER_HEIGHT))
             .w_full()
             .px(px(10.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .justify_center()
+            .gap(px(4.0))
             .border_b_1()
             .border_color(theme.hairline)
-            .child(
+            .children(PanelView::ORDER.map(|view| {
+                let is_active = view == active;
+                let badge_color = (view == PanelView::Activity)
+                    .then_some(badge)
+                    .flatten()
+                    .map(|status| match status {
+                        ActivityStatus::Error => theme.tab_error,
+                        _ => theme.tab_needs_input,
+                    });
                 div()
-                    .flex_1()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(11.5))
-                    .text_color(theme.title)
-                    .child("Files"),
-            )
-            .child(
-                div()
-                    .id("close-right-panel")
-                    .w(px(20.0))
-                    .h(px(24.0))
+                    .id(view.element_id())
+                    .debug_selector(move || view.element_id().to_owned())
+                    .relative()
+                    .w(px(28.0))
+                    .h(px(28.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(16.0))
-                    .text_color(theme.subtitle)
-                    .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
-                    .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
+                    .rounded(px(4.0))
+                    .when(is_active, |this| this.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.row_hover))
+                    .child(
+                        IconElement::new(view.icon(), IconSize::Small).text_color(if is_active {
+                            theme.title
+                        } else {
+                            theme.subtitle
+                        }),
+                    )
+                    .when_some(badge_color, |this, color| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(4.0))
+                                .right(px(4.0))
+                                .w(px(6.0))
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(color),
+                        )
+                    })
+                    .on_mouse_down(MouseButton::Left, {
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            PanelView::set(view, cx);
+                            entity.update(cx, |_, cx| cx.notify());
+                        }
+                    })
+            }))
+    }
+
+    fn render_no_worktree(&self, theme: Theme) -> impl IntoElement {
+        div()
+            .id("right-panel-no-worktree")
+            .debug_selector(|| "right-panel-no-worktree".to_owned())
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(theme.spacing.card_gap)
+            .p(theme.spacing.card_gap)
+            .text_size(theme.typography.headline)
+            .text_color(theme.title)
+            .child(
+                IconElement::new(
+                    Icon::PanelRight,
+                    IconSize::Custom(theme.typography.large_title),
+                )
+                .text_color(theme.title),
+            )
+            .child("No worktree selected")
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child("Select a worktree to inspect its files and changes."),
             )
     }
 
+    /// Filled in by Task 8.
+    fn render_diff(&mut self, theme: Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_placeholder("Diff", theme)
+    }
+
+    /// Filled in by Task 10.
+    fn render_history(&mut self, theme: Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_placeholder("History", theme)
+    }
+
+    fn render_placeholder(&self, label: &'static str, theme: Theme) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(theme.meta)
+            .child(label)
+    }
 }
 
 
@@ -295,46 +453,26 @@ impl Render for RightPanel {
             .h_full()
             .overflow_hidden()
             .bg(theme.background)
-            .child(self.render_header(theme))
-            .child(if self.worktree_selected {
-                self.render_files(entity.clone(), theme, cx)
-                    .into_any_element()
+            .child(self.render_header(entity.clone(), theme, cx))
+            .child(if !self.worktree_selected {
+                self.render_no_worktree(theme).into_any_element()
             } else {
-                div()
-                    .id("right-panel-no-worktree")
-                    .debug_selector(|| "right-panel-no-worktree".to_owned())
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(theme.spacing.card_gap)
-                    .p(theme.spacing.card_gap)
-                    .text_size(theme.typography.headline)
-                    .text_color(theme.title)
-                    .child(
-                        IconElement::new(
-                            Icon::PanelRight,
-                            IconSize::Custom(theme.typography.large_title),
-                        )
-                        .text_color(theme.title),
-                    )
-                    .child("No worktree selected")
-                    .child(
-                        div()
-                            .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
-                            .child("Select a worktree to inspect its files and changes."),
-                    )
-                    .into_any_element()
+                match PanelView::get(cx) {
+                    PanelView::Files => self
+                        .render_files(entity.clone(), theme, cx)
+                        .into_any_element(),
+                    PanelView::Activity => {
+                        self.render_activity(entity.clone(), theme).into_any_element()
+                    }
+                    PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
+                    PanelView::History => self.render_history(theme, cx).into_any_element(),
+                }
             })
             .when(self.worktree_selected, |this| {
                 this.when_some(self.file_context_menu.clone(), |this, menu| {
                     this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
                 })
             })
-            .child(self.render_activity(entity, theme))
     }
 
 }
@@ -349,6 +487,7 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     // ── F-EDIT-12 harness capability: payload drags ─────────────────────
     //
@@ -472,6 +611,79 @@ mod tests {
         );
     }
 
+    struct TempDir(PathBuf);
 
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "tiller-right-panel-module-test-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[gpui::test]
+    fn the_rail_switches_the_selected_view(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+
+        cx.update(|cx| {
+            assert_eq!(PanelView::get(cx), PanelView::Files, "Files is the default");
+            PanelView::set(PanelView::History, cx);
+            assert_eq!(PanelView::get(cx), PanelView::History);
+        });
+    }
+
+    #[gpui::test]
+    fn the_selection_survives_rebinding_to_another_worktree(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let other = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        cx.update(|cx| PanelView::set(PanelView::Diff, cx));
+        panel.update(cx, |panel, cx| panel.bind_worktree(other.0.clone(), cx));
+
+        cx.update(|cx| assert_eq!(PanelView::get(cx), PanelView::Diff));
+    }
+
+    #[gpui::test]
+    fn the_activity_badge_appears_only_for_attention_states(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+
+        let idle = ActivitySurface::new(
+            Icon::SquareTerminal,
+            "one",
+            "",
+            ActivityStatus::Idle,
+        );
+        let waiting = ActivitySurface::new(
+            Icon::SquareTerminal,
+            "two",
+            "",
+            ActivityStatus::NeedsInput,
+        );
+
+        panel.update(cx, |panel, cx| {
+            panel.set_activity(vec![idle.clone()], cx);
+            assert!(panel.activity_badge().is_none(), "idle rows raise no badge");
+            panel.set_activity(vec![idle, waiting], cx);
+            assert!(
+                panel.activity_badge().is_some(),
+                "a waiting agent raises a badge"
+            );
+        });
+    }
 }
 
