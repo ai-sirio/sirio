@@ -353,11 +353,15 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
         }
     }
     let echo = echo.expect("the fixture echoes the received blocks");
+    // Join through PathBuf (not string interpolation): temp_dir() may carry a
+    // trailing slash on some platforms, and the product resolves relative
+    // links with PathBuf::join, which normalizes it away.
+    let notes_link_target = cwd.join("sub/notes.md");
     assert_eq!(
         echo,
         format!(
-            "text:hello world|link:file://{}/sub/notes.md:notes.md|link:file:///abs/file.png:file.png|image:image/png",
-            cwd.display()
+            "text:hello world|link:file://{}:notes.md|link:file:///abs/file.png:file.png|image:image/png",
+            notes_link_target.display()
         )
     );
 
