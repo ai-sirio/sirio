@@ -89,4 +89,6 @@ gpui_linux = { path = "vendor/gpui_linux" }
 gpui_platform = { path = "vendor/gpui_platform" }
 
 [profile.dev]
+# Keep dev links and debug-info I/O light; remove this line when full debug info is needed.
+debug = "line-tables-only"
 split-debuginfo = "unpacked"
