@@ -1495,6 +1495,8 @@ fn helper_process() {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
+    std::fs::write(format!("{ready_file}.started"), "started")
+        .unwrap_or_else(|error| helper_fail(7, &format!("cannot write started file: {error}")));
 
     let db = match AppDatabase::open(Path::new(&database_path)) {
         Ok(db) => db,
@@ -1717,9 +1719,11 @@ fn concurrent_first_opens_from_two_processes_both_succeed() {
     );
 
     std::fs::write(&go, "go").expect("write go file");
-    // Hold the write lock well past the children's arrival, so both opens
-    // are blocked inside their migration when we release it.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let started_a = dir.0.join("ready-a.started");
+    let started_b = dir.0.join("ready-b.started");
+    assert!(wait_until(deadline, "both migration attempts", || {
+        started_a.exists() && started_b.exists()
+    }));
     held_lock.rollback().expect("release the lock");
     drop(conn);
 

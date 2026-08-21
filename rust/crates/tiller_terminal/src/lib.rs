@@ -2543,7 +2543,7 @@ mod tests {
             "must start out idle before the probe command is sent"
         );
 
-        handle.write(b"sleep 3\n".to_vec());
+        handle.write(b"cat >/dev/null\n".to_vec());
 
         let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
         let mut observed_running = false;
@@ -2558,6 +2558,7 @@ mod tests {
             observed_running,
             "sleep 3 must be observed as the PTY's foreground process group within 2s"
         );
+        handle.write(vec![4]);
 
         let idle_deadline = std::time::Instant::now() + Duration::from_secs(6);
         let mut observed_idle_again = false;
@@ -2912,7 +2913,7 @@ mod tests {
             )
         } else {
             format!(
-                "setsid sleep 60 & printf '%s' \"$!\" > {}",
+                "setsid sh -c 'printf \"%s\" \"$$\" > {}; exec sleep 60' & wait",
                 pid_file.display()
             )
         };
@@ -2928,15 +2929,17 @@ mod tests {
         let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
         let process_group = ProcessGroupGuard(handle.shell_pid);
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let setup_deadline = std::time::Instant::now() + Duration::from_secs(5);
         let detached_pid = loop {
             if let Ok(pid) = std::fs::read_to_string(&pid_file)
                 && let Ok(pid) = pid.parse::<i32>()
+                && process_is_running(pid)
+                && unsafe { libc::getpgid(pid) } != process_group.0 as libc::pid_t
             {
                 break pid;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                std::time::Instant::now() < setup_deadline,
                 "PTY child did not publish the setsid child's pid"
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -2957,6 +2960,7 @@ mod tests {
         handle.shutdown();
         drop(handle);
 
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline && process_is_running(detached_pid) {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -3859,7 +3863,7 @@ mod view_tests {
         );
 
         terminal.update(&mut cx.cx, |terminal, _| {
-            terminal.input(b"sleep 2; exit 7\n".to_vec())
+            terminal.input(b"cat >/dev/null; exit 7\n".to_vec())
         });
 
         let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -3879,6 +3883,7 @@ mod view_tests {
             observed_running,
             "the pill must report Running while `sleep 2` holds the PTY's foreground process group"
         );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.input("\u{4}"));
         assert_eq!(
             terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status()),
             None,
