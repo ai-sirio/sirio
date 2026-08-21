@@ -18,7 +18,7 @@ use tiller_project::FileIconKey;
 use tiller_theme::Theme;
 
 use crate::editor::fs_actions;
-use crate::sidebar::icons::{Icon, IconElement};
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 const PANEL_WIDTH: f32 = 405.0;
 const HEADER_HEIGHT: f32 = 40.0;
@@ -586,12 +586,12 @@ impl RightPanel {
         let disclosure = if is_dir {
             if row.node.expanded {
                 Some(
-                    IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                    IconElement::new(Icon::ChevronDown, IconSize::XSmall)
                         .text_color(theme.subtitle),
                 )
             } else {
                 Some(
-                    IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                    IconElement::new(Icon::ChevronRight, IconSize::XSmall)
                         .text_color(theme.subtitle),
                 )
             }
@@ -695,10 +695,7 @@ impl RightPanel {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(
-                            IconElement::new(glyph, theme.typography.callout)
-                                .text_color(theme.subtitle),
-                        ),
+                        .child(IconElement::new(glyph, IconSize::Small).text_color(theme.subtitle)),
                 )
             })
             .child(
@@ -824,10 +821,7 @@ impl RightPanel {
                     .text_size(px(16.0))
                     .text_color(theme.subtitle)
                     .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
-                    .child(
-                        IconElement::new(Icon::Close, theme.typography.footnote)
-                            .text_color(theme.title),
-                    ),
+                    .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
             )
     }
 
@@ -1010,10 +1004,10 @@ impl RightPanel {
                         toggle_entity.update(cx, |panel, cx| panel.toggle_activity(cx));
                     })
                     .child(if self.activity_expanded {
-                        IconElement::new(Icon::ChevronDown, theme.typography.footnote)
+                        IconElement::new(Icon::ChevronDown, IconSize::XSmall)
                             .text_color(theme.title)
                     } else {
-                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
                             .text_color(theme.title)
                     })
                     .child("Activity")
@@ -1100,7 +1094,7 @@ impl RightPanel {
                 div()
                     .w(px(15.0))
                     .text_color(theme.tab_focus_accent)
-                    .child(IconElement::new(surface.icon, theme.typography.headline)),
+                    .child(IconElement::new(surface.icon, IconSize::Small)),
             )
             .child(
                 div()
@@ -1141,10 +1135,7 @@ impl RightPanel {
                             cx.emit(RightPanelEvent::CloseActivity(index));
                         });
                     })
-                    .child(
-                        IconElement::new(Icon::Close, theme.typography.footnote)
-                            .text_color(theme.title),
-                    ),
+                    .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
             )
     }
 }
@@ -1189,8 +1180,11 @@ impl Render for RightPanel {
                     .text_size(theme.typography.headline)
                     .text_color(theme.title)
                     .child(
-                        IconElement::new(Icon::PanelRight, theme.typography.large_title)
-                            .text_color(theme.title),
+                        IconElement::new(
+                            Icon::PanelRight,
+                            IconSize::Custom(theme.typography.large_title),
+                        )
+                        .text_color(theme.title),
                     )
                     .child("No worktree selected")
                     .child(
@@ -2965,8 +2959,7 @@ mod tests {
 
         // A pure staged add — brand new file, fully staged, zero unstaged
         // component.
-        std::fs::write(dir.join("staged-add.txt"), "new + staged\n")
-            .expect("write staged-add");
+        std::fs::write(dir.join("staged-add.txt"), "new + staged\n").expect("write staged-add");
         git(dir, &["add", "staged-add.txt"]);
 
         // A genuinely untracked file, for contrast.
@@ -3017,7 +3010,8 @@ mod tests {
         // A pure staged add: zero unstaged component, must not fall back
         // to "changed" for lack of a staged colour.
         assert!(
-            cx.debug_bounds("file-status-staged-staged-add.txt").is_some(),
+            cx.debug_bounds("file-status-staged-staged-add.txt")
+                .is_some(),
             "a fully-staged new file is marked staged"
         );
         assert!(
