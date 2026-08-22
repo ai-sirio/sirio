@@ -2499,7 +2499,7 @@ fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
 }
 
-fn post_desktop_notification(_payload: &NotificationPayload) {
+fn post_desktop_notification(payload: &NotificationPayload) {
     #[cfg(target_os = "macos")]
     let result = {
         let script = format!(
@@ -2517,7 +2517,45 @@ fn post_desktop_notification(_payload: &NotificationPayload) {
         .arg(&payload.body)
         .spawn();
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    let result = {
+        // Windows has no notify-send; the zero-dependency equivalent is a
+        // `System.Windows.Forms.NotifyIcon` balloon driven from a short
+        // PowerShell script (a WinRT toast would need an AUMID registered
+        // in the Start menu — real app identity, out of scope for a CLI
+        // launcher). Explorer renders legacy balloons as notification-
+        // center toasts on Win10/11 with the app's icon, so the user-visible
+        // effect matches the other platforms' arms. Requirements:
+        // - `-STA` — NotifyIcon needs a single-threaded apartment;
+        // - `-NoProfile` — the user's profile could print anything;
+        // - `-WindowStyle Hidden` — no console window flashes on screen;
+        // - the balloon must outlive the script, so it sleeps a moment
+        //   past the display timeout before disposing the icon.
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             Add-Type -AssemblyName System.Drawing; \
+             $n = New-Object System.Windows.Forms.NotifyIcon; \
+             $n.Icon = [System.Drawing.SystemIcons]::Information; \
+             $n.BalloonTipTitle = '{}'; \
+             $n.BalloonTipText = '{}'; \
+             $n.Visible = $true; \
+             $n.ShowBalloonTip(6000); \
+             Start-Sleep -Seconds 7; \
+             $n.Dispose()",
+            powershell_single_quote_literal(&payload.title),
+            powershell_single_quote_literal(&payload.body),
+        );
+        Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command"])
+            .arg(&script)
+            .spawn()
+    };
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
     let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "desktop notifications are unsupported on this platform",
@@ -2526,6 +2564,13 @@ fn post_desktop_notification(_payload: &NotificationPayload) {
     if let Err(error) = result {
         eprintln!("[notifications] could not deliver desktop notification: {error}");
     }
+}
+
+/// Doubles every `'` so the text survives inside PowerShell single quotes
+/// (the script is passed as one `-Command` argument, no shell involved).
+#[cfg(target_os = "windows")]
+fn powershell_single_quote_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 #[cfg(target_os = "macos")]
@@ -13302,6 +13347,22 @@ mod tests {
             "notification content must stay inside one AppleScript string literal"
         );
         assert_eq!(apple_script_string_literal("nul\0"), "\"nul \"");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_single_quote_literal_escapes_notification_text() {
+        // A single quote inside a PowerShell single-quoted string is
+        // escaped by doubling it; the doubled form must survive a round
+        // trip, and text without quotes passes through untouched.
+        assert_eq!(
+            powershell_single_quote_literal("it's broken"),
+            "it''s broken",
+            "an apostrophe inside the balloon text must not end the \
+             PowerShell string literal"
+        );
+        assert_eq!(powershell_single_quote_literal("plain text"), "plain text");
+        assert_eq!(powershell_single_quote_literal(""), "");
     }
 
     struct TerminalReplayFixture {
