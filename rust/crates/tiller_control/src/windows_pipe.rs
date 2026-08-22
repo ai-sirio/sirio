@@ -28,15 +28,29 @@
 //! namespace, because NT pipe names cannot be arbitrary filesystem paths:
 //!
 //! - a path already under `\.\pipe\` is used as-is;
-//! - anything else becomes `\.\pipe\TillerRust\<sanitized>-<fnv1a64>`,
-//!   where `<sanitized>` is the path with characters illegal in a pipe
-//!   name replaced and `<fnv1a64>` is a hash of the *full* path, keeping
-//!   distinct paths distinct even where sanitization collides, and keeping
-//!   the name under the 256-character NT pipe-name limit.
+//! - anything else becomes `\.\pipe\TillerRust\<user-SID>-<sanitized>-<fnv1a64>`,
+//!   where `<user-SID>` scopes the name to the calling user, `<sanitized>`
+//!   is the path with characters illegal in a pipe name replaced, and
+//!   `<fnv1a64>` is a hash of the *full* path, keeping distinct paths
+//!   distinct even where sanitization collides, and keeping the name under
+//!   the 256-character NT pipe-name limit.
+//!
+//! The user-SID component is load-bearing, not cosmetic. Without it the
+//! default path (`/tmp/TillerRust/control.sock` when no XDG/HOME env is
+//! set — the norm for GUI processes) derives a name that is identical for
+//! every user on the machine and guessable from the source: an attacker
+//! could pre-create it and silently harvest every Layer-A hook payload
+//! from victims' `tillerctl notify`, while Tiller itself would fail to
+//! bind and misread the collision as "another instance running". With the
+//! SID in the name, users no longer contend for one name at all (a second
+//! user's Tiller just works), and nobody can pre-squat a name they cannot
+//! derive for their victim.
 //!
 //! `$TILLER_SOCKET=/tmp/x/control.sock` therefore lands on the same pipe
-//! for the app and for `tillerctl`, whatever their working directories —
-//! the override semantics carry over unchanged from unix.
+//! for the app and for `tillerctl` *of the same user*, whatever their
+//! working directories — the override semantics carry over unchanged from
+//! unix. An explicit `\.\pipe\…` override passes through verbatim and
+//! is the operator's own responsibility, exactly as on unix.
 
 use std::cell::Cell;
 use std::ffi::OsStr;
@@ -52,12 +66,13 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SE_KERNEL_OBJECT, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
     GetKernelObjectSecurity, GetSecurityDescriptorDacl, GetTokenInformation, RevertToSelf, ACL,
-    DACL_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER, TokenUser,
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -106,7 +121,7 @@ fn last_error(context: &str) -> io::Error {
     if code != 0 {
         io::Error::from_raw_os_error(code)
     } else {
-        io::Error::new(io::ErrorKind::Other, format!("{context} failed"))
+        io::Error::other(format!("{context} failed"))
     }
 }
 
@@ -122,17 +137,48 @@ pub(crate) enum ListenerError {
     Bind { detail: String },
 }
 
+/// Why a client connect failed. The foreign-owner case gets its own
+/// variant because it deserves its own message ("the name is held by a
+/// pipe created by someone else") and its own classification at bind time
+/// (loud hostile collision, never "another instance is already running").
+#[derive(Debug)]
+pub(crate) enum ClientConnectError {
+    /// The pipe exists but was created by — is owned by — another user:
+    /// a hostile squatter or another user's Tiller session. Never talk to
+    /// it, whatever its DACL happens to grant us.
+    ForeignOwner { name: String, owner: String },
+    /// No server, busy timeout, access denied, … — ordinary connect noise.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for ClientConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientConnectError::ForeignOwner { name, owner } => write!(
+                f,
+                "control pipe {name} exists but is owned by another user ({owner}); refusing to talk to it"
+            ),
+            ClientConnectError::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 /// Maps the unix-style socket path onto the named-pipe namespace. See the
-/// module doc comment for the full mapping rationale.
+/// module doc comment for the full mapping rationale — including why the
+/// current user's SID is part of every derived name.
 ///
 /// Pure and deterministic: the app and `tillerctl` derive the same name
 /// from the same path with no shared state, which is what makes
-/// `$TILLER_SOCKET` overrides work identically on both sides.
-pub(crate) fn pipe_name_for_path(path: &Path) -> String {
+/// `$TILLER_SOCKET` overrides work identically on both sides. Fails only
+/// when the process token cannot be read — refuse closed: a name derived
+/// without the user component would silently reintroduce the machine-global
+/// predictability the SID exists to prevent.
+pub(crate) fn pipe_name_for_path(path: &Path) -> Result<String, String> {
     let text = path.to_string_lossy().into_owned();
     if text.to_ascii_lowercase().starts_with(r"\\.\pipe\") {
-        return text;
+        return Ok(text);
     }
+    let user = current_user_sid_string()?;
 
     // FNV-1a over the full path: sanitization alone is not injective
     // (`a/b` and `a_b` would collide), so every derived name carries the
@@ -149,8 +195,8 @@ pub(crate) fn pipe_name_for_path(path: &Path) -> String {
 
     // Pipe names cannot contain `/` or `\` beyond the prefix, and `:` would
     // parse as an NT alternate-data-stream separator; everything outside
-    // the safe set collapses to `_`. Truncated to leave room for the hash
-    // suffix under MAX_PIPE_NAME_CHARS.
+    // the safe set collapses to `_`. Truncated to leave room for the user
+    // SID and the hash suffix under MAX_PIPE_NAME_CHARS.
     let mut sanitized: String = text
         .chars()
         .map(|c| match c {
@@ -159,10 +205,14 @@ pub(crate) fn pipe_name_for_path(path: &Path) -> String {
         })
         .collect();
     let hash_len = format!("{hash:016x}").len();
-    let budget = MAX_PIPE_NAME_CHARS - PIPE_NAMESPACE.len() - 1 - hash_len;
+    let budget = MAX_PIPE_NAME_CHARS
+        - PIPE_NAMESPACE.len()
+        - user.len()
+        - 2 // separators around the sanitized path
+        - hash_len;
     sanitized.truncate(budget);
 
-    format!("{PIPE_NAMESPACE}{sanitized}-{hash:016x}")
+    Ok(format!("{PIPE_NAMESPACE}{user}-{sanitized}-{hash:016x}"))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -232,6 +282,73 @@ unsafe fn string_from_wide(pointer: *const u16) -> String {
         len += 1;
     }
     String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, len) })
+}
+
+/// The owner SID of any kernel object, as an SDDL string.
+///
+/// A kernel object's owner is the user whose token created it, minted by
+/// the kernel at creation time and unchangeable without
+/// SeTakeOwnershipPrivilege — which is exactly what makes this check
+/// unforgeable for the client side: a squatter cannot create a pipe that
+/// *verifies as* victim-owned, so verifying ownership before writing a
+/// single byte authenticates the server without touching the protocol.
+/// This is the mirror image of the server-side [`peer_is_owner`], which
+/// authenticates the client the same way.
+fn pipe_owner_sid_string(handle: HANDLE) -> Result<String, String> {
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: isize = 0;
+    // GetSecurityInfo returns a WIN32_ERROR (0 = success), not a BOOL, and
+    // allocates the descriptor backing the returned SID — freed below once
+    // the SID has been rendered to its canonical string form.
+    let code = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor as *mut isize as *mut PSECURITY_DESCRIPTOR,
+        )
+    };
+    if code != 0 {
+        return Err(format!("GetSecurityInfo failed with error {code}"));
+    }
+    let result = (|| {
+        if owner.is_null() {
+            return Err("object carries no owner SID".to_string());
+        }
+        let mut string_sid: *mut u16 = std::ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(owner, &mut string_sid) } == 0 {
+            return Err("ConvertSidToStringSidW failed".to_string());
+        }
+        let text = unsafe { string_from_wide(string_sid) };
+        unsafe { LocalFree(string_sid.cast()) };
+        Ok(text)
+    })();
+    if descriptor != 0 {
+        unsafe { LocalFree(descriptor as *mut core::ffi::c_void) };
+    }
+    result
+}
+
+/// Whether an object's owner SID equals the expected one. Split out pure so
+/// the refusal decision itself is unit-testable without a second OS user.
+fn ensure_owner_is(actual: &str, expected: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("owner is {actual}, expected {expected} (created by another user)"))
+    }
+}
+
+/// Verifies the pipe we just opened was created by the current user.
+/// Fail closed: unreadable ownership counts as mismatch.
+fn verify_pipe_owner(handle: HANDLE) -> Result<(), String> {
+    let actual = pipe_owner_sid_string(handle)?;
+    let expected = current_user_sid_string()?;
+    ensure_owner_is(&actual, &expected)
 }
 
 /// Builds the SECURITY_ATTRIBUTES handed to `CreateNamedPipeW`, together
@@ -461,7 +578,7 @@ impl PipeListener {
     /// name squatter exactly like the unix `prepare_path` does with its
     /// probe connect.
     pub(crate) fn bind(path: &Path) -> Result<Self, ListenerError> {
-        let name = pipe_name_for_path(path);
+        let name = pipe_name_for_path(path).map_err(|detail| ListenerError::Bind { detail })?;
         let name_wide = wide(&name);
         let (security, descriptor) =
             restricted_security_attributes().map_err(|detail| ListenerError::Bind { detail })?;
@@ -484,8 +601,27 @@ impl PipeListener {
                 // silently serving nobody.
                 if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
                     match open_client(path) {
+                        // Probe connected AND the pipe verifies as ours: a
+                        // live sibling Tiller — or a same-user squatter,
+                        // which is indistinguishable from a sibling within
+                        // one uid, exactly as on unix where a same-uid
+                        // process can bind the socket file first. Refuse to
+                        // steal, like unix.
                         Ok(_) => Err(ListenerError::AlreadyRunning { name }),
-                        Err(probe_error) => Err(ListenerError::Bind {
+                        // The probe reached a pipe owned by ANOTHER user:
+                        // hostile squat or another user's session. This must
+                        // never be reported as "already running" — the app
+                        // would start silently socket-less while agents talk
+                        // to the impostor. Loud failure instead.
+                        Err(ClientConnectError::ForeignOwner { owner, .. }) => {
+                            Err(ListenerError::Bind {
+                                detail: format!(
+                                    "pipe name {name} is held by a pipe owned by \
+                                     another user ({owner}) — hostile name collision; refusing"
+                                ),
+                            })
+                        }
+                        Err(probe_error @ ClientConnectError::Io(_)) => Err(ListenerError::Bind {
                             detail: format!(
                                 "pipe name {name} is held by another process \
                                  that denies us access (probe connect: {probe_error})"
@@ -572,12 +708,12 @@ impl PipeListener {
                         // Cancel the pending wait before tearing down, and
                         // drain the completion so the kernel state of this
                         // instance is well-defined afterwards.
-                        unsafe { CancelIoEx(self.instance, &mut overlapped) };
+                        unsafe { CancelIoEx(self.instance, &overlapped) };
                         let mut transferred = 0u32;
                         unsafe {
                             GetOverlappedResult(
                                 self.instance,
-                                &mut overlapped,
+                                &overlapped,
                                 &mut transferred,
                                 1,
                             );
@@ -705,8 +841,22 @@ unsafe fn verify_impersonated_identity() -> bool {
 /// Opens the pipe as a client would, with `SECURITY_IDENTIFICATION` SQOS so
 /// the server can verify who we are (see [`peer_is_owner`]). Handles
 /// `ERROR_PIPE_BUSY` by waiting, like every well-behaved pipe client.
-pub fn open_client(path: &Path) -> io::Result<PipeStream> {
-    let name = pipe_name_for_path(path);
+///
+/// Before a single byte is written, the opened pipe object's OWNER is
+/// verified against the current user ([`verify_pipe_owner`]). A pipe's
+/// DACL only says who may connect to the object its creator made — it says
+/// nothing about *who the creator was*, and a squatter happily grants the
+/// whole world access. Ownership is the one creator identity the kernel
+/// vouches for, so this is what turns "we connected" into "we connected to
+/// our own Tiller". No TOCTOU either: we hold a handle to that exact
+/// object, and its owner cannot change without SeTakeOwnershipPrivilege.
+// `pub(crate)` rather than `pub`: it returns [`ClientConnectError`], which is
+// crate-private because the ForeignOwner/Io distinction is an implementation
+// detail of this transport. `client.rs` is the only caller and it flattens
+// that distinction into `io::Error` for the outside world.
+pub(crate) fn open_client(path: &Path) -> Result<PipeStream, ClientConnectError> {
+    let name =
+        pipe_name_for_path(path).map_err(|error| ClientConnectError::Io(io::Error::other(error)))?;
     let name_wide = wide(&name);
 
     // Bounded retry: a busy pipe means the server's spare instance is
@@ -728,11 +878,19 @@ pub fn open_client(path: &Path) -> io::Result<PipeStream> {
             )
         };
         if handle != INVALID_HANDLE_VALUE {
-            return Ok(PipeStream {
-                handle,
-                event: std::ptr::null_mut(),
-                read_timeout: Cell::new(None),
-            });
+            // Authenticate the server before any protocol byte flows.
+            return match verify_pipe_owner(handle) {
+                Ok(()) => Ok(PipeStream {
+                    handle,
+                    event: std::ptr::null_mut(),
+                    read_timeout: Cell::new(None),
+                }),
+                Err(_) => {
+                    let owner = pipe_owner_sid_string(handle).unwrap_or_default();
+                    unsafe { CloseHandle(handle) };
+                    Err(ClientConnectError::ForeignOwner { name, owner })
+                }
+            };
         }
         let error = last_error("CreateFileW");
         if error.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline {
@@ -742,7 +900,7 @@ pub fn open_client(path: &Path) -> io::Result<PipeStream> {
         // ERROR_FILE_NOT_FOUND (no server), ERROR_ACCESS_DENIED (a DACL we
         // do not satisfy), … — all surface as plain connect failures, the
         // same way UnixStream::connect reports them.
-        return Err(error);
+        return Err(ClientConnectError::Io(error));
     }
 }
 
@@ -863,10 +1021,10 @@ impl PipeStream {
             match unsafe { WaitForSingleObject(self.event, wait_ms) } {
                 WAIT_OBJECT_0 => {}
                 WAIT_TIMEOUT => {
-                    unsafe { CancelIoEx(self.handle, &mut overlapped) };
+                    unsafe { CancelIoEx(self.handle, &overlapped) };
                     let mut transferred = 0u32;
                     unsafe {
-                        GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 1);
+                        GetOverlappedResult(self.handle, &overlapped, &mut transferred, 1);
                     }
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -882,7 +1040,7 @@ impl PipeStream {
         }
 
         let mut transferred = 0u32;
-        if unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 0) } == 0
+        if unsafe { GetOverlappedResult(self.handle, &overlapped, &mut transferred, 0) } == 0
         {
             let error = last_error("GetOverlappedResult");
             if read_direction {
@@ -978,31 +1136,50 @@ mod tests {
         let a = Path::new(r"C:\Users\me\AppData\Local\Temp\control.sock");
         let b = Path::new(r"C:\Users\you\AppData\Local\Temp\control.sock");
 
-        let name_a = pipe_name_for_path(a);
-        assert_eq!(name_a, pipe_name_for_path(a), "same path, same name");
+        let name_a = pipe_name_for_path(a).expect("derive a name");
+        assert_eq!(
+            name_a,
+            pipe_name_for_path(a).expect("derive a name"),
+            "same path, same name"
+        );
         assert_ne!(
             name_a,
-            pipe_name_for_path(b),
+            pipe_name_for_path(b).expect("derive a name"),
             "distinct paths, distinct names"
         );
         assert!(name_a.starts_with(r"\\.\pipe\TillerRust\"));
         assert!(name_a.len() <= MAX_PIPE_NAME_CHARS, "{name_a}");
 
-        // An explicit pipe path passes through untouched.
+        // The security property, and the reason this function became
+        // fallible: the name carries the CURRENT USER's SID. Without it the
+        // default path — no XDG_*/HOME exists on native Windows, so it falls
+        // back to the literal "/tmp/TillerRust/control.sock" — derived to ONE
+        // machine-global name. That was predictable enough for a local user
+        // to create the pipe first and harvest everything tillerctl wrote to
+        // it, and it also broke a second user's Tiller, which contended for
+        // the same name.
+        let user = current_user_sid_string().expect("resolve our own SID");
+        assert!(
+            name_a.contains(&user),
+            "the pipe name must be per-user, got {name_a} for SID {user}"
+        );
+
+        // An explicit pipe path passes through untouched — the Windows
+        // counterpart of $TILLER_SOCKET naming an exact socket file.
         assert_eq!(
-            pipe_name_for_path(Path::new(r"\\.\pipe\custom")),
+            pipe_name_for_path(Path::new(r"\\.\pipe\custom")).expect("passthrough"),
             r"\\.\pipe\custom"
         );
 
         // Sanitization collapses characters, the hash keeps names apart.
         assert_ne!(
-            pipe_name_for_path(Path::new("/a/b")),
-            pipe_name_for_path(Path::new("/a_b"))
+            pipe_name_for_path(Path::new("/a/b")).expect("derive a name"),
+            pipe_name_for_path(Path::new("/a_b")).expect("derive a name")
         );
 
         // A path long enough to blow the NT limit still derives a legal name.
         let deep = PathBuf::from("/".to_string() + &"d".repeat(600));
-        let derived = pipe_name_for_path(&deep);
+        let derived = pipe_name_for_path(&deep).expect("derive a name");
         assert!(derived.len() <= MAX_PIPE_NAME_CHARS, "{derived}");
     }
 
@@ -1012,8 +1189,45 @@ mod tests {
         let listener = PipeListener::bind(&dir.0.join("control.sock")).expect("bind");
         // The full parity of the unix post-bind stat: the object that ended
         // up on the wire name grants only us (and SYSTEM).
-        assert_eq!(listener.instance.is_null(), false);
+        assert!(!listener.instance.is_null());
         post_bind_sanity_check(listener.instance).expect("DACL restricted to owner");
+    }
+
+    /// The refusal decision behind the client-side owner check, which is what
+    /// gives Windows the authenticity unix gets for free from a socket living
+    /// in a user-owned directory. `\\.\pipe\` is a flat global namespace, so
+    /// without this a local user can create the name first and harvest
+    /// whatever tillerctl writes; a DACL only says who may CONNECT to a pipe
+    /// we created, and says nothing about a pipe someone else created.
+    ///
+    /// A genuine cross-user squat cannot be staged in-process — that needs a
+    /// second OS user — which is exactly why the decision was split out pure.
+    /// This pins the decision; the sibling test below pins that our OWN pipe
+    /// is still accepted, so a check that simply refused everything (secure
+    /// and useless) cannot pass both.
+    #[test]
+    fn a_pipe_owned_by_someone_else_is_refused_and_the_owner_is_named() {
+        let us = current_user_sid_string().expect("resolve our own SID");
+        ensure_owner_is(&us, &us).expect("our own pipe must be accepted");
+
+        let stranger = "S-1-5-21-0-0-0-1234";
+        let refusal = ensure_owner_is(stranger, &us)
+            .expect_err("a pipe owned by another user must be refused");
+        assert!(
+            refusal.contains(stranger),
+            "the refusal must name the actual owner so the cause is diagnosable, got: {refusal}"
+        );
+    }
+
+    /// The other half of the pair above: the owner check must not reject the
+    /// pipe we ourselves just bound. Without this, `verify_pipe_owner` could
+    /// fail closed on everything and the refusal test would still pass.
+    #[test]
+    fn our_own_bound_pipe_passes_the_client_owner_check() {
+        let dir = TempDir::new("owner");
+        let path = dir.0.join("control.sock");
+        let _listener = PipeListener::bind(&path).expect("bind");
+        open_client(&path).expect("a pipe we own must be accepted by the client check");
     }
 
     #[test]

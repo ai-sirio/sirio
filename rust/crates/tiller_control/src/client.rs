@@ -129,9 +129,23 @@ pub fn connect_raw(socket_path: &Path) -> std::io::Result<RawStream> {
     UnixStream::connect(socket_path)
 }
 
+/// The Windows twin keeps the unix signature by flattening the richer
+/// connect error. `open_client` distinguishes a refused foreign-owned pipe
+/// from ordinary connect noise, but this helper exists to mirror
+/// `UnixStream::connect` for callers and tests, and unix has no such
+/// distinction to mirror. A refusal is reported as `PermissionDenied` —
+/// which is what it is, a decision about who owns the endpoint rather than
+/// an I/O failure — and the message carries the owner so the reason is not
+/// lost on the way through.
 #[cfg(windows)]
 pub fn connect_raw(socket_path: &Path) -> std::io::Result<RawStream> {
-    crate::windows_pipe::open_client(socket_path)
+    use crate::windows_pipe::ClientConnectError;
+    crate::windows_pipe::open_client(socket_path).map_err(|error| match error {
+        ClientConnectError::Io(error) => error,
+        refused @ ClientConnectError::ForeignOwner { .. } => {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, refused.to_string())
+        }
+    })
 }
 
 /// Named-pipe client transport. No path-length check here, unlike the unix

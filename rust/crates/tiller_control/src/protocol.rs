@@ -548,7 +548,13 @@ pub mod request {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_socket_path, request};
+    use super::request;
+    // Only the Linux socket-path test below needs these. Gating the imports
+    // the same way that test is gated keeps other platforms warning-clean
+    // instead of importing names nothing there can use.
+    #[cfg(target_os = "linux")]
+    use super::default_socket_path;
+    #[cfg(target_os = "linux")]
     use std::collections::BTreeMap;
 
     #[cfg(target_os = "linux")]
