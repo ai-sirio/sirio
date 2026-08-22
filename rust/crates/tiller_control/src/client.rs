@@ -2,7 +2,6 @@
 //! `TillerControl/ControlClient.swift`: a fresh connection per request, one
 //! request line in, one response line out, with a receive timeout.
 
-#[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -24,10 +23,6 @@ pub enum ClientError {
     BadResponse { detail: String },
     /// The server did not answer within the timeout.
     TimedOut { timeout: Duration },
-    /// This platform has no client transport implemented yet — see
-    /// [`ServerError::Unsupported`](crate::server::ServerError::Unsupported)
-    /// for the matching server-side gap and its rationale (named pipes).
-    Unsupported { detail: String },
 }
 
 impl std::fmt::Display for ClientError {
@@ -40,7 +35,6 @@ impl std::fmt::Display for ClientError {
             ClientError::TimedOut { timeout } => {
                 write!(f, "no response within {timeout:?}")
             }
-            ClientError::Unsupported { detail } => write!(f, "unsupported: {detail}"),
         }
     }
 }
@@ -120,17 +114,84 @@ pub fn round_trip(
     }
 }
 
-/// Named-pipe client not implemented (see the doc comment on the
-/// `#[cfg(unix)]` twin above).
-#[cfg(not(unix))]
+/// A raw client-side control stream: the exact surface a real client (and
+/// the integration tests, which hold idle connections open, half-write
+/// requests and so on) needs. Connect it with [`connect_raw`].
+#[cfg(unix)]
+pub type RawStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub type RawStream = crate::windows_pipe::PipeStream;
+
+/// Connects a raw client stream to the control endpoint — the same call
+/// [`round_trip`] makes internally.
+#[cfg(unix)]
+pub fn connect_raw(socket_path: &Path) -> std::io::Result<RawStream> {
+    UnixStream::connect(socket_path)
+}
+
+#[cfg(windows)]
+pub fn connect_raw(socket_path: &Path) -> std::io::Result<RawStream> {
+    crate::windows_pipe::open_client(socket_path)
+}
+
+/// Named-pipe client transport. No path-length check here, unlike the unix
+/// twin above: `sun_path`'s 104-byte cap has no Windows counterpart — the
+/// derived pipe name is length-bounded by construction (see
+/// [`crate::windows_pipe::pipe_name_for_path`]).
+#[cfg(windows)]
 pub fn round_trip(
-    _socket_path: &Path,
-    _request: &ControlRequest,
-    _timeout: Duration,
+    socket_path: &Path,
+    request: &ControlRequest,
+    timeout: Duration,
 ) -> Result<ControlResponse, ClientError> {
-    Err(ClientError::Unsupported {
-        detail: "the control socket client is not implemented on this platform yet \
-                 (Windows counterpart: a named pipe)"
-            .to_string(),
-    })
+    let mut stream = crate::windows_pipe::open_client(socket_path).map_err(|error| {
+        ClientError::Connect {
+            detail: error.to_string(),
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| ClientError::Io {
+            detail: error.to_string(),
+        })?;
+
+    let line = encode_line(request).map_err(|error| ClientError::Io {
+        detail: error.to_string(),
+    })?;
+    stream.write_all(&line).map_err(|error| ClientError::Io {
+        detail: error.to_string(),
+    })?;
+
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=newline).collect();
+            return decode_response(&line[..line.len() - 1]).map_err(|error| {
+                ClientError::BadResponse {
+                    detail: error.to_string(),
+                }
+            });
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(ClientError::BadResponse {
+                    detail: "connection closed before a response line".to_string(),
+                });
+            }
+            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Err(ClientError::TimedOut { timeout });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(ClientError::Io {
+                    detail: error.to_string(),
+                });
+            }
+        }
+    }
 }

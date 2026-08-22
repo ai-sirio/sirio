@@ -24,6 +24,11 @@ pub mod panel;
 pub mod protocol;
 pub mod server;
 
+// The Windows named-pipe transport. Compiled only on Windows; on unix the
+// crate never sees it, keeping the unix build byte-identical.
+#[cfg(windows)]
+pub mod windows_pipe;
+
 pub use client::{ClientError, round_trip};
 pub use extract::{session_ref_from_json, session_ref_from_payload_arguments};
 pub use panel::{
