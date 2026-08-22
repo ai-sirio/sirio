@@ -78,9 +78,19 @@ impl GitHistory {
         self.generation += 1;
         let generation = self.generation;
         self.load_task = Some(cx.spawn(async move |this, cx| {
+            // `has_commits` shells out to `git rev-parse`. It is resolved
+            // here, beside the log read, and never in the `update` closure
+            // below: that closure runs on the render thread, and a blocking
+            // subprocess there stalls the frame.
             let loaded = cx
-                .background_spawn(async move { GitLog::commits(&repo_root, skip, CHUNK) })
+                .background_spawn(async move {
+                    let commits = GitLog::commits(&repo_root, skip, CHUNK);
+                    let has_commits = matches!(&commits, Ok(loaded) if loaded.is_empty())
+                        .then(|| GitLog::has_commits(&repo_root));
+                    (commits, has_commits)
+                })
                 .await;
+            let (loaded, has_commits) = loaded;
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 this.settled = true;
@@ -94,14 +104,9 @@ impl GitHistory {
                         }
                         this.commits.extend(commits);
                         this.rows = layout(&this.commits);
-                        this.empty_reason = if this.commits.is_empty() {
-                            if GitLog::has_commits(&this.repo_root) {
-                                None
-                            } else {
-                                Some(EmptyReason::NoCommits)
-                            }
-                        } else {
-                            None
+                        this.empty_reason = match (this.commits.is_empty(), has_commits) {
+                            (true, Some(false)) => Some(EmptyReason::NoCommits),
+                            _ => None,
                         };
                         this.error = None;
                     }
@@ -381,6 +386,17 @@ fn graph_width(rows: &[GraphRow]) -> f32 {
     peak as f32 * LANE_WIDTH
 }
 
+/// Whether this commit's node, and the curves anchored to it, can be drawn
+/// at all.
+///
+/// The column's width stops at `MAX_LANES * LANE_WIDTH`, so a node past the
+/// cap is clipped away entirely and every curve reaching for it runs off the
+/// right edge and stops in mid-air. `layout` imposes no cap of its own, so a
+/// repository with more than `MAX_LANES` concurrent branches reaches this.
+fn node_is_drawable(row: &GraphRow) -> bool {
+    row.lane < MAX_LANES
+}
+
 fn graph_column(row: &GraphRow, theme: Theme) -> impl IntoElement {
     let row = row.clone();
     canvas(
@@ -404,6 +420,10 @@ fn graph_column(row: &GraphRow, theme: Theme) -> impl IntoElement {
                 path.line_to(point(px(x - half), px(origin_y + height)));
                 path.line_to(point(px(x - half), px(origin_y)));
                 window.paint_path(path, theme.graph_lane(color.unwrap_or_default()));
+            }
+
+            if !node_is_drawable(&row) {
+                return;
             }
 
             for &(source, color) in &row.joins_in {
@@ -646,6 +666,31 @@ mod tests {
         };
 
         assert_eq!(graph_width(std::slice::from_ref(&narrow)), LANE_WIDTH);
+    }
+
+    #[test]
+    fn a_node_past_the_lane_cap_is_not_drawn() {
+        // `layout` caps nothing, so a repository with more concurrent
+        // branches than the column can show produces these. Drawing one puts
+        // the node outside the clipped column and leaves any curve reaching
+        // for it ending in mid-air.
+        let beyond = GraphRow {
+            lane: MAX_LANES,
+            color: 0,
+            through: vec![Some(0); MAX_LANES + 1],
+            joins_in: vec![(5, 1)],
+            edges_out: Vec::new(),
+        };
+        let inside = GraphRow {
+            lane: MAX_LANES - 1,
+            color: 0,
+            through: vec![Some(0); MAX_LANES],
+            joins_in: Vec::new(),
+            edges_out: Vec::new(),
+        };
+
+        assert!(!node_is_drawable(&beyond));
+        assert!(node_is_drawable(&inside), "the last lane inside the cap still draws");
     }
 
     #[test]
