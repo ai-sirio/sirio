@@ -7,3 +7,19 @@ publish = false
 [dependencies]
 pulldown-cmark = "0.13"
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# ReadDirectoryChangesW + the FILE_NOTIFY_INFORMATION chain, OVERLAPPED
+# I/O arbitration, and the manual-reset event. Win32_Security is required
+# only because CreateFileW/CreateEventW take a SECURITY_ATTRIBUTES
+# parameter, which windows-sys gates behind that feature — no security
+# APIs are used here. Same windows-sys version the workspace lockfile
+# already carries via tiller_control, so offline builds keep resolving
+# from the local registry.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
