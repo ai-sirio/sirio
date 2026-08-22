@@ -131,8 +131,18 @@ impl MarkdownDocument {
             .map_or(0, |duration| duration.as_nanos());
         let temp = parent.join(format!(".{name}.tiller-{}-{nonce}-tmp", std::process::id()));
         std::fs::write(&temp, self.text.as_bytes())?;
-        let file = std::fs::File::open(&temp)?;
-        file.sync_all()?;
+        // The sync handle needs write access: Windows rejects flushing a
+        // read-only handle with os error 5 (access denied — FlushFileBuffers
+        // demands GENERIC_WRITE), while Unix fsync accepts any open mode,
+        // which is why the plain `File::open` spelling worked there and
+        // only failed on Windows. The handle is scoped to end before the
+        // rename so no handle is live across it on any platform. The
+        // `fs::write` handle above is already closed — it was dropped when
+        // that call returned.
+        {
+            let file = std::fs::OpenOptions::new().write(true).open(&temp)?;
+            file.sync_all()?;
+        }
         std::fs::rename(&temp, &self.path)?;
         self.saved_text = self.text.clone();
         self.dirty = false;
