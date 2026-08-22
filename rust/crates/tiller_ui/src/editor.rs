@@ -1077,13 +1077,26 @@ pub mod fs_actions {
 
     /// F-EDIT-10: builds the platform command for "Show in Finder".
     /// macOS uses `open -R <path>`; Linux opens the file's containing
-    /// directory with Linux's platform opener.
+    /// directory with Linux's platform opener; Windows asks Explorer to
+    /// open the containing folder with the file highlighted
+    /// (`/select,<path>`).
     ///
     /// Returns `None` when no parent directory exists (a bare relative
-    /// filename with no current directory resolvable) on Linux, or on an
-    /// unsupported platform.
+    /// filename with no current directory resolvable) on macOS/Linux/
+    /// Windows, or on any other unsupported platform.
+    ///
+    /// On platforms with no reveal surface the body is just `None`. The
+    /// `path` parameter stays named `path` everywhere (a `_path` rename
+    /// would break the macOS/Linux/Windows arms' compile, the same
+    /// regression the notification poster's `_payload` rename caused,
+    /// which is why that fix added a Windows arm instead), so the
+    /// unused-parameter warning is scoped out with an attribute.
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+        allow(unused_variables)
+    )]
     pub fn reveal_command(path: &Path) -> Option<Command> {
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -1105,7 +1118,25 @@ pub mod fs_actions {
             Some(command)
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            // `explorer /select,<path>` opens the file's containing folder
+            // with the file highlighted — the Explorer equivalent of
+            // `open -R` / opening the parent directory. The selector must
+            // be one argument (`/select,` glued to the absolute path, no
+            // shell involved), and Explorer returns immediately. A
+            // relative input is absolutized above so the selector names a
+            // real location.
+            let mut command = Command::new("explorer");
+            command.arg(format!("/select,{}", absolute.display()));
+            Some(command)
+        }
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
         {
             None
         }
@@ -1824,6 +1855,16 @@ mod tests {
             let expected_dir = file.path().parent().expect("parent");
             let args: Vec<_> = command.get_args().collect();
             assert_eq!(args, vec![expected_dir.as_os_str()]);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // The selector is one glued argument (`/select,` + path), never
+            // split — that is what Explorer expects.
+            assert_eq!(command.get_program(), "explorer");
+            let args: Vec<_> = command.get_args().collect();
+            let expected = format!("/select,{}", file.path().display());
+            assert_eq!(args, vec![OsStr::new(&expected)]);
         }
     }
 
