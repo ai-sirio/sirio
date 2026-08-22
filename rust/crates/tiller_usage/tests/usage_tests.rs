@@ -2,7 +2,12 @@
 //! "state" is its captured transcript, and the parser must read it from
 //! disk exactly as the app would. No mocked readers.
 
-use std::path::{Path, PathBuf};
+// `Path` is only used by the gated-off (Windows: stubbed) login-shell
+// fetch tests — see the `#[cfg(unix)]` block below — so it is imported
+// conditionally to keep the Windows build warning-free.
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
