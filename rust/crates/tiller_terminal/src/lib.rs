@@ -391,6 +391,42 @@ pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
     (program, vec!["/C".to_string(), command.to_string()])
 }
 
+/// The PTY child's process id.
+///
+/// Each `alacritty_terminal` backend exposes it through a different accessor,
+/// so this is a real platform split rather than one call: the unix backend
+/// owns a `std::process::Child` and can hand back its pid directly, while the
+/// ConPTY backend owns a `ChildExitWatcher` wrapping a raw process `HANDLE`
+/// and can only report a pid it manages to resolve from it.
+#[cfg(unix)]
+fn pty_shell_pid(pty: &tty::Pty) -> u32 {
+    pty.child().id()
+}
+
+/// See the unix arm. `ChildExitWatcher::pid` is fallible, but not in the way
+/// its name suggests: the pid is resolved exactly once, by `GetProcessId` in
+/// `ChildExitWatcher::new`, and cached in a plain field that `pid()` copies
+/// out (`tty/windows/child.rs`). So `None` means only that `GetProcessId`
+/// failed against a handle `CreateProcess` had just produced -- it never
+/// starts as `Some` and later becomes `None` as the child exits. Do not read
+/// a live liveness check into this call.
+///
+/// `0` is never a real Windows pid, so it stands in for that one unknown here
+/// rather than widening `shell_pid` to an `Option` that every unix call site
+/// would then have to unwrap for no reason.
+///
+/// This degrades no further than the platform already does: the two consumers
+/// that read `shell_pid` directly are already no-ops on Windows
+/// ([`terminate_descendant_process_groups`] and
+/// [`TerminalHandle::foreground_command_running`]), and the one that leaves
+/// this crate ([`TerminalView::shell_pid`], feeding `tiller_activity`'s
+/// Layer-D process inspection) reaches a function that reports `Unsupported`
+/// on Windows before it ever looks at the number.
+#[cfg(windows)]
+fn pty_shell_pid(pty: &tty::Pty) -> u32 {
+    pty.child_watcher().pid().map_or(0, |pid| pid.get())
+}
+
 impl TerminalHandle {
     fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
@@ -471,7 +507,7 @@ impl TerminalHandle {
             ..Default::default()
         };
         let pty = tty::new(&options, size, 0).context("creating terminal PTY")?;
-        let shell_pid = pty.child().id();
+        let shell_pid = pty_shell_pid(&pty);
         // Captured before `pty` moves into `EventLoop::new` below — see the
         // field doc on `pty_master_fd` for why the bare fd number outlives
         // that move.
