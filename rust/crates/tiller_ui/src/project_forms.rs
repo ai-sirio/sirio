@@ -9,6 +9,8 @@ use gpui::{
     Render, Task, Window, div, prelude::*, px,
 };
 use tiller_git::{GitRemote, clone_repository};
+
+use crate::caret;
 use tiller_project::create_project;
 use tiller_theme::Theme;
 
@@ -130,6 +132,8 @@ pub struct CloneForm {
     parent: PathBuf,
     state: CloneFormState,
     focus: FocusHandle,
+    /// Blink state of the URL field's insertion caret.
+    blink: caret::Blink,
     task: Option<Task<()>>,
 }
 
@@ -142,6 +146,7 @@ impl CloneForm {
             parent,
             state: CloneFormState::default(),
             focus: cx.focus_handle(),
+            blink: caret::Blink::new(),
             task: None,
         }
     }
@@ -251,7 +256,14 @@ impl CloneForm {
         }));
     }
 
+    /// Blink timer tick for the URL field's insertion caret.
+    fn flip_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink.flip();
+        cx.notify();
+    }
+
     fn on_url_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.blink.wake();
         match event.keystroke.key.as_str() {
             "enter" | "return" => self.submit(cx),
             "backspace" | "delete" => {
@@ -287,8 +299,11 @@ impl Focusable for CloneForm {
 impl EventEmitter<CloneFormEvent> for CloneForm {}
 
 impl Render for CloneForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        let field_focused = self.focus.is_focused(window);
+        caret::schedule(&mut self.blink, field_focused, Self::flip_blink, cx);
+        let caret_visible = field_focused && self.blink.visible();
         let url_is_empty = self.state.url().trim().is_empty();
         let url_value = if url_is_empty {
             "https://github.com/owner/repository.git".to_owned()
@@ -299,7 +314,7 @@ impl Render for CloneForm {
             .destination()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "derived from the URL".to_owned());
-        let (status_line, status_color) = clone_status_line(&self.state, theme);
+        let (status_line, status_color) = clone_status_line(&self.state, &theme);
         let can_submit = self.state.can_submit();
         let button_label = if self.state.error().is_some() {
             "Retry clone"
@@ -328,7 +343,7 @@ impl Render for CloneForm {
                     .text_color(theme.subtitle)
                     .child("Paste a Git URL and choose where its folder should live."),
             )
-            .child(form_label("Repository URL", theme))
+            .child(form_label("Repository URL", &theme))
             .child(
                 div()
                     .id("clone-url-field")
@@ -359,9 +374,12 @@ impl Render for CloneForm {
                         cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
                     )
                     .on_key_down(cx.listener(Self::on_url_key))
-                    .child(url_value),
+                    .child(url_value)
+                    .when(field_focused, |this| {
+                        this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+                    }),
             )
-            .child(form_label("Destination", theme))
+            .child(form_label("Destination", &theme))
             .child(
                 div()
                     .id("clone-destination")
@@ -495,6 +513,8 @@ pub struct CreateForm {
     parent: PathBuf,
     state: CreateFormState,
     focus: FocusHandle,
+    /// Blink state of the name field's insertion caret.
+    blink: caret::Blink,
     task: Option<Task<()>>,
 }
 
@@ -505,6 +525,7 @@ impl CreateForm {
             parent,
             state: CreateFormState::default(),
             focus: cx.focus_handle(),
+            blink: caret::Blink::new(),
             task: None,
         }
     }
@@ -562,7 +583,14 @@ impl CreateForm {
         }));
     }
 
+    /// Blink timer tick for the name field's insertion caret.
+    fn flip_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink.flip();
+        cx.notify();
+    }
+
     fn on_name_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.blink.wake();
         match event.keystroke.key.as_str() {
             "enter" | "return" => self.submit(cx),
             "backspace" | "delete" => {
@@ -598,8 +626,11 @@ impl Focusable for CreateForm {
 impl EventEmitter<CreateFormEvent> for CreateForm {}
 
 impl Render for CreateForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::get(cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *Theme::get(cx);
+        let field_focused = self.focus.is_focused(window);
+        caret::schedule(&mut self.blink, field_focused, Self::flip_blink, cx);
+        let caret_visible = field_focused && self.blink.visible();
         let name_is_empty = self.state.name().trim().is_empty();
         let name_value = if name_is_empty {
             "project-folder-name".to_owned()
@@ -608,7 +639,7 @@ impl Render for CreateForm {
         };
         let parent = self.parent.display().to_string();
         let destination = self.destination().display().to_string();
-        let (status_line, status_color) = create_status_line(&self.state, theme);
+        let (status_line, status_color) = create_status_line(&self.state, &theme);
         let can_submit = self.state.can_submit();
         let button_label = if self.state.error().is_some() {
             "Retry creation"
@@ -637,7 +668,7 @@ impl Render for CreateForm {
                     .text_color(theme.subtitle)
                     .child("Make a new folder for a project in the selected location."),
             )
-            .child(form_label("Project name", theme))
+            .child(form_label("Project name", &theme))
             .child(
                 div()
                     .id("create-name-field")
@@ -668,9 +699,12 @@ impl Render for CreateForm {
                         cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
                     )
                     .on_key_down(cx.listener(Self::on_name_key))
-                    .child(name_value),
+                    .child(name_value)
+                    .when(field_focused, |this| {
+                        this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+                    }),
             )
-            .child(form_label("Parent location", theme))
+            .child(form_label("Parent location", &theme))
             .child(
                 div()
                     .id("create-parent")
