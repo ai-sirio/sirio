@@ -64,6 +64,9 @@ pub enum RightPanelActionEvent {
     OpenDiff(PathBuf),
     /// Open a terminal prepared to resolve this conflicted path.
     ResolveInTerminal(PathBuf),
+    /// Open one commit's diff in a host tab, by full object name. The History
+    /// view raises this; the host owns the tab it lands in.
+    OpenCommit(String),
 }
 
 /// A surface shown in the Activity section.
