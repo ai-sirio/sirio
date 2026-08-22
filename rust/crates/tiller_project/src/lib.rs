@@ -27,6 +27,54 @@
 //! and [`discovery::current_branch`] reports what branch a checkout is on.
 //! [`Workspace::load_project`] ties it together.
 
+/// Cross-platform symlink creation for tests.
+///
+/// The behaviour under test in the two callers — refusing to traverse a
+/// symlink, and canonicalizing one away — is not a unix notion, so gating
+/// those tests off Windows would drop real coverage for an incidental
+/// reason. What IS unix-only is the one-call `std::os::unix::fs::symlink`:
+/// Windows splits the API by target kind and, by default, refuses to create
+/// symlinks at all unless the process is elevated or the machine has
+/// Developer Mode enabled.
+///
+/// So the helper reports refusal rather than hiding it, and callers skip
+/// only on that specific refusal. A test that quietly passes on a machine
+/// which cannot make symlinks is honest; one that fails there would be
+/// noise, and one that never runs there would be a lie.
+#[cfg(test)]
+pub(crate) mod test_symlink {
+    use std::io;
+    use std::path::Path;
+
+    #[cfg(windows)]
+    pub(crate) fn dir(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn dir(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn file(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn file(target: &Path, link: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    /// Whether the OS refused for want of the privilege, as opposed to any
+    /// other failure. `ERROR_PRIVILEGE_NOT_HELD` (1314) is the one Windows
+    /// raises without Developer Mode; anything else is a real failure the
+    /// caller must not swallow.
+    pub(crate) fn is_unprivileged(error: &io::Error) -> bool {
+        cfg!(windows) && error.raw_os_error() == Some(1314)
+    }
+}
+
 mod create;
 mod discovery;
 mod domain;

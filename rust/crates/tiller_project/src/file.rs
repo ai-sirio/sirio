@@ -293,7 +293,18 @@ mod tests {
         let root = temp_root();
         let outside = temp_root();
         fs::write(outside.join("secret.txt"), b"secret").unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        if let Err(error) = crate::test_symlink::dir(&outside, &root.join("linked")) {
+            // Windows without Developer Mode cannot create the fixture. The
+            // rejection under test is not platform-specific; the ability to
+            // build a symlink is.
+            assert!(
+                crate::test_symlink::is_unprivileged(&error),
+                "symlink fixture failed for an unexpected reason: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outside);
+            return;
+        }
 
         assert!(matches!(
             load_file_tree(&root),
