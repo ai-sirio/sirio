@@ -65,10 +65,19 @@ fn auth_file_precedence_load_refresh_and_missing_at_both_locations() {
 
     let original_home = std::env::var_os("HOME");
     let original_codex_home = std::env::var_os("CODEX_HOME");
+    // The "~" in `~/.codex` is resolved by `user_home_dir`, which reads
+    // `HOME` on unix and `USERPROFILE` on Windows (a native GUI launch
+    // there never sets `HOME`; see that function's doc comment). The
+    // fixture must point *both* knobs at the temp dir or the fallback
+    // asserts resolve against the real home on Windows. Setting
+    // `USERPROFILE` here is harmless on unix — the unix arm never reads
+    // it.
+    let original_userprofile = std::env::var_os("USERPROFILE");
     // SAFETY: this is the only test in this file, so nothing else in this
     // process reads these variables concurrently.
     unsafe {
         std::env::set_var("HOME", home.path());
+        std::env::set_var("USERPROFILE", home.path());
         std::env::set_var("CODEX_HOME", codex_home.path());
     }
 
@@ -142,6 +151,10 @@ fn auth_file_precedence_load_refresh_and_missing_at_both_locations() {
         match &original_codex_home {
             Some(value) => std::env::set_var("CODEX_HOME", value),
             None => std::env::remove_var("CODEX_HOME"),
+        }
+        match &original_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
         }
     }
 }
