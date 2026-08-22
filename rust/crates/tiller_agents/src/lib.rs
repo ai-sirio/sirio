@@ -349,11 +349,13 @@ pub fn find_executable_in_path_checked(
     let verbatim =
         candidate.is_absolute() || program.contains('/') || (cfg!(windows) && program.contains('\\'));
 
-    // Every variant in probe order, dir-major when searching PATH: the bare
-    // name first, then — on Windows only — each PATHEXT extension, mirroring
-    // how cmd.exe and SearchPath order their tries. unix has no such
-    // convention, so the enumeration is exactly one element there and the
-    // behavior is unchanged.
+    // Every variant in probe order, dir-major when searching PATH. On
+    // Windows those are the PATHEXT suffixes, mirroring how cmd.exe resolves
+    // a bare name — see [`executable_candidates`] for why the bare name is
+    // deliberately not among them. (`SearchPath` is a different mechanism and
+    // no model for this: it appends one caller-supplied extension and never
+    // reads PATHEXT.) unix has no such convention, so the enumeration is
+    // exactly one element there and the behavior is unchanged.
     let variants = executable_candidates(program);
 
     let mut first_error: Option<DiscoveryError> = None;
@@ -468,7 +470,10 @@ fn has_pathext_extension(program: &str) -> bool {
 /// A search that accepts it returns a path that fails at spawn time, which
 /// is strictly worse than reporting the agent missing — the user sees the
 /// failure when they open a tab instead of on the settings screen. `pi` and
-/// `omp` are exactly the two catalog entries shaped this way.
+/// `omp` are the entries seen in this shape so far, but that is a fact about
+/// how they were installed, not about those two ids: every catalog CLI
+/// arrives with the same triple when installed through npm, so the guard
+/// belongs to the search itself rather than to a list of names.
 ///
 /// A name that already carries a `PATHEXT` extension is explicit and passes
 /// through untouched, so `tillerctl.exe` is never suffixed into

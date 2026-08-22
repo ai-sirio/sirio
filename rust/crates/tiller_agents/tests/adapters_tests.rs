@@ -216,8 +216,9 @@ fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
 /// A search that probes the bare name first therefore "finds" the sh shim,
 /// stops, and hands back a path that fails at spawn time — a worse outcome
 /// than reporting the agent missing, because the failure surfaces at launch
-/// instead of at discovery. `pi` and `omp` are exactly the two catalog
-/// entries shaped this way.
+/// instead of at discovery. `pi` and `omp` are the entries seen in this
+/// shape so far, but it is a property of an npm install rather than of those
+/// two ids — any catalog CLI installed that way arrives as the same triple.
 ///
 /// The second half pins the other edge: with no PATHEXT hit at all, the
 /// lone extensionless file must NOT rescue the lookup.

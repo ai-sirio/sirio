@@ -12485,12 +12485,19 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
 
-/// The control CLI's file name. On Windows the toolchain emits
-/// `tillerctl.exe` and nothing — not cmd.exe, not CreateProcess, not this
-/// resolver — resolves a bare `tillerctl`, so the extension is part of the
-/// name rather than something to discover; on unix the binary is bare. One
-/// definition feeds both the sibling-dir candidate and the install subpath
-/// so the two cannot disagree on which name to look for.
+/// The control CLI's file name: `tillerctl.exe` on Windows, bare on unix.
+///
+/// The extension is part of the name here because this resolver does not
+/// *search* for the binary the way a shell does — it stats a path it built
+/// itself (a sibling of the app executable, or the install destination), and
+/// a stat needs the exact spelling the toolchain emitted. That is a property
+/// of direct path probing, not of the platform: cmd.exe would happily
+/// resolve a bare `tillerctl` by appending `.EXE` from PATHEXT, and so does
+/// the PATH search in `tiller_agents::find_executable_in_path`. Neither of
+/// those runs here.
+///
+/// One definition feeds both the sibling-dir candidate and the install
+/// subpath so the two cannot disagree on which name to look for.
 fn tillerctl_binary_name() -> &'static str {
     #[cfg(windows)]
     {
