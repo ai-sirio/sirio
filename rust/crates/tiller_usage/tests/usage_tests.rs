@@ -228,13 +228,30 @@ fn the_fetch_is_bounded_and_single_attempts_do_not_hang() {
 // `claude` resolves to inside the spawned shell.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The three `fetch_with_env` tests below (and their two helpers) are
+// `#[cfg(unix)]` as a block. This is NOT the fixture-convenience case (a
+// chmod that merely builds a fixture around a portable subject): all three
+// drive `ClaudeUsageFetcher::fetch_with_env` through a real login shell and
+// a real PTY, and on Windows that function is an honest stub returning
+// `Unavailable(Error)` — its doc comment names ConPTY (`CreatePseudoConsole`)
+// as future work. Porting the fixture mechanically (a `.cmd` shim instead of
+// a chmod'ed shell script) would produce tests that compile and lie: the
+// `NotInstalled` and `LoggedOut` cases would fail against the stub and
+// `Error` would pass by accident. Gating here suppresses coverage of an
+// admitted gap, not of a portable behaviour — the gate is the TODO list for
+// the ConPTY port. When that lands, this block comes back with it.
+// ---------------------------------------------------------------------------
+
 /// A `PATH` containing only `dir`, so the fake (or absent) `claude` in it is
 /// all the spawned shell can find — the real `claude` on this machine's
 /// normal `PATH` never enters the picture.
+#[cfg(unix)]
 fn isolated_path(dir: &Path) -> String {
     dir.to_string_lossy().into_owned()
 }
 
+#[cfg(unix)]
 #[test]
 fn not_installed_is_reachable_through_the_real_shell_when_claude_is_absent_from_path() {
     let dir = TempDir::new(); // no `claude` binary written into it
@@ -265,6 +282,7 @@ fn not_installed_is_reachable_through_the_real_shell_when_claude_is_absent_from_
 
 /// Writes an executable `claude` shell script into `dir` and returns its
 /// path.
+#[cfg(unix)]
 fn fake_claude(dir: &Path, script_body: &str) -> PathBuf {
     let path = dir.join("claude");
     std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("write fake claude");
@@ -276,6 +294,7 @@ fn fake_claude(dir: &Path, script_body: &str) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 #[test]
 fn logged_out_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
     let dir = TempDir::new();
@@ -295,6 +314,7 @@ fn logged_out_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn error_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
     let dir = TempDir::new();
