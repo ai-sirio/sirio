@@ -183,9 +183,9 @@ pub fn database_path() -> PathBuf {
 fn app_support_root() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return std::env::var_os("HOME")
+        std::env::var_os("HOME")
             .map(|home| PathBuf::from(home).join("Library/Application Support/TillerRust"))
-            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"));
+            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -198,11 +198,11 @@ fn app_support_root() -> PathBuf {
 fn app_support_root_for(environment: &std::collections::BTreeMap<String, String>) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return environment
+        environment
             .get("HOME")
             .map(PathBuf::from)
             .map(|home| home.join("Library/Application Support/TillerRust"))
-            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"));
+            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"))
     }
 
     #[cfg(not(target_os = "macos"))]
