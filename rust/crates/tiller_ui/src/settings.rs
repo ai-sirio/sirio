@@ -1,5 +1,6 @@
 //! Full-window settings surface and its small fixture model.
 
+use crate::caret;
 use crate::controls;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use gpui::{
@@ -983,6 +984,12 @@ pub struct Settings {
     /// click-to-focus + raw-keystroke pattern `sidebar.rs`'s project filter
     /// already uses and tests successfully.
     agent_search_focus: FocusHandle,
+    /// Shared blink state for every settings text field's insertion caret
+    /// (search, both cookies, workspace override). One is enough: window
+    /// focus is unique, so at most one field can show a caret. Computed
+    /// visibility is stashed here each render for the field builders.
+    field_blink: caret::Blink,
+    field_caret_visible: bool,
     /// Per-agent accent colour choice (F-SET-22), in `SummarizerChoice::ALL`
     /// order. Part of the persistence contract — see [`SettingsSnapshot::agent_colors`].
     agent_colors: [AgentAccentColor; 5],
@@ -1123,6 +1130,8 @@ impl Settings {
             on_revoke_all_browser_origins: None,
             agent_search: String::new(),
             agent_search_focus: cx.focus_handle(),
+            field_blink: caret::Blink::new(),
+            field_caret_visible: false,
             agent_colors: initial.agent_colors,
             database_path: None,
             claude_accounts: Vec::new(),
@@ -1722,7 +1731,7 @@ impl Settings {
             let mut child = match spawned {
                 Ok(child) => child,
                 Err(error) => {
-                    let _ = entity.update(cx, |settings, cx| {
+                    entity.update(cx, |settings, cx| {
                         settings.account_login_pending = None;
                         settings.account_login_pid = None;
                         settings.account_action_error = Some((
@@ -1740,7 +1749,7 @@ impl Settings {
             // `account_login_pending` still naming this provider, so a
             // Cancel that already fired is not clobbered by this update.
             let pid = child.id();
-            let _ = entity.update(cx, |settings, cx| {
+            entity.update(cx, |settings, cx| {
                 if settings.account_login_pending == Some(provider) {
                     settings.account_login_pid = Some(pid);
                     cx.notify();
@@ -1749,7 +1758,7 @@ impl Settings {
 
             let result = cx.background_spawn(async move { child.wait() }).await;
 
-            let _ = entity.update(cx, |settings, cx| {
+            entity.update(cx, |settings, cx| {
                 settings.account_login_pending = None;
                 settings.account_login_pid = None;
                 if settings.account_login_canceled {
@@ -1860,12 +1869,19 @@ impl Settings {
     /// Raw-keystroke handling for the Agents screen's search field
     /// (F-SET-16), the same backspace/character pattern `sidebar.rs`'s
     /// project filter already uses.
+    /// Blink timer tick shared by every settings text field's caret.
+    fn flip_field_blink(&mut self, cx: &mut Context<Self>) {
+        self.field_blink.flip();
+        cx.notify();
+    }
+
     fn on_agent_search_key(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.agent_search.pop();
@@ -1887,6 +1903,7 @@ impl Settings {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.opencode_cookie_input.pop();
@@ -1911,6 +1928,7 @@ impl Settings {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.opencode_workspace_id_override.pop();
@@ -2000,6 +2018,7 @@ impl Settings {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.ollama_cookie_input.pop();
@@ -2701,6 +2720,7 @@ impl Settings {
         is_empty: bool,
         focus: FocusHandle,
         is_focused: bool,
+        caret_visible: bool,
         theme: Theme,
         on_focus: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         on_key: impl Fn(&mut Self, &KeyDownEvent, &mut Window, &mut Context<Self>) + 'static,
@@ -2739,6 +2759,12 @@ impl Settings {
             } else {
                 display_text
             }))
+            // The field's insertion caret: end-of-text, since these compact
+            // single-line fields always append. Invisible (but still laid
+            // out) while unfocused so the bar never shifts the text.
+            .when(is_focused, |this| {
+                this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+            })
     }
 
     /// A caption line under a cookie-section row, the same footnote tone
@@ -2780,6 +2806,7 @@ impl Settings {
             cookie_is_empty,
             self.opencode_cookie_focus.clone(),
             self.opencode_cookie_focus.is_focused(window),
+            self.field_caret_visible,
             theme,
             |this, window, cx| this.opencode_cookie_focus.focus(window, cx),
             |this, event, window, cx| this.on_opencode_cookie_key(event, window, cx),
@@ -2861,6 +2888,7 @@ impl Settings {
             override_is_empty,
             self.opencode_override_focus.clone(),
             self.opencode_override_focus.is_focused(window),
+            self.field_caret_visible,
             theme,
             |this, window, cx| this.opencode_override_focus.focus(window, cx),
             |this, event, window, cx| this.on_opencode_override_key(event, window, cx),
@@ -2922,6 +2950,7 @@ impl Settings {
             cookie_is_empty,
             self.ollama_cookie_focus.clone(),
             self.ollama_cookie_focus.is_focused(window),
+            self.field_caret_visible,
             theme,
             |this, window, cx| this.ollama_cookie_focus.focus(window, cx),
             |this, event, window, cx| this.on_ollama_cookie_key(event, window, cx),
@@ -3286,7 +3315,14 @@ impl Settings {
                                 "Search agents".to_string()
                             } else {
                                 search_text
-                            })),
+                            }))
+                            .when(search_is_focused, |this| {
+                                this.child(caret::bar(
+                                    px(16.0),
+                                    theme.accent,
+                                    self.field_caret_visible,
+                                ))
+                            }),
                     )
                     .child({
                         // F-SET-16: a "Refreshed …" stamp next to the
@@ -3968,6 +4004,24 @@ impl Render for Settings {
         let theme = *Theme::get(cx);
         let mode = Theme::get(cx).mode;
         let entity = cx.entity();
+        // Every settings text field shares one blink: window focus is
+        // unique, so at most one caret is ever visible. The computed bar
+        // visibility is stashed for this frame's field builders.
+        let field_focused = [
+            &self.agent_search_focus,
+            &self.opencode_cookie_focus,
+            &self.ollama_cookie_focus,
+            &self.opencode_override_focus,
+        ]
+        .iter()
+        .any(|focus| focus.is_focused(window));
+        caret::schedule(
+            &mut self.field_blink,
+            field_focused,
+            Self::flip_field_blink,
+            cx,
+        );
+        self.field_caret_visible = field_focused && self.field_blink.visible();
         let category_sidebar = self.render_categories(theme, entity.clone());
         let detail = match self.category {
             SettingsCategory::AiProviders => {

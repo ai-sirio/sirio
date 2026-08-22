@@ -77,6 +77,10 @@ pub struct ModalTextField {
     /// Drawn as-is; the caller owns the draft (same convention as
     /// `TabRename`/`CreateForm`) and applies `on_key_down`'s edits to it.
     pub value: String,
+    /// Whether the field's end-of-text insertion caret bar is currently
+    /// lit. The caller folds focus + blink phase into this — `render_modal`
+    /// is stateless, so it can't know either on its own.
+    pub caret_visible: bool,
     pub on_key_down: Box<dyn Fn(&KeyDownEvent, &mut Window, &mut App)>,
 }
 
@@ -84,11 +88,13 @@ impl ModalTextField {
     pub fn new(
         focus: FocusHandle,
         value: impl Into<String>,
+        caret_visible: bool,
         on_key_down: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
             focus,
             value: value.into(),
+            caret_visible,
             on_key_down: Box::new(on_key_down),
         }
     }
@@ -187,7 +193,10 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                     focus_for_click.focus(window, cx);
                 })
                 .on_key_down(move |event, window, cx| on_key_down(event, window, cx))
-                .child(field.value),
+                .child(field.value)
+                // End-of-text insertion caret; laid out even when invisible
+                // so the bar never shifts the value while blinking.
+                .child(crate::caret::bar(px(14.0), theme.accent, field.caret_visible)),
         );
     }
 
@@ -310,7 +319,7 @@ mod tests {
                     id: "set-title-test",
                     title: "Set Title".into(),
                     body: "Enter the new title for \"Terminal\":".into(),
-                    text_field: Some(ModalTextField::new(focus.clone(), "Terminal", |_, _, _| {})),
+                    text_field: Some(ModalTextField::new(focus.clone(), "Terminal", false, |_, _, _| {})),
                     buttons: vec![
                         ModalButton::new("ok", "OK", ModalButtonTone::Accent, |_, _, _| {}),
                         ModalButton::new("cancel", "Cancel", ModalButtonTone::Plain, |_, _, _| {}),

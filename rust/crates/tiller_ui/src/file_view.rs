@@ -22,7 +22,7 @@ use gpui::{
     ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
     InspectorElementId, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Render, Rgba, StyledText, Subscription, Task, UnderlineStyle, Window,
-    div, point, prelude::*, px, quad, transparent_black,
+    div, point, prelude::*, px, quad, size, transparent_black,
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ use tiller_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use tiller_project::resolve_file_link;
 use tiller_theme::Theme;
 
+use crate::caret;
 use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
@@ -97,6 +98,12 @@ pub struct FileView {
     /// covers a shift+arrow selection that should not keep extending on
     /// an unrelated mouse move.
     dragging: bool,
+    /// Blink state of the source surface's insertion caret, and the
+    /// (caret, selection) signature it was last rendered against — a
+    /// changed signature means the user moved/edited, so the bar wakes
+    /// instead of blinking off mid-interaction.
+    editor_blink: caret::Blink,
+    editor_caret_sig: (usize, Option<(usize, usize)>),
 }
 
 /// Emitted so the shell can act on a gesture that started inside this tab
@@ -156,6 +163,8 @@ impl FileView {
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
             dragging: false,
+            editor_blink: caret::Blink::new(),
+            editor_caret_sig: (0, None),
         }
     }
 
@@ -678,7 +687,13 @@ impl FileView {
             })
     }
 
-    fn render_state(&self, theme: Theme, entity: gpui::Entity<Self>) -> AnyElement {
+    fn render_state(
+        &self,
+        theme: Theme,
+        entity: gpui::Entity<Self>,
+        caret_visible: bool,
+        caret_offset: usize,
+    ) -> AnyElement {
         if let Some(message) = &self.notice {
             return notice(message.clone(), theme);
         }
@@ -732,6 +747,8 @@ impl FileView {
                             theme,
                             entity.clone(),
                             self.source_selection,
+                            caret_visible,
+                            caret_offset,
                         ))
                         .into_any_element()
                 }
@@ -743,6 +760,12 @@ impl FileView {
                 ),
             },
         }
+    }
+
+    /// Blink timer tick for the source surface's insertion caret.
+    fn flip_editor_blink(&mut self, cx: &mut Context<Self>) {
+        self.editor_blink.flip();
+        cx.notify();
     }
 }
 
@@ -757,6 +780,27 @@ impl Render for FileView {
         }
         let theme = *Theme::get(cx);
         let entity = cx.entity();
+        // The source surface's insertion caret: wake on any caret/selection
+        // move since the last frame, then arm the single toggle timer while
+        // the editor owns focus.
+        let editor_focused = self.editor_focus.is_focused(window);
+        let caret_sig = (
+            self.caret,
+            self.source_selection.map(|selection| (selection.start, selection.end)),
+        );
+        if caret_sig != self.editor_caret_sig {
+            self.editor_blink.wake();
+            self.editor_caret_sig = caret_sig;
+        }
+        let caret_visible =
+            editor_focused && self.effective_mode() != MarkdownMode::Preview;
+        caret::schedule(&mut self.editor_blink, caret_visible, Self::flip_editor_blink, cx);
+        let caret_offset = self.caret.min(
+            match &self.state {
+                ViewState::Ready(editor) => editor.buffer().len(),
+                _ => 0,
+            },
+        );
         div()
             .size_full()
             .flex()
@@ -767,7 +811,7 @@ impl Render for FileView {
                 div()
                     .flex_1()
                     .min_h(px(0.0))
-                    .child(self.render_state(theme, cx.entity())),
+                    .child(self.render_state(theme, cx.entity(), caret_visible, caret_offset)),
             )
     }
 }
@@ -1001,6 +1045,8 @@ fn render_content(
     theme: Theme,
     entity: gpui::Entity<FileView>,
     selection: Option<Selection>,
+    caret_visible: bool,
+    caret_offset: usize,
 ) -> AnyElement {
     let is_markdown = editor.language() == Language::Markdown;
     // Preview renders the parsed document; a locked preview (large file,
@@ -1053,7 +1099,7 @@ fn render_content(
     }
 
     let mut offset = 0;
-    let lines: Vec<(usize, String, Selection)> = editor
+    let mut lines: Vec<(usize, String, Selection)> = editor
         .buffer()
         .split_inclusive('\n')
         .enumerate()
@@ -1069,6 +1115,15 @@ fn render_content(
             )
         })
         .collect();
+    // An empty buffer still hosts a caret: synthesize its one empty line so
+    // a freshly opened file shows an insertion point instead of nothing.
+    if lines.is_empty() {
+        lines.push((
+            0,
+            String::new(),
+            Selection::new(editor.buffer(), 0, 0).expect("empty range is valid"),
+        ));
+    }
     div()
         .id("file-text-scroll")
         .debug_selector(|| "file-text-scroll".into())
@@ -1145,6 +1200,20 @@ fn render_content(
                             theme,
                             entity.clone(),
                             selection,
+                            // The caret bar lives on exactly one line: the
+                            // one containing `caret_offset`, collapsed to
+                            // this line's own byte range.
+                            if caret_visible
+                                && caret_offset >= line_selection.start
+                                && caret_offset <= line_selection.end
+                            {
+                                Some(
+                                    (caret_offset - line_selection.start)
+                                        .min(line.len()),
+                                )
+                            } else {
+                                None
+                            },
                         ))
                 })),
         )
@@ -1301,6 +1370,12 @@ struct EditableLine {
     /// Byte ranges *local to this line* of clickable Markdown link labels,
     /// paired with their raw (unresolved) target text.
     links: Vec<(Range<usize>, String)>,
+    /// Local byte offset of the insertion caret when this line hosts it
+    /// (`None` on every other line, or whenever the bar is hidden). Painted
+    /// as a thin accent quad in `Element::paint`, after any selection.
+    caret_offset: Option<usize>,
+    /// Colour of the caret bar (the theme's accent).
+    caret_color: Rgba,
     /// Set on mouse-down, consumed on mouse-up: the down position and
     /// whether the platform modifier was held, so a same-position mouse-up
     /// on a link (not a drag) can open it (F-CORE-FILE-04) while a plain
@@ -1317,6 +1392,7 @@ impl EditableLine {
         theme: Theme,
         view: gpui::Entity<FileView>,
         selection: Option<Selection>,
+        caret_offset: Option<usize>,
     ) -> Self {
         let line_len = line.len();
         let links: Vec<(Range<usize>, String)> = if language == Language::Markdown {
@@ -1372,6 +1448,8 @@ impl EditableLine {
             view,
             selection,
             selection_fill: theme.selected_fill,
+            caret_offset,
+            caret_color: theme.accent,
             links,
             pressed: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
@@ -1465,6 +1543,27 @@ impl Element for EditableLine {
         cx: &mut App,
     ) {
         self.paint_selection(bounds, window);
+        // The insertion caret: a thin accent quad at the tracked offset,
+        // painted after the selection so a collapsed selection shows the
+        // bar rather than nothing.
+        if let Some(caret) = self.caret_offset {
+            let layout = self.text.layout();
+            let line_height = layout.line_height();
+            let position = layout
+                .position_for_index(caret)
+                .unwrap_or(point(bounds.right(), bounds.origin.y));
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(position.x.min(bounds.right()), bounds.origin.y),
+                    size(crate::caret::BAR_WIDTH, line_height),
+                ),
+                px(0.0),
+                self.caret_color,
+                Edges::default(),
+                transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
         window.set_cursor_style(CursorStyle::IBeam, hitbox);
 
         let layout = self.text.layout().clone();
