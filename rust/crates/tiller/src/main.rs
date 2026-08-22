@@ -14283,13 +14283,23 @@ mod tests {
             // saved on an earlier visit -- distinct title, so a switch that
             // merely relabels wt-0's tab (the bug) is distinguishable from
             // one that genuinely reloads wt-1's own persisted content.
+            //
+            // The marker is a `diff` surface rather than a terminal so that
+            // the switch *back* stays deterministic. `select_worktree`'s
+            // `outgoing_is_safe` gate declines to reload while any outgoing
+            // tab still has a live descendant process, and a restored
+            // `terminal` spawns the developer's real login shell -- whose rc
+            // files leave helpers (`tail`, `awk`, ...) running for seconds
+            // under load, long enough to outlive the switch that follows.
+            // The tab list, not the surface kind, is what these assertions
+            // are about, and a `diff` tab owns no PTY at all.
             workspace.session.save_layout_now(&SessionLayout {
                 working_directory: wt1.clone(),
                 branch: "branch-1".into(),
                 tabs: vec![SessionTab {
                     id: "wt1-marker-tab".into(),
                     title: "WT1 Marker".into(),
-                    kind: "terminal".into(),
+                    kind: "diff".into(),
                     agent_id: None,
                     active: true,
                 }],
