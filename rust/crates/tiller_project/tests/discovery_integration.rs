@@ -25,7 +25,13 @@ impl TempDir {
         std::fs::create_dir_all(&path).expect("create temp dir");
         // Canonicalize so paths match what git reports: on macOS `/var` is a
         // symlink to `/private/var`, and `git worktree list` prints the real
-        // path.
+        // path. macOS-only: on Windows `std::fs::canonicalize` returns
+        // extended-length `\\?\C:\...` paths, which msys git neither
+        // understands (`git worktree add "\\?\..."` fails outright) nor
+        // prints — the fixture must keep the plain absolute `%TEMP%` path,
+        // which compares equal to git's `C:/...` rendering under Windows
+        // Path equality (separator- and case-insensitive).
+        #[cfg(target_os = "macos")]
         let path = std::fs::canonicalize(&path).expect("canonicalize temp dir");
         Self(path)
     }
