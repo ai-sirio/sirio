@@ -4797,7 +4797,7 @@ impl TillerWorkspace {
         // Defensive: any tab not named in the snapshot (none should exist --
         // no tab opens or closes mid-drag) keeps its relative order, appended
         // after the restored ones rather than silently dropped.
-        restored.extend(self.tabs.drain(..));
+        restored.append(&mut self.tabs);
         self.tabs = restored;
         self.active_tab = snapshot
             .active_id
@@ -6669,7 +6669,7 @@ impl TillerWorkspace {
             if self.empty_pane_prompts.contains_key(&group_id) {
                 continue;
             }
-            let prompt = cx.new(|cx| TerminalView::empty_prompt(cx));
+            let prompt = cx.new(TerminalView::empty_prompt);
             cx.subscribe(&prompt, move |workspace, _, event: &TerminalPromptEvent, cx| {
                 workspace.handle_empty_pane_prompt(group_id, event.action, cx);
             })

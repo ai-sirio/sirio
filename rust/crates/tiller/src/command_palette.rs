@@ -536,7 +536,7 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
 
 /// Minimum filtering promised by D2: a case-insensitive substring over the
 /// visible label, with no fuzzy ranking that could make a command disappear.
-pub(crate) fn filter_entries<'a>(entries: &'a [PaletteEntry], query: &str) -> Vec<PaletteEntry> {
+pub(crate) fn filter_entries(entries: &[PaletteEntry], query: &str) -> Vec<PaletteEntry> {
     let query = query.trim().to_ascii_lowercase();
     entries
         .iter()
