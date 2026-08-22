@@ -105,6 +105,25 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// up. Bounded so the deadline stays real even for unkillable processes.
 const KILL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
+/// How long the runner waits for the reader threads to deliver their final
+/// buffers after the child has exited *on its own* (no kill, no timeout).
+///
+/// On Unix the child's descendants die with its process group, so both
+/// pipes reach EOF moments after the child exits and a short bound suffices.
+/// Windows has no process groups in this picture: git clone's helper
+/// subprocesses (`git-upload-pack`, `git-index-pack`) inherit the stderr
+/// pipe and can outlive the clone itself by hundreds of milliseconds, so
+/// EOF — and with it the retained capture — arrives late. The 100 ms kill
+/// grace would abandon the readers first and the capture would come back
+/// empty even though every progress line was delivered (observed with the
+/// clone-truncation fixture: 15 lines delivered, zero bytes retained). Two
+/// seconds covers helper exit while still bounding a genuinely stuck pipe.
+#[cfg(windows)]
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(not(windows))]
+const STREAM_DRAIN_TIMEOUT: Duration = KILL_GRACE_PERIOD;
+
 /// How many bytes of one stream the runner will retain before it stops
 /// accumulating and marks the capture truncated.
 ///
@@ -339,9 +358,14 @@ impl GitRunner {
         }
 
         // The process is gone, but the reader threads may still be delivering
-        // their final buffers. Drain until both completion events arrive.
+        // their final buffers. Drain until both completion events arrive —
+        // with [`STREAM_DRAIN_TIMEOUT`]'s bound, which is longer on Windows
+        // because helper subprocesses can hold the pipes open past the
+        // child's exit. This loop only runs on the natural-exit path: the
+        // kill/timeout/cancel paths return above, so the longer bound never
+        // delays a call that killed something.
         while stdout.is_none() || stderr.is_none() {
-            match events_rx.recv_timeout(KILL_GRACE_PERIOD) {
+            match events_rx.recv_timeout(STREAM_DRAIN_TIMEOUT) {
                 Ok(event) => handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr),
                 Err(_) => break,
             }
@@ -455,6 +479,48 @@ impl GitOutput {
 
     pub fn is_success(&self) -> bool {
         self.status == Some(0)
+    }
+}
+
+/// Converts a filesystem path into the string git accepts on its command
+/// line.
+///
+/// On Windows, `std::fs::canonicalize` returns "verbatim" paths carrying
+/// the `\\?\` prefix (`\\?\C:\...`, `\\?\UNC\server\share\...`). The
+/// prefix is meaningful to the Windows kernel and to Rust's own fs calls —
+/// it is what lifts the 260-character path limit — but git does not
+/// understand it and rejects the argument outright (`fatal: could not
+/// create work tree dir '\\?\C:\...': Invalid argument`). Every path that
+/// leaves this crate as a git argument is converted here, so the prefix is
+/// stripped from the argv string only. The `Path` itself is never altered,
+/// so Rust-side fs operations keep the verbatim form's long-path
+/// capability; stripping cannot regress a working invocation either,
+/// because git rejects the prefixed form in every case.
+///
+/// On other platforms the path passes through unchanged, byte for byte.
+pub(crate) fn path_arg(path: &Path) -> String {
+    let string = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(stripped) = strip_verbatim_prefix(&string) {
+            return stripped;
+        }
+    }
+    string.into_owned()
+}
+
+/// Strips the Windows `\\?\` verbatim prefix from a path string:
+/// `\\?\C:\...` becomes `C:\...` and `\\?\UNC\server\share\...` becomes
+/// `\\server\share\...` (the UNC authority is preserved in the double-
+/// backslash form git expects). Returns `None` when the path is not
+/// verbatim-prefixed.
+#[cfg(windows)]
+pub(crate) fn strip_verbatim_prefix(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(r"\\?\")?;
+    if let Some(unc) = rest.strip_prefix("UNC\\") {
+        Some(format!(r"\\{unc}"))
+    } else {
+        Some(rest.to_string())
     }
 }
 
@@ -1016,6 +1082,34 @@ mod tests {
             "another thread must still see the default; a process-global \
              override is what made a 670-byte `git init` fail in an unrelated \
              test"
+        );
+    }
+
+    /// Verbatim-prefix paths are the exact spelling `std::fs::canonicalize`
+    /// produces on Windows, and the prefix is what git rejected on real
+    /// clones — see [`path_arg`]'s own doc comment for the full story. The
+    /// non-Windows half of this test pins the byte-identity contract.
+    #[test]
+    fn path_arg_passes_ordinary_paths_through_unchanged() {
+        assert_eq!(path_arg(Path::new("/tmp/note.md")), "/tmp/note.md");
+        assert_eq!(path_arg(Path::new("relative/path")), "relative/path");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_arg_strips_the_windows_verbatim_prefix() {
+        assert_eq!(
+            path_arg(Path::new(r"\\?\C:\Users\me\project")),
+            r"C:\Users\me\project"
+        );
+        assert_eq!(
+            path_arg(Path::new(r"\\?\UNC\server\share\repo")),
+            r"\\server\share\repo"
+        );
+        assert_eq!(
+            path_arg(Path::new("plain\\relative\\path")),
+            "plain\\relative\\path",
+            "a backslash path without the prefix must pass through"
         );
     }
 
