@@ -409,7 +409,17 @@ mod tests {
         let target = root.join("note.md");
         let link = root.join("alias.md");
         fs::write(&target, "note").unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        if let Err(error) = crate::test_symlink::file(&target, &link) {
+            // See the sibling in `file.rs`: symlink RESOLUTION is what this
+            // asserts, and that is portable; only creating the fixture needs
+            // a privilege Windows withholds by default.
+            assert!(
+                crate::test_symlink::is_unprivileged(&error),
+                "symlink fixture failed for an unexpected reason: {error}"
+            );
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
         assert_eq!(
             document_content_id("w1", &root, &target).unwrap(),
             document_content_id("w1", &root, &link).unwrap()
