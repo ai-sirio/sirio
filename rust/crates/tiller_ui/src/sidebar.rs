@@ -27,6 +27,7 @@ use tiller_git::{
 use tiller_project::TabKind;
 use tiller_theme::{AgentBrandColor, Theme};
 
+use crate::caret;
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconPicker, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
@@ -494,6 +495,10 @@ pub struct Sidebar {
     project_worktree_defaults: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     filter: String,
     filter_focus: FocusHandle,
+    /// Shared blink state for every sidebar text field's insertion caret
+    /// (filter, project-settings card, worktree prompt). One is enough:
+    /// window focus is unique. Visibility is recomputed each render.
+    field_blink: caret::Blink,
     /// The open worktree-creation prompt, if any.
     prompt: Option<WorktreePrompt>,
     /// A transient error message (failed creation/removal) shown at the
@@ -597,6 +602,7 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
             context_menu: None,
@@ -692,6 +698,7 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
             context_menu: None,
@@ -1133,6 +1140,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let Some(card) = &self.project_settings else {
             return;
         };
@@ -1170,6 +1178,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let Some(card) = &self.project_settings else {
             return;
         };
@@ -1213,6 +1222,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let Some(card) = &self.project_settings else {
             return;
         };
@@ -1678,12 +1688,19 @@ impl Sidebar {
         }
     }
 
+    /// Blink timer tick shared by every sidebar text field's caret.
+    fn flip_field_blink(&mut self, cx: &mut Context<Self>) {
+        self.field_blink.flip();
+        cx.notify();
+    }
+
     fn on_filter_key(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.filter.pop();
@@ -2250,6 +2267,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         match event.keystroke.key.as_str() {
             "enter" | "return" => self.confirm_worktree_prompt(cx),
             "escape" => self.cancel_worktree_prompt(cx),
@@ -2528,6 +2546,7 @@ impl Sidebar {
         value: &str,
         field: WorktreePromptField,
         focused: bool,
+        caret_shown: bool,
         entity: &gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -2568,6 +2587,12 @@ impl Sidebar {
                 placeholder.to_owned()
             } else {
                 value.to_owned()
+            })
+            // End-of-text insertion caret; these compact single-line fields
+            // always append. `caret_shown` already folds in the field being
+            // focused and the blink phase.
+            .when(focused, |this| {
+                this.child(caret::bar(px(14.0), theme.accent, caret_shown))
             })
     }
 
@@ -2774,7 +2799,10 @@ impl Sidebar {
         card: ProjectSettingsCard,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        focused_fields: [bool; 3],
+        caret_visible: bool,
     ) -> impl IntoElement {
+        let [name_focused, base_focused, location_focused] = focused_fields;
         let display_name = card.display_name.borrow().clone();
         let heading_name = if display_name.trim().is_empty() {
             card.name.clone()
@@ -2876,6 +2904,9 @@ impl Sidebar {
                         "Display name".to_owned()
                     } else {
                         display_name
+                    })
+                    .when(name_focused, |this| {
+                        this.child(caret::bar(px(14.0), theme.accent, caret_visible))
                     }),
             )
             .when(!card.is_git, |this| {
@@ -2915,10 +2946,20 @@ impl Sidebar {
                     .child(card.icon_picker.clone()),
             )
             .when(card.is_git, |this| {
-                this.child(Self::render_worktree_base_section(&card, &entity, &theme))
-                    .child(Self::render_worktree_location_section(
-                        &card, &entity, &theme,
-                    ))
+                this.child(Self::render_worktree_base_section(
+                    &card,
+                    &entity,
+                    &theme,
+                    base_focused,
+                    caret_visible,
+                ))
+                .child(Self::render_worktree_location_section(
+                    &card,
+                    &entity,
+                    &theme,
+                    location_focused,
+                    caret_visible,
+                ))
             })
             .child(
                 div()
@@ -2981,6 +3022,8 @@ impl Sidebar {
         card: &ProjectSettingsCard,
         entity: &gpui::Entity<Self>,
         theme: &Theme,
+        focused: bool,
+        caret_visible: bool,
     ) -> impl IntoElement {
         let draft = card.default_worktree_base.borrow().clone();
         let effective_base = if !draft.trim().is_empty() {
@@ -3088,6 +3131,9 @@ impl Sidebar {
                         "Search branches by name…".to_owned()
                     } else {
                         draft
+                    })
+                    .when(focused, |this| {
+                        this.child(caret::bar(px(14.0), theme.accent, caret_visible))
                     }),
             )
     }
@@ -3100,6 +3146,8 @@ impl Sidebar {
         card: &ProjectSettingsCard,
         entity: &gpui::Entity<Self>,
         theme: &Theme,
+        focused: bool,
+        caret_visible: bool,
     ) -> impl IntoElement {
         let draft = card.worktree_location_override.borrow().clone();
         let default_location = card
@@ -3170,6 +3218,9 @@ impl Sidebar {
                                 draft
                             } else {
                                 default_location.clone()
+                            })
+                            .when(focused, |this| {
+                                this.child(caret::bar(px(14.0), theme.accent, caret_visible))
                             }),
                     )
                     .child(
@@ -3713,6 +3764,37 @@ impl Render for Sidebar {
             .collect::<std::collections::HashMap<_, _>>();
         let filter_focus = self.filter_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
+        // Sidebar text fields (filter, project-settings card, worktree
+        // prompt) share one blink: window focus is unique, so at most one
+        // caret is ever visible.
+        let settings_name_focused = self
+            .project_settings
+            .as_ref()
+            .is_some_and(|card| card.display_name_focus.is_focused(window));
+        let settings_base_focused = self
+            .project_settings
+            .as_ref()
+            .is_some_and(|card| card.worktree_base_focus.is_focused(window));
+        let settings_location_focused = self
+            .project_settings
+            .as_ref()
+            .is_some_and(|card| card.worktree_location_focus.is_focused(window));
+        let prompt_focus_focused = self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.focus.is_focused(window));
+        let field_focused = filter_is_focused
+            || settings_name_focused
+            || settings_base_focused
+            || settings_location_focused
+            || prompt_focus_focused;
+        caret::schedule(
+            &mut self.field_blink,
+            field_focused,
+            Self::flip_field_blink,
+            cx,
+        );
+        let field_caret_visible = field_focused && self.field_blink.visible();
         let filter_text = self.filter.clone();
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
@@ -3806,6 +3888,9 @@ impl Render for Sidebar {
                                 "Filter".to_owned()
                             } else {
                                 filter_text
+                            })
+                            .when(filter_is_focused, |this| {
+                                this.child(caret::bar(px(12.0), theme.accent, field_caret_visible))
                             }),
                     ),
             )
@@ -3920,6 +4005,9 @@ impl Render for Sidebar {
                                     &prompt.draft,
                                     WorktreePromptField::Branch,
                                     prompt.focused_field == WorktreePromptField::Branch,
+                                    prompt.focused_field == WorktreePromptField::Branch
+                                        && prompt_focus_focused
+                                        && field_caret_visible,
                                     &prompt_owner,
                                     theme,
                                 ))
@@ -3938,6 +4026,9 @@ impl Render for Sidebar {
                                     &prompt.base_draft,
                                     WorktreePromptField::Base,
                                     prompt.focused_field == WorktreePromptField::Base,
+                                    prompt.focused_field == WorktreePromptField::Base
+                                        && prompt_focus_focused
+                                        && field_caret_visible,
                                     &prompt_owner,
                                     theme,
                                 ))
@@ -3954,6 +4045,9 @@ impl Render for Sidebar {
                                     &prompt.location_draft,
                                     WorktreePromptField::Location,
                                     prompt.focused_field == WorktreePromptField::Location,
+                                    prompt.focused_field == WorktreePromptField::Location
+                                        && prompt_focus_focused
+                                        && field_caret_visible,
                                     &prompt_owner,
                                     theme,
                                 ))
@@ -3980,7 +4074,17 @@ impl Render for Sidebar {
                 this.child(Self::render_context_menu(menu, entity.clone(), theme))
             })
             .when_some(project_settings, |this, card| {
-                this.child(Self::render_project_settings(card, entity.clone(), theme))
+                this.child(Self::render_project_settings(
+                    card,
+                    entity.clone(),
+                    theme,
+                    [
+                        settings_name_focused,
+                        settings_base_focused,
+                        settings_location_focused,
+                    ],
+                    field_caret_visible,
+                ))
             })
             .when_some(project_form, |this, form| {
                 this.child(Self::render_project_form(form, entity.clone(), theme))

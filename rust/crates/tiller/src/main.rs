@@ -3416,6 +3416,10 @@ struct TillerWorkspace {
     tab_menu_tab: Option<usize>,
     tab_rename: Option<TabRename>,
     pending_title_prompt: Option<PendingTitlePrompt>,
+    /// Blink state of the "Set Title" modal field's insertion caret, and
+    /// the visibility stashed for this frame's `render_title_prompt`.
+    modal_field_blink: tiller_ui::caret::Blink,
+    modal_caret_visible: bool,
     palette_open: bool,
     palette_query: String,
     palette_selected: usize,
@@ -4061,6 +4065,8 @@ impl TillerWorkspace {
             tab_menu_tab: None,
             tab_rename: None,
             pending_title_prompt: None,
+            modal_field_blink: tiller_ui::caret::Blink::new(),
+            modal_caret_visible: false,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -8949,6 +8955,7 @@ impl TillerWorkspace {
                 text_field: Some(ModalTextField::new(
                     prompt.focus.clone(),
                     prompt.draft.clone(),
+                    self.modal_caret_visible,
                     move |event, window, cx| {
                         key_entity.update(cx, |workspace, cx| {
                             workspace.handle_title_prompt_key(event, window, cx)
@@ -9892,12 +9899,19 @@ impl TillerWorkspace {
     /// which this otherwise mirrors exactly (Enter commits, Escape cancels,
     /// Backspace/Delete pop one character, anything else with a printable
     /// `key_char` and no Cmd/Ctrl modifier is inserted).
+    /// Blink timer tick for the Set Title modal field's caret.
+    fn flip_modal_blink(&mut self, cx: &mut Context<Self>) {
+        self.modal_field_blink.flip();
+        cx.notify();
+    }
+
     fn handle_title_prompt_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.modal_field_blink.wake();
         let key = event.keystroke.key.as_str();
         match key {
             "enter" | "return" => self.confirm_title_prompt(window, cx),
@@ -11593,6 +11607,21 @@ impl Render for TillerWorkspace {
         if window.focused(cx).is_none() {
             window.focus(&self.root_focus, cx);
         }
+        // The Set Title modal's caret shares the workspace's render pass:
+        // schedule its blink while the prompt owns focus and stash this
+        // frame's bar visibility for `render_title_prompt` (which has no
+        // `Window`/`Context` of its own to schedule from).
+        let modal_focused = self
+            .pending_title_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.focus.is_focused(window));
+        tiller_ui::caret::schedule(
+            &mut self.modal_field_blink,
+            modal_focused,
+            Self::flip_modal_blink,
+            cx,
+        );
+        self.modal_caret_visible = modal_focused && self.modal_field_blink.visible();
         // Fetched fresh every frame from the global, so a change of appearance
         // is picked up without the workspace holding a stale copy.
         let theme = *Theme::get(cx);
