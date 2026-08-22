@@ -4093,6 +4093,16 @@ mod tests {
     /// `setsid` (or Python's `os.setsid` on macOS, where the command is not
     /// installed) reproduces that detachment without depending on any
     /// terminal emulator being installed.
+    ///
+    /// Unix-only: the subject `descendant_pids` has no Windows arm (it
+    /// walks `/proc`, which Windows lacks), and its partner
+    /// `terminate_login_process_group` is a documented no-op there — the
+    /// comment above it names the Toolhelp32/Job-Object pairing as the
+    /// intended counterpart. Gating here suppresses coverage of that
+    /// admitted gap, not of a portable behaviour; the Toolhelp32 walk
+    /// should land with this test's fixture ported to a Windows
+    /// equivalent.
+    #[cfg(unix)]
     #[test]
     fn descendant_pids_finds_a_child_detached_into_its_own_session() {
         // `sh` is the launcher (kept as one live process, same pid the
