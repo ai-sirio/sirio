@@ -177,6 +177,12 @@ fn availability_reports_each_catalog_binary_from_current_path() {
     }
 }
 
+/// unix only: there, an extensionless name with the execute bit set *is* a
+/// command, and it is the only shape the search knows. The Windows
+/// counterpart is
+/// [`path_lookup_ignores_an_extensionless_shim_on_windows`], which pins the
+/// opposite rule.
+#[cfg(unix)]
 #[test]
 fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
     let root = std::env::temp_dir().join(format!("tiller-agent-path-test-{}", std::process::id()));
@@ -184,7 +190,6 @@ fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
     let executable = root.join("demo-agent");
     std::fs::write(&executable, b"not launched").expect("write fixture");
 
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = std::fs::metadata(&executable)
@@ -200,6 +205,75 @@ fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
         Some(executable)
     );
     assert_eq!(find_executable_in_path("missing-agent", &path), None);
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+/// Windows regression, reproduced from a real install: npm lays down three
+/// files for a Node-hosted CLI — `pi` (a `#!/bin/sh` shim for Git Bash),
+/// `pi.cmd` and `pi.ps1`. Only the `.cmd` is a command as far as Windows is
+/// concerned; cmd.exe never executes the extensionless twin.
+///
+/// A search that probes the bare name first therefore "finds" the sh shim,
+/// stops, and hands back a path that fails at spawn time — a worse outcome
+/// than reporting the agent missing, because the failure surfaces at launch
+/// instead of at discovery. `pi` and `omp` are exactly the two catalog
+/// entries shaped this way.
+///
+/// The second half pins the other edge: with no PATHEXT hit at all, the
+/// lone extensionless file must NOT rescue the lookup.
+#[cfg(windows)]
+#[test]
+fn path_lookup_ignores_an_extensionless_shim_on_windows() {
+    let root = std::env::temp_dir().join(format!("tiller-agent-shim-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create fixture directory");
+    let shim = root.join("demo-agent");
+    std::fs::write(&shim, b"#!/bin/sh\nexec node cli.js\n").expect("write posix shim fixture");
+    let command = root.join("demo-agent.cmd");
+    std::fs::write(&command, b"@echo off").expect("write cmd fixture");
+
+    let path = std::ffi::OsString::from(root.as_os_str());
+    assert_eq!(
+        find_executable_in_path("demo-agent", &path),
+        Some(command.clone()),
+        "the PATHEXT hit must win over the extensionless sh shim sitting \
+         next to it, whatever the directory order returns first"
+    );
+
+    std::fs::remove_file(&command).expect("remove cmd fixture");
+    assert_eq!(
+        find_executable_in_path("demo-agent", &path),
+        None,
+        "with no PATHEXT hit the bare name is not a command on Windows, so \
+         discovery must report the agent missing rather than hand back a \
+         path cmd.exe cannot launch"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+/// A name that already carries a PATHEXT extension is explicit and must be
+/// probed exactly as written, not suffixed again into `tillerctl.exe.COM`.
+#[cfg(windows)]
+#[test]
+fn path_lookup_takes_an_explicit_extension_verbatim() {
+    let root = std::env::temp_dir().join(format!("tiller-agent-explicit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create fixture directory");
+    let command = root.join("demo-agent.exe");
+    std::fs::write(&command, b"MZ").expect("write exe fixture");
+
+    let path = std::ffi::OsString::from(root.as_os_str());
+    assert_eq!(
+        find_executable_in_path("demo-agent.exe", &path),
+        Some(command),
+        "an explicit extension resolves as written"
+    );
+    // Case-insensitively spelled the other way round: still explicit.
+    assert!(
+        find_executable_in_path("demo-agent.EXE", &path).is_some(),
+        "PATHEXT membership is case-insensitive, so .EXE is explicit too"
+    );
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 

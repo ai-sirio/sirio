@@ -424,36 +424,69 @@ fn on_disk_spelling(candidate: PathBuf) -> PathBuf {
     }
 }
 
-/// Candidate file names for `program`, in probe order.
-///
-/// The bare name always comes first; on Windows it is followed by each
-/// `PATHEXT` extension, because that environment variable is the OS's own
-/// answer to "which suffixes make this a command?" and the discovery here
-/// must agree with what cmd.exe will actually launch — an npm-installed shim
-/// such as `claude.cmd` or `codex.cmd` is invisible to a search that only
-/// knows the bare name. When `PATHEXT` is unset the documented default is
-/// used; entries are normalized (trimmed, dotted) the way cmd.exe tolerates
-/// them. On unix the bare name is the only candidate, so this helper adds
-/// nothing and the search semantics are exactly what they have always been.
-fn executable_candidates(program: &str) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        let mut candidates = vec![program.to_string()];
-        let pathext =
-            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-        for extension in pathext
-            .split(';')
-            .map(str::trim)
-            .filter(|extension| !extension.is_empty())
-        {
-            let dotted = if extension.starts_with('.') {
+/// The `PATHEXT` extension list, normalized to dotted, non-empty entries in
+/// the order the variable spells them. When the variable is unset the
+/// documented default stands in; entries are trimmed and dotted the way
+/// cmd.exe tolerates them being written.
+#[cfg(windows)]
+fn pathext_entries() -> Vec<String> {
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            if extension.starts_with('.') {
                 extension.to_string()
             } else {
                 format!(".{extension}")
-            };
-            candidates.push(format!("{program}{dotted}"));
+            }
+        })
+        .collect()
+}
+
+/// Whether `program` already ends in one of the `PATHEXT` extensions, and is
+/// therefore an explicit command name rather than a bare one. The comparison
+/// is case-insensitive because Windows spells `PATHEXT` in uppercase while
+/// the artifacts on disk are lowercase (`tillerctl.exe`).
+#[cfg(windows)]
+fn has_pathext_extension(program: &str) -> bool {
+    let lowered = program.to_ascii_lowercase();
+    pathext_entries()
+        .iter()
+        .any(|extension| lowered.ends_with(&extension.to_ascii_lowercase()))
+}
+
+/// Candidate file names for `program`, in probe order.
+///
+/// On Windows the bare name is deliberately **not** a candidate. `PATHEXT` is
+/// the OS's own answer to "which suffixes make this a command?", and cmd.exe
+/// resolves a bare name by appending those extensions — it never executes an
+/// extensionless file. Probing the bare name anyway is not a harmless extra
+/// try: npm lays down three files for a Node-hosted CLI (`pi`, `pi.cmd`,
+/// `pi.ps1`), and the extensionless one is a `#!/bin/sh` shim for Git Bash.
+/// A search that accepts it returns a path that fails at spawn time, which
+/// is strictly worse than reporting the agent missing — the user sees the
+/// failure when they open a tab instead of on the settings screen. `pi` and
+/// `omp` are exactly the two catalog entries shaped this way.
+///
+/// A name that already carries a `PATHEXT` extension is explicit and passes
+/// through untouched, so `tillerctl.exe` is never suffixed into
+/// `tillerctl.exe.COM`.
+///
+/// On unix the bare name is the only candidate — there an extensionless file
+/// with the execute bit set genuinely is a command — so this helper adds
+/// nothing and the search semantics are unchanged.
+fn executable_candidates(program: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        if has_pathext_extension(program) {
+            return vec![program.to_string()];
         }
-        candidates
+        pathext_entries()
+            .into_iter()
+            .map(|extension| format!("{program}{extension}"))
+            .collect()
     }
 
     #[cfg(not(windows))]
