@@ -101,7 +101,7 @@ pub fn diff_entry(
 ) -> Result<FileDiff, GitError> {
     let unified = format!("--unified={context_lines}");
     let result = if entry.is_untracked() || !has_head(repo) {
-        let absolute = repo.join(&entry.path);
+        let absolute = git::path_arg(&repo.join(&entry.path));
         git::run_accepting(
             &[
                 "diff",
@@ -111,7 +111,7 @@ pub fn diff_entry(
                 &unified,
                 "--",
                 "/dev/null",
-                absolute.to_str().unwrap_or_default(),
+                &absolute,
             ],
             repo,
             &[0, 1],
@@ -119,9 +119,9 @@ pub fn diff_entry(
     } else {
         let mut pathspecs = Vec::new();
         if let Some(original) = &entry.original_path {
-            pathspecs.push(original.to_string_lossy().into_owned());
+            pathspecs.push(git::path_arg(original));
         }
-        pathspecs.push(entry.path.to_string_lossy().into_owned());
+        pathspecs.push(git::path_arg(&entry.path));
         let mut args = vec![
             "diff".to_string(),
             "--no-color".to_string(),
@@ -173,7 +173,7 @@ pub fn commit_files(repo: &Path, sha: &str) -> Result<Vec<(char, PathBuf)>, GitE
 
 /// Loads the unified diff for one file in one commit.
 pub fn commit_diff_entry(repo: &Path, sha: &str, path: &Path) -> Result<FileDiff, GitError> {
-    let path_arg = format!(":(literal){}", path.to_string_lossy());
+    let path_arg = format!(":(literal){}", git::path_arg(path));
     let result = git::run_accepting(
         &[
             "-c",

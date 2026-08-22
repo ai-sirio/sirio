@@ -137,8 +137,13 @@ fn repo_with_a_glob_path() -> TempDir {
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(dir.path(), &["config", "user.email", "t@example.com"]);
     git(dir.path(), &["config", "user.name", "Tester"]);
-    std::fs::write(dir.path().join("star*.txt"), "literal").expect("write");
-    std::fs::write(dir.path().join("star-match.txt"), "wildcard").expect("write");
+    // `[1]` is a glob character class that is also a legal filename
+    // character on Windows (unlike `*`, which Windows forbids in names).
+    // As a glob, `star[1].txt` matches only `star1.txt`, so the
+    // `:(literal)` pathspec under test still has a discriminating sibling
+    // to not-match.
+    std::fs::write(dir.path().join("star[1].txt"), "literal").expect("write");
+    std::fs::write(dir.path().join("star1.txt"), "wildcard").expect("write");
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "glob path"]);
     dir
@@ -226,7 +231,7 @@ fn commit_files_and_diff_preserve_utf8_paths() {
 fn commit_diff_entry_treats_glob_characters_as_literal() {
     let dir = repo_with_a_glob_path();
     let sha = head_sha(dir.path(), "HEAD");
-    let path = Path::new("star*.txt");
+    let path = Path::new("star[1].txt");
 
     let diff = tiller_git::commit_diff_entry(dir.path(), &sha, path).expect("diff");
 
