@@ -360,6 +360,13 @@ mod windows_process {
         Ok(out)
     }
 
+    /// Counts creation-time resolutions so a test can pin the lazy-walk cost
+    /// property (see `windows_tests` below). Test builds only — the shipped
+    /// binary pays no counter.
+    #[cfg(test)]
+    pub(crate) static CREATION_TIME_QUERIES: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     /// Creation time as an opaque, comparable counter (FILETIME ticks).
     ///
     /// `None` covers both "cannot open" (a protected process) and "already
@@ -367,6 +374,8 @@ mod windows_process {
     /// vanished candidate is indistinguishable from a legitimate child that
     /// lost a race with the poll.
     pub fn creation_time(pid: u32) -> Option<u64> {
+        #[cfg(test)]
+        CREATION_TIME_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: all four output pointers are valid `FileTime`s for the
         // duration of the call; the handle is closed on every path.
         unsafe {
@@ -437,13 +446,19 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     }
 
     let entries = windows_process::entries()?;
+    // children_of and name_of are built eagerly in this one pass over the
+    // already-materialized snapshot rows, and that is deliberate: the rows are
+    // plain memory by the time `entries()` returns (the snapshot syscall is a
+    // single call), so indexing them costs no handle operations at all. Only
+    // creation times need OpenProcess/GetProcessTimes per pid — the expensive
+    // part — so those alone are resolved lazily below, for pids the walk
+    // actually touches, keeping the per-poll cost O(walked) like the Linux
+    // /proc arm rather than O(all processes).
     let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut name_of: HashMap<u32, String> = HashMap::new();
-    let mut created_at: HashMap<u32, Option<u64>> = HashMap::new();
     for entry in entries {
         children_of.entry(entry.parent_pid).or_default().push(entry.pid);
         name_of.insert(entry.pid, entry.name);
-        created_at.insert(entry.pid, windows_process::creation_time(entry.pid));
     }
 
     // The shell vanished between the PTY watcher resolving its pid and this
@@ -458,16 +473,20 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     }
 
     let mut names = HashSet::new();
-    // Each queued node carries its own creation time so the pid-reuse defence
-    // below can be applied at every level, not just directly under the shell.
-    let mut queue = VecDeque::from([(
-        shell_pid,
-        0_usize,
-        created_at[&shell_pid],
-    )]);
+    let mut queue = VecDeque::from([(shell_pid, 0_usize)]);
     let mut visited = HashSet::new();
+    // Per-call memo of creation times. The same pid can be reached more than
+    // once through the queue (as a candidate under several parents before the
+    // visited set dedupes it), and each memo miss costs one OpenProcess +
+    // GetProcessTimes round trip on the caller's thread, so every pid pays it
+    // at most once per walk.
+    let mut creation_times: HashMap<u32, Option<u64>> = HashMap::new();
+    let resolve_creation_time =
+        |cache: &mut HashMap<u32, Option<u64>>, pid: u32| -> Option<u64> {
+            *cache.entry(pid).or_insert_with(|| windows_process::creation_time(pid))
+        };
 
-    while let Some((pid, depth, pid_created)) = queue.pop_front() {
+    while let Some((pid, depth)) = queue.pop_front() {
         if !visited.insert(pid) {
             continue;
         }
@@ -484,6 +503,10 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
             continue;
         }
 
+        // Resolved here, not when queued: only nodes the walk actually
+        // expands pay for a lookup, and each exactly once thanks to the memo.
+        let pid_created = resolve_creation_time(&mut creation_times, pid);
+
         if let Some(children) = children_of.get(&pid) {
             for &child in children {
                 // Windows recycles pids, and an orphaned process keeps the
@@ -497,18 +520,81 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
                 // unknowable (protected or already-exited process) the
                 // candidate stays: a vanished process is routine mid-poll,
                 // and a protected process will not carry an agent image name.
-                if let (Some(parent_created), Some(child_created)) =
-                    (pid_created, created_at.get(&child).copied().flatten())
+                let child_created = resolve_creation_time(&mut creation_times, child);
+                if let (Some(parent_created), Some(child_created)) = (pid_created, child_created)
                     && child_created < parent_created
                 {
                     continue;
                 }
-                queue.push_back((child, depth + 1, created_at.get(&child).copied().flatten()));
+                queue.push_back((child, depth + 1));
             }
         }
     }
 
     Ok(names)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Pins Layer D's cost property, not just its correctness: creation-time
+    /// lookups (one OpenProcess + GetProcessTimes round trip each) must stay
+    /// proportional to the WALKED SUBTREE, never one per row of the
+    /// whole-system snapshot. This runs every poll on the GPUI main thread,
+    /// once per pane, so an eager lookup over ~300 snapshot rows per pane per
+    /// poll would be thousands of handle operations per second on the render
+    /// thread.
+    #[test]
+    fn resolves_creation_times_only_for_the_walked_subtree() {
+        let comspec =
+            std::env::var("ComSpec").expect("ComSpec is set on every Windows install");
+        let root = std::env::temp_dir().join(format!(
+            "tiller-activity-cost-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create cost fixture directory");
+        let agent = root.join("codex.exe");
+        std::fs::copy(&comspec, &agent).expect("copy shell as codex.exe fixture");
+        let mut child = std::process::Command::new(&agent)
+            .args(["/c", "ping -n 6 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn cost fixture child");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let before = windows_process::CREATION_TIME_QUERIES.load(Ordering::Relaxed);
+        let names = inspect_process_names(std::process::id()).expect("walk from test process");
+        let after = windows_process::CREATION_TIME_QUERIES.load(Ordering::Relaxed);
+        let queries = (after - before) as usize;
+        // Taken after the walk; snapshot size wobbles between calls, but by
+        // far less than the margin asserted against.
+        let snapshot_size = windows_process::entries().expect("count snapshot rows").len();
+
+        assert!(names.contains("codex"), "fixture must be found, got {names:?}");
+        assert!(
+            snapshot_size > 50,
+            "expected a realistically populated system, got {snapshot_size} rows"
+        );
+        assert!(
+            queries < snapshot_size,
+            "walk must not resolve a creation time per snapshot row \
+             ({queries} lookups for {snapshot_size} rows)"
+        );
+        // Tighter ceiling for this fixture's tiny subtree (test process + the
+        // alias + ping, plus whatever few siblings cargo leaves running); if
+        // the walk ever regresses to eager lookups this fails long before the
+        // snapshot-size assertion does.
+        assert!(
+            queries <= 25,
+            "a two-level subtree must not cost {queries} creation-time lookups"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
