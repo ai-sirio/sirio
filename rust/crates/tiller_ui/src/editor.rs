@@ -1888,10 +1888,15 @@ mod tests {
         // A relative path is absolutized against the current directory.
         let relative = Path::new("relative/note.txt");
         let absolutized = fs_actions::copy_path_text(relative);
+        // `starts_with('/')` was the unix spelling of "absolute"; on
+        // Windows an absolute path starts with a drive letter or `\`, so
+        // the portable spelling is the platform's own `is_absolute`.
         assert!(
-            absolutized.starts_with('/'),
+            Path::new(&absolutized).is_absolute(),
             "the pasted path is absolute: {absolutized}"
         );
-        assert!(absolutized.ends_with("relative/note.txt"));
+        // Component-wise (not byte-wise, which would split on the
+        // platform's separator): the joined suffix is the relative input.
+        assert!(Path::new(&absolutized).ends_with(relative));
     }
 }
