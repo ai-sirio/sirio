@@ -340,28 +340,125 @@ pub fn find_executable_in_path_checked(
     };
 
     let candidate = Path::new(program);
-    if candidate.is_absolute() || program.contains('/') {
-        return match probe_executable(candidate) {
-            Ok(true) => Ok(Some(candidate.to_path_buf())),
-            Ok(false) => Ok(None),
-            Err(error) => Err(probe_error(candidate.to_path_buf(), error)),
-        };
-    }
+    // A name that already carries a path is probed as-is, never searched on
+    // PATH. unix knows one separator; Windows accepts `\` and `/` both, and
+    // an absolute path starts with a drive letter (`C:\...`) that
+    // `Path::is_absolute` already recognizes — the extra backslash check
+    // catches the relative-but-pathlike form (`foo\bar`) that would
+    // otherwise be misread as a bare name and joined onto PATH directories.
+    let verbatim =
+        candidate.is_absolute() || program.contains('/') || (cfg!(windows) && program.contains('\\'));
+
+    // Every variant in probe order, dir-major when searching PATH: the bare
+    // name first, then — on Windows only — each PATHEXT extension, mirroring
+    // how cmd.exe and SearchPath order their tries. unix has no such
+    // convention, so the enumeration is exactly one element there and the
+    // behavior is unchanged.
+    let variants = executable_candidates(program);
 
     let mut first_error: Option<DiscoveryError> = None;
-    for candidate in std::env::split_paths(path).map(|directory| directory.join(program)) {
-        match probe_executable(&candidate) {
-            Ok(true) => return Ok(Some(candidate)),
-            Ok(false) => {}
-            Err(error) if first_error.is_none() => {
+    let mut probe = |candidate: PathBuf| match probe_executable(&candidate) {
+        Ok(true) => Ok(Some(on_disk_spelling(candidate))),
+        Ok(false) => Ok(None),
+        Err(error) => {
+            if first_error.is_none() {
                 first_error = Some(probe_error(candidate, error));
             }
-            Err(_) => {}
+            Ok(None)
+        }
+    };
+
+    if verbatim {
+        for variant in &variants {
+            if let Some(hit) = probe(PathBuf::from(variant.as_str()))? {
+                return Ok(Some(hit));
+            }
+        }
+    } else {
+        for directory in std::env::split_paths(path) {
+            for variant in &variants {
+                if let Some(hit) = probe(directory.join(variant))? {
+                    return Ok(Some(hit));
+                }
+            }
         }
     }
+
     match first_error {
         Some(error) => Err(error),
         None => Ok(None),
+    }
+}
+
+/// The real on-disk spelling of a just-found candidate.
+///
+/// On Windows a case-insensitive probe can hit a file whose name is written
+/// differently than the candidate that found it: `PATHEXT` spells its
+/// extensions in uppercase, so `demo-agent.CMD` matches a fixture named
+/// `demo-agent.cmd`. The candidate's spelling must not leak into the result
+/// — the returned path is a user-visible value (settings screen, hook
+/// config files), not an opaque spawn handle, so it must carry the name the
+/// filesystem actually stored. Only the file-name component is fixed: PATH
+/// directories keep their given spelling, exactly as they always have.
+fn on_disk_spelling(candidate: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let Some(parent) = candidate.parent() else { return candidate; };
+        let Some(wanted) = candidate.file_name() else { return candidate; };
+        let Ok(entries) = std::fs::read_dir(parent) else { return candidate; };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.eq_ignore_ascii_case(wanted) {
+                return parent.join(name);
+            }
+        }
+        candidate
+    }
+
+    #[cfg(not(windows))]
+    {
+        // On case-sensitive filesystems a probe hit and the disk entry are
+        // the same string by construction, so the candidate passes through
+        // untouched — this is the identity the unix arms relied on before.
+        candidate
+    }
+}
+
+/// Candidate file names for `program`, in probe order.
+///
+/// The bare name always comes first; on Windows it is followed by each
+/// `PATHEXT` extension, because that environment variable is the OS's own
+/// answer to "which suffixes make this a command?" and the discovery here
+/// must agree with what cmd.exe will actually launch — an npm-installed shim
+/// such as `claude.cmd` or `codex.cmd` is invisible to a search that only
+/// knows the bare name. When `PATHEXT` is unset the documented default is
+/// used; entries are normalized (trimmed, dotted) the way cmd.exe tolerates
+/// them. On unix the bare name is the only candidate, so this helper adds
+/// nothing and the search semantics are exactly what they have always been.
+fn executable_candidates(program: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut candidates = vec![program.to_string()];
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        for extension in pathext
+            .split(';')
+            .map(str::trim)
+            .filter(|extension| !extension.is_empty())
+        {
+            let dotted = if extension.starts_with('.') {
+                extension.to_string()
+            } else {
+                format!(".{extension}")
+            };
+            candidates.push(format!("{program}{dotted}"));
+        }
+        candidates
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![program.to_string()]
     }
 }
 

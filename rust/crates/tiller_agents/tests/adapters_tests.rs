@@ -172,6 +172,47 @@ fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 
+/// Windows resolves commands through `PATHEXT`, and discovery must agree
+/// with that or it reports npm shims — `claude.cmd`, `codex.cmd` — as "not
+/// found on PATH" even though cmd.exe would launch them. This is the real
+/// install shape of the catalog on Windows: the `.cmd` shell script with no
+/// extensionless twin.
+///
+/// The comparison against the fixture path is deliberately exact and
+/// case-sensitive. `PATHEXT` spells its extensions in uppercase, so the
+/// probe that finds `demo-agent.cmd` on disk is the candidate
+/// `demo-agent.CMD` — a case-insensitive filesystem matches them. The
+/// result must carry the name the filesystem stored, not the candidate's
+/// spelling: the returned path is user-visible (settings, hook configs),
+/// and any other surname would make this test fail on purpose.
+#[cfg(windows)]
+#[test]
+fn path_lookup_finds_a_pathext_shim_cmd() {
+    let root = std::env::temp_dir().join(format!("tiller-agent-cmd-test-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create fixture directory");
+    let shim = root.join("demo-agent.cmd");
+    std::fs::write(&shim, b"@echo off").expect("write shim fixture");
+
+    let path = std::ffi::OsString::from(root.as_os_str());
+    assert_eq!(
+        find_executable_in_path("demo-agent", &path),
+        Some(shim.clone()),
+        "the .cmd shim must resolve through the PATHEXT extension list"
+    );
+
+    // A file whose extension is not in PATHEXT must stay invisible: only the
+    // listed suffixes make a name a command the way Windows defines it.
+    let not_a_command = root.join("demo-agent.xyz");
+    std::fs::write(&not_a_command, b"not a command").expect("write decoy fixture");
+    assert_eq!(
+        find_executable_in_path("demo-agent", &path),
+        Some(shim),
+        "the PATHEXT hit wins over a non-PATHEXT sibling file"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
 /// F-SET-17: discovery must be able to say "I could not check" instead of
 /// collapsing a probe failure into "Not found on PATH". The checked lookup
 /// still lets a hit later in PATH win over an earlier unreadable directory
