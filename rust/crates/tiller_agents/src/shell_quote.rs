@@ -24,33 +24,86 @@ pub fn shell_quote(value: &str) -> String {
 }
 
 /// Windows form: cmd.exe has no single-quote grouping, so the value rides
-/// one double-quoted token with each embedded `"` written doubled.
+/// one double-quoted token with each embedded `"` written doubled AND each
+/// run of backslashes immediately before a `"` written doubled.
 ///
 /// Two parsers see this string in sequence, and the form has to survive
-/// both. **cmd.exe first**: it scans the command tail for its own
-/// metacharacters (`&`, `|`, `>`, `^`) and treats a double-quoted region as
-/// off limits for them, then hands the line to `CreateProcess` — it does
-/// *not* collapse the doubled quotes itself. **The child's argv parser
+/// both — and it matters which one does what, because a previous version
+/// of this comment had them swapped. **cmd.exe first**: it scans the
+/// command tail for its own metacharacters (`&`, `|`, `>`, `%VAR%`, `^`),
+/// treats a double-quoted region as off limits to most of them, and hands
+/// the line to CreateProcess essentially verbatim — it does *not* collapse
+/// doubled quotes or backslash runs itself. **The child's argv parser
 /// second** (`CommandLineToArgvW` and the CRT rules every Rust and MSVC
 /// program inherits): it splits the line into arguments and, inside a
-/// quoted token, collapses each `""` back to one literal `"`.
+/// quoted token, consumes each run of backslashes directly before a `"`
+/// in pairs and collapses each `""` pair back to one literal `"`.
 ///
-/// WHY not `\"`, even though the CRT accepts it as an escaped quote: cmd
-/// runs first and knows nothing about backslash escapes. It reads that `"`
-/// as *closing* the quoted region, so everything after it — spaces, `&`, a
-/// redirection character — is parsed unquoted, and a value carrying JSON
-/// falls apart before the child is even spawned. The doubling form is the
-/// one both parsers agree on, which is what makes it safe for values that
-/// smuggle JSON with embedded quotes, like Codex's `-c notify=[...]`
-/// override.
+/// WHY not `\"`, even though the argv parser accepts it as an escaped
+/// quote: cmd runs first and knows nothing about backslash escapes. It
+/// reads that `"` as *closing* the quoted region, so everything after it
+/// — spaces, `&`, a redirection character — is parsed unquoted, and a
+/// value carrying JSON falls apart before the child is even spawned. The
+/// doubling form is the one both parsers agree on, which is what makes it
+/// safe for values that smuggle JSON with embedded quotes, like Codex's
+/// `-c notify=[...]` override.
 ///
-/// The one thing this cannot protect: cmd expands `%VAR%` inside double
-/// quotes too, so a value containing `%` is not delivered byte-for-byte.
-/// No caller passes one today — these are paths and prompts — and escaping
-/// it would need a `^` dance that only applies outside quotes.
+/// WHY the backslash doubling: the argv parser pairs up backslashes only
+/// when they sit directly before a quote, so an odd run there loses its
+/// last member — and a value that merely ENDS with `\` always qualifies,
+/// because our closing quote follows it (`…tiller\` would arrive as
+/// `…tiller"`). Doubling every run that touches any quote keeps the count
+/// even everywhere it matters; backslashes elsewhere are literal and stay
+/// untouched.
+///
+/// THE REMAINING HOLE, stated precisely because an earlier version of this
+/// comment claimed there was none: cmd expands `%VAR%` between two `%`
+/// signs even inside double quotes, and `%` has no escape on the command
+/// line (`^` only takes effect outside quoted regions). `%` is legal in
+/// NTFS names, so a worktree path like `C:\src\100%\repo` — riding into
+/// omp's `--hook` argument or into the tillerctl path inside Codex's
+/// notify JSON — would be silently rewritten wherever its `%..%` happens
+/// to name an environment variable. This is documented rather than solved:
+/// [`shell_quote`] returns a `String`, so rejecting here is not expressible
+/// without rippling a `Result` through every adapter for a hole that only
+/// bites Windows paths containing a `%NAME%`-shaped substring; callers
+/// wanting a hard guarantee should reject such paths before they reach an
+/// adapter.
 #[cfg(windows)]
 pub fn shell_quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut slashes = 0_usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => slashes += 1,
+            '"' => {
+                // The argv parser eats this run in pairs before the quote;
+                // doubling it makes the count even everywhere a quote can
+                // follow. The quote itself rides as a "" pair — cmd cannot
+                // be taught \" (see above).
+                for _ in 0..slashes * 2 {
+                    quoted.push('\\');
+                }
+                quoted.push_str("\"\"");
+                slashes = 0;
+            }
+            _ => {
+                for _ in 0..slashes {
+                    quoted.push('\\');
+                }
+                slashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    // A trailing run sits directly against OUR closing quote — same rule as
+    // any embedded one.
+    for _ in 0..slashes * 2 {
+        quoted.push('\\');
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Builds a JSON string literal — also a valid TOML basic string literal —
@@ -125,17 +178,72 @@ mod tests {
         );
     }
 
-    /// The inverse of the cmd form for round-trip assertions: strips the
-    /// outer quotes and collapses each `""` back to `"` — what the child's
-    /// argv parser (`CommandLineToArgvW`/the CRT rules) does once cmd.exe
-    /// has passed the line through.
+    #[cfg(windows)]
+    #[test]
+    fn shell_quote_doubles_backslash_runs_touching_a_quote() {
+        // The argv parser consumes backslashes in pairs before a quote, so a
+        // value merely ENDING with a backslash sits one backslash away from
+        // our own closing quote and would lose it (…\" closes as …") —
+        // the run must be doubled wherever it touches ANY quote.
+        assert_eq!(
+            shell_quote("C:\\Program Files\\tiller\\"),
+            "\"C:\\Program Files\\tiller\\\\\""
+        );
+        // An embedded quote preceded by a backslash: same rule mid-value.
+        assert_eq!(shell_quote("a\\\"b"), "\"a\\\\\"\"b\"");
+        // Backslashes NOT touching a quote are literal and stay single.
+        assert_eq!(shell_quote("C:\\dir\\deep"), "\"C:\\dir\\deep\"");
+    }
+
+    /// The inverse of the cmd form for round-trip assertions. It models what
+    /// the child's argv parser (`CommandLineToArgvW`/the CRT rules) does to
+    /// the FULL token, quotes included: each backslash run touching a `"` is
+    /// halved (an odd member escapes the quote instead of closing the
+    /// region), each `""` pair collapses to one literal `"`, and any other
+    /// `"` opens or closes the quoted region. The previous version stripped
+    /// the outer quotes first and collapsed only `""` — it modeled no
+    /// backslash handling at all, which is exactly why this round-trip kept
+    /// passing while the real behaviour lost trailing backslashes.
     #[cfg(windows)]
     fn cmd_unquote(quoted: &str) -> String {
-        assert!(
-            quoted.starts_with('"') && quoted.ends_with('"'),
-            "double-quoted: {quoted}"
-        );
-        quoted[1..quoted.len() - 1].replace("\"\"", "\"")
+        let chars: Vec<char> = quoted.chars().collect();
+        let mut out = String::new();
+        let mut in_quotes = false;
+        let mut slashes = 0_usize;
+        let mut index = 0;
+        while index < chars.len() {
+            match chars[index] {
+                '\\' => slashes += 1,
+                '"' => {
+                    for _ in 0..slashes / 2 {
+                        out.push('\\');
+                    }
+                    if slashes % 2 == 1 {
+                        // An escaped quote; still inside the region.
+                        out.push('"');
+                    } else if in_quotes && chars.get(index + 1) == Some(&'"') {
+                        // A "" pair collapses to one literal quote.
+                        out.push('"');
+                        index += 1;
+                    } else {
+                        in_quotes = !in_quotes;
+                    }
+                    slashes = 0;
+                }
+                ch => {
+                    for _ in 0..slashes {
+                        out.push('\\');
+                    }
+                    slashes = 0;
+                    out.push(ch);
+                }
+            }
+            index += 1;
+        }
+        for _ in 0..slashes {
+            out.push('\\');
+        }
+        out
     }
 
     #[cfg(windows)]
@@ -147,6 +255,11 @@ mod tests {
             "",
             "say \"hi\"",
             "notify=[\"C:\\Program Files\\tiller\\tillerctl.exe\",\"notify\"]",
+            // Trailing backslash, backslash-before-quote, doubled backslash:
+            // the cases the old cmd_unquote could not even model.
+            "C:\\Program Files\\tiller\\",
+            "a\\\"b",
+            "C:\\dir\\deep",
         ] {
             assert_eq!(
                 cmd_unquote(&shell_quote(value)),
