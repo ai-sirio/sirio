@@ -1073,7 +1073,7 @@ pub mod fs_actions {
         {
             let mut command = Command::new("open");
             command.args(["-R", "--"]).arg(absolute);
-            return Some(command);
+            Some(command)
         }
 
         #[cfg(target_os = "linux")]
