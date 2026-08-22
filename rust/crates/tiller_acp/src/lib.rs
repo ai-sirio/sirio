@@ -1858,11 +1858,42 @@ fn apply_current_mode(cell: &Arc<Mutex<Option<ModeCatalog>>>, current_id: String
     }
 }
 
+/// The `file://` URI for an absolute path, as the agent side receives it.
+///
+/// A POSIX path already starts with `/`, so concatenating it onto `file://`
+/// lands on the well-formed three-slash form (`file:///home/me/notes.md`):
+/// empty authority, then the absolute path. A Windows path starts with a
+/// drive letter and separates with `\`, so the same concatenation yields
+/// `file://C:\Users\me\notes.md`, which is malformed on two axes at once —
+/// the authority slot swallows `C:`, making it read as a host, and
+/// backslashes are not URI separators. The drive form needs the third slash
+/// and forward separators: `file:///C:/Users/me/notes.md`.
+///
+/// Percent-encoding is deliberately NOT applied, on either platform. The
+/// POSIX arm has always passed paths through raw, so encoding them now would
+/// change what every existing agent receives for every mention — a wire
+/// contract change, not a portability fix. A path containing a space or `#`
+/// is therefore still not a strictly valid URI. That is a real gap, and it
+/// belongs to a deliberate agreement with the agent side rather than to a
+/// silent side effect of making Windows work.
+fn file_uri(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        // `display()` keeps the platform separators; only the separators and
+        // the leading slash differ from the POSIX form.
+        format!("file:///{}", path.display().to_string().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("file://{}", path.display())
+    }
+}
+
 /// Assembles the `session/prompt` content blocks from a draft, mirroring the
 /// reference app's `ChatPromptBuilder`: the trimmed text first, then one
 /// resource link per mentioned path (absolute paths as-is, relative paths
 /// resolved against the session working directory, both serialized as
-/// `file://` URIs), then one image block per attachment.
+/// `file://` URIs — see [`file_uri`]), then one image block per attachment.
 fn prompt_blocks(
     text: &str,
     mention_paths: &[String],
@@ -1887,7 +1918,7 @@ fn prompt_blocks(
             .unwrap_or_default();
         blocks.push(ContentBlock::ResourceLink(ResourceLink::new(
             name,
-            format!("file://{}", resolved.display()),
+            file_uri(&resolved),
         )));
     }
     for image in images {
@@ -2278,16 +2309,55 @@ mod tests {
             blocks[0],
             ContentBlock::Text(TextContent::new("hello world"))
         );
+        // The expected URI is built through the same helper the production
+        // path uses, so this assertion pins the RESOLUTION (relative mention
+        // joined onto the session cwd) rather than re-deriving the spelling.
+        // The shape assertions below are what pin the spelling, and they are
+        // written out rather than computed — otherwise a helper that emitted
+        // nonsense would agree with itself and the test would pass.
         assert_eq!(
             blocks[1],
             ContentBlock::ResourceLink(ResourceLink::new(
                 "notes.md",
-                format!("file://{}/sub/notes.md", cwd.display())
+                file_uri(&cwd.join("sub").join("notes.md"))
             ))
         );
+        // `/abs/file.png` is absolute on unix but NOT on Windows, where an
+        // absolute path needs a drive or a UNC prefix — so production
+        // resolves it against the session cwd there. Mirror that decision
+        // rather than hardcoding one platform's answer.
+        let png = Path::new("/abs/file.png");
+        let png_resolved = if png.is_absolute() {
+            png.to_path_buf()
+        } else {
+            cwd.join(png)
+        };
         assert_eq!(
             blocks[2],
-            ContentBlock::ResourceLink(ResourceLink::new("file.png", "file:///abs/file.png"))
+            ContentBlock::ResourceLink(ResourceLink::new("file.png", file_uri(&png_resolved)))
+        );
+
+        // Shape, stated independently of the helper: three slashes, then an
+        // absolute path with forward separators and no backslash anywhere —
+        // `file://C:\Users\…` was the Windows defect, malformed both by the
+        // missing slash and by the separators.
+        let ContentBlock::ResourceLink(link) = &blocks[1] else {
+            panic!("blocks[1] must be a resource link, got {:?}", blocks[1]);
+        };
+        assert!(
+            link.uri.starts_with("file:///"),
+            "a file URI needs the empty authority and its third slash: {}",
+            link.uri
+        );
+        assert!(
+            !link.uri.contains('\\'),
+            "URI separators are forward slashes on every platform: {}",
+            link.uri
+        );
+        assert!(
+            link.uri.ends_with("/sub/notes.md"),
+            "the resolved mention must survive into the URI: {}",
+            link.uri
         );
         assert_eq!(
             blocks[3],
