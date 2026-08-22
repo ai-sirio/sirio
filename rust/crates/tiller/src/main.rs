@@ -12485,7 +12485,28 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
 
-const TILLERCTL_INSTALL_SUBPATH: &str = "TillerRust/bin/tillerctl";
+/// The control CLI's file name. On Windows the toolchain emits
+/// `tillerctl.exe` and nothing — not cmd.exe, not CreateProcess, not this
+/// resolver — resolves a bare `tillerctl`, so the extension is part of the
+/// name rather than something to discover; on unix the binary is bare. One
+/// definition feeds both the sibling-dir candidate and the install subpath
+/// so the two cannot disagree on which name to look for.
+fn tillerctl_binary_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "tillerctl.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "tillerctl"
+    }
+}
+
+/// Install subpath of the control CLI under `XDG_DATA_HOME` (or its
+/// per-platform fallbacks).
+fn tillerctl_install_subpath() -> PathBuf {
+    Path::new("TillerRust").join("bin").join(tillerctl_binary_name())
+}
 
 /// Resolve the control CLI used by worktree-local agent hooks.
 ///
@@ -12499,14 +12520,14 @@ fn resolve_tillerctl_path(
     current_exe: &Path,
     environment: &BTreeMap<String, String>,
 ) -> Result<PathBuf, String> {
-    let destination = xdg_data_home_for(environment).join(TILLERCTL_INSTALL_SUBPATH);
+    let destination = xdg_data_home_for(environment).join(tillerctl_install_subpath());
     if is_executable_file(&destination) {
         return Ok(destination);
     }
 
     let mut candidates = Vec::new();
     if let Some(parent) = current_exe.parent() {
-        candidates.push(parent.join("tillerctl"));
+        candidates.push(parent.join(tillerctl_binary_name()));
     }
     if let Some(path) = environment.get("PATH")
         && let Some(path) =
@@ -12526,7 +12547,7 @@ fn resolve_tillerctl_path(
                 "tillerctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
                 current_exe
                     .parent()
-                    .map(|path| path.join("tillerctl").display().to_string())
+                    .map(|path| path.join(tillerctl_binary_name()).display().to_string())
                     .unwrap_or_else(|| "the app executable directory".to_string())
             )
         })?;
@@ -18850,6 +18871,9 @@ mod tests {
 
     #[test]
     fn tillerctl_resolver_installs_the_sibling_binary_in_xdg_data_bin() {
+        // The fixture names the binary exactly the way the platform ships
+        // it (`tillerctl.exe` on Windows, bare `tillerctl` on unix); the
+        // resolver has to look for that name, not the other one.
         let root = std::env::temp_dir().join(format!(
             "tiller-tillerctl-resolution-{}-{}",
             std::process::id(),
@@ -18860,7 +18884,7 @@ mod tests {
         let data_home = root.join("data");
         std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
         let current_exe = executable_dir.join("tiller");
-        let tillerctl = executable_dir.join("tillerctl");
+        let tillerctl = executable_dir.join(tillerctl_binary_name());
         std::fs::write(&current_exe, b"tiller").expect("write app fixture");
         std::fs::write(&tillerctl, b"tillerctl").expect("write tillerctl fixture");
         make_executable(&current_exe);
@@ -18883,8 +18907,68 @@ mod tests {
 
         let resolved = resolve_tillerctl_path(&current_exe, &environment)
             .expect("sibling tillerctl should be installed");
-        assert_eq!(resolved, data_home.join("TillerRust/bin/tillerctl"));
+        assert_eq!(resolved, data_home.join(tillerctl_install_subpath()));
         assert!(resolved.is_absolute());
+        assert_eq!(
+            std::fs::canonicalize(&resolved).expect("installed tillerctl exists"),
+            std::fs::canonicalize(&tillerctl).expect("source tillerctl exists")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Windows regression: the build emits `tillerctl.exe`, and the
+    /// resolver must look for exactly that name. An extensionless `tillerctl`
+    /// next to the app is not a real Windows artifact (and does not exist on
+    /// a normal build), so it may not satisfy the resolution — otherwise
+    /// every agent tab would fail to open on Windows, which is the bug this
+    /// test pins.
+    #[cfg(windows)]
+    #[test]
+    fn tillerctl_resolver_requires_the_exe_sibling_on_windows() {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-tillerctl-exe-resolution-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let executable_dir = root.join("target/debug");
+        let data_home = root.join("data");
+        std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
+        let current_exe = executable_dir.join("tiller.exe");
+        std::fs::write(&current_exe, b"tiller").expect("write app fixture");
+        // An extensionless twin is the Windows mistake in fixture form:
+        // present, but not the artifact the resolver must find.
+        std::fs::write(
+            executable_dir.join("tillerctl"),
+            b"wrong artifact",
+        )
+        .expect("write extensionless decoy");
+        std::fs::create_dir_all(root.join("empty-path")).expect("create empty PATH dir");
+
+        let environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                data_home.to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_string(),
+                root.join("empty-path").to_string_lossy().into_owned(),
+            ),
+        ]);
+
+        let error = resolve_tillerctl_path(&current_exe, &environment)
+            .expect_err("an extensionless tillerctl must not satisfy the resolver");
+        assert!(error.contains("tillerctl is unavailable"), "got {error}");
+
+        let tillerctl = executable_dir.join("tillerctl.exe");
+        std::fs::write(&tillerctl, b"tillerctl").expect("write the real artifact");
+        let resolved = resolve_tillerctl_path(&current_exe, &environment)
+            .expect("the .exe sibling must resolve");
+        assert_eq!(
+            resolved,
+            data_home.join("TillerRust").join("bin").join("tillerctl.exe")
+        );
         assert_eq!(
             std::fs::canonicalize(&resolved).expect("installed tillerctl exists"),
             std::fs::canonicalize(&tillerctl).expect("source tillerctl exists")
@@ -18922,7 +19006,7 @@ mod tests {
         ]);
         let resolved = resolve_tillerctl_path(&current_exe, &environment)
             .expect("PATH tillerctl should be installed");
-        assert_eq!(resolved, data_home.join(TILLERCTL_INSTALL_SUBPATH));
+        assert_eq!(resolved, data_home.join(tillerctl_install_subpath()));
         assert_eq!(
             std::fs::canonicalize(&resolved).expect("PATH installation exists"),
             std::fs::canonicalize(&path_tillerctl).expect("PATH source exists")
@@ -18964,7 +19048,7 @@ mod tests {
         let path_dir = root.join("path");
         let data_home = root.join("data");
         std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
-        let destination = data_home.join(TILLERCTL_INSTALL_SUBPATH);
+        let destination = data_home.join(tillerctl_install_subpath());
         std::fs::create_dir_all(destination.parent().expect("install parent"))
             .expect("create install dir");
         let path_tillerctl = path_dir.join("tillerctl");
