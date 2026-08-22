@@ -428,6 +428,32 @@ mod windows_process {
 /// hosted CLIs (pi, omp) run as their host binary — `node.exe` on Windows —
 /// so they are invisible to Layer D here just as they are behind `node` on
 /// Linux, and they keep relying on Layer B titles instead.
+/// Whether a candidate child is a recycled-pid ghost rather than a genuine
+/// descendant, given the three creation times involved. Split out pure
+/// because the decision is the whole defence and a real pid recycle cannot
+/// be staged in a test.
+///
+/// A genuine child always postdates the process it claims as parent. The
+/// comparison floor is that parent's creation time when it can be read, and
+/// the SHELL's when it cannot — every genuine descendant postdates the shell
+/// too, so the fallback never drops a legitimate process, while a node with
+/// unreadable ownership no longer disables the guard for its whole subtree.
+/// With neither time readable the candidate is kept: failing open is correct
+/// here, since a vanished process is routine mid-poll and refusing would
+/// blind Layer D on elevated panes, which is a worse outcome than the narrow
+/// misattribution this guards against.
+#[cfg(windows)]
+fn is_recycled_pid_ghost(
+    child_created: Option<u64>,
+    parent_created: Option<u64>,
+    shell_created: Option<u64>,
+) -> bool {
+    match (child_created, parent_created.or(shell_created)) {
+        (Some(child), Some(floor)) => child < floor,
+        _ => false,
+    }
+}
+
 #[cfg(windows)]
 pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     // `pty_shell_pid` (tiller_terminal) reports 0 when `GetProcessId` could
@@ -485,6 +511,19 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
         |cache: &mut HashMap<u32, Option<u64>>, pid: u32| -> Option<u64> {
             *cache.entry(pid).or_insert_with(|| windows_process::creation_time(pid))
         };
+    // The floor of last resort for the pid-reuse guard below. Resolving it
+    // once here rather than per-node matters for how much the guard actually
+    // defends: `OpenProcess` is denied for a large share of processes on a
+    // normal machine (measured: 131 of 295 here), and a node whose own
+    // creation time is unknowable would otherwise disable the guard for its
+    // WHOLE subtree — including children whose times are perfectly readable.
+    // Worse, an admitted ghost becomes a parent in turn, and its descendants
+    // then compare against ITS real time and pass. The shell is the one pid
+    // we can nearly always read, because Tiller spawned it under its own
+    // token, and every genuine descendant of the shell postdates the shell by
+    // construction — so this floor never drops a legitimate child while still
+    // catching a recycled-pid ghost that predates the pane entirely.
+    let shell_created = resolve_creation_time(&mut creation_times, shell_pid);
 
     while let Some((pid, depth)) = queue.pop_front() {
         if !visited.insert(pid) {
@@ -520,10 +559,15 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
                 // unknowable (protected or already-exited process) the
                 // candidate stays: a vanished process is routine mid-poll,
                 // and a protected process will not carry an agent image name.
+                //
+                // The floor is the direct parent's time when we can read it,
+                // and the shell's otherwise — see `shell_created` above for
+                // why falling back matters rather than simply giving up on
+                // the subtree. Only when NEITHER is readable does the guard
+                // fail open, which is the honest limit of what this defence
+                // can do without a handle to compare against.
                 let child_created = resolve_creation_time(&mut creation_times, child);
-                if let (Some(parent_created), Some(child_created)) = (pid_created, child_created)
-                    && child_created < parent_created
-                {
+                if is_recycled_pid_ghost(child_created, pid_created, shell_created) {
                     continue;
                 }
                 queue.push_back((child, depth + 1));
@@ -538,6 +582,42 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
 mod windows_tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// The pid-reuse decision, case by case. A genuine recycle cannot be
+    /// staged in a test — that needs the OS to hand back a specific pid — so
+    /// the decision itself is what gets pinned. The third case is the one
+    /// worth having: before the shell fallback existed, an unreadable parent
+    /// switched the guard OFF for its entire subtree, and on a normal machine
+    /// `OpenProcess` is denied for roughly 45% of processes.
+    #[test]
+    fn a_child_older_than_its_floor_is_a_recycled_pid_ghost() {
+        // Ordinary case: the child predates the parent it claims. Impossible
+        // for a real descendant, so it is a stale parent pid pointing at a
+        // recycled number.
+        assert!(is_recycled_pid_ghost(Some(100), Some(200), Some(50)));
+        // The normal, overwhelmingly common case: a real child, kept.
+        assert!(!is_recycled_pid_ghost(Some(300), Some(200), Some(50)));
+
+        // Parent unreadable: the shell's time still floors the comparison.
+        assert!(
+            is_recycled_pid_ghost(Some(40), None, Some(50)),
+            "a candidate predating the pane's own shell cannot be its descendant"
+        );
+        assert!(
+            !is_recycled_pid_ghost(Some(60), None, Some(50)),
+            "a candidate created after the shell stays, parent unreadable or not"
+        );
+
+        // Nothing readable: fail open, deliberately. Refusing here would
+        // blind Layer D on elevated panes, a worse failure than the narrow
+        // misattribution the guard exists to prevent.
+        assert!(!is_recycled_pid_ghost(Some(10), None, None));
+        assert!(!is_recycled_pid_ghost(None, Some(200), Some(50)));
+
+        // Equal times pass: a parent and child stamped in the same tick is a
+        // real spawn, not a ghost.
+        assert!(!is_recycled_pid_ghost(Some(200), Some(200), Some(50)));
+    }
 
     /// Pins Layer D's cost property, not just its correctness: creation-time
     /// lookups (one OpenProcess + GetProcessTimes round trip each) must stay
@@ -589,6 +669,19 @@ mod windows_tests {
         assert!(
             queries <= 25,
             "a two-level subtree must not cost {queries} creation-time lookups"
+        );
+        // A FLOOR, not just ceilings. Both assertions above are upper bounds,
+        // so `queries == 0` satisfies them — which is exactly what happens if
+        // the counter is disconnected from the walk, or if the pid-reuse
+        // guard that drives these lookups is deleted outright. The remaining
+        // assertion in this test (`names` contains the fixture) keeps passing
+        // in that case too, because inserting a name never depended on
+        // resolving a time. Without this line the test cannot fail when the
+        // property it exists to protect disappears.
+        assert!(
+            queries >= 2,
+            "the walk must resolve the shell's own time plus at least one \
+             candidate's; {queries} lookups means the guard is not running"
         );
 
         let _ = child.kill();
