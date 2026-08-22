@@ -779,7 +779,15 @@ pub struct Typography {
     pub callout: Pixels,
     /// Footnote/UI chrome size (11.5px).
     pub footnote: Pixels,
-    /// Caption-2 size (10.5px).
+    /// Caption-2 size (12px).
+    ///
+    /// The one type token that does NOT sit on a waku-measured step. It
+    /// was raised from the measured 10.5 for legibility, which leaves it
+    /// larger than [`Typography::footnote`] (11.5) — so despite the name,
+    /// this is no longer the smallest size in the scale. Reach for
+    /// `footnote` when what you want is "the small one"; reach for
+    /// `caption2` when you want the size the dense Tiller-only strips
+    /// (status bar, tab bar, toolbar labels) actually render at.
     pub caption2: Pixels,
     /// Default UI chrome size (waku: 11.5px for chips, buttons, rows).
     pub ui_size: Pixels,
@@ -815,7 +823,8 @@ impl Typography {
             headline: scaled(13.5),
             callout: scaled(12.5),
             footnote: scaled(11.5),
-            caption2: scaled(10.5),
+            // Off the measured scale on purpose — see the field doc.
+            caption2: scaled(12.0),
             ui_size: px(11.5),
             body_line_height: px(21.0),
             ui_line_height: px(16.0),
@@ -2222,7 +2231,10 @@ mod tests {
         assert_eq!(typography.headline, px(13.5));
         assert_eq!(typography.callout, px(12.5));
         assert_eq!(typography.footnote, px(11.5));
-        assert_eq!(typography.caption2, px(10.5));
+        // The single departure from the measured scale: raised from
+        // waku's 10.5 for legibility, which puts it above `footnote`.
+        // Recorded in `tiller_ui::conformance`'s departures ledger.
+        assert_eq!(typography.caption2, px(12.0));
         assert_eq!(typography.ui_size, px(11.5));
         assert_eq!(typography.body_line_height, px(21.0));
         assert_eq!(typography.ui_line_height, px(16.0));

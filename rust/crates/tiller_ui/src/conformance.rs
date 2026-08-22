@@ -58,9 +58,14 @@
 //! - **Right panel header 40px, activity rows 48px, `PANEL_WIDTH` 405**:
 //!   Tiller-only surface (waku's right panel is a native webview, "not
 //!   part of Tiller's UI"). No waku measurement exists.
-//! - **Status bar text at caption2 (10.5)**: a dense Tiller-only strip
-//!   (three provider segments + worktree context) sized for fit, within
-//!   the measured scale; waku's 40px footer rows are 11.5.
+//! - **`caption2` is 12.0, off the measured scale**: waku's smallest
+//!   step is 10.5, and Tiller first sized its dense strips there for fit
+//!   — the status bar (three provider segments + worktree context), tab
+//!   bar and toolbar labels. 10.5 read too small on those surfaces, so
+//!   the token was raised to 12.0. Two consequences, both accepted:
+//!   12.0 is not a waku step, and it puts `caption2` ABOVE `footnote`
+//!   (11.5), so the scale is no longer monotonic in the order its names
+//!   imply. The name stays because every call site already spells it.
 //! - **User pill text at body 13.5/21 instead of waku's 14/20**: Tiller
 //!   keeps one body size; the pill is distinguished by its container
 //!   (max 540, r12, raised, px12/py8 — all pinned below), not by a second
@@ -90,7 +95,8 @@
 //! - Swift-scale text sizes (**13.0/12.0/11.0/10.0** from the macOS app's
 //!   13pt base) still sat in settings/controls/sidebar/right panel/file
 //!   view/tab bar; all moved to the measured steps
-//!   (**13.5/12.5/11.5/10.5**) via the `Typography` tokens.
+//!   (**13.5/12.5/11.5/10.5**) via the `Typography` tokens. The last of
+//!   those steps has since been raised — see the departures ledger.
 //! - File-view code text was 12pt (Swift's mono size), now the frozen
 //!   code size **11.5** (`typography.code_size`).
 
@@ -151,10 +157,13 @@ fn accent_resolves_to_the_same_coral_under_either_token_name() {
 }
 
 /// The type scale is the measured one: body 13.5/21 (the document ratio),
-/// UI chrome 11.5/16, callout 12.5, caption 10.5, code 11.5/17.5, and the
-/// heading steps off body (×1.45/×1.28/×1.14/×1.05). These are the values
-/// the surfaces resolve through `theme.typography`; a drift here is a
-/// drift everywhere.
+/// UI chrome 11.5/16, callout 12.5, code 11.5/17.5, and the heading steps
+/// off body (×1.45/×1.28/×1.14/×1.05). These are the values the surfaces
+/// resolve through `theme.typography`; a drift here is a drift everywhere.
+///
+/// `caption2` is the one member that is NOT a measured step — it was
+/// raised to 12.0, above `footnote`. It is pinned here all the same: a
+/// value nobody measured still has to be a value somebody decided.
 #[test]
 fn type_scale_is_the_measured_one() {
     let typography = Theme::dark().typography;
@@ -168,7 +177,11 @@ fn type_scale_is_the_measured_one() {
     assert_eq!(typography.ui_size, px(11.5), "UI chrome 11.5");
     assert_eq!(typography.ui_line_height, px(16.0), "chrome 11.5 @ 16");
     assert_eq!(typography.callout, px(12.5), "callout 12.5");
-    assert_eq!(typography.caption2, px(10.5), "caption 10.5");
+    assert_eq!(
+        typography.caption2,
+        px(12.0),
+        "caption2 12.0 — the deliberate off-scale step, above footnote"
+    );
     assert_eq!(typography.headline, px(13.5), "headline is the body size");
     assert_eq!(typography.code_size, px(11.5), "code 11.5");
     assert_eq!(typography.code_line_height, px(17.5), "code 11.5 @ 17.5");
