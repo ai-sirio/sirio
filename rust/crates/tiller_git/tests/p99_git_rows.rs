@@ -104,6 +104,11 @@ fn make_repo() -> TempDir {
 
 // ---------------------------------------------------------------- RUN-02
 
+/// Unix-only: the emitter is handed to `sh -c` and the whole fixture
+/// premise (no ETXTBSY, `/bin/sh`) is a POSIX one — Windows has no
+/// `/bin/sh` and the LF/CR splitting this exercises is covered there by
+/// the real-clone streaming tests.
+#[cfg(unix)]
 #[test]
 fn streaming_lines_arrive_incrementally_before_completion() {
     ensure_generous_timeout();
@@ -171,7 +176,23 @@ fn a_real_git_clone_streams_progress_and_completes() {
     git(source.path(), &["commit", "-m", "more objects"]);
 
     let scratch = TempDir::new();
-    let url = format!("file://{}", source.path().display());
+    // A file:// URL needs forward slashes and no verbatim prefix — the
+    // fixture path is canonicalized, which on Windows yields `\\?\C:\...`,
+    // a spelling git cannot open (it resolves the URL to `//\\?\C:\...`).
+    #[cfg(windows)]
+    let display = source
+        .path()
+        .display()
+        .to_string()
+        .strip_prefix(r"\\?\")
+        .unwrap_or("")
+        .to_string();
+    #[cfg(not(windows))]
+    let display = source.path().display().to_string();
+    #[cfg(windows)]
+    let url = format!("file://{}", display.replace('\\', "/"));
+    #[cfg(not(windows))]
+    let url = format!("file://{display}");
     let mut lines = Vec::new();
     let result = run_streaming(
         &["clone", "--progress", &url, "dest"],
