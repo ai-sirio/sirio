@@ -44,9 +44,11 @@ pub fn resolve_file_link(raw: &str, worktree: &Path) -> Option<FileLinkTarget> {
     };
     let (path_text, line, column) = split_location(&path_text);
     let path = PathBuf::from(path_text);
-    let path = if from_url {
-        path
-    } else if path.is_absolute() {
+    // Both absoluteness votes — the URL grammar's and the platform's —
+    // land here in the same arm: a file URL is absolute by contract
+    // (see [`resolve_file_link`]'s doc comment) and a bare path answers
+    // the host's `is_absolute`.
+    let path = if from_url || path.is_absolute() {
         path
     } else {
         validate_relative(&path)?;
