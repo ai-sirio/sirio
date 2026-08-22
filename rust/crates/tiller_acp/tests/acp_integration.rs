@@ -357,11 +357,36 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
     // trailing slash on some platforms, and the product resolves relative
     // links with PathBuf::join, which normalizes it away.
     let notes_link_target = cwd.join("sub/notes.md");
+
+    // The `file://` spelling is rebuilt here rather than borrowed from the
+    // product, deliberately: an expectation computed with the very function
+    // under test would agree with itself however wrong that function became.
+    // A POSIX path already starts with `/`, so `file://` + path is the
+    // three-slash form; a Windows path starts with a drive and separates
+    // with `\`, so it needs the third slash and forward separators.
+    fn expected_file_uri(path: &std::path::Path) -> String {
+        if cfg!(windows) {
+            format!("file:///{}", path.display().to_string().replace('\\', "/"))
+        } else {
+            format!("file://{}", path.display())
+        }
+    }
+    // `/abs/file.png` is absolute on unix but not on Windows, where the
+    // product resolves it against the session cwd — mirror that, do not
+    // hardcode one platform's answer.
+    let png = std::path::Path::new("/abs/file.png");
+    let png_target = if png.is_absolute() {
+        png.to_path_buf()
+    } else {
+        cwd.join(png)
+    };
+
     assert_eq!(
         echo,
         format!(
-            "text:hello world|link:file://{}:notes.md|link:file:///abs/file.png:file.png|image:image/png",
-            notes_link_target.display()
+            "text:hello world|link:{}:notes.md|link:{}:file.png|image:image/png",
+            expected_file_uri(&notes_link_target),
+            expected_file_uri(&png_target)
         )
     );
 
