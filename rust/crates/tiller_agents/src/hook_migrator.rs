@@ -91,6 +91,9 @@ fn rewrite_command(command: &str, tillerctl_path: &str) -> Option<String> {
 mod tests {
     use super::rewrite_command;
 
+    /// The migrator's contract is spelled in the POSIX form the Swift
+    /// original wrote — it runs unchanged on unix.
+    #[cfg(not(windows))]
     #[test]
     fn only_a_quoted_tillerctl_path_is_rewritten() {
         assert_eq!(
@@ -104,6 +107,20 @@ mod tests {
         assert_eq!(
             rewrite_command("'/new/tillerctl' notify", "/new/tillerctl"),
             None
+        );
+    }
+
+    /// On Windows the rewritten hook command is cmd.exe-quoted, so the
+    /// expected output is the double-quote form. Windows paths end in
+    /// `tillerctl.exe`, which `ends_with("/tillerctl")` cannot match — the
+    /// migrator only ever rewrites POSIX-style stale paths, which is exactly
+    /// the kind of file this migrator exists to fix.
+    #[cfg(windows)]
+    #[test]
+    fn only_a_quoted_tillerctl_path_is_rewritten() {
+        assert_eq!(
+            rewrite_command("'/old/tillerctl' notify --session pane", "/new/tillerctl"),
+            Some("\"/new/tillerctl\" notify --session pane".to_string())
         );
     }
 }

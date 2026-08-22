@@ -613,6 +613,7 @@ mod tests {
     /// F-AGENT-OPENCODE-03: the noninteractive summarizer command is
     /// `opencode run --pure '<prompt>'`, with the prompt shell-quoted the
     /// same way the Swift original quotes it.
+    #[cfg(not(windows))]
     #[test]
     fn opencode_summarizer_command_is_run_pure_with_a_quoted_prompt() {
         assert_eq!(
@@ -627,6 +628,24 @@ mod tests {
         );
     }
 
+    /// Windows form of the same command: the prompt rides one cmd.exe
+    /// double-quoted token (`""` doubling for embedded quotes), the only
+    /// quoting cmd understands.
+    #[cfg(windows)]
+    #[test]
+    fn opencode_summarizer_command_is_run_pure_with_a_quoted_prompt() {
+        assert_eq!(
+            OpenCodeAdapter.summarizer_command("summarize this"),
+            Some("opencode run --pure \"summarize this\"".to_string())
+        );
+        // A prompt with an embedded double quote: cmd collapses the doubled
+        // pair back to one before the child parses the token.
+        assert_eq!(
+            OpenCodeAdapter.summarizer_command("say \"hi\""),
+            Some("opencode run --pure \"say \"\"hi\"\"\"".to_string())
+        );
+    }
+
     /// F-AGENT-OMP-03: the noninteractive summarizer flags are
     /// `--print --no-tools`, and the program is `omp` — the name the
     /// Swift original always used and the `bin` that
@@ -635,11 +654,30 @@ mod tests {
     /// was read off an unrelated npm package of the same name, and it is
     /// false. See `OhMyPiAdapter::executable_name` for the collision and
     /// the live evidence.
+    #[cfg(not(windows))]
     #[test]
     fn omp_summarizer_command_uses_the_distribution_binary_name() {
         assert_eq!(
             OhMyPiAdapter.summarizer_command("summarize this"),
             Some("omp --print --no-tools 'summarize this'".to_string())
+        );
+        let command = OhMyPiAdapter
+            .summarizer_command("x")
+            .expect("has a summarizer");
+        assert!(
+            command.starts_with(OhMyPiAdapter.executable_name()),
+            "the summarizer must spawn the executable name, not the adapter id: {command}"
+        );
+    }
+
+    /// The Windows prompt form of the same summarizer: one cmd.exe
+    /// double-quoted token.
+    #[cfg(windows)]
+    #[test]
+    fn omp_summarizer_command_uses_the_distribution_binary_name() {
+        assert_eq!(
+            OhMyPiAdapter.summarizer_command("summarize this"),
+            Some("omp --print --no-tools \"summarize this\"".to_string())
         );
         let command = OhMyPiAdapter
             .summarizer_command("x")
@@ -657,6 +695,7 @@ mod tests {
     /// (`agent_id: None`, default `summarizer_agent: Claude`) depends on
     /// this returning `Some` rather than falling through to the trait
     /// default.
+    #[cfg(not(windows))]
     #[test]
     fn claude_codex_pi_summarizer_commands_match_the_swift_reference() {
         assert_eq!(

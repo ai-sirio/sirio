@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use tiller_agents::{
-    ALL, AgentAdapter, AgentAvailability, ClaudeCodeAdapter, CodexAdapter, DiscoveryError,
-    OhMyPiAdapter, OpenCodeAdapter, PiAdapter, PrepareError, SKILL_MANAGED_MARKER,
-    discover_availability, find_executable_in_path, find_executable_in_path_checked, install_skill,
-    json_string_literal, shell_quote, try_discover_availability_in,
+    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, OhMyPiAdapter, OpenCodeAdapter, PiAdapter,
+    PrepareError, SKILL_MANAGED_MARKER, discover_availability, find_executable_in_path,
+    install_skill, json_string_literal, shell_quote,
 };
+#[cfg(not(windows))]
+use tiller_agents::{AgentAvailability, DiscoveryError, find_executable_in_path_checked, try_discover_availability_in};
 
 const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
 const TILLERCTL: &str = "/usr/local/bin/tillerctl";
@@ -79,6 +80,7 @@ fn claude_command_is_bare() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn codex_command_carries_the_notify_override() {
     // The exact expectation from CodexAdapterTests: slashes unescaped,
@@ -86,6 +88,20 @@ fn codex_command_carries_the_notify_override() {
     assert_eq!(
         CodexAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
         "codex -c 'notify=[\"/usr/local/bin/tillerctl\",\"notify\",\"--session\",\"12345678-1234-1234-1234-123456789abc\",\"--status\",\"needs-input\"]'"
+    );
+}
+
+/// The Windows command() form: the whole `-c` override rides one
+/// cmd.exe double-quoted token, with every embedded JSON quote doubled
+/// (`""` is cmd's own literal-quote convention, collapsed back to `"`
+/// before the child's argv parser sees the token — the shape verified
+/// end-to-end against a live cmd.exe in the win-quoting pass).
+#[cfg(windows)]
+#[test]
+fn codex_command_carries_the_notify_override() {
+    assert_eq!(
+        CodexAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
+        "codex -c \"notify=[\"\"/usr/local/bin/tillerctl\"\",\"\"notify\"\",\"\"--session\"\",\"\"12345678-1234-1234-1234-123456789abc\"\",\"\"--status\"\",\"\"needs-input\"\"]\""
     );
 }
 
@@ -102,11 +118,26 @@ fn pi_command_is_bare() {
     assert_eq!(PiAdapter.command(WORKTREE, PANE_ID, TILLERCTL), "pi");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn omp_command_points_at_the_worktree_local_hook() {
     assert_eq!(
         OhMyPiAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
         "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
+    );
+}
+
+/// The Windows form of the launch line: the hook path is a single
+/// cmd.exe double-quoted token, so a worktree path with spaces survives.
+/// (The adapter joins the hook path with `/` on every platform — the
+/// mixed separators are fine for Windows APIs and for cmd; it is the
+/// quoting, not the separator, that must match cmd.)
+#[cfg(windows)]
+#[test]
+fn omp_command_points_at_the_worktree_local_hook() {
+    assert_eq!(
+        OhMyPiAdapter.command("C:\\Users\\me\\my worktree\\tiller", PANE_ID, TILLERCTL),
+        "omp --hook \"C:\\Users\\me\\my worktree\\tiller/.tiller/omp-hook.ts\""
     );
 }
 
@@ -323,6 +354,7 @@ fn try_discover_fails_on_unsafe_absence_and_recovers_when_the_cause_is_fixed() {
 // Resume commands
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 #[test]
 fn claude_resume_command() {
     assert_eq!(
@@ -331,6 +363,24 @@ fn claude_resume_command() {
     );
 }
 
+/// Acceptance (win-quoting): a resume with a session reference containing
+/// spaces must emerge as ONE cmd.exe double-quoted token — the form
+/// verified against a live cmd.exe to arrive intact at the child.
+#[cfg(windows)]
+#[test]
+fn claude_resume_command() {
+    assert_eq!(
+        ClaudeCodeAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("claude --resume \"sess-abc\"".to_string())
+    );
+
+    let spaced = ClaudeCodeAdapter
+        .resume_command(WORKTREE, PANE_ID, TILLERCTL, "my session abc")
+        .expect("claude resumes");
+    assert_eq!(spaced, "claude --resume \"my session abc\"");
+}
+
+#[cfg(not(windows))]
 #[test]
 fn codex_resume_command() {
     assert_eq!(
@@ -342,6 +392,23 @@ fn codex_resume_command() {
     );
 }
 
+/// The Windows resume form: the `-c` override is one cmd double-quoted
+/// token with its embedded JSON quotes doubled, and the spaced session
+/// reference is a second one. cmd.exe collapses the doubled quotes back
+/// and the child receives `-c notify=[...] resume <ref>` exactly.
+#[cfg(windows)]
+#[test]
+fn codex_resume_command() {
+    assert_eq!(
+        CodexAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some(
+            "codex -c \"notify=[\"\"/usr/local/bin/tillerctl\"\",\"\"notify\"\",\"\"--session\"\",\"\"12345678-1234-1234-1234-123456789abc\"\",\"\"--status\"\",\"\"needs-input\"\"]\" resume \"sess-abc\""
+                .to_string()
+        )
+    );
+}
+
+#[cfg(not(windows))]
 #[test]
 fn opencode_resume_command() {
     assert_eq!(
@@ -350,6 +417,16 @@ fn opencode_resume_command() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn opencode_resume_command() {
+    assert_eq!(
+        OpenCodeAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("opencode --session \"sess-abc\"".to_string())
+    );
+}
+
+#[cfg(not(windows))]
 #[test]
 fn pi_resume_command() {
     assert_eq!(
@@ -358,14 +435,44 @@ fn pi_resume_command() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn pi_resume_command() {
+    assert_eq!(
+        PiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("pi --session \"sess-abc\"".to_string())
+    );
+}
+
+#[cfg(not(windows))]
 #[test]
 fn omp_resume_command() {
     assert_eq!(
         OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
         Some(
-            "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'"
-                .to_string(),
+            "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'".to_string(),
         )
+    );
+}
+
+/// Acceptance (win-quoting): a resume whose worktree path contains spaces
+/// must produce a line cmd.exe parses into ONE hook-path argument — the
+/// exact case that previously split the path at the space and handed the
+/// single-quote characters to omp.
+#[cfg(windows)]
+#[test]
+fn omp_resume_command() {
+    assert_eq!(
+        OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("omp --hook \"/Users/me/tiller/.tiller/omp-hook.ts\" --resume=\"sess-abc\"".to_string())
+    );
+
+    let spaced = OhMyPiAdapter
+        .resume_command("C:\\Users\\me\\my worktree\\tiller", PANE_ID, TILLERCTL, "sess-abc")
+        .expect("omp resumes");
+    assert_eq!(
+        spaced,
+        "omp --hook \"C:\\Users\\me\\my worktree\\tiller/.tiller/omp-hook.ts\" --resume=\"sess-abc\""
     );
 }
 
@@ -373,6 +480,7 @@ fn omp_resume_command() {
 // The Codex TOML trap: slashes must survive unescaped
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 #[test]
 fn codex_notify_override_survives_shell_and_json_round_trip() {
     // Mirror of the Swift `verifyCodexRoundTrip`: strip `codex -c `, shell-
@@ -412,13 +520,60 @@ fn codex_override_with_slashy_tillerctl_path_keeps_slashes_unescaped() {
 }
 
 /// Strips the outer single quotes and unescapes embedded `'\''` sequences —
-/// the inverse of [`shell_quote`].
+/// the inverse of the POSIX [`shell_quote`].
+#[cfg(not(windows))]
 fn shell_unquote(quoted: &str) -> String {
     assert!(
         quoted.starts_with('\'') && quoted.ends_with('\''),
         "single-quoted: {quoted}"
     );
     quoted[1..quoted.len() - 1].replace("'\\''", "'")
+}
+
+/// cmd.exe's unquoting for the double-quote form: outer pair stripped,
+/// every `""` collapsed to `"`. This is the inverse of the Windows
+/// [`shell_quote`], mirroring what cmd does on its way to the child's
+/// argv parser.
+#[cfg(windows)]
+fn shell_unquote(quoted: &str) -> String {
+    assert!(
+        quoted.starts_with('"') && quoted.ends_with('"'),
+        "double-quoted: {quoted}"
+    );
+    quoted[1..quoted.len() - 1].replace("\"\"", "\"")
+}
+
+/// The Windows mirror of `codex_notify_override_survives_shell_and_json_round_trip`,
+/// with a tillerctl path that contains spaces and backslashes — the case
+/// that previously split at the spaces and handed the single-quote
+/// characters to Codex. The command string is cmd-unquoted the way a
+/// spawned child would receive it, then JSON-decoded.
+#[cfg(windows)]
+#[test]
+fn codex_notify_override_survives_shell_and_json_round_trip() {
+    let tillerctl = r"C:\.herdr\tillerctl bin\\tillerctl.exe";
+    let cmd = CodexAdapter.command(WORKTREE, PANE_ID, tillerctl);
+
+    let after_prefix = cmd.strip_prefix("codex -c ").expect("prefix");
+    assert!(
+        !after_prefix.contains("\\/"),
+        "TOML would reject the override"
+    );
+
+    let inner = shell_unquote(after_prefix);
+    let notify = inner.strip_prefix("notify=").expect("notify= prefix");
+    let args: Vec<String> = serde_json::from_str(notify).expect("override decodes as JSON");
+    assert_eq!(
+        args,
+        vec![
+            tillerctl.to_string(),
+            "notify".to_string(),
+            "--session".to_string(),
+            PANE_ID.to_string(),
+            "--status".to_string(),
+            "needs-input".to_string(),
+        ]
+    );
 }
 
 #[test]
