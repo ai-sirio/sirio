@@ -2601,8 +2601,27 @@ fn summarizer_candidate_commands(
 /// Blocking: callers run this on a background executor, never the UI thread.
 fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration) -> Option<String> {
     let (shell_program, shell_args) = command_shell_invocation(command);
-    let mut child = std::process::Command::new(&shell_program)
-        .args(&shell_args)
+    let mut spawn = std::process::Command::new(&shell_program);
+    // command_shell_invocation's output has TWO consumers with DIFFERENT
+    // transports, and only one tolerates std's quoting. The terminal-pane
+    // path feeds alacritty's Windows PTY, which concatenates the pieces RAW
+    // into the CreateProcess tail — the cmd-form quoting from
+    // tiller_agents::shell_quote survives that intact. std's Command::args is
+    // a different transport: it re-quotes each argument by CRT rules when
+    // building the tail, so the already-cmd-quoted line gets quoted a SECOND
+    // time and arrives at the child shredded — every quoted prompt split at
+    // its spaces (see the transport-parity test below). raw_arg appends each
+    // piece verbatim instead, delivering exactly the bytes the terminal path
+    // delivers. POSIX is untouched: `-lc <command>` as two argv entries is
+    // correct because the unix PTY path and std both pass argv directly.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        spawn.raw_arg(&shell_args[0]).raw_arg(&shell_args[1]);
+    }
+    #[cfg(not(windows))]
+    spawn.args(&shell_args);
+    let mut child = spawn
         .current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -12485,12 +12504,19 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
 
-/// The control CLI's file name. On Windows the toolchain emits
-/// `tillerctl.exe` and nothing — not cmd.exe, not CreateProcess, not this
-/// resolver — resolves a bare `tillerctl`, so the extension is part of the
-/// name rather than something to discover; on unix the binary is bare. One
-/// definition feeds both the sibling-dir candidate and the install subpath
-/// so the two cannot disagree on which name to look for.
+/// The control CLI's file name: `tillerctl.exe` on Windows, bare on unix.
+///
+/// The extension is part of the name here because this resolver does not
+/// *search* for the binary the way a shell does — it stats a path it built
+/// itself (a sibling of the app executable, or the install destination), and
+/// a stat needs the exact spelling the toolchain emitted. That is a property
+/// of direct path probing, not of the platform: cmd.exe would happily
+/// resolve a bare `tillerctl` by appending `.EXE` from PATHEXT, and so does
+/// the PATH search in `tiller_agents::find_executable_in_path`. Neither of
+/// those runs here.
+///
+/// One definition feeds both the sibling-dir candidate and the install
+/// subpath so the two cannot disagree on which name to look for.
 fn tillerctl_binary_name() -> &'static str {
     #[cfg(windows)]
     {
@@ -19346,6 +19372,11 @@ mod tests {
     /// same file. Real files and a real symlink on disk, not string
     /// manipulation: the two paths differ lexically but must be recognised
     /// as the same open document.
+    /// POSIX-only fixture: `std::os::unix::fs::symlink` has no Windows
+    /// equivalent on this API surface (developer-mode symlinks are a
+    /// different call with different privilege rules). Gated, not faked —
+    /// same split as every other platform-specific test in this repo.
+    #[cfg(unix)]
     #[test]
     fn opening_a_symlink_to_an_already_open_file_reuses_the_same_tab() {
         let dir = std::env::temp_dir().join(format!(
@@ -22838,6 +22869,11 @@ mod tests {
         assert!(prompt.ends_with("user: hi\nassistant: hello"));
     }
 
+    /// The expected spellings differ by platform because `shell_quote` is
+    /// itself platform-split (single quotes for `$SHELL -lc`, doubled
+    /// double-quotes for `cmd /C`) — split like the tiller_agents tests,
+    /// not loosened: each side still pins its exact spelling.
+    #[cfg(not(windows))]
     #[test]
     fn summarizer_candidates_prefer_the_selected_agent_then_the_tab_agent() {
         // I1-autoname: all five adapters now have a ported `summarizer_command`.
@@ -22873,6 +22909,40 @@ mod tests {
             vec![
                 "claude -p 'prompt'".to_string(),
                 "pi --print --no-tools 'prompt'".to_string(),
+            ]
+        );
+    }
+
+    /// Windows arm of the split above — same candidates, cmd-form quoting.
+    #[cfg(windows)]
+    #[test]
+    fn summarizer_candidates_prefer_the_selected_agent_then_the_tab_agent() {
+        let commands = summarizer_candidate_commands("opencode", Some("omp"), "prompt");
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].starts_with("opencode run --pure"));
+        assert!(commands[1].starts_with("omp --print --no-tools"));
+
+        let commands = summarizer_candidate_commands("claude", Some("opencode"), "prompt");
+        assert_eq!(
+            commands,
+            vec![
+                "claude -p \"prompt\"".to_string(),
+                "opencode run --pure \"prompt\"".to_string(),
+            ]
+        );
+
+        let commands = summarizer_candidate_commands("omp", Some("omp"), "prompt");
+        assert_eq!(commands.len(), 1);
+
+        let commands = summarizer_candidate_commands("claude", None, "prompt");
+        assert_eq!(commands, vec!["claude -p \"prompt\"".to_string()]);
+
+        let commands = summarizer_candidate_commands("claude", Some("pi"), "prompt");
+        assert_eq!(
+            commands,
+            vec![
+                "claude -p \"prompt\"".to_string(),
+                "pi --print --no-tools \"prompt\"".to_string(),
             ]
         );
     }
@@ -22914,6 +22984,59 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The transport-parity pin for `run_summarizer_command`.
+    /// `command_shell_invocation`'s output has TWO consumers: the terminal
+    /// pane (alacritty's Windows PTY concatenates the pieces RAW) and this
+    /// function, which used std `Command::args` — a DIFFERENT transport that
+    /// re-quotes each argument by CRT rules, quoting an already-cmd-quoted
+    /// line a second time. Every quoted prompt then arrived shredded (the
+    /// reviewer's reproduction: "fix the login bug" → three args), and since
+    /// every failure here is swallowed into `None`, tabs silently kept their
+    /// default names. This drives a real cmd.exe through the same path and
+    /// asserts the quoted argument arrives as ONE argument.
+    #[cfg(windows)]
+    #[test]
+    fn run_summarizer_command_delivers_a_quoted_argument_intact_through_cmd() {
+        use tiller_agents::shell_quote;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-summarizer-transport-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create transport fixture directory");
+        // `%~1` strips the surrounding quotes, so the batch echoes exactly
+        // the argument the child received. That is what lets this test tell
+        // the two outcomes apart: an intact delivery echoes `fix the login
+        // bug`, a shredded one makes `%1` just `"fix` and echoes `fix`.
+        // Asserting on non-empty output would have passed either way.
+        let bat = dir.join("echo_first_arg.bat");
+        std::fs::write(&bat, b"@echo %~1\r\n").expect("write fixture batch file");
+
+        // Production shape: bare program name, argument shell_quoted — what
+        // `claude -p <quoted prompt>` builds. The `.\` prefix is not
+        // cosmetic and not production shape: measured on this platform,
+        // `cmd /C echo_first_arg.bat …` answers "is not recognized as an
+        // internal or external command", because cmd does not resolve a bare
+        // batch name from the working directory here, while the same line
+        // with `.\` runs. Production resolves its program through PATH and
+        // never needs this; the fixture, living in a temp directory, does.
+        let command = format!(".\\echo_first_arg.bat {}", shell_quote("fix the login bug"));
+        let cwd = dir.to_string_lossy().into_owned();
+        // Generous on purpose: this test pins transport parity, not latency,
+        // and inside a fully parallel suite run Windows process spawn can
+        // transiently take seconds (freshly written .bat files get re-scanned
+        // by real-time antivirus). The production timeout is untouched.
+        let title = run_summarizer_command(&command, &cwd, Duration::from_secs(30));
+        assert_eq!(
+            title,
+            Some("fix the login bug".to_string()),
+            "a quoted prompt must arrive at the child as one argument"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
