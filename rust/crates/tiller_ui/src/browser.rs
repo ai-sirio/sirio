@@ -791,11 +791,10 @@ fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, 
     if flag.get() == want {
         return;
     }
-    if let Some(webview) = webview.borrow().as_ref() {
-        if webview.set_visible(want).is_err() {
+    if let Some(webview) = webview.borrow().as_ref()
+        && webview.set_visible(want).is_err() {
             return;
         }
-    }
     flag.set(want);
 }
 
@@ -2096,12 +2095,12 @@ impl Element for NativeWebViewElement {
             // correction above already lands exactly, as it now does.
             let corrected = match self.scale_correction.get() {
                 Some(factor) => scale_rect(&requested, factor),
-                None => requested.clone(),
+                None => requested,
             };
             let _ = webview.set_bounds(corrected);
 
-            if self.scale_correction.get().is_none() {
-                if let Ok(actual) = webview.bounds() {
+            if self.scale_correction.get().is_none()
+                && let Ok(actual) = webview.bounds() {
                     let (requested_w, requested_h) = rect_size(&requested);
                     let (actual_w, actual_h) = rect_size(&actual);
                     // Guard against the 1x1 startup stub and any transient
@@ -2123,9 +2122,8 @@ impl Element for NativeWebViewElement {
                         }
                     }
                 }
-            }
         }
-        ()
+        
     }
 
     fn paint(
