@@ -15035,10 +15035,13 @@ mod tests {
             2
         );
 
-        let header = cx
-            .debug_bounds("activity-header")
-            .expect("the activity header is drawn");
-        cx.simulate_click(header.center(), Modifiers::none());
+        // Activity is one of the right panel's four icon-selected views, not
+        // a collapsible footer under Files: reaching its rows means selecting
+        // it in the rail.
+        let rail_icon = cx
+            .debug_bounds("right-panel-tab-activity")
+            .expect("the Activity rail icon is drawn");
+        cx.simulate_click(rail_icon.center(), Modifiers::none());
         cx.run_until_parked();
 
         // The close control is the row's last child, inside its 10px right
