@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use crate::http::{HttpError, get, post};
 use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
+use crate::user_home_dir;
 
 /// The ChatGPT rate-limit endpoint.
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -101,9 +102,11 @@ pub fn codex_auth_file_path() -> PathBuf {
     {
         return PathBuf::from(home).join("auth.json");
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".codex/auth.json"))
-        .expect("HOME must be set")
+    user_home_dir()
+        .map(|home| home.join(".codex/auth.json"))
+        // No home → an empty path: loading credentials fails and the
+        // fetcher reports LoggedOut instead of panicking.
+        .unwrap_or_default()
 }
 
 /// Whether a Codex auth file carries usable OAuth tokens — the same parse

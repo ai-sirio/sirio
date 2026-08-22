@@ -57,6 +57,40 @@ pub use model::{
 pub use ollama::{OllamaCloudUsageFetcher, extract_ollama_cloud_usage, parse_ollama_cloud_usage};
 pub use opencode_go::OpenCodeGoUsageFetcher;
 
+/// The user's home directory, or `None` when the environment offers no
+/// source. Windows has no `HOME`: a native GUI launch (Explorer, the start
+/// menu) never sets it — git-bash does, which is exactly why this only
+/// breaks outside a terminal — so `USERPROFILE` is the primary source,
+/// with `HOMEDRIVE`+`HOMEPATH` as the fallback. Unix keeps reading
+/// `HOME` unchanged. Callers must degrade on `None` (report "no
+/// credentials", fall back to a sane path), never panic.
+///
+/// Duplicated deliberately across the leaf crates that need it —
+/// `tiller_usage`, `tiller_project/src/domain.rs`, and `tiller/src/main.rs`
+/// (+ its environment-map variant in `tiller/src/session.rs`) — because
+/// none of them may gain a dependency on a shared helper crate; each
+/// keeps this ~10-line private copy instead.
+pub(crate) fn user_home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let drive =
+                    std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
+                let path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty())?;
+                Some(std::path::PathBuf::from(drive).join(path))
+            })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+}
+
 /// The provider identity, matching the Swift `UsageProvider` ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UsageProvider {

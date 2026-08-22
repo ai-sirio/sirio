@@ -10,9 +10,38 @@ pub fn default_project_base() -> PathBuf {
     if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
         return PathBuf::from(data).join("Tiller/projects");
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Tiller/projects"))
+    // A native Windows launch has no HOME, so XDG's data fallback must
+    // resolve through USERPROFILE — otherwise the base silently degrades
+    // to a RELATIVE "Tiller/projects" under the current directory.
+    home_dir()
+        .map(|home| home.join("Tiller/projects"))
         .unwrap_or_else(|| PathBuf::from("Tiller/projects"))
+}
+
+/// The user's home directory, or `None` when the environment offers no
+/// source. Windows has no `HOME` in a native GUI launch: `USERPROFILE`
+/// (then `HOMEDRIVE`+`HOMEPATH`) takes its place; unix keeps reading
+/// `HOME`. Duplicated deliberately — the leaf crates that need it cannot
+/// depend on each other; see the copies in `tiller_usage/src/lib.rs` and
+/// `tiller/src/main.rs` (+ `tiller/src/session.rs`).
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
+                let path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty())?;
+                Some(PathBuf::from(drive).join(path))
+            })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
 }
 
 /// Chooses the branch base and parent directory for a new worktree.

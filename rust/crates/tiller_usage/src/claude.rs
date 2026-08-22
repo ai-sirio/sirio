@@ -23,6 +23,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
+use crate::user_home_dir;
 
 /// The Claude config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude` —
 /// the same precedence `claude` itself uses.
@@ -32,9 +33,11 @@ pub fn claude_config_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".claude"))
-        .expect("HOME must be set")
+    user_home_dir()
+        .map(|home| home.join(".claude"))
+        // No home → an empty config dir: credential reads fail and report
+        // "not signed in" instead of killing the process.
+        .unwrap_or_default()
 }
 
 /// Whether a Claude credentials file (`<config dir>/.credentials.json`)
