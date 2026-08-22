@@ -48,6 +48,7 @@ impl Drop for TempDir {
 
 /// Flattens a JSON document into `(pointer, leaf)` pairs so two documents
 /// can be diffed field by field.
+#[cfg(not(windows))]
 fn leaves(value: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
     fn walk(value: &serde_json::Value, at: String, out: &mut Vec<(String, serde_json::Value)>) {
         match value {
@@ -74,6 +75,7 @@ fn leaves(value: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
 /// three hook events (one stale tillerctl, one current tillerctl, one
 /// unrelated command), matchers, a numeric hook timeout, and an unrelated
 /// top-level object.
+#[cfg(not(windows))]
 fn settings_with_stale_hook() -> serde_json::Value {
     serde_json::json!({
         "permissions": {"allow": ["Bash(cargo:*)", "Read"], "deny": []},
@@ -104,6 +106,12 @@ fn settings_with_stale_hook() -> serde_json::Value {
 
 // ---------------------------------------------------------------- SAFE-02
 
+// On Windows the rewritten hook command is cmd.exe-quoted ("…" with
+// doubled embedded quotes), so the `' ` split point this test's suffix
+// helper relies on does not exist there. The migration behaviour itself is
+// platform-neutral and covered on Windows by the session_sources suite,
+// whose expectations derive from `shell_quote`.
+#[cfg(not(windows))]
 #[test]
 fn migration_rewrites_only_the_stale_leading_path_and_no_other_field() {
     let dir = TempDir::new();
