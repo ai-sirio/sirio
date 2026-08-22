@@ -5,7 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tiller_control::client::RawStream;
+#[cfg(windows)]
+use tiller_control::client::connect_raw;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,21 +25,50 @@ use tiller_control::{
 };
 use tiller_persistence::{AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
+#[cfg(unix)]
+type TestStream = UnixStream;
+#[cfg(windows)]
+type TestStream = RawStream;
+
+fn connect_test_stream(path: &Path) -> std::io::Result<TestStream> {
+    #[cfg(unix)]
+    {
+        let _ = &connect_raw as fn(&Path) -> std::io::Result<RawStream>; // symmetry with windows
+        connect_test_stream(path)
+    }
+    #[cfg(windows)]
+    {
+        connect_raw(path)
+    }
+}
+
 struct TempDir(PathBuf);
 impl TempDir {
     fn new(tag: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        // Deliberately short, and under /tmp rather than $TMPDIR: a unix
-        // socket path is capped at 104 bytes by sun_path, and the obvious
-        // name under macOS's per-user $TMPDIR (/private/var/folders/../T/)
-        // already spends ~55 of them. The descriptive version of this name
-        // pushed bind() past the limit once the test counter reached two
-        // digits, so it passed alone and failed in the suite.
-        let _ = tag;
-        let path = std::path::PathBuf::from(format!("/tmp/tc{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&path).expect("create temp dir");
-        Self(std::fs::canonicalize(&path).expect("canonicalize"))
+        #[cfg(unix)]
+        {
+            // Deliberately short, and under /tmp rather than $TMPDIR: a unix
+            // socket path is capped at 104 bytes by sun_path, and the obvious
+            // name under macOS's per-user $TMPDIR (/private/var/folders/../T/)
+            // already spends ~55 of them. The descriptive version of this name
+            // pushed bind() past the limit once the test counter reached two
+            // digits, so it passed alone and failed in the suite.
+            let _ = tag;
+            let path =
+                std::path::PathBuf::from(format!("/tmp/tc{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(std::fs::canonicalize(&path).expect("canonicalize"))
+        }
+        #[cfg(windows)]
+        {
+            // No sun_path-style cap on the pipe namespace; the standard
+            // temp directory is fine.
+            let path = std::env::temp_dir().join(format!("tc{}-{unique}-{tag}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
     }
     fn path(&self) -> &Path {
         &self.0
@@ -289,7 +323,7 @@ impl LineReader {
     /// Reads exactly one `\n`-terminated line (without the newline). The
     /// stream carries a read timeout so a server that never answers turns
     /// into an error instead of a hang.
-    fn read_line(&mut self, stream: &mut UnixStream) -> Vec<u8> {
+    fn read_line(&mut self, stream: &mut TestStream) -> Vec<u8> {
         let mut chunk = [0u8; 4096];
         loop {
             if let Some(newline) = self.buffer.iter().position(|b| *b == b'\n') {
@@ -311,7 +345,7 @@ fn idle_client_does_not_block_other_clients() {
     let (server, _) = TestServer::start();
 
     // Client A connects and sends nothing.
-    let idle = UnixStream::connect(&server.socket_path).expect("idle client connects");
+    let idle = connect_test_stream(&server.socket_path).expect("idle client connects");
     std::thread::sleep(Duration::from_millis(50));
 
     // Client B must still get a prompt response.
@@ -339,7 +373,7 @@ fn disconnect_mid_request_does_not_take_the_server_down() {
     let mut line = tiller_control::encode_line(&request).expect("encode");
     line.truncate(10);
     {
-        let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+        let mut stream = connect_test_stream(&server.socket_path).expect("connect");
         stream.write_all(&line).expect("partial write");
     } // dropped mid-request
 
@@ -359,7 +393,7 @@ fn oversized_request_line_is_rejected_not_buffered() {
     // reject and close mid-write (the client sees EPIPE) — that is the
     // expected wire behavior, so write errors are tolerated.
     let huge = vec![b'x'; tiller_control::server::MAX_BUFFER_BYTES + 64 * 1024];
-    let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+    let mut stream = connect_test_stream(&server.socket_path).expect("connect");
     let _ = stream.write_all(&huge);
 
     let mut reader = LineReader::new();
@@ -388,11 +422,14 @@ fn oversized_complete_request_line_is_rejected_before_dispatch() {
     );
     assert!(request.len() > tiller_control::server::MAX_BUFFER_BYTES);
 
-    let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+    let mut stream = connect_test_stream(&server.socket_path).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
-    stream.write_all(request.as_bytes()).expect("write request");
+    // The server may reject and abort mid-write once it has seen the whole
+    // line (client then sees EPIPE/broken pipe) — that is expected wire
+    // behavior, so write errors are tolerated.
+    let _ = stream.write_all(request.as_bytes());
 
     let mut reader = LineReader::new();
     let response_line = reader.read_line(&mut stream);
@@ -436,12 +473,15 @@ fn stale_socket_file_is_replaced_cleanly() {
     let dir = TempDir::new("stale");
     let socket_path = dir.path().join("control.sock");
 
-    // Simulate a crashed previous run: a socket file with no live server.
+    #[cfg(unix)]
     {
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind stale");
+        // Simulate a crashed previous run: a socket file with no live
+        // server. (On Windows this scenario cannot exist — a named pipe
+        // dies with its owning process — so there is nothing to stage.)
+        let listener = UnixListener::bind(&socket_path).expect("bind stale");
         drop(listener); // leaves the socket file behind, nothing listening
+        assert!(socket_path.exists(), "stale file present");
     }
-    assert!(socket_path.exists(), "stale file present");
 
     // Starting the server must replace it, not fail forever.
     let handler = TestHandler::new();
@@ -494,7 +534,7 @@ fn live_socket_is_not_stolen() {
 fn malformed_request_gets_an_error_and_the_connection_keeps_serving() {
     let (server, _) = TestServer::start();
 
-    let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+    let mut stream = connect_test_stream(&server.socket_path).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("timeout");
@@ -532,7 +572,7 @@ fn malformed_request_gets_an_error_and_the_connection_keeps_serving() {
 fn multiple_requests_on_one_connection_are_answered_in_order() {
     let (server, _) = TestServer::start();
 
-    let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+    let mut stream = connect_test_stream(&server.socket_path).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("timeout");
@@ -565,7 +605,7 @@ fn multiple_requests_on_one_connection_are_answered_in_order() {
 fn request_split_across_reads_is_assembled() {
     let (server, _) = TestServer::start();
 
-    let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+    let mut stream = connect_test_stream(&server.socket_path).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("timeout");
@@ -665,13 +705,15 @@ fn stop_removes_the_socket_file_and_stops_accepting() {
     let socket_path = dir.path().join("control.sock");
     let server = ControlServer::new(socket_path.clone(), TestHandler::new());
     server.start().expect("start");
+    #[cfg(unix)]
     assert!(socket_path.exists());
 
     server.stop();
+    #[cfg(unix)]
     assert!(!socket_path.exists(), "socket file removed on stop");
 
     // Connecting now must fail (nothing listening).
-    let error = UnixStream::connect(&socket_path).expect_err("no listener after stop");
+    let error = connect_test_stream(&socket_path).expect_err("no listener after stop");
     let _ = error;
     // And the path can be reused by a fresh server.
     let again = ControlServer::new(socket_path.clone(), TestHandler::new());
@@ -692,7 +734,15 @@ fn server_creates_missing_parent_for_platform_default_style_socket() {
     let server = ControlServer::new(socket_path.clone(), TestHandler::new());
 
     server.start().expect("server creates socket parent");
+    #[cfg(unix)]
     assert!(socket_path.exists(), "socket exists below a new parent");
+    let response = round_trip(
+        &socket_path,
+        &request::system_ping(),
+        Duration::from_secs(5),
+    )
+    .expect("server on the newly created path serves");
+    assert!(response.ok);
     server.stop();
 }
 
@@ -789,6 +839,10 @@ fn tillerctl_quit_requests_a_graceful_application_exit() {
     );
 }
 
+// Control-owned panes have no PTY backend off unix yet (`spawn_process`
+// returns Unsupported there), and these tests are about real process
+// groups — genuinely unportable today, not merely inconvenient.
+#[cfg(unix)]
 #[test]
 fn pane_registry_runs_a_real_command_and_returns_output_and_exit_code() {
     let registry = PaneRegistry::new();
@@ -810,6 +864,10 @@ fn pane_registry_runs_a_real_command_and_returns_output_and_exit_code() {
     );
 }
 
+// Control-owned panes have no PTY backend off unix yet (`spawn_process`
+// returns Unsupported there), and these tests are about real process
+// groups — genuinely unportable today, not merely inconvenient.
+#[cfg(unix)]
 #[test]
 fn pane_registry_writes_input_to_a_live_command() {
     let registry = PaneRegistry::new();
@@ -832,6 +890,10 @@ fn pane_registry_writes_input_to_a_live_command() {
     );
 }
 
+// Control-owned panes have no PTY backend off unix yet (`spawn_process`
+// returns Unsupported there), and these tests are about real process
+// groups — genuinely unportable today, not merely inconvenient.
+#[cfg(unix)]
 #[test]
 fn pane_registry_close_terminates_process_group() {
     let dir = TempDir::new("close-group");
@@ -879,6 +941,10 @@ fn pane_registry_close_terminates_process_group() {
     );
 }
 
+// Control-owned panes have no PTY backend off unix yet (`spawn_process`
+// returns Unsupported there), and these tests are about real process
+// groups — genuinely unportable today, not merely inconvenient.
+#[cfg(unix)]
 #[test]
 fn pane_registry_shutdown_for_only_its_worktree() {
     let first_dir = TempDir::new("shutdown-for-first");
@@ -930,6 +996,10 @@ fn pane_registry_shutdown_for_only_its_worktree() {
     assert!(wait_for_processes_to_exit(&second_pids, deadline));
 }
 
+// Control-owned panes have no PTY backend off unix yet (`spawn_process`
+// returns Unsupported there), and these tests are about real process
+// groups — genuinely unportable today, not merely inconvenient.
+#[cfg(unix)]
 #[test]
 fn workspace_close_terminates_process_group_when_worktree_is_missing() {
     let dir = TempDir::new("workspace-close-missing");
@@ -1561,6 +1631,12 @@ fn tillerctl_current_and_select_workspace() {
 /// captured connection authorized forever. The reviewer's version of this
 /// loop caught mode 0755 on 488 of 500 startups; with the umask narrowed
 /// around the bind, the socket is born 0600 and this must be 0 of 500.
+// Windows equivalent coverage: `windows_pipe::tests::
+// bound_pipe_has_a_restricted_dacl` parses back the created pipe's security
+// descriptor and refuses anything but owner+SYSTEM — and unlike unix, the
+// DACL is supplied atomically inside CreateNamedPipeW, so there is no
+// startup window for an observer thread to race in the first place.
+#[cfg(unix)]
 #[test]
 fn socket_mode_is_never_permissive_during_startup() {
     use std::os::unix::fs::MetadataExt;
@@ -1636,6 +1712,10 @@ fn same_uid_peer_is_accepted() {
     assert!(response.ok);
 }
 
+// Control-owned panes have no PTY backend off unix yet (`spawn_process`
+// returns Unsupported there), and these tests are about real process
+// groups — genuinely unportable today, not merely inconvenient.
+#[cfg(unix)]
 #[test]
 fn pane_registry_shutdown_terminates_live_children() {
     let dir = TempDir::new("shutdown");
@@ -1670,6 +1750,7 @@ fn pane_registry_shutdown_terminates_live_children() {
     panic!("pane child {pid} was still running after registry shutdown");
 }
 
+#[cfg(unix)]
 fn process_exists(pid: i32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -1678,6 +1759,7 @@ fn process_exists(pid: i32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+#[cfg(unix)]
 fn wait_for_pid_file(path: &Path, deadline: std::time::Instant) -> Vec<i32> {
     loop {
         if let Ok(contents) = std::fs::read_to_string(path) {
@@ -1697,6 +1779,7 @@ fn wait_for_pid_file(path: &Path, deadline: std::time::Instant) -> Vec<i32> {
     }
 }
 
+#[cfg(unix)]
 fn wait_for_processes_to_exit(pids: &[i32], deadline: std::time::Instant) -> bool {
     while std::time::Instant::now() < deadline {
         if pids.iter().all(|pid| !process_exists(*pid)) {
