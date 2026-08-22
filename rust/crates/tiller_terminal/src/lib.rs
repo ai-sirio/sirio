@@ -385,10 +385,52 @@ fn user_shell_program() -> String {
 
 /// See the POSIX arm. `$SHELL` is not a Windows notion, so the interpreter
 /// comes from `COMSPEC` and the command flag is `/C`.
+///
+/// The command comes back wrapped in an outer pair of quotes. This is
+/// DEFENSIVE, not load-bearing today, and the distinction is worth stating
+/// so nobody removes it as noise or trusts it further than it goes.
+///
+/// `cmd /C` has a quote rule with no POSIX counterpart: when the first
+/// character after `/C` is a quote, cmd strips the FIRST and LAST quote of
+/// the whole tail unless narrow conditions hold — exactly two quotes, no
+/// metacharacters between them, and the text between them naming a real
+/// executable. A tail carrying a quoted program AND a quoted argument has
+/// four quotes, so the rule fires and what survives is `program" "argument`,
+/// which is not a command. Measured here rather than inferred:
+///
+/// ```text
+/// cmd /C  "prog" "arg"     -> exit 1, "'prog" "arg' is not recognized"
+/// cmd /C ""prog" "arg""    -> exit 0, argument delivered intact
+/// ```
+///
+/// No caller reaches that shape yet: every `AgentAdapter::command` starts
+/// with a BARE program name (`claude`, `claude --resume "<ref>"`), because
+/// [`tiller_agents::shell_quote`] is applied to arguments and not to the
+/// program, and a tail beginning with a letter never triggers the rule. The
+/// pair is here because that is one refactor away from changing — the moment
+/// a command is built from a discovered absolute path, which on Windows
+/// routinely contains spaces and therefore needs quoting, the tail starts
+/// with a quote and every such command breaks in a way that reads like the
+/// program is missing rather than like a quoting bug.
+///
+/// Adding it unconditionally is safe: for a tail with no quotes, or one whose
+/// two quotes already satisfy the preserve conditions, cmd strips the extra
+/// pair and the result is unchanged — verified across plain commands, pipes,
+/// `&`, redirections, quoted arguments, and a quoted program path.
+///
+/// WHY it lives here rather than in a caller: the five "run this command"
+/// sites funnel through this function but do NOT share a transport. Terminal
+/// panes hand the pieces to alacritty's ConPTY, which concatenates them raw;
+/// `run_summarizer_command` builds its own line through
+/// `std::process::Command`. Wrapping in one caller would protect that caller
+/// and leave the rest exposed. The contract that comes with living here:
+/// consumers must pass this argument through VERBATIM — `raw_arg`, not
+/// `args`, since std re-quotes with CRT backslash escapes that cmd cannot
+/// read.
 #[cfg(windows)]
 pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
     let (program, _) = default_system_shell();
-    (program, vec!["/C".to_string(), command.to_string()])
+    (program, vec!["/C".to_string(), format!("\"{command}\"")])
 }
 
 /// The PTY child's process id.
@@ -2872,6 +2914,13 @@ mod tests {
         panic!("PTY child {pid} was still running after terminal shutdown");
     }
 
+    /// unix only, and genuinely so rather than for convenience: the subject
+    /// is POSIX process-group teardown (`getpgid`/`killpg`), which Windows
+    /// does not have. `terminate_descendant_process_groups` is a documented
+    /// no-op there pending the Job Object design named in its own comment,
+    /// so there is no Windows behaviour for this to assert against yet —
+    /// gating it suppresses no coverage that could exist today.
+    #[cfg(unix)]
     #[test]
     fn shutdown_terminates_the_entire_pty_process_group() {
         let working_directory = std::env::temp_dir().join(format!(
@@ -2934,6 +2983,9 @@ mod tests {
     /// non-interactive `-c` shell. The old fix only ever `killpg`'d the
     /// pgid captured once at spawn — the shell's own group — so this
     /// grandchild used to survive shutdown as an orphan.
+    /// unix only for the same reason as its sibling above: `setsid` and the
+    /// separate-process-group behaviour it reproduces are POSIX notions.
+    #[cfg(unix)]
     #[test]
     fn shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group() {
         let working_directory = std::env::temp_dir().join(format!(
@@ -3009,8 +3061,12 @@ mod tests {
         drop(guard);
     }
 
+    /// Cleanup helper for the two `cfg(unix)` process-group tests above; it
+    /// signals a process group, so it has no meaning off unix.
+    #[cfg(unix)]
     struct ProcessGroupGuard(u32);
 
+    #[cfg(unix)]
     impl Drop for ProcessGroupGuard {
         fn drop(&mut self) {
             // The PTY creates a dedicated session/process group for its child.
@@ -3026,8 +3082,10 @@ mod tests {
     /// [`ProcessGroupGuard`]'s `killpg` on the shell's group cannot reach
     /// it). Same role as `ProcessGroupGuard`: a fallback that must prove
     /// unnecessary once the assertion above has run.
+    #[cfg(unix)]
     struct PidGuard(i32);
 
+    #[cfg(unix)]
     impl Drop for PidGuard {
         fn drop(&mut self) {
             unsafe {
@@ -3566,22 +3624,48 @@ mod view_tests {
             std::path::Path::new(&program).exists() || which_on_path(&program).is_some(),
             "the command shell must be executable here, got: {program}"
         );
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("printf hello"),
-            "the command must reach the shell verbatim, got {args:?}"
-        );
-
         #[cfg(not(windows))]
-        assert_eq!(args.first().map(String::as_str), Some("-lc"));
+        {
+            assert_eq!(args.first().map(String::as_str), Some("-lc"));
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("printf hello"),
+                "the command must reach the shell verbatim, got {args:?}"
+            );
+        }
+        // Windows adds the outer quote pair `cmd /C` eats; see the function's
+        // own doc for why it is required rather than cosmetic. "Verbatim"
+        // still holds for what the SHELL sees — the pair is consumed before
+        // the command is read.
         #[cfg(windows)]
-        assert_eq!(args.first().map(String::as_str), Some("/C"));
+        {
+            assert_eq!(args.first().map(String::as_str), Some("/C"));
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("\"printf hello\""),
+                "the command must be wrapped for cmd /C, got {args:?}"
+            );
+        }
 
         // The whole point is that it runs. A shell that cannot execute the
         // command is the defect this replaced: an ungated `/bin/zsh` opened
         // nothing at all on a Linux box with `$SHELL` unset.
-        let status = std::process::Command::new(&program)
-            .args(&args)
+        //
+        // The spawn has to model the REAL transport, which is why Windows
+        // uses `raw_arg`: `args` would re-quote the already-wrapped tail with
+        // CRT backslash escapes that cmd cannot read, so a test spawning that
+        // way would exercise a command line the app never builds.
+        let mut spawn = std::process::Command::new(&program);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            for argument in &args {
+                spawn.raw_arg(argument);
+            }
+        }
+        #[cfg(not(windows))]
+        spawn.args(&args);
+        let status = spawn
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
