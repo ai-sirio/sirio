@@ -82,7 +82,8 @@ pub fn stage(repo: &Path, path: &Path) -> Result<(), GitError> {
         });
     }
     validate_single_path(repo, path, ActionSection::Stage)?;
-    run_literal(&["add", "-A", "--", &path.to_string_lossy()], repo)
+    let path = git::path_arg(path);
+    run_literal(&["add", "-A", "--", &path], repo)
 }
 
 /// Stages every change in the checkout: `git add -A`.
@@ -102,7 +103,7 @@ pub fn stage_all(repo: &Path) -> Result<(), GitError> {
 /// app.
 pub fn unstage(repo: &Path, path: &Path) -> Result<(), GitError> {
     validate_single_path(repo, path, ActionSection::Unstage)?;
-    let path = path.to_string_lossy();
+    let path = git::path_arg(path);
     if has_head(repo) {
         run_literal(&["reset", "HEAD", "--", &path], repo)
     } else {
@@ -118,10 +119,8 @@ pub fn unstage(repo: &Path, path: &Path) -> Result<(), GitError> {
 /// Swift app).
 pub fn discard(repo: &Path, path: &Path) -> Result<(), GitError> {
     validate_single_path(repo, path, ActionSection::DiscardChanges)?;
-    run_literal(
-        &["restore", "--worktree", "--", &path.to_string_lossy()],
-        repo,
-    )
+    let path = git::path_arg(path);
+    run_literal(&["restore", "--worktree", "--", &path], repo)
 }
 
 /// Discards every unstaged worktree change in the checkout:
@@ -268,7 +267,7 @@ fn mutated_args<const N: usize>(prefix: [&str; N], paths: Vec<std::path::PathBuf
         .chain(
             paths
                 .into_iter()
-                .map(|path| path.to_string_lossy().into_owned()),
+                .map(|path| git::path_arg(&path)),
         )
         .collect()
 }

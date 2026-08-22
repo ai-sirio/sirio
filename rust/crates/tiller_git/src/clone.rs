@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::GitError;
-use crate::git::GitRunner;
+use crate::git::{GitRunner, path_arg};
 
 /// Namespace for clone operations.
 pub struct GitClone;
@@ -36,8 +36,25 @@ impl GitClone {
         if Path::new(url).exists() || parent.join(url).exists() {
             arguments.push("--no-local".to_string());
         }
-        arguments.push(url.to_string());
-        arguments.push(destination.to_string_lossy().into_owned());
+        // The source goes through `path_arg` like the destination: a
+        // caller handing over a canonicalized path passes `\\?\C:\...`,
+        // which git parses as a remote (`hostname contains invalid
+        // characters`). A verbatim prefix can only appear on a Windows
+        // filesystem path — no real URL starts with `\\?\` — so stripping
+        // it here cannot corrupt a genuine remote. The same prefix also
+        // rides inside a `file://` URL a caller serialized from a
+        // canonicalized path (`file://\\?\C:\...`); git resolves that to
+        // `//\\?\C:\...` and cannot open it, so it is stripped from the
+        // URL's remainder too.
+        let mut url = url.to_string();
+        #[cfg(windows)]
+        if let Some(rest) = url.strip_prefix("file://") {
+            if let Some(stripped) = crate::git::strip_verbatim_prefix(rest) {
+                url = format!("file://{stripped}");
+            }
+        }
+        arguments.push(path_arg(Path::new(&url)));
+        arguments.push(path_arg(destination));
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
         let result = GitRunner::run_streaming(&arguments, parent, move |line| {
             if let Some(progress) = Self::parse_progress(&line) {

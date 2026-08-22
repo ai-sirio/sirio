@@ -90,6 +90,18 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
 }
 
 /// The branch of the worktree at `path`, per `git worktree list --porcelain`.
+/// git-for-Windows spells porcelain worktree paths with forward slashes
+/// and no verbatim prefix (`C:/Users/...`), while the fixtures hold
+/// canonicalized `\\?\C:\...` paths — normalize before comparing.
+fn porcelain_spelling(path: &Path) -> String {
+    let mut spelling = path.display().to_string();
+    #[cfg(windows)]
+    if let Some(rest) = spelling.strip_prefix(r"\\?\") {
+        spelling = rest.to_string();
+    }
+    spelling.replace('\\', "/")
+}
+
 fn porcelain_branch(repo: &Path, path: &Path) -> Option<String> {
     let output = git_stdout(repo, &["worktree", "list", "--porcelain"]);
     let mut current_path: Option<&str> = None;
@@ -97,7 +109,7 @@ fn porcelain_branch(repo: &Path, path: &Path) -> Option<String> {
         if let Some(worktree_path) = line.strip_prefix("worktree ") {
             current_path = Some(worktree_path);
         } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
-            && current_path == Some(path.to_str().unwrap())
+            && current_path == Some(porcelain_spelling(path).as_str())
         {
             return Some(branch.to_string());
         }
@@ -285,7 +297,10 @@ fn unborn_head_creates_a_valid_worktree_with_an_unborn_branch() {
 
     let output = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
     assert!(
-        output.contains(&format!("worktree {}\nHEAD 0000000", path.display())),
+        output.contains(&format!(
+            "worktree {}\nHEAD 0000000",
+            porcelain_spelling(&path)
+        )),
         "the unborn worktree is reported: {output}"
     );
     assert_eq!(

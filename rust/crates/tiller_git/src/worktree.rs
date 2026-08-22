@@ -89,7 +89,7 @@ pub fn create_worktree(
     .is_ok_and(|output| output.is_success());
 
     let mut arguments = vec!["worktree", "add"];
-    let path_string = path.to_string_lossy();
+    let path_string = git::path_arg(path);
     if branch_exists {
         // Attach to the existing branch: `worktree add <path> <branch>`.
         arguments.push(path_string.as_ref());
@@ -113,8 +113,9 @@ pub fn create_worktree(
 /// uncommitted changes, and that refusal is surfaced to the user rather
 /// than silently discarding their work.
 pub fn remove_worktree(repo: &Path, path: &Path) -> Result<(), WorktreeError> {
+    let path = git::path_arg(path);
     git::run_accepting(
-        &["worktree", "remove", path.to_string_lossy().as_ref()],
+        &["worktree", "remove", path.as_str()],
         repo,
         &[0],
     )?;

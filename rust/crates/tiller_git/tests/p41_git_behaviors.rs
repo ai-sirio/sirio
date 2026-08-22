@@ -58,6 +58,12 @@ fn repo(tag: &str) -> TempDir {
     git(repo.path(), &["config", "user.email", "test@tiller.dev"]);
     git(repo.path(), &["config", "user.name", "Tiller Test"]);
     std::fs::write(repo.path().join("file.txt"), "one\ntwo\nthree\n").expect("write fixture");
+    // `* -text` keeps fixture content byte-exact through clone checkouts:
+    // on Windows the global core.autocrlf default would otherwise rewrite
+    // the checked-out file to CRLF and break byte-level content asserts.
+    // On Unix this is a no-op — the worktree bytes were already literal.
+    std::fs::write(repo.path().join(".gitattributes"), "* -text\n")
+        .expect("write gitattributes");
     git(repo.path(), &["add", "-A"]);
     git(repo.path(), &["commit", "-q", "-m", "root"]);
     repo
