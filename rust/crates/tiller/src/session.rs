@@ -179,7 +179,8 @@ pub fn database_path() -> PathBuf {
 /// The root under which every TillerRust database lives: the stable
 /// `tiller.sqlite` for installed binaries plus a `checkouts/` subtree with
 /// one directory per development checkout. Linux uses XDG_STATE_HOME (or
-/// `$HOME/.local/state`); macOS retains Application Support.
+/// `$HOME/.local/state`); Windows uses LOCALAPPDATA (it has no XDG layout);
+/// macOS retains Application Support.
 fn app_support_root() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -213,11 +214,29 @@ fn app_support_root_for(environment: &std::collections::BTreeMap<String, String>
             .filter(|path| path.is_absolute())
             .map(Path::to_path_buf)
             .or_else(|| {
-                environment
-                    .get("HOME")
-                    .map(Path::new)
-                    .filter(|path| path.is_absolute())
-                    .map(|home| home.join(".local/state"))
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows has no HOME and no XDG layout: LOCALAPPDATA
+                    // is the non-roaming state root (the closest counterpart
+                    // to XDG_STATE_HOME), so a native launch never lands in
+                    // %TEMP%, where session state is swept away by OS
+                    // cleanup. Temp stays the last resort when even the
+                    // profile variables are absent — the same degrade the
+                    // unix branch already used.
+                    environment
+                        .get("LOCALAPPDATA")
+                        .map(Path::new)
+                        .filter(|path| path.is_absolute())
+                        .map(Path::to_path_buf)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    environment
+                        .get("HOME")
+                        .map(Path::new)
+                        .filter(|path| path.is_absolute())
+                        .map(|home| home.join(".local/state"))
+                }
             })
             .unwrap_or_else(std::env::temp_dir);
         state_home.join("TillerRust")

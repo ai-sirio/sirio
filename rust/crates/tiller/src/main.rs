@@ -2216,7 +2216,7 @@ impl ControlHandler for AppControlHandler {
                     );
                 };
                 drop(references);
-                let home_directory = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let home_directory = user_home_dir().unwrap_or_default();
                 let text = match agent_id.as_str() {
                     "claude" => tiller_agents::ClaudeTranscriptSource::new(
                         worktree_path.clone(),
@@ -2499,7 +2499,7 @@ fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
 }
 
-fn post_desktop_notification(payload: &NotificationPayload) {
+fn post_desktop_notification(_payload: &NotificationPayload) {
     #[cfg(target_os = "macos")]
     let result = {
         let script = format!(
@@ -3229,7 +3229,7 @@ fn short_head(path: &Path) -> Option<String> {
 }
 
 fn display_path(path: &Path) -> String {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = user_home_dir() else {
         return path.to_string_lossy().into_owned();
     };
     path.strip_prefix(&home)
@@ -11949,9 +11949,7 @@ fn seed_sidebar_identity_and_worktree_defaults(
 fn initial_working_directory() -> PathBuf {
     let current = std::env::current_dir().unwrap_or_else(|error| {
         eprintln!("[tiller] cannot read the current directory: {error}");
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
+        user_home_dir().unwrap_or_else(|| PathBuf::from("."))
     });
     current
         .ancestors()
@@ -12014,7 +12012,12 @@ fn register_restored_agent(
 /// `~/.claude`, honouring the same home resolution used to locate a native
 /// Claude session's transcript file — never overridden per-worktree.
 fn claude_config_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
+    user_home_dir()
+        .map(|home| home.join(".claude"))
+        // No home → an empty relative path; session validation then finds
+        // no on-disk transcripts and treats sessions as unresumable
+        // instead of panicking.
+        .unwrap_or_default()
 }
 
 /// `$CODEX_HOME`, falling back to `~/.codex` when unset or empty — the same
@@ -12025,7 +12028,9 @@ fn codex_home() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")
+    user_home_dir()
+        .map(|home| home.join(".codex"))
+        .unwrap_or_default()
 }
 
 /// Splits saved agent session references into resumable/prunable via
@@ -12535,17 +12540,61 @@ fn resolve_tillerctl_for_process() -> Result<PathBuf, String> {
     resolve_tillerctl_path(&current_exe, &environment)
 }
 
+/// The user's home directory, or `None` when the environment offers no
+/// source. Windows has no `HOME` in a native GUI launch (git-bash exports
+/// it, Explorer/Start-menu launches do not): `USERPROFILE` is the primary
+/// source, with `HOMEDRIVE`+`HOMEPATH` as fallback. Unix keeps reading
+/// `HOME` unchanged. Callers must degrade on `None` (fall back to a sane
+/// path), never panic.
+///
+/// Duplicated deliberately — the leaf crates that need it must not depend
+/// on each other; this is the `tiller` copy, with siblings in
+/// `tiller_usage/src/lib.rs`, `tiller_project/src/domain.rs` and the
+/// environment-map variant in `tiller/src/session.rs`.
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
+                let path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty())?;
+                Some(PathBuf::from(drive).join(path))
+            })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+}
+
 fn xdg_data_home_for(environment: &BTreeMap<String, String>) -> PathBuf {
     environment
         .get("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| {
-            environment
-                .get("HOME")
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .map(|home| home.join(".local/share"))
+            #[cfg(target_os = "windows")]
+            {
+                // Windows has no HOME/XDG layout: LOCALAPPDATA is the
+                // non-roaming data root (a tillerctl install lands here,
+                // never in %TEMP%).
+                environment
+                    .get("LOCALAPPDATA")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                environment
+                    .get("HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .map(|home| home.join(".local/share"))
+            }
         })
         .unwrap_or_else(|| std::env::temp_dir().join(".local/share"))
 }

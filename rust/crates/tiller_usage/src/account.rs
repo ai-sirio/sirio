@@ -21,6 +21,7 @@ use serde_json::Value;
 use crate::UsageProvider;
 use crate::claude::claude_has_credentials_at;
 use crate::codex::codex_has_credentials_at;
+use crate::user_home_dir;
 
 /// Whether a provider has local credentials on this machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,9 +132,11 @@ fn codex_auth_file() -> PathBuf {
     {
         return PathBuf::from(home).join("auth.json");
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".codex/auth.json"))
-        .expect("HOME must be set")
+    user_home_dir()
+        .map(|home| home.join(".codex/auth.json"))
+        // No home → an empty path — the subsequent file read fails, and
+        // every caller treats that as "no credentials". Never a panic.
+        .unwrap_or_default()
 }
 
 /// The Claude credentials file: `$CLAUDE_CONFIG_DIR/.credentials.json`,
@@ -145,9 +148,11 @@ fn claude_credentials_file() -> PathBuf {
     {
         return PathBuf::from(dir).join(".credentials.json");
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".claude/.credentials.json"))
-        .expect("HOME must be set")
+    user_home_dir()
+        .map(|home| home.join(".claude/.credentials.json"))
+        // Degrade to "no credentials" (empty path → failed read) instead
+        // of panicking, as before this helper existed.
+        .unwrap_or_default()
 }
 
 fn opencode_go_account_state() -> LocalAccountState {
