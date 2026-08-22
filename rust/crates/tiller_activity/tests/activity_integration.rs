@@ -76,6 +76,92 @@ fn macos_process_inspection_reads_a_real_child_process_name() {
     child.wait().expect("reap child process");
 }
 
+// The Windows counterpart of the Linux test above: no privilege-free
+// symlinks on Windows, so cmd.exe is *copied* under an agent's catalog id and
+// spawned with a slow grandchild (ping) still running when the walk happens.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_process_inspection_reads_agent_names_from_a_real_child() {
+    use std::process::Command;
+    use std::thread;
+    use std::time::Duration;
+
+    let comspec =
+        std::env::var("ComSpec").expect("ComSpec is set on every Windows install");
+    let root = std::env::temp_dir().join(format!(
+        "tiller-activity-win-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create process fixture directory");
+    let agent = root.join("codex.exe");
+    std::fs::copy(&comspec, &agent).expect("copy shell as codex.exe test alias");
+    // Spawned as a direct child of THIS test process, which is what the walk
+    // below starts from (the macOS test's trick): the copied alias is a real
+    // depth-1 node under it and its own ping grandchild stays alive ~5s so
+    // the nested walk has something at depth > 1 to find.
+    let mut child = Command::new(&agent)
+        .args(["/c", "ping -n 6 127.0.0.1 >nul"])
+        .spawn()
+        .expect("spawn shell with agent child");
+    thread::sleep(Duration::from_millis(200));
+
+    let names = inspect_process_names(std::process::id()).expect("read Windows process tree");
+    assert!(
+        names.iter().any(|name| name == "codex"),
+        "the .exe suffix must be stripped down to the catalog shape, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "ping"),
+        "nested descendants must be walked too, got {names:?}"
+    );
+
+    let mut model = AgentActivityModel::new();
+    let transition = model
+        .refresh_process_signal(P1, std::process::id())
+        .expect("refresh process signal");
+    assert_eq!(
+        transition.map(|value| value.new),
+        Some(AgentStatus::Running)
+    );
+    assert!(model.is_process_owned(P1));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    // The alias is dead; whatever orphaned ping remains carries no catalog
+    // name, so the pane's Layer-D evidence is gone either way.
+    model
+        .refresh_process_signal(P1, std::process::id())
+        .expect("refresh disappeared process signal");
+    assert_eq!(model.status(P1), None);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `pty_shell_pid` stands `0` in for an unresolvable ConPTY child pid. Layer D
+/// must refuse to enumerate it — Toolhelp32 would happily report processes
+/// whose parent field is 0 — and the refusal must arrive as `Err` so that
+/// `refresh_process_signal` never routes an unknown pid through
+/// `process_gone`: that would let a resolution failure clear a
+/// legitimately identified process-owned pane.
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_layer_d_refuses_an_unknown_shell_pid_without_clearing_state() {
+    use std::io::ErrorKind;
+
+    let error = inspect_process_names(0).expect_err("pid 0 must be refused");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+
+    let mut model = AgentActivityModel::new();
+    model.process_identified(P1, "codex");
+    assert!(model.refresh_process_signal(P1, 0).is_err());
+    assert_eq!(
+        model.status(P1),
+        Some(AgentStatus::Running),
+        "an unknown pid must not clear a process-owned pane"
+    );
+    assert!(model.is_process_owned(P1));
+}
+
 fn spinner() -> String {
     "\u{280B}".to_string() // ⠋
 }
