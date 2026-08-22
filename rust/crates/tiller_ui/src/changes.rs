@@ -48,8 +48,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tiller_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
-    GitDiffSideBySide, GitError, StatusEntry, StatusSnapshot, diff_entry, discard, discard_all,
-    stage, stage_all, stats, status, unstage,
+    GitDiffSideBySide, GitError, StatusEntry, StatusKind, StatusSnapshot, commit_diff_entry,
+    commit_files, diff_entry, discard, discard_all, stage, stage_all, stats, status, unstage,
 };
 use tiller_theme::Theme;
 
@@ -363,9 +363,20 @@ struct GitSnapshot {
     diff_errors: HashMap<PathBuf, String>,
 }
 
+/// What a Changes surface is showing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChangesSource {
+    /// The working tree: `git status` plus per-entry diffs, mutable.
+    WorkingTree,
+    /// One commit, by sha. Immutable: stage/unstage/discard are refused.
+    Commit(String),
+}
+
 /// The full-width git changes surface.
 pub struct ChangesTab {
     repo_root: PathBuf,
+    /// What this surface reads and whether it may mutate it.
+    source: ChangesSource,
     entries: Vec<StatusEntry>,
     diffs: HashMap<PathBuf, FileDiff>,
     stats: HashMap<PathBuf, DiffStat>,
@@ -395,8 +406,20 @@ impl ChangesTab {
     /// Creates the tab for one checkout and starts its first refresh. The
     /// poll loop then re-checks on the interval after the first render.
     pub fn new(repo_root: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::with_source(repo_root, ChangesSource::WorkingTree, cx)
+    }
+
+    /// Creates a read-only tab showing one commit's files and diffs. The
+    /// surface is immutable: every stage/unstage/discard entry point
+    /// refuses to run and the mutation buttons are not drawn.
+    pub fn for_commit(repo_root: PathBuf, sha: String, cx: &mut Context<Self>) -> Self {
+        Self::with_source(repo_root, ChangesSource::Commit(sha), cx)
+    }
+
+    fn with_source(repo_root: PathBuf, source: ChangesSource, cx: &mut Context<Self>) -> Self {
         let mut tab = Self {
             repo_root,
+            source,
             entries: Vec::new(),
             diffs: HashMap::new(),
             stats: HashMap::new(),
@@ -413,6 +436,12 @@ impl ChangesTab {
         // first report is always produced by the surface's own refresh path.
         tab.refresh(cx);
         tab
+    }
+
+    /// Whether this surface may mutate the repository. The working tree
+    /// can; a commit view is immutable by definition.
+    pub fn allows_staging(&self) -> bool {
+        matches!(self.source, ChangesSource::WorkingTree)
     }
 
     /// Returns the status and per-file counts currently held by this mounted
@@ -485,9 +514,10 @@ impl ChangesTab {
             return;
         }
         let repo_root = self.repo_root.clone();
+        let source = self.source.clone();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load_snapshot(&repo_root) })
+                .background_spawn(async move { load_snapshot(&repo_root, &source) })
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
@@ -505,9 +535,11 @@ impl ChangesTab {
 
     /// Arms the periodic refresh loop: once immediately, then on the
     /// interval. The timer runs on the background executor; git status never
-    /// touches the render thread.
+    /// touches the render thread. A commit view never arms it: a commit's
+    /// contents are fixed, so re-reading them every second would only burn
+    /// git processes.
     fn ensure_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.refresh_started {
+        if self.refresh_started || !self.allows_staging() {
             return;
         }
         self.refresh_started = true;
@@ -532,11 +564,15 @@ impl ChangesTab {
             return;
         }
         let repo_root = self.repo_root.clone();
+        let source = self.source.clone();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move {
                     let result = operation(&repo_root);
-                    let snapshot = result.as_ref().ok().map(|_| load_snapshot(&repo_root));
+                    let snapshot = result
+                        .as_ref()
+                        .ok()
+                        .map(|_| load_snapshot(&repo_root, &source));
                     (result, snapshot)
                 })
                 .await;
@@ -560,14 +596,23 @@ impl ChangesTab {
     }
 
     fn stage_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.allows_staging() {
+            return;
+        }
         self.start_operation(move |repo| stage(repo, &path), cx);
     }
 
     fn unstage_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.allows_staging() {
+            return;
+        }
         self.start_operation(move |repo| unstage(repo, &path), cx);
     }
 
     fn section_action(&mut self, section: ChangeSection, cx: &mut Context<Self>) {
+        if !self.allows_staging() {
+            return;
+        }
         if self.git_task.is_some() {
             return;
         }
@@ -610,6 +655,9 @@ impl ChangesTab {
     }
 
     fn confirm_discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.allows_staging() {
+            return;
+        }
         if self.git_task.is_some() {
             return;
         }
@@ -636,6 +684,9 @@ impl ChangesTab {
     }
 
     fn confirm_discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.allows_staging() {
+            return;
+        }
         if self.git_task.is_some() {
             return;
         }
@@ -940,7 +991,12 @@ impl ChangesTab {
         }
     }
 
-    fn render_change_row(row: ChangeRow, entity: gpui::Entity<Self>, theme: Theme) -> AnyElement {
+    fn render_change_row(
+        row: ChangeRow,
+        allows_staging: bool,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> AnyElement {
         match row {
             ChangeRow::File {
                 section,
@@ -954,6 +1010,7 @@ impl ChangesTab {
                 stat,
                 drag_payload,
                 expanded,
+                allows_staging,
                 entity,
                 theme,
             )
@@ -1089,6 +1146,7 @@ impl ChangesTab {
         section: ChangeSection,
         count: usize,
         collapsed: bool,
+        allows_staging: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -1134,14 +1192,18 @@ impl ChangesTab {
             )
             .child(div().text_color(theme.meta).child(format!("({count})")))
             .child(div().flex_1())
-            .child(section_action_button(
-                action_label,
-                action_id,
-                theme,
-                move |cx| {
-                    entity_for_action.update(cx, |tab, cx| tab.section_action(section, cx));
-                },
-            ))
+            // A commit view renders no stage/unstage batch action either:
+            // the header keeps its collapse toggle but not the mutation.
+            .when(allows_staging, |this| {
+                this.child(section_action_button(
+                    action_label,
+                    action_id,
+                    theme,
+                    move |cx| {
+                        entity_for_action.update(cx, |tab, cx| tab.section_action(section, cx));
+                    },
+                ))
+            })
     }
 
     fn render_change_file(
@@ -1150,6 +1212,7 @@ impl ChangesTab {
         stat: Option<DiffStat>,
         drag_payload: Option<DiffPayload>,
         expanded: bool,
+        allows_staging: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -1250,30 +1313,35 @@ impl ChangesTab {
                         .flex()
                         .items_center()
                         .gap(px(3.0))
-                        .child(destructive_action_text_button(
-                            "Discard",
-                            format!("discard-{}-{}", section.slug(), path.display()),
-                            theme,
-                            move |window, cx| {
-                                entity_for_discard.update(cx, |tab, cx| {
-                                    tab.confirm_discard(path_for_discard.clone(), window, cx);
-                                });
-                            },
-                        ))
-                        .child(action_text_button(
-                            stage_label,
-                            format!("stage-{}-{}", section.slug(), path.display()),
-                            theme,
-                            move |cx| {
-                                entity_for_stage.update(cx, |tab, cx| {
-                                    if unstages {
-                                        tab.unstage_path(path_for_stage.clone(), cx);
-                                    } else {
-                                        tab.stage_path(path_for_stage.clone(), cx);
-                                    }
-                                });
-                            },
-                        ))
+                        // A commit view drops the Discard/Stage pair: the
+                        // row keeps its diff navigation, but nothing to
+                        // mutate.
+                        .when(allows_staging, |this| {
+                            this.child(destructive_action_text_button(
+                                "Discard",
+                                format!("discard-{}-{}", section.slug(), path.display()),
+                                theme,
+                                move |window, cx| {
+                                    entity_for_discard.update(cx, |tab, cx| {
+                                        tab.confirm_discard(path_for_discard.clone(), window, cx);
+                                    });
+                                },
+                            ))
+                            .child(action_text_button(
+                                stage_label,
+                                format!("stage-{}-{}", section.slug(), path.display()),
+                                theme,
+                                move |cx| {
+                                    entity_for_stage.update(cx, |tab, cx| {
+                                        if unstages {
+                                            tab.unstage_path(path_for_stage.clone(), cx);
+                                        } else {
+                                            tab.stage_path(path_for_stage.clone(), cx);
+                                        }
+                                    });
+                                },
+                            ))
+                        })
                         .child(action_text_button(
                             "Open diff",
                             format!("changes-open-diff-{}-{}", section.slug(), path.display()),
@@ -1515,26 +1583,30 @@ impl ChangesTab {
                     collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx));
                 },
             ))
-            .child(action_text_button(
-                "Stage all",
-                "stage-all".to_owned(),
-                theme,
-                move |cx| {
-                    stage_entity.update(cx, |tab, cx| {
-                        tab.start_operation(stage_all, cx);
-                    });
-                },
-            ))
-            .child(destructive_action_text_button(
-                "Discard all",
-                "discard-all".to_owned(),
-                theme,
-                move |window, cx| {
-                    discard_entity.update(cx, |tab, cx| {
-                        tab.confirm_discard_all(window, cx);
-                    });
-                },
-            ))
+            // The git mutations only exist for a mutable checkout: a commit
+            // view renders no Stage/Discard controls at all.
+            .when(self.allows_staging(), |this| {
+                this.child(action_text_button(
+                    "Stage all",
+                    "stage-all".to_owned(),
+                    theme,
+                    move |cx| {
+                        stage_entity.update(cx, |tab, cx| {
+                            tab.start_operation(stage_all, cx);
+                        });
+                    },
+                ))
+                .child(destructive_action_text_button(
+                    "Discard all",
+                    "discard-all".to_owned(),
+                    theme,
+                    move |window, cx| {
+                        discard_entity.update(cx, |tab, cx| {
+                            tab.confirm_discard_all(window, cx);
+                        });
+                    },
+                ))
+            })
     }
 }
 
@@ -1774,6 +1846,7 @@ impl ChangesTab {
                 .into_any_element();
         }
         let row_entity = entity;
+        let allows_staging = self.allows_staging();
         // Both modes render into exactly the width the surface was given —
         // see `SPLIT_DIVIDER_WIDTH` for the two attempts at doing otherwise
         // and what each one cost. `min_w(px(0.0))` stays because a scroll
@@ -1796,13 +1869,19 @@ impl ChangesTab {
                         section.section,
                         section.count,
                         section.collapsed,
+                        allows_staging,
                         row_entity.clone(),
                         theme,
                     )
                     .into_any_element(),
                 ];
                 for row in section.rows {
-                    elements.push(Self::render_change_row(row, row_entity.clone(), theme));
+                    elements.push(Self::render_change_row(
+                        row,
+                        allows_staging,
+                        row_entity.clone(),
+                        theme,
+                    ));
                 }
                 elements
             }))
@@ -2027,7 +2106,18 @@ where
 /// per path instead of failing the whole snapshot: the row's counts may
 /// still be valid, and the expanded row says "diff unavailable" rather
 /// than lying.
-fn load_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
+/// Loads the snapshot this surface displays: the working tree's status, or
+/// one commit's files, depending on the source.
+fn load_snapshot(repo_root: &Path, source: &ChangesSource) -> Result<GitSnapshot, String> {
+    match source {
+        ChangesSource::WorkingTree => load_worktree_snapshot(repo_root),
+        ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
+    }
+}
+
+/// The working-tree snapshot: `git status` entries, per-file stats and
+/// diffs against HEAD. Untouched by the commit view.
+fn load_worktree_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
     let entries = status(repo_root)
         .map_err(|error| error.to_string())?
         .entries;
@@ -2041,6 +2131,68 @@ fn load_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
             }
             Err(error) => {
                 diff_errors.insert(entry.path.clone(), error.to_string());
+            }
+        }
+    }
+    Ok(GitSnapshot {
+        entries,
+        diffs,
+        stats,
+        diff_errors,
+    })
+}
+
+/// Maps one `git show --name-status` letter onto the status kind the
+/// surface buckets by. A letter outside porcelain's set (git's pathological
+/// `X` unknown) reads as `Modified` rather than being dropped: a file git
+/// itself reports on is never invisible here.
+fn commit_status_kind(status: char) -> StatusKind {
+    match status {
+        'A' => StatusKind::Added,
+        'D' => StatusKind::Deleted,
+        'R' => StatusKind::Renamed,
+        'C' => StatusKind::Copied,
+        'T' => StatusKind::TypeChanged,
+        'U' => StatusKind::Unmerged,
+        _ => StatusKind::Modified,
+    }
+}
+
+/// The snapshot of one commit: the files it touched, each with the unified
+/// diff of that path within the commit and its +/− counts, all read through
+/// `git show <sha>`. Counts come from the same `FileDiff` the expansion
+/// renders, so they cannot disagree with what the rows show. Every entry
+/// reads as staged content — fixed relative to the commit's parent, exactly
+/// like the index is fixed relative to the worktree — which keeps the
+/// section buckets working, while [`ChangesTab::allows_staging`] refuses
+/// the mutations those buckets would otherwise offer.
+fn load_commit_snapshot(repo_root: &Path, sha: &str) -> Result<GitSnapshot, String> {
+    let files = commit_files(repo_root, sha).map_err(|error| error.to_string())?;
+    let mut entries = Vec::with_capacity(files.len());
+    let mut diffs = HashMap::new();
+    let mut stats = HashMap::new();
+    let mut diff_errors = HashMap::new();
+    for (status, path) in files {
+        entries.push(StatusEntry {
+            path: path.clone(),
+            original_path: None,
+            index_status: Some(commit_status_kind(status)),
+            worktree_status: None,
+        });
+        match commit_diff_entry(repo_root, sha, &path) {
+            Ok(diff) => {
+                stats.insert(
+                    path.clone(),
+                    DiffStat {
+                        additions: diff.additions,
+                        deletions: diff.deletions,
+                        is_binary: diff.is_binary,
+                    },
+                );
+                diffs.insert(path.clone(), diff);
+            }
+            Err(error) => {
+                diff_errors.insert(path.clone(), error.to_string());
             }
         }
     }
@@ -2092,6 +2244,42 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Seeds a repository with two commits: `a.txt` ("first") then `b.txt`
+    /// ("second"). A commit-mode surface reads this same shape back through
+    /// `git show`.
+    fn seed_two_commits(dir: &Path) {
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Tiller tests"]);
+        std::fs::write(dir.join("a.txt"), "first\n").expect("write a.txt");
+        git(dir, &["add", "a.txt"]);
+        git(
+            dir,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "first"],
+        );
+        std::fs::write(dir.join("b.txt"), "second\n").expect("write b.txt");
+        git(dir, &["add", "b.txt"]);
+        git(
+            dir,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "second"],
+        );
+    }
+
+    /// Resolves a revision to its full 40-character object name.
+    fn rev_parse(dir: &Path, revision: &str) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", revision])
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "rev-parse {revision} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     fn clean_git_repo(dir: &Path) {
@@ -3135,7 +3323,8 @@ mod tests {
     fn a_missing_git_reports_spawn_not_silence() {
         let missing =
             std::env::temp_dir().join(format!("tiller-changes-missing-{}", std::process::id()));
-        let error = load_snapshot(&missing).expect_err("no repo, no git: the load must fail");
+        let error = load_snapshot(&missing, &ChangesSource::WorkingTree)
+            .expect_err("no repo, no git: the load must fail");
         assert!(
             error.contains("failed to spawn git"),
             "the missing binary is named, not hidden: {error}"
@@ -3153,6 +3342,7 @@ mod tests {
     fn an_expanded_file_whose_diff_failed_says_unavailable() {
         let tab = ChangesTab {
             repo_root: PathBuf::from("/tmp"),
+            source: ChangesSource::WorkingTree,
             entries: vec![StatusEntry {
                 path: PathBuf::from("x.rs"),
                 original_path: None,
@@ -3200,6 +3390,7 @@ mod tests {
     fn an_expanded_binary_file_says_binary_diff_unavailable() {
         let tab = ChangesTab {
             repo_root: PathBuf::from("/tmp"),
+            source: ChangesSource::WorkingTree,
             entries: vec![StatusEntry {
                 path: PathBuf::from("image.bin"),
                 original_path: None,
@@ -3453,6 +3644,7 @@ mod tests {
         let path = PathBuf::from("src/conflicted file.txt");
         let window = cx.add_window(|_window, _cx| ChangesTab {
             repo_root: PathBuf::from("/repo"),
+            source: ChangesSource::WorkingTree,
             entries: vec![StatusEntry {
                 path: path.clone(),
                 original_path: None,
@@ -3817,5 +4009,50 @@ mod tests {
             path.display()
         );
         assert_eq!(path, &dir.0.join("tracked.txt"));
+    }
+
+    /// A commit-mode surface lists exactly the files that commit touched and
+    /// refuses every mutation: the commit is immutable, so there is nothing
+    /// to stage, unstage or discard.
+    #[gpui::test]
+    async fn a_commit_view_lists_that_commit_s_files_and_forbids_staging(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        // The second commit added exactly one file; asking for it proves the
+        // list comes from `git show <sha>` and not from the working tree
+        // (the worktree itself is clean here).
+        let sha = rev_parse(&dir.0, "HEAD");
+
+        let tab = cx.new(|cx| ChangesTab::for_commit(dir.0.clone(), sha, cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.report()
+                    .sections
+                    .iter()
+                    .any(|section| !section.files.is_empty())
+            })
+        });
+
+        tab.read_with(cx, |tab, _| {
+            let report = tab.report();
+            let files: Vec<_> = report
+                .sections
+                .iter()
+                .flat_map(|section| section.files.iter())
+                .collect();
+            assert!(
+                files.iter().any(|file| file.path.ends_with("b.txt")),
+                "the commit's own files are listed, got: {:?}",
+                files.iter().map(|file| &file.path).collect::<Vec<_>>()
+            );
+            assert!(
+                files.iter().all(|file| file.path != *"a.txt"),
+                "files outside the commit must not leak in from the worktree"
+            );
+            assert!(!tab.allows_staging(), "a commit is immutable");
+        });
     }
 }

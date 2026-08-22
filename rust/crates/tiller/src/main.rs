@@ -4292,6 +4292,9 @@ impl TillerWorkspace {
                 RightPanelActionEvent::ResolveInTerminal(path) => {
                     workspace.add_conflict_terminal_tab(path.clone(), cx)
                 }
+                RightPanelActionEvent::OpenCommit(sha) => {
+                    workspace.add_commit_tab(sha.clone(), cx)
+                }
             },
         )
         .detach();
@@ -7366,6 +7369,39 @@ impl TillerWorkspace {
         if let Some(path) = focus_path {
             changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
         }
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id,
+            group_id: self.tab_machinery.active_group(),
+            title: "Changes".to_string(),
+            kind: TabKind::Diff,
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(self.next_pane_id),
+            panes: PaneNode::leaf(self.next_pane_id, TabContent::Changes(changes)),
+            focused_pane: self.next_pane_id,
+            title_is_auto_named: true,
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Diff, "Changes") {
+            self.rebuild_tab_machinery();
+        }
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+        cx.notify();
+    }
+
+    /// Opens a read-only Changes tab showing one commit's diff. The
+    /// entity is built in commit mode (see `ChangesTab::for_commit`); the
+    /// remainder of the tab bookkeeping mirrors `add_changes_tab` exactly.
+    fn add_commit_tab(&mut self, sha: String, cx: &mut Context<Self>) {
+        let changes =
+            cx.new(|cx| ChangesTab::for_commit(self.working_directory.clone(), sha, cx));
+        Self::subscribe_changes_tab(&changes, cx);
         let tab_id = self.next_tab_id;
         let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
