@@ -73,11 +73,49 @@ impl ClaudeHookMigrator {
     }
 }
 
+/// Whether a quoted leading token names our control CLI by path.
+///
+/// A separator is required, so a bare `tillerctl` typed by the user is left
+/// alone — only a path we could have written is a migration candidate. The
+/// executable name is matched with and without the `.exe` the Windows
+/// toolchain emits, because a hook file is on disk from whenever it was
+/// written and may name either.
+///
+/// Which characters separate is per-platform on purpose: `\` is a legal
+/// character in a unix file name, so splitting on it there would misread
+/// `foo\tillerctl` — one file — as a path ending in `tillerctl`.
+fn names_tillerctl(path: &str) -> bool {
+    #[cfg(windows)]
+    let separators: &[char] = &['/', '\\'];
+    #[cfg(not(windows))]
+    let separators: &[char] = &['/'];
+
+    let Some(index) = path.rfind(separators) else {
+        return false;
+    };
+    matches!(&path[index + 1..], "tillerctl" | "tillerctl.exe")
+}
+
+/// Reads permissively, writes in the current form.
+///
+/// Reading has to be permissive because the whole point of this migrator is
+/// files written by an OLDER build: on Windows those carry the POSIX
+/// single-quoted form, since `shell_quote` only learned the cmd form later,
+/// and their paths end in `\tillerctl.exe` rather than `/tillerctl`. A parser
+/// that accepted only what the CURRENT build emits would have skipped every
+/// stale Windows entry — the exact files it exists to repair — and the
+/// migration would have been a silent no-op there.
+///
+/// Writing stays strict: the replacement is quoted by [`shell_quote`], which
+/// is the form the shell that will run this hook understands today.
 fn rewrite_command(command: &str, tillerctl_path: &str) -> Option<String> {
-    let rest = command.strip_prefix('\'')?;
-    let closing = rest.find('\'')?;
+    // Either quote character opens the token; the same one must close it.
+    let (quote, rest) = ['\'', '"']
+        .into_iter()
+        .find_map(|quote| command.strip_prefix(quote).map(|rest| (quote, rest)))?;
+    let closing = rest.find(quote)?;
     let old_path = &rest[..closing];
-    if !old_path.ends_with("/tillerctl") || old_path == tillerctl_path {
+    if !names_tillerctl(old_path) || old_path == tillerctl_path {
         return None;
     }
     Some(format!(
@@ -110,17 +148,42 @@ mod tests {
         );
     }
 
-    /// On Windows the rewritten hook command is cmd.exe-quoted, so the
-    /// expected output is the double-quote form. Windows paths end in
-    /// `tillerctl.exe`, which `ends_with("/tillerctl")` cannot match — the
-    /// migrator only ever rewrites POSIX-style stale paths, which is exactly
-    /// the kind of file this migrator exists to fix.
+    /// Windows arm. The replacement is cmd-quoted because that is what will
+    /// run the hook today; what varies between cases is the STALE entry being
+    /// read, and all four shapes below are ones a real hook file can hold.
     #[cfg(windows)]
     #[test]
     fn only_a_quoted_tillerctl_path_is_rewritten() {
+        let current = r"C:\Users\me\AppData\Local\TillerRust\bin\tillerctl.exe";
+
+        // The shape this migrator will actually meet on Windows: an entry
+        // written by a current build — double-quoted, backslashes, `.exe` —
+        // whose install path has since moved. Before the parser learned to
+        // read its own output, this was skipped and Layer A stayed broken
+        // with no way to repair itself.
         assert_eq!(
-            rewrite_command("'/old/tillerctl' notify --session pane", "/new/tillerctl"),
-            Some("\"/new/tillerctl\" notify --session pane".to_string())
+            rewrite_command(
+                &format!("\"{}\" notify --session pane", r"C:\old\bin\tillerctl.exe"),
+                current
+            ),
+            Some(format!("\"{current}\" notify --session pane"))
         );
+
+        // Written by an OLDER Windows build, before `shell_quote` had a cmd
+        // form: single quotes and a POSIX-looking path. Still ours, still
+        // stale, still repairable.
+        assert_eq!(
+            rewrite_command("'/old/tillerctl' notify --session pane", current),
+            Some(format!("\"{current}\" notify --session pane"))
+        );
+
+        // Not ours, and already current: both left alone.
+        assert_eq!(rewrite_command("C:\\Windows\\System32\\cmd.exe /C echo", current), None);
+        assert_eq!(
+            rewrite_command(&format!("\"{current}\" notify"), current),
+            None
+        );
+        // A bare name is a command the user typed, not a path we wrote.
+        assert_eq!(rewrite_command("'tillerctl' notify", current), None);
     }
 }
