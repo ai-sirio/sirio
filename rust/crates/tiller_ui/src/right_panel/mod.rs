@@ -10,6 +10,7 @@
 
 mod activity;
 mod files;
+mod history;
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*,
@@ -20,6 +21,7 @@ use tiller_theme::Theme;
 
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use history::{GitHistory, GitHistoryEvent};
 
 // ROW_HEIGHT stays reachable at the module root for the conformance
 // suite (`crate::right_panel::ROW_HEIGHT`) even though the file-tree
@@ -203,6 +205,10 @@ pub struct RightPanel {
     changes: Option<gpui::Entity<crate::changes::ChangesTab>>,
     /// Kept alive so the child's events keep reaching `re_emit`.
     changes_subscriptions: Vec<gpui::Subscription>,
+    /// Built on first selection of the History view, dropped when the
+    /// checkout changes. A user who never opens History never runs `git log`.
+    history: Option<gpui::Entity<GitHistory>>,
+    history_subscription: Option<gpui::Subscription>,
 }
 
 
@@ -227,6 +233,8 @@ impl RightPanel {
             file_context_menu: None,
             changes: None,
             changes_subscriptions: Vec::new(),
+            history: None,
+            history_subscription: None,
         }
     }
 
@@ -265,6 +273,8 @@ impl RightPanel {
         self.file_context_menu = None;
         self.changes = None;
         self.changes_subscriptions.clear();
+        self.history = None;
+        self.history_subscription = None;
         cx.notify();
     }
 
@@ -297,12 +307,15 @@ impl RightPanel {
         self.file_context_menu = None;
         self.changes = None;
         self.changes_subscriptions.clear();
+        self.history = None;
+        self.history_subscription = None;
         self.settled = false;
         self.walk_generation += 1;
         cx.notify();
     }
 
 }
+
 
 
 impl RightPanel {
@@ -462,19 +475,25 @@ impl RightPanel {
             .child(self.ensure_changes(cx))
     }
 
-    /// Filled in by Task 10.
-    fn render_history(&mut self, theme: Theme, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_placeholder("History", theme)
+    fn ensure_history(&mut self, cx: &mut Context<Self>) -> gpui::Entity<GitHistory> {
+        if let Some(history) = self.history.clone() {
+            return history;
+        }
+        let history = cx.new(|cx| GitHistory::new(self.repo_root.clone(), cx));
+        self.history_subscription = Some(cx.subscribe(
+            &history,
+            |_, _, event: &GitHistoryEvent, cx| match event {
+                GitHistoryEvent::OpenCommit(sha) => {
+                    cx.emit(RightPanelActionEvent::OpenCommit(sha.clone()))
+                }
+            },
+        ));
+        self.history = Some(history.clone());
+        history
     }
 
-    fn render_placeholder(&self, label: &'static str, theme: Theme) -> impl IntoElement {
-        div()
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(theme.meta)
-            .child(label)
+    fn render_history(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex_1().min_h(px(0.0)).child(self.ensure_history(cx))
     }
 }
 
