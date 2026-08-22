@@ -5,7 +5,8 @@
 //! terminal shell. Linux exposes the equivalent of the macOS libproc walk via
 //! `/proc/<pid>/task/<pid>/children` and `/proc/<pid>/comm` — implemented
 //! below. macOS uses the system `libproc` API because it has no `/proc` tree;
-//! Windows remains unsupported here.
+//! Windows uses a Toolhelp32 snapshot (`CreateToolhelp32Snapshot` plus
+//! `Process32First`/`Process32Next`, walking `th32ParentProcessID`).
 
 use std::collections::HashSet;
 use std::io;
@@ -30,6 +31,12 @@ const PROC_ROOT: &str = "/proc";
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_DEPTH: usize = 5;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_PROCESSES: usize = 50;
+#[cfg(windows)]
+use std::collections::{HashMap, VecDeque};
+#[cfg(windows)]
+const MAX_DEPTH: usize = 5;
+#[cfg(windows)]
 const MAX_PROCESSES: usize = 50;
 
 /// Returns process comm names for the shell's descendants, including direct
@@ -214,14 +221,294 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     Ok(names)
 }
 
-/// Windows counterpart: Toolhelp32 (`CreateToolhelp32Snapshot` plus
-/// `Process32First`/`Process32Next`, walking `th32ParentProcessID`).
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn inspect_process_names(_shell_pid: u32) -> io::Result<HashSet<String>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "process-tree inspection is not implemented on this platform (Windows: Toolhelp32)",
-    ))
+// ---------------------------------------------------------------------------
+// Windows: Toolhelp32 snapshot
+// ---------------------------------------------------------------------------
+
+/// Hand-declared kernel32 surface rather than a binding crate: this crate is
+/// deliberately dependency-free ("pure std" in its Cargo.toml) so it stays
+/// testable without a window, and the same precedent already exists above in
+/// the hand-declared `libproc` block. Everything needed here lives in
+/// kernel32, which the MSVC linker pulls in anyway.
+#[cfg(windows)]
+mod windows_process {
+    use std::io;
+
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const ERROR_NO_MORE_FILES: i32 = 18;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    type Handle = *mut core::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, th32_process_id: u32) -> Handle;
+        fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, pid: u32) -> Handle;
+        fn GetProcessTimes(
+            process: Handle,
+            creation_time: *mut FileTime,
+            exit_time: *mut FileTime,
+            kernel_time: *mut FileTime,
+            user_time: *mut FileTime,
+        ) -> i32;
+    }
+
+    /// Mirrors WinAPI's `PROCESSENTRY32W`. `th32DefaultHeapID` is a
+    /// `ULONG_PTR`, so its width follows the pointer — hence `usize`.
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage_count: u32,
+        process_id: u32,
+        default_heap_id: usize,
+        module_id: u32,
+        thread_count: u32,
+        parent_process_id: u32,
+        base_priority: i32,
+        flags: u32,
+        exe_file: [u16; 260],
+    }
+
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    /// One snapshot row, with the image name already normalized to the bare
+    /// shape the catalog matches against.
+    pub struct Entry {
+        pub pid: u32,
+        pub parent_pid: u32,
+        pub name: String,
+    }
+
+    /// Owns the snapshot handle so early returns cannot leak it.
+    struct Snapshot(Handle);
+
+    impl Snapshot {
+        fn new() -> io::Result<Self> {
+            // pid 0 means "all processes" for TH32CS_SNAPPROCESS.
+            let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+            if handle.is_null() || handle == -1_isize as Handle {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(handle))
+        }
+    }
+
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// Windows image names carry a `.exe` suffix that Linux comm names never
+    /// have, while [`crate::model::identify_agent_from_process_names`] matches
+    /// bare lower-case catalog ids like `codex`. Strip the suffix and fold to
+    /// lower-case: NTFS is case-insensitive, so the same binary surfaces as
+    /// `PING.EXE`, `ping.exe`, or anything in between depending on how its
+    /// spawner wrote the command line (observed verbatim in tests), and the
+    /// Linux `/proc` comm names this set must stay interchangeable with are
+    /// conventionally lower-case.
+    fn normalized_image_name(raw: &[u16]) -> String {
+        let length = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
+        let name = String::from_utf16_lossy(&raw[..length]);
+        match name.len().checked_sub(4).and_then(|cut| name.get(cut..)) {
+            Some(suffix) if suffix.eq_ignore_ascii_case(".exe") => {
+                name[..name.len() - 4].to_ascii_lowercase()
+            }
+            _ => name.to_ascii_lowercase(),
+        }
+    }
+
+    /// One pass over a whole-system snapshot. Taken once per call rather than
+    /// queried incrementally because Toolhelp32 offers no "children of X"
+    /// query — parentage comes from filtering rows by `th32ParentProcessID`.
+    pub fn entries() -> io::Result<Vec<Entry>> {
+        let snapshot = Snapshot::new()?;
+        // SAFETY: `entry` is a valid PROCESSENTRY32W whose `size` field is set
+        // to its own size, as WinAPI requires before the first call.
+        let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        entry.size = std::mem::size_of::<ProcessEntry32W>() as u32;
+
+        let mut out = Vec::new();
+        unsafe {
+            if Process32FirstW(snapshot.0, &mut entry) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            loop {
+                out.push(Entry {
+                    pid: entry.process_id,
+                    parent_pid: entry.parent_process_id,
+                    name: normalized_image_name(&entry.exe_file),
+                });
+                if Process32NextW(snapshot.0, &mut entry) == 0 {
+                    // ERROR_NO_MORE_FILES is the documented end-of-snapshot
+                    // marker, not a failure.
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(ERROR_NO_MORE_FILES) {
+                        return Err(error);
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Creation time as an opaque, comparable counter (FILETIME ticks).
+    ///
+    /// `None` covers both "cannot open" (a protected process) and "already
+    /// exited between snapshot and now"; callers fail open on it, because a
+    /// vanished candidate is indistinguishable from a legitimate child that
+    /// lost a race with the poll.
+    pub fn creation_time(pid: u32) -> Option<u64> {
+        // SAFETY: all four output pointers are valid `FileTime`s for the
+        // duration of the call; the handle is closed on every path.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let (mut creation, mut exit, mut kernel, mut user): (
+                FileTime,
+                FileTime,
+                FileTime,
+                FileTime,
+            ) = std::mem::zeroed();
+            let ok =
+                GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(process);
+            if ok == 0 {
+                return None;
+            }
+            Some(((creation.high as u64) << 32) | creation.low as u64)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::normalized_image_name;
+
+        #[test]
+        fn normalizes_suffix_and_case_to_catalog_shape() {
+            assert_eq!(normalized_image_name(&utf16("codex.exe")), "codex");
+            assert_eq!(normalized_image_name(&utf16("CODEX.EXE")), "codex");
+            assert_eq!(normalized_image_name(&utf16("PING")), "ping");
+            assert_eq!(normalized_image_name(&utf16("pwsh.dll")), "pwsh.dll");
+            assert_eq!(normalized_image_name(&utf16("exe")), "exe");
+            assert_eq!(normalized_image_name(&[]), "");
+        }
+
+        fn utf16(value: &str) -> Vec<u16> {
+            value.encode_utf16().collect()
+        }
+    }
+}
+
+/// Returns process names for the shell's descendants using one Toolhelp32
+/// snapshot. The traversal mirrors the Linux `/proc` arm exactly: breadth-first
+/// from the shell (depth 0, whose own name is excluded), bounded by the same
+/// [`MAX_DEPTH`] and [`MAX_PROCESSES`] limits.
+///
+/// Known limitation, inherited from the Linux arm and NOT a bug: Node/Bun-
+/// hosted CLIs (pi, omp) run as their host binary — `node.exe` on Windows —
+/// so they are invisible to Layer D here just as they are behind `node` on
+/// Linux, and they keep relying on Layer B titles instead.
+#[cfg(windows)]
+pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
+    // `pty_shell_pid` (tiller_terminal) reports 0 when `GetProcessId` could
+    // not resolve the ConPTY child; 0 is never a real Windows pid. Walking it
+    // anyway would be actively harmful: Toolhelp32 happily reports system
+    // processes whose `th32ParentProcessID` is 0, so a pid-0 walk would pin
+    // random system processes onto this pane. Refuse instead — and refuse
+    // with `Err`, not `Ok(empty)`, because `AgentActivityModel::
+    // refresh_process_signal` treats `Ok(None)`/empty as "process_gone" and
+    // an unknown pid must never clear a legitimately identified pane.
+    if shell_pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "shell pid is unknown (0); refusing to enumerate the process tree",
+        ));
+    }
+
+    let entries = windows_process::entries()?;
+    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut name_of: HashMap<u32, String> = HashMap::new();
+    let mut created_at: HashMap<u32, Option<u64>> = HashMap::new();
+    for entry in entries {
+        children_of.entry(entry.parent_pid).or_default().push(entry.pid);
+        name_of.insert(entry.pid, entry.name);
+        created_at.insert(entry.pid, windows_process::creation_time(entry.pid));
+    }
+
+    // The shell vanished between the PTY watcher resolving its pid and this
+    // snapshot. Like the Linux arm's depth-0 NotFound, this is surfaced as an
+    // error (not an empty set) so the model can tell "pane is gone" apart
+    // from "nothing running under the pane".
+    if !name_of.contains_key(&shell_pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "shell process is absent from the process snapshot",
+        ));
+    }
+
+    let mut names = HashSet::new();
+    // Each queued node carries its own creation time so the pid-reuse defence
+    // below can be applied at every level, not just directly under the shell.
+    let mut queue = VecDeque::from([(
+        shell_pid,
+        0_usize,
+        created_at[&shell_pid],
+    )]);
+    let mut visited = HashSet::new();
+
+    while let Some((pid, depth, pid_created)) = queue.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        if visited.len() > MAX_PROCESSES {
+            break;
+        }
+
+        if depth > 0
+            && let Some(name) = name_of.get(&pid)
+        {
+            names.insert(name.clone());
+        }
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+
+        if let Some(children) = children_of.get(&pid) {
+            for &child in children {
+                // Windows recycles pids, and an orphaned process keeps the
+                // parent pid it recorded at spawn time forever. If that
+                // original parent exited and its pid was later reused by THIS
+                // pane's shell, the orphan's stale `th32ParentProcessID` now
+                // names our shell and the orphan would be misattributed to
+                // this pane. A genuine child always postdates its parent, so
+                // a candidate older than the pid it claims as parent is a
+                // recycled-pid ghost and is dropped. When a creation time is
+                // unknowable (protected or already-exited process) the
+                // candidate stays: a vanished process is routine mid-poll,
+                // and a protected process will not carry an agent image name.
+                if let (Some(parent_created), Some(child_created)) =
+                    (pid_created, created_at.get(&child).copied().flatten())
+                    && child_created < parent_created
+                {
+                    continue;
+                }
+                queue.push_back((child, depth + 1, created_at.get(&child).copied().flatten()));
+            }
+        }
+    }
+
+    Ok(names)
 }
 
 #[cfg(all(test, target_os = "linux"))]
