@@ -1046,7 +1046,28 @@ pub mod fs_actions {
             command
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            // `rundll32 url.dll,FileProtocolHandler` is the classic
+            // ShellExecute equivalent with no extra dependency: it asks
+            // Explorer's handler for the file's/URL's default association,
+            // the same resolution a double-click performs, and it works for
+            // both local paths and http(s) URLs. The comma-bearing verb must
+            // stay one argument, so it is passed as a single `arg` (never
+            // shell-quoted — `Command` does not go through a shell, which is
+            // exactly why `cmd /c start` is avoided: its first-quoted-arg
+            // quirks are a quoting minefield for paths with spaces). The
+            // spawn returns immediately, like xdg-open/open.
+            let mut command = Command::new("rundll32");
+            command.arg("url.dll,FileProtocolHandler").arg(target);
+            command
+        }
+
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
         {
             let mut command = Command::new("__tiller_unsupported_platform_open__");
             command.arg(target);
@@ -1827,6 +1848,18 @@ mod tests {
             {
                 assert_eq!(command.get_program(), "xdg-open");
                 assert_eq!(command.get_args().collect::<Vec<_>>(), vec![target]);
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                // The comma-bearing verb must stay one argument (the
+                // rundll32 form is `url.dll,FileProtocolHandler <target>`,
+                // never split on the comma).
+                assert_eq!(command.get_program(), "rundll32");
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    vec![OsStr::new("url.dll,FileProtocolHandler"), target]
+                );
             }
         }
     }
