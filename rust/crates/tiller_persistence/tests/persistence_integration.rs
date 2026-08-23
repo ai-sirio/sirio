@@ -1902,3 +1902,42 @@ fn no_write_path_opens_a_deferred_transaction() {
         offenders.join("\n")
     );
 }
+
+/// The panel widths are Linux-rewrite-only keys with no Swift antecedent.
+/// They round-trip, clamp into their ranges, and fall back to the drawn
+/// geometry (325 / 405) when never written — which is what makes wiring them
+/// visually a no-op on first launch.
+#[test]
+fn panel_widths_round_trip_and_clamp_into_their_ranges() {
+    let dir = TempDir::new();
+    let path = dir.db_path("panel-widths");
+
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        let fresh = db.settings().expect("load defaults");
+        assert_eq!(fresh.sidebar_width, 325, "matches the geometry drawn today");
+        assert_eq!(fresh.right_panel_width, 405, "matches the geometry drawn today");
+
+        db.save_settings(&AppSettings {
+            sidebar_width: 900,     // above the 160...480 range
+            right_panel_width: 100, // below the 220...640 range
+            ..AppSettings::default()
+        })
+        .expect("save");
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let settings = db.settings().expect("load");
+    assert_eq!(settings.sidebar_width, 480, "clamped to the upper bound");
+    assert_eq!(settings.right_panel_width, 220, "clamped to the lower bound");
+
+    db.save_settings(&AppSettings {
+        sidebar_width: 300,
+        right_panel_width: 500,
+        ..settings
+    })
+    .expect("save in-range values");
+    let settings = db.settings().expect("reload");
+    assert_eq!(settings.sidebar_width, 300, "an in-range width survives verbatim");
+    assert_eq!(settings.right_panel_width, 500);
+}
