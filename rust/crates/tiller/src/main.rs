@@ -70,6 +70,7 @@ mod command_palette;
 #[cfg(target_os = "linux")]
 mod display_backend;
 mod panes;
+mod panel_layout;
 mod session;
 mod shell_chrome;
 mod tab_machinery;
