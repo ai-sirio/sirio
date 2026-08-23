@@ -616,12 +616,17 @@ fn provider_icon(id: &str) -> Icon {
     Icon::for_agent_id(id).unwrap_or(Icon::Sparkles)
 }
 
+/// The colour a discovered agent's brand mark wears, from its published
+/// identity — Claude's orange; the monochrome Codex/OpenCode/Pi marks in
+/// the foreground they are authored in. Only an id outside the catalog
+/// (the Sparkles stand-in) keeps a neutral meta tint: it is nobody's
+/// brand, so it must not borrow one.
 fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
-    match id {
-        "claude" => theme.rail_question,
-        "codex" => theme.tab_focus_accent,
-        "opencode" => theme.tab_needs_input,
-        _ => theme.rail_task,
+    match Icon::for_agent_id(id) {
+        Some(icon) => icon
+            .agent_mark_color(theme.title)
+            .unwrap_or_else(|| theme.meta),
+        None => theme.meta,
     }
 }
 
@@ -2377,24 +2382,32 @@ impl Settings {
     }
 
     fn render_agent_colors(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
-        let agents: [(&str, &str); 5] = [
-            ("✳", "Claude Code"),
-            ("◉", "Codex"),
-            ("▣", "OpenCode"),
-            ("π", "Pi"),
-            ("π", "Oh-My-Pi"),
+        let agents: [(&str, Icon); 5] = [
+            ("Claude Code", Icon::ClaudeCode),
+            ("Codex", Icon::Codex),
+            ("OpenCode", Icon::OpenCode),
+            ("Pi", Icon::Pi),
+            ("Oh-My-Pi", Icon::OhMyPi),
         ];
+        // The mark wears its published brand colour, not the picked accent:
+        // Claude's orange, omp's own gradient, and the monochrome trio in
+        // the foreground exactly as those projects present them. Which
+        // accent is selected stays visible in the picker itself, whose
+        // swatch ring is the single source of that truth.
         let palette: Vec<(&'static str, Rgba)> = AgentAccentColor::ALL
             .iter()
             .map(|choice| (choice.id(), choice.resolve(theme)))
             .collect();
         let mut card = controls::card(theme);
-        for (index, (glyph, name)) in agents.into_iter().enumerate() {
+        for (index, (name, mark)) in agents.into_iter().enumerate() {
             if index > 0 {
                 card = card.child(controls::separator(theme));
             }
             let selected = self.agent_colors[index];
-            let color = selected.resolve(theme);
+            let mut mark_element = IconElement::new(mark, IconSize::XSmall);
+            if let Some(tint) = mark.agent_mark_color(theme.title) {
+                mark_element = mark_element.text_color(tint);
+            }
             let label = div()
                 .flex()
                 .items_center()
@@ -2404,8 +2417,10 @@ impl Settings {
                 .child(
                     div()
                         .w(px(14.0))
-                        .text_color(color)
-                        .child(text!(id = ("settings-agent-color-glyph", index), glyph)),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(mark_element),
                 )
                 .child(text!(id = ("settings-agent-color-name", index), name));
             let picker_id: &'static str = match index {
@@ -3066,18 +3081,22 @@ impl Settings {
         window: &Window,
     ) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
+        let claude_mark = Icon::ClaudeCode
+            .agent_mark_color(theme.title)
+            .unwrap_or_else(|| theme.title);
+        let monochrome_mark = theme.title;
         let cards = [
             ProviderCardView::new(
                 ProviderKind::Claude,
                 "Claude Code",
-                theme.rail_question,
+                claude_mark,
                 accounts.claude,
             ),
-            ProviderCardView::new(ProviderKind::Codex, "Codex", theme.subtitle, accounts.codex),
+            ProviderCardView::new(ProviderKind::Codex, "Codex", monochrome_mark, accounts.codex),
             ProviderCardView::new(
                 ProviderKind::OpenCodeGo,
                 "OpenCode Go",
-                theme.tab_needs_input,
+                monochrome_mark,
                 accounts.opencode_go,
             ),
             // F-SET-13: the fourth reference card. No Ollama brand mark

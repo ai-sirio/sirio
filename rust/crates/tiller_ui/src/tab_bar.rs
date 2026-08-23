@@ -331,7 +331,16 @@ impl TabBar {
         let (icon, glyph_color) = match label {
             "New Terminal" => (Icon::SquareTerminal, theme.meta),
             "Changes" => (Icon::File, theme.meta),
-            "Claude Code" | "Split Claude Code" => (Icon::ClaudeCode, theme.tab_focus_accent),
+            // Agent marks wear their published brand colour, not a theme
+            // token: Claude its orange, the monochrome trio the foreground
+            // they are authored in. omp's tint is ignored by its
+            // full-colour path.
+            "Claude Code" | "Split Claude Code" => (
+                Icon::ClaudeCode,
+                Icon::ClaudeCode
+                    .agent_mark_color(theme.title)
+                    .unwrap_or(theme.title),
+            ),
             "Codex" => (Icon::Codex, theme.title),
             "OpenCode" => (Icon::OpenCode, theme.title),
             "Pi" => (Icon::Pi, theme.title),
@@ -441,6 +450,11 @@ impl TabBar {
         let selector_for_debug = selector.clone();
         let display_name = agent.display_name;
         let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
+        let mut mark = IconElement::new(icon, IconSize::Small);
+        if let Some(tint) = icon.agent_mark_color(theme.title) {
+            mark = mark.text_color(tint);
+        }
+        let mark_element = mark;
         div()
             .id(selector.clone())
             .debug_selector(move || selector_for_debug.clone())
@@ -456,7 +470,7 @@ impl TabBar {
             .text_color(theme.title)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
-            .child(IconElement::new(icon, IconSize::Small).text_color(theme.title))
+            .child(mark_element)
             .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
     }
 
