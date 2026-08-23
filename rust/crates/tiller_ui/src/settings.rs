@@ -4522,6 +4522,27 @@ mod tests {
         let install = cx
             .debug_bounds("settings-agent-install-0")
             .expect("Install renders for opencode");
+
+        // The click below proves nothing unless the control is inside
+        // the card that clips it: `controls::card` sets
+        // `overflow_hidden`, so a button pushed past the row's right
+        // edge is invisible AND unhittable while still reporting real
+        // `debug_bounds`. That is not hypothetical — the button already
+        // overflowed the 720px column, and this test passed only
+        // because its CENTRE still happened to land inside. Widening
+        // the type scale moved the centre out too and the control went
+        // dead. Assert the containment the click depends on, so the
+        // next few pixels of drift fail here instead of in the app.
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the opencode row draws");
+        assert!(
+            install.origin.x + install.size.width
+                <= row.origin.x + row.size.width,
+            "Install must sit inside the row that clips it, not past its \
+             right edge: install={install:?} row={row:?}"
+        );
+
         cx.simulate_click(install.center(), Modifiers::none());
         cx.run_until_parked();
 

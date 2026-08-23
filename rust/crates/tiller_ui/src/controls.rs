@@ -106,7 +106,16 @@ pub fn row_view(label_view: Div, control: impl IntoElement, theme: Theme) -> Div
         .flex()
         .items_center()
         .gap(px(spacing.xs as f32))
-        .child(label_view.flex_1())
+        // A flex child's `min-width` defaults to `auto` — its own
+        // min-content width (the CSS flexbox rule gpui inherits) — so
+        // `flex_1` alone does NOT let a long label shrink. It pushes
+        // `control` out past the row instead, where the enclosing
+        // `card`'s `overflow_hidden` both clips it and masks its
+        // hit-testing, leaving a control that is drawn, reported by
+        // `debug_bounds`, and completely dead to a click. `min_w_0()`
+        // is the standard pairing; chat.rs's auth banner carries the
+        // same fix for the same reason (F-CHAT-02).
+        .child(label_view.flex_1().min_w_0())
         .child(control)
 }
 
