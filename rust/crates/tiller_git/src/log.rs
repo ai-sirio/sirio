@@ -138,22 +138,23 @@ impl LogFilter {
 pub struct GitLog;
 
 impl GitLog {
-    /// Reads local-branch commits in date order, including merge parents.
-    pub fn commits(repo: &Path, skip: usize, limit: usize) -> Result<Vec<CommitRecord>, GitError> {
-        let skip_arg = format!("--skip={skip}");
-        let limit_arg = format!("-n{limit}");
-        match git::run_accepting(
-            &[
-                "log",
-                "--branches",
-                "--date-order",
-                &skip_arg,
-                &limit_arg,
-                LOG_FORMAT,
-            ],
-            repo,
-            &[0],
-        ) {
+    /// Reads commits in the filter's order, including merge parents.
+    pub fn commits(
+        repo: &Path,
+        skip: usize,
+        limit: usize,
+        filter: &LogFilter,
+    ) -> Result<Vec<CommitRecord>, GitError> {
+        let mut args = vec!["log".to_owned()];
+        args.extend(filter.args());
+        args.push(format!("--skip={skip}"));
+        args.push(format!("-n{limit}"));
+        args.push(LOG_FORMAT.to_owned());
+        // Last, and only last: git reads everything after `--` as a path.
+        args.extend(filter.pathspec_args());
+
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        match git::run_accepting(&borrowed, repo, &[0]) {
             Ok(output) => Ok(parse_log(&output.stdout_string())),
             Err(error) if is_unborn_head(&error) => Ok(Vec::new()),
             Err(error) => Err(error),
@@ -464,5 +465,50 @@ mod tests {
             }
             .is_filtering()
         );
+    }
+
+    /// The seam that matters: predicates reach git, and they compose with
+    /// `--skip`/`-n` — git applies them *before* limiting, which is the whole
+    /// reason filtering can live git-side without breaking pagination.
+    #[test]
+    fn a_text_filter_reaches_git_and_still_paginates() {
+        let dir = std::env::temp_dir().join(format!("tiller-log-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp repo");
+
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("spawn git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Tester"]);
+        for subject in ["alpha one", "beta", "alpha two"] {
+            std::fs::write(dir.join(subject), subject).expect("write");
+            git(&["add", "."]);
+            git(&["commit", "-q", "-m", subject]);
+        }
+
+        let filter = LogFilter {
+            text: Some("alpha".to_owned()),
+            ..LogFilter::default()
+        };
+
+        let all = GitLog::commits(&dir, 0, 10, &filter).expect("filtered log");
+        assert_eq!(all.len(), 2, "only the two alpha commits match");
+
+        let second_page = GitLog::commits(&dir, 1, 10, &filter).expect("filtered log, skipped");
+        assert_eq!(
+            second_page.len(),
+            1,
+            "--skip counts within the filtered results, not within the whole log"
+        );
+        assert_eq!(second_page[0].subject, "alpha one");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

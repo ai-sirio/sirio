@@ -9,7 +9,7 @@ use gpui::{
     ParentElement as _, Path, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
     canvas, div, fill, point, px, uniform_list,
 };
-use tiller_git::{CommitRecord, GitLog, GraphRow, layout};
+use tiller_git::{CommitRecord, GitLog, GraphRow, LogFilter, layout};
 use tiller_theme::Theme;
 
 /// Commits requested per chunk.
@@ -84,7 +84,7 @@ impl GitHistory {
             // subprocess there stalls the frame.
             let loaded = cx
                 .background_spawn(async move {
-                    let commits = GitLog::commits(&repo_root, skip, CHUNK);
+                    let commits = GitLog::commits(&repo_root, skip, CHUNK, &LogFilter::default());
                     let has_commits = matches!(&commits, Ok(loaded) if loaded.is_empty())
                         .then(|| GitLog::has_commits(&repo_root));
                     (commits, has_commits)
