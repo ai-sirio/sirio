@@ -209,6 +209,9 @@ pub struct RightPanel {
     /// checkout changes. A user who never opens History never runs `git log`.
     history: Option<gpui::Entity<GitHistory>>,
     history_subscription: Option<gpui::Subscription>,
+    /// The resolved right-panel width, pushed in by the host every render.
+    /// The History toolbar shapes itself from it; see [`GitHistory::panel_width`].
+    panel_width: f32,
 }
 
 
@@ -235,6 +238,7 @@ impl RightPanel {
             changes_subscriptions: Vec::new(),
             history: None,
             history_subscription: None,
+            panel_width: 405.0,
         }
     }
 
@@ -254,6 +258,17 @@ impl RightPanel {
             return;
         }
         self.activity = activity;
+        cx.notify();
+    }
+
+    /// The host pushes the resolved right-panel width every render; same
+    /// every-render push as [`RightPanel::set_activity`], no-op when
+    /// unchanged so a drag does not notify more than it must.
+    pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if self.panel_width == width {
+            return;
+        }
+        self.panel_width = width;
         cx.notify();
     }
 
@@ -493,12 +508,22 @@ impl RightPanel {
     }
 
     fn render_history(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // The view cannot measure its own container, so the host's resolved
+        // width is handed down here, each render, with a no-op guard.
+        let panel_width = self.panel_width;
+        let history = self.ensure_history(cx);
+        history.update(cx, |history, cx| {
+            if history.panel_width != panel_width {
+                history.panel_width = panel_width;
+                cx.notify();
+            }
+        });
         div()
             .flex_1()
             .min_h(px(0.0))
             .flex()
             .flex_col()
-            .child(self.ensure_history(cx))
+            .child(history)
     }
 }
 
