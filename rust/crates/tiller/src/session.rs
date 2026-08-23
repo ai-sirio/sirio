@@ -1905,6 +1905,11 @@ mod tests {
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
             translucency: true,
+            // Deliberately neither default nor out of range: this round-trip
+            // is the only place that proves a dragged width survives the
+            // SessionStore layer, not just `AppDatabase`.
+            sidebar_width: 300,
+            right_panel_width: 500,
         };
 
         {
@@ -1925,6 +1930,8 @@ mod tests {
             rows,
             vec![
                 ("appearance.fileIconTheme".into(), "material".into()),
+                ("appearance.rightPanelWidth".into(), "500".into()),
+                ("appearance.sidebarWidth".into(), "300".into()),
                 ("appearance.terminalFontSize".into(), "19".into()),
                 ("appearance.theme".into(), "dark".into()),
                 ("appearance.translucency".into(), "true".into()),
