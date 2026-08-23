@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tiller_git::GitLog;
+use tiller_git::{GitLog, LogFilter};
 
 /// A throwaway directory, removed on drop. Canonicalized so paths match what
 /// git reports (macOS `/var` is a symlink to `/private/var`).
@@ -153,7 +153,7 @@ fn repo_with_a_glob_path() -> TempDir {
 fn reads_commits_newest_first_with_parents() {
     let dir = repo_with_a_merge();
 
-    let commits = GitLog::commits(dir.path(), 0, 100).expect("log");
+    let commits = GitLog::commits(dir.path(), 0, 100, &LogFilter::default()).expect("log");
 
     assert_eq!(commits[0].subject, "merge side");
     assert_eq!(commits[0].parents.len(), 2, "a --no-ff merge has two parents");
@@ -165,8 +165,8 @@ fn reads_commits_newest_first_with_parents() {
 fn skip_and_limit_paginate() {
     let dir = repo_with_a_merge();
 
-    let first = GitLog::commits(dir.path(), 0, 2).expect("log");
-    let second = GitLog::commits(dir.path(), 2, 2).expect("log");
+    let first = GitLog::commits(dir.path(), 0, 2, &LogFilter::default()).expect("log");
+    let second = GitLog::commits(dir.path(), 2, 2, &LogFilter::default()).expect("log");
 
     assert_eq!(first.len(), 2);
     assert!(!second.is_empty());
@@ -179,14 +179,16 @@ fn a_repository_without_commits_reports_no_commits_rather_than_an_error() {
     git(dir.path(), &["init", "-q", "-b", "main"]);
 
     assert!(!GitLog::has_commits(dir.path()));
-    assert!(GitLog::commits(dir.path(), 0, 10).expect("log").is_empty());
+    assert!(GitLog::commits(dir.path(), 0, 10, &LogFilter::default())
+        .expect("log")
+        .is_empty());
 }
 
 #[test]
 fn a_directory_that_is_not_a_repository_is_an_error() {
     let dir = TempDir::new();
 
-    assert!(GitLog::commits(dir.path(), 0, 10).is_err());
+    assert!(GitLog::commits(dir.path(), 0, 10, &LogFilter::default()).is_err());
 }
 
 #[test]
