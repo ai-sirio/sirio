@@ -81,7 +81,9 @@ Everything below was verified on 2026-08-23, not taken from documentation.
 | Binary platform coverage | `linux-x86_64` 18, `linux-aarch64` 16, `darwin-aarch64` 18, `darwin-x86_64` 16, `windows-x86_64` 18, `windows-aarch64` 9 |
 | Registry pins versions | `claude-acp` to `@agentclientprotocol/claude-agent-acp@0.70.0`; `codex-acp` to `@agentclientprotocol/codex-acp@1.6.2`; both match the current npm `latest` |
 | An ACP wrapper for Pi exists | `pi-acp` to `npx pi-acp@0.0.33` |
-| The registry publishes OpenCode's ACP invocation | `opencode` uses `binary`, per platform: `{ archive, cmd: "./opencode", args: ["acp"], sha256 }` |
+| The registry publishes OpenCode's ACP invocation | `opencode` uses `binary`, per platform: `{ archive, cmd: "./opencode", args: ["acp"], sha256 }` — hash present on every platform |
+| Artifact formats across all `binary` agents | 95 artifacts: `.tar.gz` 55, `.zip` 32, `.tar.bz2` 4, bare executable 4 |
+| Integrity coverage | `sha256` on 48 of 95 artifacts; all 95 URLs are `https`; all 21 `npx` packages are version-pinned |
 | Installed CLI versions on the dev machine | claude 2.1.241, codex-cli 0.149.0, opencode 1.18.21, pi 0.84.2, omp absent |
 | Codex has no `acp` subcommand | `codex --help` lists `mcp-server` and `app-server`, not `acp` |
 
@@ -251,8 +253,14 @@ following `AgentInstaller.swift:95-135`.
   **This rule is load-bearing.** Installing `codex-acp` also drops a `codex` bin from
   its `@openai/codex` dependency, and preferring it would silently launch the wrong
   program. The Swift comment says it outright: *"must never be preferred."*
-- **`Binary`**: download the archive for the current platform key, **verify its
-  `sha256`**, extract, check `cmd` exists, set the executable bit.
+- **`Binary`**: download the artifact for the current platform key, **verify its
+  `sha256` when the registry publishes one**, unpack, check `cmd` exists, set the
+  executable bit. "Unpack" is four paths, not one — measured across the 95
+  artifacts: `.tar.gz` (55), `.zip` (32), `.tar.bz2` (4, `goose`), and **4 that are
+  not archives at all** but bare executables (`sigit-linux-amd64`,
+  `sigit-win-amd64.exe` and their siblings). The bare-executable case is not an
+  edge case to bolt on later: it is the path with no extraction step, so treating
+  every artifact as an archive would fail on it outright.
 - **`Uvx`**: `Err(InstallError::UnsupportedDistribution)`, naming the agent.
 
 Two deliberate departures from the Swift original:
@@ -474,7 +482,7 @@ general one, and the asymmetry must be on the record:
 
 | Distribution | Agents | Integrity check | Code execution at install |
 |---|---|---|---|
-| `binary` | 18 | sha256 from the registry document | none — download, verify, extract |
+| `binary` | 18 | sha256 **on 48 of 95 artifacts** — 9 of the 18 agents publish at least one artifact with no hash at all | none — download, verify, extract |
 | `npx` | **21** | **none** | **`npm install` runs the package's `preinstall`/`postinstall` scripts with full user privileges** |
 | `uvx` | 2 | n/a — rejected | n/a |
 
@@ -482,6 +490,20 @@ So the majority distribution has no integrity verification at all, and installin
 one runs maintainer-controlled code *before* the user has ever chosen to launch that
 agent. The registry pins a version, which prevents drift; it does not verify that
 the npm tarball matches anything the registry says.
+
+**And the `binary` row is weaker than it first reads.** Measured on 2026-08-23:
+`sha256` is present on 48 of 95 artifacts; the agents publishing at least one
+unhashed artifact are `antigravity-acp`, `cortex-code`, `corust-agent`, `crow-cli`,
+`cursor`, `devin`, `junie`, `stakpak` and `vtcode`. An earlier draft of this spec
+asserted sha256 covered all 18, which was wrong.
+
+**Decision for unhashed artifacts:** install is still offered, but the row says
+*"no published checksum"* before the click, and the manifest records
+`integrity: none` so what was installed unverified stays auditable afterwards.
+Refusing outright would make half the binary catalogue uninstallable while the
+user's fallback — downloading the same file by hand — carries strictly less
+ceremony, so a refusal would buy no safety. `opencode`, the agent this spec
+actually turns on, publishes a hash on every platform.
 
 This is not fatal — every one of these agents will, once launched, execute arbitrary
 code as the user by design; that is what a coding agent is. But there is a real
