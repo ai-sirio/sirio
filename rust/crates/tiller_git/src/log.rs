@@ -45,6 +45,9 @@ pub struct LogFilter {
     /// `-E` when set, `-F` when not. Off means *literal*, not "basic regex".
     pub regex: bool,
     pub case_sensitive: bool,
+    /// A revision the input resolved to. Set, it replaces branch selection
+    /// entirely and the query shows just that commit.
+    pub rev: Option<String>,
     /// Empty means every local branch, as before.
     pub branches: Vec<String>,
     /// Repeated `--author`; git ORs them.
@@ -65,6 +68,7 @@ impl LogFilter {
     /// graph or turn an empty result into "no matches".
     pub fn is_filtering(&self) -> bool {
         self.text.is_some()
+            || self.rev.is_some()
             || !self.branches.is_empty()
             || !self.authors.is_empty()
             || self.since.is_some()
@@ -79,7 +83,12 @@ impl LogFilter {
     pub fn args(&self) -> Vec<String> {
         let mut args = Vec::new();
 
-        if self.branches.is_empty() {
+        if let Some(rev) = &self.rev {
+            // `--no-walk` is what makes this one commit rather than that
+            // commit and all of its ancestors.
+            args.push("--no-walk".to_owned());
+            args.push(rev.clone());
+        } else if self.branches.is_empty() {
             args.push("--branches".to_owned());
         } else {
             for branch in &self.branches {
@@ -134,6 +143,15 @@ impl LogFilter {
     }
 }
 
+/// Whether an input should be tried as a commit before being tried as text.
+///
+/// Seven hex characters is git's own default abbreviation length, and it is
+/// the threshold that keeps real words out: `cafe`, `dead`, `face` and
+/// `beef` are all valid hex, and someone typing them means the word.
+pub fn looks_like_hash(input: &str) -> bool {
+    input.len() >= 7 && input.chars().all(|character| character.is_ascii_hexdigit())
+}
+
 /// Namespace for commit-history operations.
 pub struct GitLog;
 
@@ -174,9 +192,23 @@ impl GitLog {
     /// would also make the record seven fields, and a body may legitimately
     /// contain the 0x1e/0x1f bytes this format uses as separators. Fetching
     /// one body for one visible row costs neither.
+    /// The full object name `input` abbreviates, if it names exactly one
+    /// commit. `None` covers every other case — no such object, an ambiguous
+    /// prefix, or a tree — and each of them means "treat it as text".
     pub fn body(repo: &Path, sha: &str) -> Result<String, GitError> {
         let output = git::run_accepting(&["show", "-s", "--format=%b", sha], repo, &[0])?;
         Ok(output.stdout_string().trim_end().to_owned())
+    }
+
+    /// The full object name `input` abbreviates, if it names exactly one
+    /// commit. `None` covers every other case — no such object, an ambiguous
+    /// prefix, or a tree — and each of them means "treat it as text".
+    pub fn resolve_commit(repo: &Path, input: &str) -> Option<String> {
+        let spec = format!("{input}^{{commit}}");
+        git::run_accepting(&["rev-parse", "--verify", "--quiet", &spec], repo, &[0])
+            .ok()
+            .map(|output| output.stdout_string().trim().to_owned())
+            .filter(|sha| sha.len() == 40)
     }
 }
 
@@ -565,5 +597,41 @@ mod tests {
         assert!(body.contains("the body mentions sockets"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Seven is git's own default abbreviation length. Below it, hex
+    /// collisions with real words are common enough to matter: `cafe`,
+    /// `face`, `dead` and `beef` are all valid hex, and someone typing them
+    /// means the word.
+    #[test]
+    fn only_seven_or_more_hex_characters_look_like_a_hash() {
+        assert!(!looks_like_hash("cafe"));
+        assert!(!looks_like_hash("dead"));
+        assert!(!looks_like_hash("abcdef"), "six is still a word");
+        assert!(looks_like_hash("abcdef0"));
+        assert!(looks_like_hash("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!looks_like_hash("socket"), "not hex at all");
+        assert!(!looks_like_hash("abcdefg"), "g is not hex");
+        assert!(!looks_like_hash(""));
+    }
+
+    /// A resolved revision replaces branch selection and walks nothing:
+    /// `--no-walk` shows that commit, not that commit plus every ancestor.
+    #[test]
+    fn a_revision_filter_shows_exactly_one_commit() {
+        let filter = LogFilter {
+            rev: Some("abcdef0".to_owned()),
+            ..LogFilter::default()
+        };
+
+        let args = filter.args();
+
+        assert!(args.contains(&"--no-walk".to_owned()));
+        assert!(args.contains(&"abcdef0".to_owned()));
+        assert!(
+            !args.contains(&"--branches".to_owned()),
+            "a revision replaces branch selection rather than adding to it"
+        );
+        assert!(filter.is_filtering());
     }
 }

@@ -211,15 +211,63 @@ impl GitHistory {
     /// flipped, where waiting would feel broken.
     pub(crate) fn apply_search_now(&mut self, cx: &mut Context<Self>) {
         self.search_generation += 1;
-        self.search_task = None;
-        let text = (!self.search_draft.is_empty()).then(|| self.search_draft.clone());
-        let filter = LogFilter {
-            text,
-            regex: self.search_regex,
-            case_sensitive: self.search_case_sensitive,
-            ..self.filter.clone()
-        };
-        self.set_filter(filter, cx);
+        let generation = self.search_generation;
+        let draft = self.search_draft.clone();
+        let regex = self.search_regex;
+        let case_sensitive = self.search_case_sensitive;
+        let base = self.filter.clone();
+        let repo_root = self.repo_root.clone();
+
+        if draft.is_empty() {
+            self.set_filter(
+                LogFilter {
+                    text: None,
+                    rev: None,
+                    ..base
+                },
+                cx,
+            );
+            return;
+        }
+
+        // `resolve_commit` shells out, so it runs off the render thread —
+        // the same reason `has_commits` is resolved beside the log read
+        // rather than inside the `update` closure.
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            let resolved = if tiller_git::looks_like_hash(&draft) {
+                cx.background_spawn({
+                    let repo_root = repo_root.clone();
+                    let draft = draft.clone();
+                    async move { GitLog::resolve_commit(&repo_root, &draft) }
+                })
+                .await
+            } else {
+                None
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                let filter = match resolved {
+                    // It named a commit: show that commit, and do not also
+                    // grep for its own hash.
+                    Some(sha) => LogFilter {
+                        rev: Some(sha),
+                        text: None,
+                        ..base
+                    },
+                    // Hex-looking but unresolvable, or not hex at all: text.
+                    None => LogFilter {
+                        rev: None,
+                        text: Some(draft),
+                        regex,
+                        case_sensitive,
+                        ..base
+                    },
+                };
+                this.set_filter(filter, cx);
+            });
+        }));
     }
 
     /// Runs the draft once the typing stops.
