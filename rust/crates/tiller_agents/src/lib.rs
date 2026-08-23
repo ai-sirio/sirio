@@ -180,6 +180,20 @@ pub trait AgentAdapter {
     /// than fall back to another agent's server.
     fn acp_program(&self) -> Option<AcpProgram>;
 
+    /// The ACP server this adapter's own CLI serves, as a subcommand of a
+    /// binary the user already installed — or `None`.
+    ///
+    /// Narrower than [`AgentAdapter::acp_program`] on purpose: this claim
+    /// covers only what the local binary does, so it stays true without a
+    /// network round-trip. Anything reachable through a separate package is
+    /// the registry's business, not this trait's.
+    ///
+    /// The default is `None`: an adapter answers here only once its
+    /// subcommand has been observed answering an ACP `initialize`.
+    fn builtin_acp(&self) -> Option<AcpProgram> {
+        None
+    }
+
     /// Full shell command that runs the CLI noninteractively over `prompt`
     /// and prints the answer to stdout — the auto-naming summarizer's
     /// invocation, ported from `AgentAdapter.summarizerCommand`.
@@ -580,6 +594,40 @@ pub const ALL: &[&dyn AgentAdapter] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_agents_that_serve_acp_from_their_own_binary_claim_it() {
+        // The claim is deliberately narrow: it means "this CLI, already on
+        // the user's machine, answers ACP on a subcommand". Claude, Codex
+        // and Pi reach ACP through separate packages, so they claim
+        // nothing here.
+        assert_eq!(
+            OpenCodeAdapter.builtin_acp(),
+            Some(AcpProgram::new("opencode", &["acp"])),
+            "verified live 2026-08-23: opencode 1.18.21 answers initialize"
+        );
+        for adapter in [
+            &ClaudeCodeAdapter as &dyn AgentAdapter,
+            &CodexAdapter,
+            &PiAdapter,
+        ] {
+            assert_eq!(
+                adapter.builtin_acp(),
+                None,
+                "{} reaches ACP through a package, not a subcommand",
+                adapter.id()
+            );
+        }
+    }
+
+    #[test]
+    fn oh_my_pi_claims_nothing_until_a_real_omp_is_verified() {
+        // Ship gate, not a note. The retired Swift app launched `omp acp`
+        // (AgentLaunchSpec.swift:73-75), but no omp has been available to
+        // confirm it against, and asserting an unverified capability is the
+        // exact defect this work exists to remove.
+        assert_eq!(OhMyPiAdapter.builtin_acp(), None);
+    }
 
     #[test]
     fn catalog_has_the_five_adapters_in_order() {

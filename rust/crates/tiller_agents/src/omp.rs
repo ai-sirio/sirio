@@ -116,6 +116,17 @@ impl super::AgentAdapter for OhMyPiAdapter {
         None
     }
 
+    fn builtin_acp(&self) -> Option<crate::AcpProgram> {
+        // The retired Swift app launched `omp acp`
+        // (AgentLaunchSpec.swift:73-75 at 5430d7bf), so this is very
+        // probably `Some(AcpProgram::new("omp", &["acp"]))` — but no omp has
+        // been installed anywhere this could be checked, and shipping an
+        // unverified capability claim is precisely the defect this design
+        // removes. Flip it when `tests/acp_conformance.rs` runs green
+        // against a real omp instead of skipping.
+        None
+    }
+
     fn summarizer_command(&self, prompt: &str) -> Option<String> {
         // F-AGENT-OMP-03. Live, 2026-08-19: `omp --print --no-tools
         // 'Reply with exactly the word: ALIVE'` printed `ALIVE` on
