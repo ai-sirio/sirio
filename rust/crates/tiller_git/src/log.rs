@@ -1,6 +1,6 @@
 //! `git log` reading: commit records for the History view.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::GitError;
 use crate::git;
@@ -30,6 +30,108 @@ pub struct CommitRecord {
     pub timestamp: i64,
     /// One-line subject (`%s`).
     pub subject: String,
+}
+
+/// Everything the History view can ask `git log` to narrow by.
+///
+/// Data plus one pure translation into arguments, so every combination is
+/// testable without running git and without a window. `Default` is exactly
+/// the query the view ran before filtering existed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LogFilter {
+    /// Free text for `--grep`. Matches the whole message, body included:
+    /// git has no subject-only flag.
+    pub text: Option<String>,
+    /// `-E` when set, `-F` when not. Off means *literal*, not "basic regex".
+    pub regex: bool,
+    pub case_sensitive: bool,
+    /// Empty means every local branch, as before.
+    pub branches: Vec<String>,
+    /// Repeated `--author`; git ORs them.
+    pub authors: Vec<String>,
+    /// Passed to git verbatim, so git's own relative forms ("7 days ago")
+    /// work without this crate computing timestamps.
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub paths: Vec<PathBuf>,
+    /// IntelliSort: `--topo-order` keeps a merged branch's commits contiguous
+    /// instead of interleaving them by date.
+    pub topo_order: bool,
+}
+
+impl LogFilter {
+    /// Whether any *predicate* is set. Ordering is excluded on purpose: a
+    /// re-ordered history is still the whole history, so it must not hide the
+    /// graph or turn an empty result into "no matches".
+    pub fn is_filtering(&self) -> bool {
+        self.text.is_some()
+            || !self.branches.is_empty()
+            || !self.authors.is_empty()
+            || self.since.is_some()
+            || self.until.is_some()
+            || !self.paths.is_empty()
+    }
+
+    /// Revision selection, ordering and predicates — everything that must
+    /// precede `--skip`/`-n`/`--format`. Pathspecs are in
+    /// [`LogFilter::pathspec_args`] instead, because they must come after
+    /// those, behind `--`.
+    pub fn args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        if self.branches.is_empty() {
+            args.push("--branches".to_owned());
+        } else {
+            for branch in &self.branches {
+                args.push(format!("--branches={branch}"));
+            }
+        }
+
+        args.push(
+            if self.topo_order {
+                "--topo-order"
+            } else {
+                "--date-order"
+            }
+            .to_owned(),
+        );
+
+        if let Some(text) = &self.text {
+            args.push(if self.regex { "-E" } else { "-F" }.to_owned());
+            args.push(format!("--grep={text}"));
+        }
+        for author in &self.authors {
+            args.push(format!("--author={author}"));
+        }
+        // One `-i` covers --grep and --author both; emitting it with neither
+        // present would be noise in every unfiltered query.
+        if !self.case_sensitive && (self.text.is_some() || !self.authors.is_empty()) {
+            args.push("-i".to_owned());
+        }
+        if let Some(since) = &self.since {
+            args.push(format!("--since={since}"));
+        }
+        if let Some(until) = &self.until {
+            args.push(format!("--until={until}"));
+        }
+
+        args
+    }
+
+    /// `["--", <path>…]`, or empty. The caller appends this **last**, after
+    /// `--skip`, `-n` and `--format`: everything after `--` is a path to git.
+    pub fn pathspec_args(&self) -> Vec<String> {
+        if self.paths.is_empty() {
+            return Vec::new();
+        }
+        let mut args = vec!["--".to_owned()];
+        args.extend(
+            self.paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+        args
+    }
 }
 
 /// Namespace for commit-history operations.
@@ -120,6 +222,8 @@ pub fn parse_log(output: &str) -> Vec<CommitRecord> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// One record per commit, fields split on US (0x1f), records on RS (0x1e).
@@ -225,5 +329,140 @@ mod tests {
         ]);
 
         assert!(parse_log(&output).is_empty());
+    }
+
+    #[test]
+    fn a_default_filter_is_the_query_the_view_already_ran() {
+        let args = LogFilter::default().args();
+
+        assert_eq!(args, vec!["--branches", "--date-order"]);
+        assert!(LogFilter::default().pathspec_args().is_empty());
+    }
+
+    /// Regex off must mean *literal*, not "basic regex" — otherwise typing
+    /// `fix(ui)` silently searches for a group.
+    #[test]
+    fn text_without_regex_matches_fixed_strings() {
+        let filter = LogFilter {
+            text: Some("fix(ui)".to_owned()),
+            ..LogFilter::default()
+        };
+
+        let args = filter.args();
+
+        assert!(args.contains(&"-F".to_owned()));
+        assert!(!args.contains(&"-E".to_owned()));
+        assert!(args.contains(&"--grep=fix(ui)".to_owned()));
+    }
+
+    #[test]
+    fn text_with_regex_uses_extended_syntax() {
+        let filter = LogFilter {
+            text: Some("^feat".to_owned()),
+            regex: true,
+            ..LogFilter::default()
+        };
+
+        let args = filter.args();
+
+        assert!(args.contains(&"-E".to_owned()));
+        assert!(!args.contains(&"-F".to_owned()));
+    }
+
+    #[test]
+    fn case_insensitivity_is_emitted_once_and_only_when_it_can_apply() {
+        let searching = LogFilter {
+            text: Some("socket".to_owned()),
+            ..LogFilter::default()
+        };
+        assert_eq!(
+            searching.args().iter().filter(|arg| *arg == "-i").count(),
+            1,
+            "-i covers --grep and --author together, so it is emitted once"
+        );
+
+        let sensitive = LogFilter {
+            case_sensitive: true,
+            ..searching.clone()
+        };
+        assert!(!sensitive.args().contains(&"-i".to_owned()));
+
+        assert!(
+            !LogFilter::default().args().contains(&"-i".to_owned()),
+            "nothing to match, so no -i"
+        );
+    }
+
+    #[test]
+    fn authors_repeat_and_branches_replace_the_default_selection() {
+        let filter = LogFilter {
+            authors: vec!["Ada".to_owned(), "Bob".to_owned()],
+            branches: vec!["main".to_owned(), "release/*".to_owned()],
+            ..LogFilter::default()
+        };
+
+        let args = filter.args();
+
+        assert!(args.contains(&"--author=Ada".to_owned()));
+        assert!(args.contains(&"--author=Bob".to_owned()));
+        assert!(args.contains(&"--branches=main".to_owned()));
+        assert!(args.contains(&"--branches=release/*".to_owned()));
+        assert!(
+            !args.contains(&"--branches".to_owned()),
+            "an explicit selection replaces the bare --branches, it does not add to it"
+        );
+    }
+
+    /// Pathspecs are deliberately *not* in `args()`. They must follow `--`,
+    /// and `--` must follow `--skip`/`-n`/`--format`, which the caller adds
+    /// in between. Returning them together would put the pathspec before
+    /// arguments git then reads as paths.
+    #[test]
+    fn pathspecs_are_kept_apart_from_the_predicate_arguments() {
+        let filter = LogFilter {
+            paths: vec![PathBuf::from("rust/crates/tiller_git")],
+            ..LogFilter::default()
+        };
+
+        assert!(!filter.args().contains(&"--".to_owned()));
+        assert_eq!(
+            filter.pathspec_args(),
+            vec!["--".to_owned(), "rust/crates/tiller_git".to_owned()]
+        );
+    }
+
+    #[test]
+    fn intellisort_swaps_the_ordering_flag() {
+        let filter = LogFilter {
+            topo_order: true,
+            ..LogFilter::default()
+        };
+
+        let args = filter.args();
+
+        assert!(args.contains(&"--topo-order".to_owned()));
+        assert!(!args.contains(&"--date-order".to_owned()));
+    }
+
+    /// Ordering is not filtering: a re-ordered history is still the whole
+    /// history, so the graph stays and an empty result still means "no
+    /// commits", not "no matches".
+    #[test]
+    fn ordering_alone_does_not_count_as_filtering() {
+        assert!(!LogFilter::default().is_filtering());
+        assert!(
+            !LogFilter {
+                topo_order: true,
+                ..LogFilter::default()
+            }
+            .is_filtering()
+        );
+        assert!(
+            LogFilter {
+                text: Some("x".to_owned()),
+                ..LogFilter::default()
+            }
+            .is_filtering()
+        );
     }
 }
