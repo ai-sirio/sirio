@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "downgrade-agent",
+      "name": "Downgrade Agent",
+      "version": "1.0.0",
+      "distribution": {
+        "binary": {
+          "linux-x86_64": {
+            "archive": "http://example.invalid/agent-linux-x64.zip",
+            "cmd": "./agent",
+            "args": ["acp"]
+          },
+          "darwin-aarch64": {
+            "archive": "https://example.invalid/agent-darwin-arm64.zip",
+            "cmd": "./agent",
+            "args": ["acp"]
+          }
+        }
+      }
+    }
+  ]
+}

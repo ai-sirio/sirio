@@ -20,6 +20,7 @@ members = [
     "crates/tiller_activity",
     "crates/tiller_markdown",
     "crates/tiller_usage",
+    "crates/tiller_registry",
 ]
 
 [workspace.package]
@@ -75,6 +76,7 @@ tiller_control = { path = "crates/tiller_control" }
 tiller_activity = { path = "crates/tiller_activity" }
 tiller_markdown = { path = "crates/tiller_markdown" }
 tiller_usage = { path = "crates/tiller_usage" }
+tiller_registry = { path = "crates/tiller_registry" }
 
 # Local override for F-CORE-FILE-03A: upstream `gpui_linux`'s wl_data_device `Drop` handler
 # bails out silently (no `finish()`/`destroy()`, no error, no event delivered to the app) when

@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "future-agent",
+      "name": "Future Agent",
+      "version": "9.9.9",
+      "distribution": { "flatpak": { "ref": "org.example.Future" } }
+    }
+  ]
+}
