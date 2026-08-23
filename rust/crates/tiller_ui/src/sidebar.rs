@@ -156,11 +156,27 @@ pub struct SidebarTab {
     pub agent: Option<AgentMark>,
 }
 
-const SIDEBAR_WIDTH: f32 = 325.0;
+/// Width the sidebar draws itself at until the host says otherwise, and the
+/// same number as `AppSettings::sidebar_width`'s default. Every fixture in
+/// this file's tests, and the demo sidebar, keep it: only the running shell
+/// pushes a different one, through [`Sidebar::set_panel_width`].
+const DEFAULT_SIDEBAR_WIDTH: f32 = 325.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
 const ROW_LEFT_INSET: f32 = 27.0;
 const ROW_RIGHT_INSET: f32 = 7.0;
 const TAB_INDENT: f32 = 35.0;
+
+/// Width of one row's box inside a sidebar `panel_width` wide, for a row at
+/// `depth` in the tree.
+///
+/// Each level steps right by [`TAB_INDENT`] while every row ends at the same
+/// right inset, so a deep row has less to work with than a shallow one.
+/// Clamped at zero: the panel's 160px floor leaves room at every depth the
+/// tree actually produces, but a negative width would reach gpui instead of
+/// the assertion that should have caught it.
+fn row_width(panel_width: f32, depth: usize) -> f32 {
+    (panel_width - (ROW_LEFT_INSET + depth as f32 * TAB_INDENT) - ROW_RIGHT_INSET).max(0.0)
+}
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
@@ -509,9 +525,25 @@ pub struct Sidebar {
     add_project_menu: bool,
     project_form: Option<ProjectFormSurface>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
+    /// The panel's current width, pushed in by the host each render — the
+    /// same arrangement `RightPanel::set_panel_width` uses, and for the same
+    /// reason: a view cannot measure its own container, and reading the last
+    /// drawn frame would lag a frame behind every drag.
+    panel_width: f32,
 }
 
 impl Sidebar {
+    /// The host pushes the resolved sidebar width every render; same
+    /// every-render push as `RightPanel::set_panel_width`, no-op when
+    /// unchanged so a drag does not notify more than it must.
+    pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if self.panel_width == width {
+            return;
+        }
+        self.panel_width = width;
+        cx.notify();
+    }
+
     /// Creates the expanded fixture shown by the reference sidebar capture.
     pub fn new_for_demo(cx: &mut Context<Self>) -> Self {
         // The fixture's "tiller" project is backed by the repository the app
@@ -610,6 +642,7 @@ impl Sidebar {
             add_project_menu: false,
             project_form: None,
             pending_reorder: None,
+            panel_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 
@@ -706,6 +739,7 @@ impl Sidebar {
             add_project_menu: false,
             project_form: None,
             pending_reorder: None,
+            panel_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 
@@ -3275,6 +3309,7 @@ impl Sidebar {
         drag: Option<RowDrag>,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        panel_width: f32,
     ) -> impl IntoElement {
         let row_id = row.id;
         let selected = row.selected;
@@ -3296,7 +3331,7 @@ impl Sidebar {
         // saturating subtraction made depth-one worktrees share the project's
         // inset, hiding the project -> worktree relationship.
         let row_left_inset = ROW_LEFT_INSET + row.depth as f32 * TAB_INDENT;
-        let row_width = SIDEBAR_WIDTH - row_left_inset - ROW_RIGHT_INSET;
+        let row_width = row_width(panel_width, row.depth);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
         // per distinct running agent, 3px apart, 7px clear of the title. It
         // takes its width out of the title's, so a busy worktree truncates
@@ -3816,11 +3851,12 @@ impl Render for Sidebar {
         let add_project_menu = self.add_project_menu;
         let project_form = self.project_form.clone();
         let reorder_drop_entity = entity.clone();
+        let panel_width = self.panel_width;
         div()
             .relative()
             .flex()
             .flex_col()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(panel_width))
             .h_full()
             .overflow_hidden()
             .bg(theme.sidebar)
@@ -3865,7 +3901,7 @@ impl Render for Sidebar {
                     .relative()
                     .ml(px(FILTER_LEFT_INSET))
                     .mt(px(6.0))
-                    .w(px(SIDEBAR_WIDTH - FILTER_LEFT_INSET - ROW_RIGHT_INSET))
+                    .w(px((panel_width - FILTER_LEFT_INSET - ROW_RIGHT_INSET).max(0.0)))
                     .h(px(28.0))
                     .px(px(9.0))
                     .flex()
@@ -3939,6 +3975,7 @@ impl Render for Sidebar {
                                 drag,
                                 entity.clone(),
                                 theme,
+                                panel_width,
                             )
                         }
                     })),
@@ -4365,6 +4402,26 @@ mod tests {
         assert_eq!(inset(&worktree), ROW_LEFT_INSET + TAB_INDENT);
         assert_eq!(guide(&worktree), GUIDE_LEFT);
         assert_ne!(inset(&project), inset(&worktree));
+    }
+
+    /// A row's box follows the panel one pixel for one pixel. Every pixel it
+    /// does not give back is a pixel of text the panel clips.
+    #[test]
+    fn a_row_gives_up_width_as_the_panel_does() {
+        assert_eq!(
+            row_width(DEFAULT_SIDEBAR_WIDTH, 0),
+            DEFAULT_SIDEBAR_WIDTH - ROW_LEFT_INSET - ROW_RIGHT_INSET
+        );
+        assert_eq!(
+            row_width(DEFAULT_SIDEBAR_WIDTH, 0) - row_width(DEFAULT_SIDEBAR_WIDTH - 125.0, 0),
+            125.0
+        );
+        // Deeper rows start further right and still end at the same edge.
+        assert_eq!(
+            row_width(DEFAULT_SIDEBAR_WIDTH, 1),
+            row_width(DEFAULT_SIDEBAR_WIDTH, 0) - TAB_INDENT
+        );
+        assert_eq!(row_width(20.0, 3), 0.0, "a width is never negative");
     }
 
     #[test]
@@ -4925,6 +4982,49 @@ mod tests {
         assert!(
             !porcelain.contains("to-remove"),
             "porcelain no longer reports the removed worktree:\n{porcelain}"
+        );
+    }
+
+    /// The shell lets the panel be dragged between 160 and 480, and until
+    /// now the sidebar did not notice: every row was laid out against a
+    /// fixed 325 and the panel's `overflow_hidden` cut off the difference.
+    /// At the 160 floor that read as a worktree name ending mid-word with no
+    /// ellipsis — the text was not overflowing its row, the row was
+    /// overflowing the panel.
+    #[gpui::test]
+    async fn rows_follow_the_panel_width(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("panel-width");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo)));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        let wide = cx
+            .debug_bounds("sidebar-row-0")
+            .expect("the first project row")
+            .size
+            .width;
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_panel_width(DEFAULT_SIDEBAR_WIDTH - 125.0, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let narrow = cx
+            .debug_bounds("sidebar-row-0")
+            .expect("the first project row")
+            .size
+            .width;
+
+        assert_eq!(
+            f32::from(wide) - f32::from(narrow),
+            125.0,
+            "the row must give back exactly what the panel took"
         );
     }
 
