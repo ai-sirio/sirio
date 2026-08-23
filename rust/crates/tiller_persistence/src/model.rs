@@ -386,7 +386,7 @@ pub struct AppSettings {
     /// "appearance.translucency" — default: false. A Linux-rewrite-only
     /// key (F-SET-20); there is no Swift-parity `@AppStorage` field for it.
     pub translucency: bool,
-    /// "appearance.sidebarWidth" — default 325, clamped to 160...480. A
+    /// "appearance.sidebarWidth" — default 325, clamped to 220...480. A
     /// Linux-rewrite-only key: the Swift app's sidebar was a fixed width, so
     /// unlike every other key here this one has no `@AppStorage` antecedent.
     pub sidebar_width: i64,

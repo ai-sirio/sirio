@@ -1919,7 +1919,7 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
         assert_eq!(fresh.right_panel_width, 405, "matches the geometry drawn today");
 
         db.save_settings(&AppSettings {
-            sidebar_width: 900,     // above the 160...480 range
+            sidebar_width: 900,     // above the 220...480 range
             right_panel_width: 100, // below the 220...640 range
             ..AppSettings::default()
         })
@@ -1930,6 +1930,21 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
     let settings = db.settings().expect("load");
     assert_eq!(settings.sidebar_width, 480, "clamped to the upper bound");
     assert_eq!(settings.right_panel_width, 220, "clamped to the lower bound");
+
+    // The sidebar's own floor, which nothing on this side pinned before. It
+    // moved from 160 to 220 when the panel's rows turned out not to fit
+    // below that, so a width written under the old floor has to come back
+    // raised rather than reopening a sidebar its own content cannot use.
+    db.save_settings(&AppSettings {
+        sidebar_width: 160,
+        ..settings
+    })
+    .expect("save a width below the floor");
+    let settings = db.settings().expect("reload");
+    assert_eq!(
+        settings.sidebar_width, 220,
+        "a width stored under the floor is raised to it"
+    );
 
     db.save_settings(&AppSettings {
         sidebar_width: 300,
