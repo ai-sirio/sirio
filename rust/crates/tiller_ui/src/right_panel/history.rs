@@ -228,6 +228,21 @@ impl GitHistory {
         self.set_filter(filter, cx);
     }
 
+    /// Distinct authors among the commits currently loaded, in first-seen
+    /// order so the list does not reshuffle as more chunks arrive.
+    ///
+    /// Deliberately not exhaustive: `git log --format=%an --branches` over
+    /// the whole repository would walk every reachable commit, which is the
+    /// cost the person filtering is trying to avoid. The dropdown says so.
+    pub(crate) fn author_options(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.commits
+            .iter()
+            .filter(|commit| seen.insert(commit.author.clone()))
+            .map(|commit| commit.author.clone())
+            .collect()
+    }
+
     /// Replaces the filter and restarts the query from the top.
     ///
     /// This is a reset, never a narrowing of what is already loaded.
@@ -1268,6 +1283,40 @@ mod tests {
                 "empty means every branch; it must not become a list of all of them"
             );
             assert!(!history.filter.is_filtering());
+        });
+    }
+
+    /// The author list is derived from the commits actually loaded, so it is
+    /// a convenience list rather than the repository's full author set. The
+    /// exhaustive alternative is a complete walk — exactly the cost someone
+    /// filtering is trying to avoid.
+    #[gpui::test]
+    fn the_author_list_comes_from_the_loaded_commits_without_duplicates(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        history.read_with(cx, |history, _| {
+            assert_eq!(
+                history.author_options(),
+                vec!["Tester".to_owned()],
+                "both commits share one author, so the list has one entry"
+            );
+        });
+
+        history.update(cx, |history, cx| {
+            history.toggle_chip_option(FilterChip::User, "Tester".to_owned(), cx);
+        });
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.filter.authors, vec!["Tester".to_owned()]);
+            assert_eq!(history.commits.len(), 2, "both commits are Tester's");
         });
     }
 }
