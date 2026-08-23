@@ -24,6 +24,11 @@ use crate::store::InstallStore;
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Same ceiling family as the download above: `Command::output()` would
+/// otherwise wait forever, leaving the row in flight and its per-agent
+/// lock taken.
+const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
@@ -190,18 +195,40 @@ impl Installer {
 
         std::fs::create_dir_all(&staging).map_err(|error| fail(error.to_string()))?;
 
-        let output = std::process::Command::new(npm_binary())
+        let mut child = std::process::Command::new(npm_binary())
             .args(npm_install_argv(&staging.to_string_lossy(), package, false))
             .current_dir(&staging)
-            .output()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|error| {
                 fail(format!(
                     "npm could not be run ({error}); the npx distribution needs Node on PATH"
                 ))
             })?;
-        if !output.status.success() {
+        // Drained on a thread so a chatty npm cannot fill the pipe and
+        // stall while the deadline below is being polled.
+        let stderr_drain = {
+            let pipe = child.stderr.take();
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+                }
+                text
+            })
+        };
+        if matches!(wait_up_to(&mut child, NPM_INSTALL_TIMEOUT), WaitOutcome::TimedOut) {
+            return Err(fail(format!(
+                "npm install timed out after {} s; nothing was installed",
+                NPM_INSTALL_TIMEOUT.as_secs()
+            )));
+        }
+        let status = child.wait().map_err(|error| fail(error.to_string()))?;
+        let stderr = stderr_drain.join().unwrap_or_default();
+        if !status.success() {
             let _ = std::fs::remove_dir_all(&staging);
-            return Err(fail(String::from_utf8_lossy(&output.stderr).into_owned()));
+            return Err(fail(stderr));
         }
 
         let bin_dir = staging.join("node_modules/.bin");
@@ -350,7 +377,6 @@ pub(crate) fn resolve_bin_name(entries: &[String], package: &str) -> Option<Stri
         .filter(|entry| package.contains(entry.as_str()))
         .max_by_key(|entry| entry.len())
         .map(|entry| (*entry).clone())
-        .or_else(|| candidates.first().map(|entry| (*entry).clone()))
 }
 
 /// The argv for one npm install. `--ignore-scripts` is the default: a
@@ -375,6 +401,34 @@ pub(crate) fn npm_install_argv(prefix: &str, package: &str, allow_scripts: bool)
 
 fn npm_binary() -> &'static str {
     if cfg!(windows) { "npm.cmd" } else { "npm" }
+}
+
+enum WaitOutcome {
+    Exited,
+    TimedOut,
+}
+
+/// Waits for `child` up to `timeout`, polling. Kills it at the deadline:
+/// an install must never hang forever — least of all while holding its
+/// per-agent lock.
+fn wait_up_to(child: &mut std::process::Child, timeout: Duration) -> WaitOutcome {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return WaitOutcome::Exited,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return WaitOutcome::TimedOut;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            // The child is already gone one way or another; the caller's
+            // own `wait()` surfaces whatever is knowable.
+            Err(_) => return WaitOutcome::Exited,
+        }
+    }
 }
 
 fn download(url: &str) -> anyhow::Result<Vec<u8>> {
@@ -885,5 +939,68 @@ mod tests {
         );
         let with_scripts = npm_install_argv("/tmp/staging", "codex-acp@1.6.2", true);
         assert!(!with_scripts.contains(&"--ignore-scripts".to_string()));
+    }
+
+    #[test]
+    fn entries_unrelated_to_the_package_yield_none() {
+        // Nothing matches the base name and nothing is contained in it:
+        // guessing the alphabetically-first bin would be the codex-beside-
+        // codex-acp trap all over again, minus the safety net. The honest
+        // answer is None, and the caller turns that into an error.
+        let entries = vec!["alpha".to_string(), "zeta".to_string()];
+        assert_eq!(resolve_bin_name(&entries, "totally-unrelated@2.0.0"), None);
+    }
+
+    #[test]
+    fn the_npm_install_deadline_is_coherent_with_the_other_ceilings() {
+        // Same ceiling family as Task 5's download: nothing stays in
+        // flight forever.
+        assert_eq!(DOWNLOAD_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(NPM_INSTALL_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn wait_up_to_notices_a_child_that_finishes_in_time() {
+        let mut child = quick_child(true).spawn().unwrap();
+        assert!(matches!(
+            wait_up_to(&mut child, Duration::from_secs(30)),
+            WaitOutcome::Exited
+        ));
+    }
+
+    #[test]
+    fn wait_up_to_kills_a_child_that_blows_the_deadline() {
+        let started = std::time::Instant::now();
+        let mut child = quick_child(false).spawn().unwrap();
+
+        assert!(matches!(
+            wait_up_to(&mut child, Duration::from_millis(50)),
+            WaitOutcome::TimedOut
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the child was killed at the deadline, not waited out"
+        );
+        assert!(child.try_wait().unwrap().is_some(), "the killed child was reaped");
+    }
+
+    /// A command that exits immediately (`succeed`) or hangs for a long
+    /// time, spelled for this host.
+    fn quick_child(succeed: bool) -> std::process::Command {
+        #[cfg(windows)]
+        {
+            let mut command = std::process::Command::new("cmd");
+            command.args([
+                "/C",
+                if succeed { "exit 0" } else { "ping -n 30 127.0.0.1 > nul" },
+            ]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", if succeed { "exit 0" } else { "sleep 30" }]);
+            command
+        }
     }
 }
