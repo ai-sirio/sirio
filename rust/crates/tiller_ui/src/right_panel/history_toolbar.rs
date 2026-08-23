@@ -338,6 +338,69 @@ pub(super) fn render_chip_popup(
     list
 }
 
+/// The Paths chip's popup: one free-text row bound to `path_draft`, applied
+/// on Enter via `set_path_filter`. Key handling follows the search field's
+/// `on_search_key`.
+pub(super) fn render_paths_popup(
+    draft: &str,
+    focus: &FocusHandle,
+    entity: Entity<GitHistory>,
+    theme: Theme,
+) -> impl IntoElement {
+    let key_entity = entity;
+    div()
+        .id("history-paths-popup")
+        .debug_selector(|| "history-paths-popup".to_owned())
+        .absolute()
+        .top(px(26.0))
+        .w(theme.spacing.menu_width)
+        .p(px(4.0))
+        .rounded(theme.radii.user_pill)
+        .border_1()
+        .border_color(theme.hairline)
+        .bg(theme.card_fill)
+        .shadow_lg()
+        .child(
+            div()
+                .id("history-path-field")
+                .debug_selector(|| "history-path-field".to_owned())
+                .track_focus(focus)
+                .on_key_down(move |event, _, cx| {
+                    key_entity.update(cx, |history, cx| history.on_path_key(event, cx));
+                })
+                .w_full()
+                .px(px(6.0))
+                .py(px(3.0))
+                .rounded(theme.radii.control)
+                .border_1()
+                .border_color(theme.hairline)
+                .text_size(theme.typography.footnote)
+                .text_color(if draft.is_empty() {
+                    theme.meta
+                } else {
+                    theme.title
+                })
+                .child(if draft.is_empty() {
+                    "Path or glob".to_owned()
+                } else {
+                    draft.to_owned()
+                }),
+        )
+}
+
+/// IntelliSort: ordering, not filtering. The toolbar's own square-toggle
+/// helper, with the double arrow for a sort that is not a filter.
+pub(super) fn render_intellisort(
+    on: bool,
+    entity: Entity<GitHistory>,
+    theme: Theme,
+) -> impl IntoElement {
+    let click_entity = entity;
+    toggle("⇅", "history-intellisort", on, theme, move |cx| {
+        click_entity.update(cx, |history, cx| history.toggle_topo_order(cx));
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
