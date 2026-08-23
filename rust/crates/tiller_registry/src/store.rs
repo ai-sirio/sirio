@@ -116,10 +116,6 @@ fn absolute(environment: &BTreeMap<String, String>, key: &str) -> Option<PathBuf
 mod tests {
     use super::*;
     use crate::resolve::Integrity;
-    // Only the Linux default_root tests below need this. Gating the import
-    // the same way those tests are gated keeps other platforms
-    // warning-clean instead of importing a name nothing there can use.
-    #[cfg(target_os = "linux")]
     use std::collections::BTreeMap;
 
     fn temp_root(name: &str) -> PathBuf {
@@ -179,40 +175,49 @@ mod tests {
         assert_eq!(store.manifest("codex-acp"), None);
     }
 
-    // The default_root tests below assert POSIX spellings (`/data`,
-    // `/home/…`), which `Path::is_absolute` only recognises on Unix. Gating
-    // them like `tiller_control::protocol`'s socket-path test keeps
-    // non-Linux hosts warning-clean instead of failing on path semantics
-    // that do not apply there.
-    #[cfg(target_os = "linux")]
+    // The three default_root tests below build their inputs at runtime
+    // (`std::env::temp_dir()` is absolute on every host) and compare
+    // `PathBuf`s built with the same `.join()` chain the implementation
+    // uses — only the *rules* are Tiller's; no POSIX literal is under
+    // test. What is platform-defined (e.g. `/data` counting as absolute
+    // on Unix) is deliberately not asserted here.
     #[test]
     fn the_default_root_follows_xdg_data_home() {
-        let env = BTreeMap::from([("XDG_DATA_HOME".to_string(), "/data".to_string())]);
-        assert_eq!(InstallStore::default_root(&env), PathBuf::from("/data/tiller/agents"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_default_root_falls_back_to_home_local_share() {
-        let env = BTreeMap::from([("HOME".to_string(), "/home/enzo".to_string())]);
+        let data_home = std::env::temp_dir();
+        let env = BTreeMap::from([(
+            "XDG_DATA_HOME".to_string(),
+            data_home.to_string_lossy().into_owned(),
+        )]);
         assert_eq!(
             InstallStore::default_root(&env),
-            PathBuf::from("/home/enzo/.local/share/tiller/agents")
+            data_home.join("tiller").join("agents")
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_default_root_falls_back_to_home_local_share() {
+        let home = std::env::temp_dir();
+        let env = BTreeMap::from([("HOME".to_string(), home.to_string_lossy().into_owned())]);
+        assert_eq!(
+            InstallStore::default_root(&env),
+            home.join(".local/share").join("tiller").join("agents")
+        );
+    }
+
     #[test]
     fn a_relative_xdg_data_home_is_ignored() {
         // The XDG spec says a relative value is invalid and must be treated
         // as unset — the same filter `tiller_control` applies.
+        // "relative/path" is relative on every host, so this holds
+        // everywhere unchanged.
+        let home = std::env::temp_dir();
         let env = BTreeMap::from([
             ("XDG_DATA_HOME".to_string(), "relative/path".to_string()),
-            ("HOME".to_string(), "/home/enzo".to_string()),
+            ("HOME".to_string(), home.to_string_lossy().into_owned()),
         ]);
         assert_eq!(
             InstallStore::default_root(&env),
-            PathBuf::from("/home/enzo/.local/share/tiller/agents")
+            home.join(".local/share").join("tiller").join("agents")
         );
     }
 }
