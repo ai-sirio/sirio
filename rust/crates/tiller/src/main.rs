@@ -18735,6 +18735,55 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn settings_override_field_accepts_typing_through_the_real_shell(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| workspace.open_settings(None, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let field = cx
+            .debug_bounds("provider-opencode-workspace-override")
+            .expect("the override field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("wrkdemo");
+        cx.run_until_parked();
+        let typed = cx.update(|window, cx| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+                .read(cx)
+                .settings
+                .read(cx)
+                .snapshot()
+                .opencode_workspace_id_override
+        });
+        assert_eq!(
+            typed, "wrkdemo",
+            "keystrokes must reach the override field through the real shell dispatch path"
+        );
+    }
+
+    #[gpui::test]
     async fn applying_translucency_updates_workspace_and_window_material(cx: &mut TestAppContext) {
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
