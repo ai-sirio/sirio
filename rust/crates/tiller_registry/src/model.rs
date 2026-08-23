@@ -30,9 +30,12 @@ pub struct RegistryAgent {
     pub website: Option<String>,
     pub license: Option<String>,
     pub icon: Option<String>,
-    /// Every kind the document declares for this agent, in document order.
-    /// Most agents declare one; a few declare two (binary + npx). Choosing
-    /// between them belongs to whoever knows the platform, not to decoding.
+    /// Every kind the document declares for this agent. Most agents declare
+    /// one; a few declare two (binary + npx). Order is serde_json's map
+    /// order — lexicographic, since the map is a BTreeMap — which happens
+    /// to match today's documents but is not a promise; nothing may select
+    /// by index. Choosing between kinds belongs to whoever knows the
+    /// platform, not to decoding.
     pub distributions: Vec<Distribution>,
 }
 
@@ -138,10 +141,13 @@ fn decode_distribution(
     wire: serde_json::Value,
     warnings: &mut Vec<String>,
 ) -> Vec<Distribution> {
-    // Walked in map order, which is the document's order for every agent
-    // published today (`binary` < `npx` < `uvx`). A kind this build has
-    // never heard of is skipped here and disclosed as [`Distribution::Unknown`]
-    // when nothing else decoded.
+    // Walked in serde_json's map order. Without the `preserve_order`
+    // feature that map is a BTreeMap, so keys come back lexicographically
+    // (`binary` < `npx` < `uvx`) — which matches today's documents only
+    // because they list them that way. Selection must therefore key off
+    // kind and platform (`resolve` does), never off this Vec's indices.
+    // A kind this build has never heard of is skipped here and disclosed
+    // as [`Distribution::Unknown`] when nothing else decoded.
     let entries: Vec<(String, serde_json::Value)> = match wire {
         serde_json::Value::Object(map) => map.into_iter().collect(),
         _ => Vec::new(),
@@ -309,10 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn multi_kind_agents_keep_every_kind_in_document_order() {
-        // kilo and sigit declare binary AND npx. Both survive, in the order
-        // the document lists them; choosing between them belongs to whoever
-        // knows the platform, in a later task.
+    fn multi_kind_agents_keep_every_recognised_kind() {
+        // kilo and sigit declare binary AND npx. Both survive (lexicographic
+        // map order puts binary first); choosing between them belongs to
+        // whoever knows the platform, in resolve — not to decoding.
         let registry =
             AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json")).unwrap();
 
