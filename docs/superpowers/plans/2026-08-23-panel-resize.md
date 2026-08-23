@@ -19,6 +19,9 @@
 - Settings ranges: sidebar `160..=480`, right panel `220..=640`. Defaults: sidebar `325`, right panel `405`. These exact numbers appear in three places by design (struct default, load-time clamp fallback, range constant) — that is the existing convention for every other setting, not an accident to fix.
 - `MIN_CENTER_WIDTH = 320.0`.
 - Panel widths persist as `i64` pixels. Every other numeric key in `AppSettings` is `i64`.
+- **`cargo build --workspace` does not compile `#[cfg(test)]` code.** Use `cargo test -p <crate>` to verify, or a struct-literal change will look clean and break the test build. This cost Task 2 a follow-up fix in `session.rs`.
+- **Line numbers in this plan drift** as earlier tasks edit the same files. Locate every cited item with `grep -n` rather than trusting the number.
+- This machine (Windows) has pre-existing red tests: nine in `tiller_ui`, plus some in `tiller` around git/ACP process spawning. They fail on a clean tree too — verify with `git stash` before blaming your own change. No *new* red is acceptable.
 
 ---
 
@@ -130,14 +133,24 @@ mod tests {
 }
 ```
 
-`PanelSide::range` restates in `f32` what `settings_ranges` holds in `i64`, and those two numbers live in different crates. The test that pins them together is **Task 2, Step 8** — it cannot live here, because the constants it reads do not exist until Task 2 adds them, and this task has to end green.
+`PanelSide::range` restates in `f32` what `settings_ranges` holds in `i64`, and those two numbers live in different crates. The test that pins them together is **Task 3, Step 8** — it cannot live here, because the constants it reads do not exist until Task 2 adds them, and this task has to end green.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Register the module — before the red run, not after**
+
+In `rust/crates/tiller/src/main.rs`, beside `mod shell_chrome;`:
+
+```rust
+mod panel_layout;
+```
+
+This has to come first, and the reason is worth internalising: an unregistered `.rs` file does not exist as far as the compiler is concerned. Run the tests before this line and the crate compiles fine, the filter matches nothing, and cargo reports `0 passed … exit 0` — a green run that proves nothing, which is a worse outcome than a red one.
+
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `cd rust && cargo test -p tiller panel_layout`
-Expected: FAIL to compile — `cannot find function resolve_panel_widths in this scope`, `cannot find type PanelSide in this scope`. Six tests in total once they compile.
+Expected: FAIL to compile — `cannot find function resolve_panel_widths in this scope` (×6), `cannot find type PanelSide in this scope` (×2), exit 101. Six tests in total once they compile.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 4: Write the implementation**
 
 Put this above the test module in `rust/crates/tiller/src/panel_layout.rs`:
 
@@ -231,14 +244,6 @@ pub(crate) fn resolve_panel_widths(
 
     (left_pref.map(|_| left), right_pref.map(|_| right))
 }
-```
-
-- [ ] **Step 4: Register the module**
-
-In `rust/crates/tiller/src/main.rs`, beside `mod shell_chrome;` (line 74):
-
-```rust
-mod panel_layout;
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
