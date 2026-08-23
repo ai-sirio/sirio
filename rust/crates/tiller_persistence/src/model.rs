@@ -461,8 +461,11 @@ pub mod settings_ranges {
     pub const CHAT_RETENTION: std::ops::RangeInclusive<i64> = 5..=500;
     pub const MOUNTED_WORKTREES: std::ops::RangeInclusive<i64> = 2..=50;
     pub const REFRESH_INTERVAL_MIN: std::ops::RangeInclusive<i64> = 1..=60;
-    /// Linux-rewrite-only; no Swift range to mirror.
-    pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<i64> = 160..=480;
+    /// Linux-rewrite-only; no Swift range to mirror. The floor is 220 and
+    /// not lower because that is where the sidebar's own rows stop working:
+    /// below it a tab row's indentation plus its fixed marks leave nothing
+    /// for the name. See `sidebar::indent_step`.
+    pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<i64> = 220..=480;
     /// Linux-rewrite-only; no Swift range to mirror.
     pub const RIGHT_PANEL_WIDTH: std::ops::RangeInclusive<i64> = 220..=640;
 }

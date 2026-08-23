@@ -166,16 +166,58 @@ const ROW_LEFT_INSET: f32 = 27.0;
 const ROW_RIGHT_INSET: f32 = 7.0;
 const TAB_INDENT: f32 = 35.0;
 
+/// Deepest row the tree produces: project → worktree → tab.
+const MAX_ROW_DEPTH: usize = 2;
+/// What sits between a row's left edge and its title, and is not the title:
+/// disclosure slot, gap, icon slot, status slot, settings slot.
+const ROW_TITLE_OVERHEAD: f32 = 16.0 + 12.0 + 16.0 + 21.0 + 16.0;
+/// Narrowest a row title may get before the tree's indentation starts
+/// yielding — ten characters at the row's type size, enough for a tab row's
+/// name to be read rather than guessed.
+const MIN_TITLE_WIDTH: f32 = 64.0;
+/// The indent compresses, but never past this: a level that steps by
+/// nothing stops reading as a level and the tree becomes a list.
+const MIN_TAB_INDENT: f32 = 12.0;
+
+/// Per-level indent at `panel_width`.
+///
+/// [`TAB_INDENT`] is the reference's step and is what a comfortable panel
+/// uses. It stops being affordable well before the panel's floor: at 220px a
+/// depth-two row would pay 27 + 70 = 97px of indentation out of 220, and
+/// after the fixed marks its title was left with a *negative* width — drawn
+/// as nothing at all, which is what the running app showed.
+///
+/// So the step yields before the title does, the same order the history
+/// row's columns yield in: the indentation says where a row sits, the title
+/// says what it is, and a row that says nothing about what it is has stopped
+/// being useful. Compressed evenly across levels — never per-row, which
+/// would let a deep row's inset fall left of its own parent's.
+fn indent_step(panel_width: f32) -> f32 {
+    let affordable =
+        panel_width - ROW_LEFT_INSET - ROW_RIGHT_INSET - ROW_TITLE_OVERHEAD - MIN_TITLE_WIDTH;
+    (affordable / MAX_ROW_DEPTH as f32).clamp(MIN_TAB_INDENT, TAB_INDENT)
+}
+
+/// Where a row at `depth` starts, inside a sidebar `panel_width` wide.
+fn row_left_inset(panel_width: f32, depth: usize) -> f32 {
+    ROW_LEFT_INSET + depth as f32 * indent_step(panel_width)
+}
+
+/// Where the indent guide for a row at `depth` runs. Takes the same step as
+/// the rows: on a fixed one it would detach from them as the panel narrowed.
+fn guide_left(panel_width: f32, depth: usize) -> f32 {
+    GUIDE_LEFT + depth.saturating_sub(1) as f32 * indent_step(panel_width)
+}
+
 /// Width of one row's box inside a sidebar `panel_width` wide, for a row at
 /// `depth` in the tree.
 ///
-/// Each level steps right by [`TAB_INDENT`] while every row ends at the same
-/// right inset, so a deep row has less to work with than a shallow one.
-/// Clamped at zero: the panel's 160px floor leaves room at every depth the
-/// tree actually produces, but a negative width would reach gpui instead of
-/// the assertion that should have caught it.
+/// Every row ends at the same right inset, so a deep row has less to work
+/// with than a shallow one. Clamped at zero: the arithmetic above keeps it
+/// positive across the panel's whole range, but a negative width would reach
+/// gpui instead of the assertion that should have caught it.
 fn row_width(panel_width: f32, depth: usize) -> f32 {
-    (panel_width - (ROW_LEFT_INSET + depth as f32 * TAB_INDENT) - ROW_RIGHT_INSET).max(0.0)
+    (panel_width - row_left_inset(panel_width, depth) - ROW_RIGHT_INSET).max(0.0)
 }
 
 /// How many lines a row's title is laid out for.
@@ -3343,7 +3385,7 @@ impl Sidebar {
         // worktrees, must move right from the project row; the previous
         // saturating subtraction made depth-one worktrees share the project's
         // inset, hiding the project -> worktree relationship.
-        let row_left_inset = ROW_LEFT_INSET + row.depth as f32 * TAB_INDENT;
+        let row_left_inset = row_left_inset(panel_width, row.depth);
         let row_width = row_width(panel_width, row.depth);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
         // per distinct running agent, 3px apart, 7px clear of the title. It
@@ -3359,7 +3401,7 @@ impl Sidebar {
         } else {
             running_agents.len() as f32 * 15.0 + 4.0
         };
-        let title_width = row_width - 16.0 - 12.0 - 16.0 - 21.0 - 16.0 - badge_width;
+        let title_width = (row_width - ROW_TITLE_OVERHEAD - badge_width).max(0.0);
         let disclosure = match (kind, row.expanded) {
             (RowKind::Project, true) => Some(Icon::ChevronDown),
             (RowKind::Project, false) => Some(Icon::ChevronRight),
@@ -3806,7 +3848,7 @@ impl Sidebar {
 
         let mut container = div().relative().w_full().h(px(row_height));
         if guide {
-            let guide_left = GUIDE_LEFT + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
+            let guide_left = guide_left(panel_width, row.depth);
             container = container.child(
                 div()
                     .absolute()
@@ -4181,6 +4223,10 @@ impl Render for Sidebar {
 mod tests {
     use super::*;
     use crate::project_identity::ProjectGlyph;
+    // The layout guarantees below are only meaningful over the range the
+    // panel can actually be dragged to, so they read it from the same place
+    // the shell clamps against rather than restating it.
+    use tiller_persistence::settings_ranges;
 
     /// A path picker that cannot open must say so, not fail silently.
     ///
@@ -4427,8 +4473,11 @@ mod tests {
             comment: None,
             running_agents: Vec::new(),
         };
-        let inset = |row: &SidebarRow| ROW_LEFT_INSET + row.depth as f32 * TAB_INDENT;
-        let guide = |row: &SidebarRow| GUIDE_LEFT + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
+        // Asked of the real functions rather than of a copy of their
+        // arithmetic: a copy here would have kept passing when the indent
+        // became width-dependent.
+        let inset = |row: &SidebarRow| row_left_inset(DEFAULT_SIDEBAR_WIDTH, row.depth);
+        let guide = |row: &SidebarRow| guide_left(DEFAULT_SIDEBAR_WIDTH, row.depth);
 
         assert_eq!(inset(&project), ROW_LEFT_INSET);
         assert_eq!(inset(&worktree), ROW_LEFT_INSET + TAB_INDENT);
@@ -4454,6 +4503,68 @@ mod tests {
             row_width(DEFAULT_SIDEBAR_WIDTH, 0) - TAB_INDENT
         );
         assert_eq!(row_width(20.0, 3), 0.0, "a width is never negative");
+    }
+
+    /// The indent is the reference's and stays the reference's until the
+    /// panel genuinely cannot afford it.
+    #[test]
+    fn the_indent_is_untouched_until_the_panel_needs_the_room() {
+        assert_eq!(indent_step(DEFAULT_SIDEBAR_WIDTH), TAB_INDENT);
+        assert_eq!(
+            indent_step(*settings_ranges::SIDEBAR_WIDTH.end() as f32),
+            TAB_INDENT
+        );
+    }
+
+    /// The defect this exists to prevent: at the old 160px floor a depth-two
+    /// row paid 27 + 70 = 97px of indentation out of 160 and its title was
+    /// left with a negative width, drawn as nothing at all. The indentation
+    /// yields first now, the same way the history row's author column does.
+    ///
+    /// The guarantee is exact at `MAX_ROW_DEPTH`, which is where it matters:
+    /// tab rows are the deepest and never carry a running-agents badge. A
+    /// depth-one worktree row with several agents running still spends part
+    /// of its title on that badge — F-CORE-ACT-18's own trade, untouched.
+    #[test]
+    fn the_deepest_row_keeps_a_readable_title_across_the_panels_range() {
+        let floor = *settings_ranges::SIDEBAR_WIDTH.start() as f32;
+        assert!(
+            indent_step(floor) < TAB_INDENT,
+            "at the floor the indent has to have given something up"
+        );
+
+        for width in (floor as i64)..=*settings_ranges::SIDEBAR_WIDTH.end() {
+            let width = width as f32;
+            let title = row_width(width, MAX_ROW_DEPTH) - ROW_TITLE_OVERHEAD;
+            assert!(
+                title >= MIN_TITLE_WIDTH,
+                "at {width}px the deepest row leaves its title {title}px"
+            );
+        }
+    }
+
+    /// Compressing the indent must not erase it: a level that steps by
+    /// nothing stops reading as a level, and the tree becomes a list.
+    #[test]
+    fn the_indent_never_collapses_a_level() {
+        for width in *settings_ranges::SIDEBAR_WIDTH.start()..=*settings_ranges::SIDEBAR_WIDTH.end()
+        {
+            assert!(indent_step(width as f32) >= MIN_TAB_INDENT);
+        }
+    }
+
+    /// The guides run down the gutter the indentation opens, so they take
+    /// the same step. Left on `TAB_INDENT` they would detach from the rows
+    /// they belong to as soon as the panel narrowed.
+    #[test]
+    fn the_indent_guides_follow_the_same_step_as_the_rows() {
+        for width in [DEFAULT_SIDEBAR_WIDTH, 260.0, 220.0] {
+            assert_eq!(
+                guide_left(width, 2) - guide_left(width, 1),
+                row_left_inset(width, 2) - row_left_inset(width, 1),
+                "guide and row must move together at {width}px"
+            );
+        }
     }
 
     /// The arithmetic half of the invariant: a row pays for the lines
