@@ -32,6 +32,22 @@ const ROW_HEIGHT: f32 = 26.0;
 /// rows, which it has no way to make taller on their own. Without this the
 /// annotation drew straight over the next row's subject.
 const ROW_HEIGHT_ANNOTATED: f32 = 42.0;
+/// Fixed width of the author column.
+const AUTHOR_WIDTH: f32 = 90.0;
+/// Fixed width of the date column.
+const DATE_WIDTH: f32 = 72.0;
+/// Horizontal gap between a row's columns.
+const ROW_GAP: f32 = 6.0;
+/// What a commit row loses to chrome it does not control: the panel's two
+/// 1px borders (`shell_chrome::panel`) plus the row's own `px(8.0)` padding
+/// on each side. `panel_width` counts both, so the row's own arithmetic has
+/// to take them off again.
+const ROW_CHROME: f32 = 18.0;
+/// Narrowest a subject may get before a trailing column is dropped to feed
+/// it — roughly twenty characters at `Typography::footnote` (13px), which is
+/// about where a conventional-commit subject stops being identifiable
+/// (`feat(history): add …`).
+const MIN_SUBJECT_WIDTH: f32 = 130.0;
 
 /// Membership toggle that keeps the vector a set: `LogFilter` treats a
 /// repeated value as a repeated git argument, and git would then OR a term
@@ -609,6 +625,11 @@ impl Render for GitHistory {
             } else {
                 ROW_HEIGHT
             };
+            // Which trailing columns the panel is currently wide enough for.
+            // Resolved once per frame rather than per row: every row in a
+            // `uniform_list` has the same width, so a per-row answer would be
+            // the same answer computed hundreds of times.
+            let columns = row_columns(self.panel_width, graph_width);
             let row_entity = entity.clone();
             let list = uniform_list(
                 "right-panel-history",
@@ -689,6 +710,7 @@ impl Render for GitHistory {
                                 theme,
                                 body_match,
                                 row_height,
+                                columns,
                             )
                         })
                         .collect::<Vec<_>>()
@@ -763,8 +785,11 @@ fn render_history_row(
     theme: Theme,
     body_match: Option<String>,
     row_height: f32,
+    columns: RowColumns,
 ) -> impl IntoElement {
     let sha = commit.sha.clone();
+    // Built before anything is moved out of `commit` below.
+    let (tooltip_subject, tooltip_meta) = commit_tooltip_text(&commit);
     let subject_color = if commit.parents.len() > 1 {
         theme.meta
     } else {
@@ -782,9 +807,17 @@ fn render_history_row(
         .w_full()
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(ROW_GAP))
         .px(px(8.0))
         .hover(|style| style.bg(theme.row_hover))
+        .tooltip(move |_, cx| -> gpui::AnyView {
+            cx.new(|_| CommitTooltip {
+                theme,
+                subject: tooltip_subject.clone(),
+                meta: tooltip_meta.clone(),
+            })
+            .into()
+        })
         .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
             entity.update(cx, |_, cx| {
                 cx.emit(GitHistoryEvent::OpenCommit(sha.clone()))
@@ -829,24 +862,167 @@ fn render_history_row(
                     )
                 }),
         )
-        .child(
-            div()
-                .w(px(90.0))
-                .flex_none()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_size(theme.typography.footnote)
-                .text_color(theme.meta)
-                .child(commit.author),
-        )
-        .child(
-            div()
-                .w(px(72.0))
-                .flex_none()
-                .text_size(theme.typography.footnote)
-                .text_color(theme.meta)
-                .child(date),
-        )
+        .when(columns.author, move |row| {
+            row.child(
+                div()
+                    .debug_selector(|| "history-row-author".to_owned())
+                    .w(px(AUTHOR_WIDTH))
+                    .flex_none()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child(commit.author),
+            )
+        })
+        .when(columns.date, move |row| {
+            row.child(
+                div()
+                    .debug_selector(|| "history-row-date".to_owned())
+                    .w(px(DATE_WIDTH))
+                    .flex_none()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child(date),
+            )
+        })
+}
+
+/// Which of a commit row's trailing columns fit at the panel's current
+/// width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowColumns {
+    author: bool,
+    date: bool,
+}
+
+/// Room left for the subject once `columns` and the graph are drawn.
+///
+/// `content` is the row's own box — `panel_width` less [`ROW_CHROME`]. The
+/// gap count is derived rather than assumed because a hidden column takes
+/// its gap with it.
+fn subject_width(content: f32, graph_width: f32, columns: RowColumns) -> f32 {
+    let mut children = 1usize;
+    let mut fixed = 0.0;
+    if graph_width > 0.0 {
+        children += 1;
+        fixed += graph_width;
+    }
+    if columns.author {
+        children += 1;
+        fixed += AUTHOR_WIDTH;
+    }
+    if columns.date {
+        children += 1;
+        fixed += DATE_WIDTH;
+    }
+    content - fixed - ROW_GAP * (children - 1) as f32
+}
+
+/// Drops trailing columns, author first, until the subject has room to be
+/// read.
+///
+/// Flexbox on its own does the opposite. The subject is the only column that
+/// *can* shrink — it is `flex_1` with a zero floor, while author and date
+/// are `flex_none` — so when the row runs out of room the subject is what
+/// goes, and the two fixed columns overflow the panel's border. That is
+/// backwards: a row whose subject is gone identifies nothing, while a row
+/// without its author still does. So the width decision is taken here,
+/// before layout, and the columns that lose are not drawn at all.
+///
+/// The graph is deliberately *not* on this ladder, even though at six lanes
+/// it costs more than the date column. Author and date are metadata about a
+/// commit; the graph is the commit's place in history, which is what the
+/// view is for. Narrowing it would also have to narrow it honestly — a lane
+/// clipped mid-fan draws a commit with no node — and that is a different
+/// change from this one.
+///
+/// Analogous to `history_toolbar::toolbar_layout` and deliberately shaped
+/// like it: a pure function of the panel width, testable without a window.
+fn row_columns(panel_width: f32, graph_width: f32) -> RowColumns {
+    let content = panel_width - ROW_CHROME;
+    [
+        RowColumns {
+            author: true,
+            date: true,
+        },
+        RowColumns {
+            author: false,
+            date: true,
+        },
+    ]
+    .into_iter()
+    .find(|columns| subject_width(content, graph_width, *columns) >= MIN_SUBJECT_WIDTH)
+    // Last rung: nothing left to drop, so the subject takes what there is.
+    .unwrap_or(RowColumns {
+        author: false,
+        date: false,
+    })
+}
+
+/// The two blocks of a commit row's hover card: the subject in full, and one
+/// meta line under it.
+///
+/// Split out of the view so it can be tested without hovering anything. The
+/// date is deliberately formatted with the hour here and without it in the
+/// row: the column is a fixed 72px and the row is where space is scarce,
+/// while the card is where the detail the row could not fit belongs.
+fn commit_tooltip_text(commit: &CommitRecord) -> (String, String) {
+    let when = chrono::Local
+        .timestamp_opt(commit.timestamp, 0)
+        .single()
+        .map(|date| date.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "—".to_owned());
+    let short: String = commit.sha.chars().take(7).collect();
+    let mut meta = format!("{} · {when} · {short}", commit.author);
+    // Refs are what git itself puts first when it prints a commit; they are
+    // appended rather than led with because the row already has no room for
+    // them and the subject is still what identifies the commit.
+    if !commit.refs.is_empty() {
+        meta.push_str(" · ");
+        meta.push_str(&commit.refs.join(", "));
+    }
+    (commit.subject.clone(), meta)
+}
+
+/// The hover card for one commit row, on the pattern of
+/// `status_bar::StatusBarTooltip`.
+///
+/// Earns its place because the row truncates at *every* width, not only the
+/// narrow ones: a conventional-commit subject outgrows a 200px column long
+/// before the panel is at its floor.
+struct CommitTooltip {
+    theme: Theme,
+    subject: String,
+    meta: String,
+}
+
+impl Render for CommitTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .max_w(px(420.0))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(self.theme.radii.control)
+            .bg(self.theme.raised)
+            .border_1()
+            .border_color(self.theme.hairline)
+            .child(
+                div()
+                    .text_size(self.theme.typography.footnote)
+                    .text_color(self.theme.title)
+                    .child(self.subject.clone()),
+            )
+            .child(
+                div()
+                    .text_size(self.theme.typography.caption2)
+                    .text_color(self.theme.meta)
+                    .child(self.meta.clone()),
+            )
+    }
 }
 
 /// Horizontal pitch between lanes.
@@ -1205,6 +1381,121 @@ mod tests {
         };
 
         assert_eq!(graph_width(std::slice::from_ref(&settled)), LANE_WIDTH);
+    }
+
+    /// The panel's own default. Nothing is dropped at the width the app
+    /// starts at, or the fix would be a regression for everyone who never
+    /// touches the divider.
+    #[test]
+    fn the_default_panel_width_keeps_every_column() {
+        assert_eq!(
+            row_columns(405.0, MAX_LANES as f32 * LANE_WIDTH),
+            RowColumns {
+                author: true,
+                date: true
+            }
+        );
+    }
+
+    /// The author goes first. In a single-author repository the column
+    /// repeats one name down the whole list, while the date is the only
+    /// thing placing a commit in time.
+    #[test]
+    fn a_narrow_panel_drops_the_author_before_the_date() {
+        assert_eq!(
+            row_columns(340.0, MAX_LANES as f32 * LANE_WIDTH),
+            RowColumns {
+                author: false,
+                date: true
+            }
+        );
+    }
+
+    /// At the panel's 220px floor the subject gets the row to itself. This
+    /// is the width the running app showed the defect at: the subject was
+    /// squeezed to nothing and the two fixed columns overflowed the border.
+    #[test]
+    fn the_panel_floor_keeps_only_the_subject() {
+        assert_eq!(
+            row_columns(220.0, MAX_LANES as f32 * LANE_WIDTH),
+            RowColumns {
+                author: false,
+                date: false
+            }
+        );
+    }
+
+    /// Filtering hides the graph, and the columns come back into the space
+    /// it was using. The room is genuinely there, so refusing to use it
+    /// would be its own bug.
+    #[test]
+    fn hiding_the_graph_gives_the_columns_back() {
+        assert_eq!(
+            row_columns(340.0, 0.0),
+            RowColumns {
+                author: true,
+                date: true
+            }
+        );
+    }
+
+    /// The invariant the ladder exists to hold, checked across the panel's
+    /// whole settings range rather than at the three widths above: while any
+    /// column is still droppable, the subject is never below its minimum.
+    /// Only the last rung — subject alone, nothing left to give — may be.
+    #[test]
+    fn a_column_is_never_kept_at_the_subjects_expense() {
+        let graph = MAX_LANES as f32 * LANE_WIDTH;
+        for width in 220..=640 {
+            let width = width as f32;
+            let columns = row_columns(width, graph);
+            if !columns.author && !columns.date {
+                continue;
+            }
+            let subject = subject_width(width - ROW_CHROME, graph, columns);
+            assert!(
+                subject >= MIN_SUBJECT_WIDTH,
+                "at {width}px the row keeps {columns:?} and leaves the subject {subject}px"
+            );
+        }
+    }
+
+    fn tooltip_fixture(refs: Vec<String>) -> CommitRecord {
+        CommitRecord {
+            sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            parents: Vec::new(),
+            refs,
+            author: "e.palmisano".to_owned(),
+            timestamp: 1_755_000_000,
+            subject: "feat(history): drop the columns the panel cannot fit".to_owned(),
+        }
+    }
+
+    /// The card carries what the row had to give up. Asserted by structure
+    /// rather than against a literal string: the timestamp is rendered in
+    /// local time, so a literal would pass here and fail in another zone.
+    #[test]
+    fn the_tooltip_carries_the_full_subject_and_the_dropped_columns() {
+        let commit = tooltip_fixture(vec!["HEAD -> main".to_owned()]);
+        let (subject, meta) = commit_tooltip_text(&commit);
+
+        assert_eq!(subject, commit.subject, "the subject is never truncated");
+        assert!(meta.starts_with("e.palmisano · "));
+        assert!(meta.contains("0123456"), "the short sha is seven characters");
+        assert!(
+            !meta.contains("0123456789a"),
+            "and not the whole object name"
+        );
+        assert!(meta.ends_with(" · HEAD -> main"));
+    }
+
+    /// Most commits carry no refs, and an empty list must not leave a
+    /// dangling separator behind it.
+    #[test]
+    fn a_commit_without_refs_ends_at_its_sha() {
+        let (_, meta) = commit_tooltip_text(&tooltip_fixture(Vec::new()));
+
+        assert!(meta.ends_with("0123456"), "meta was {meta:?}");
     }
 
     /// A filter that matches nothing must not claim the repository is empty.
@@ -1614,6 +1905,50 @@ mod tests {
         assert!(
             cx.debug_bounds("history-chips-collapsed").is_some(),
             "the four chips are behind one button, not gone"
+        );
+    }
+
+    /// What the running app showed: at the panel's narrow end the subject
+    /// was squeezed to nothing while the author and date kept their fixed
+    /// widths and spilled past the border. The drawn frame is where that is
+    /// true or false — `row_columns` alone cannot prove the row obeys it.
+    #[gpui::test]
+    async fn a_narrow_panel_drops_the_columns_and_keeps_the_subject(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let history = cx.update(|window, _| {
+            window.root::<GitHistory>().flatten().expect("history root")
+        });
+        pump_until(&cx.cx, || {
+            history.read_with(&cx.cx, |history, _| history.commits.len() == 2)
+        });
+        cx.run_until_parked();
+
+        // The panel's own default width: nothing is dropped there.
+        assert!(cx.debug_bounds("history-row-author").is_some());
+        assert!(cx.debug_bounds("history-row-date").is_some());
+
+        history.update(&mut cx.cx, |history, cx| {
+            history.panel_width = 230.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("history-row").is_some(),
+            "the subject is what a narrow row keeps"
+        );
+        assert!(
+            cx.debug_bounds("history-row-author").is_none(),
+            "the author yields before the subject does"
+        );
+        assert!(
+            cx.debug_bounds("history-row-date").is_none(),
+            "and so does the date"
         );
     }
 }
