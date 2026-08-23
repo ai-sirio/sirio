@@ -29,7 +29,6 @@ use history::{GitHistory, GitHistoryEvent};
 #[cfg(test)]
 pub(crate) use files::ROW_HEIGHT;
 
-const PANEL_WIDTH: f32 = 405.0;
 const HEADER_HEIGHT: f32 = 40.0;
 /// Two-line activity row: 5 + 18 + 2 + 15 + 5, waku's card math.
 const ACTIVITY_ROW_HEIGHT: f32 = 48.0;
@@ -522,7 +521,7 @@ impl Render for RightPanel {
             .relative()
             .flex()
             .flex_col()
-            .w(px(PANEL_WIDTH))
+            .w_full()
             .h_full()
             .overflow_hidden()
             .bg(theme.background)
