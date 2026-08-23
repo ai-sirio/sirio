@@ -12,8 +12,6 @@ pub struct SettingsPolicy {
     pub mount_cap: u32,
     pub ui_font_size: f32,
     pub terminal_font_size: f32,
-    pub sidebar_width: f32,
-    pub right_panel_width: f32,
 }
 
 impl Default for SettingsPolicy {
@@ -28,8 +26,6 @@ impl Default for SettingsPolicy {
             mount_cap: 8,
             ui_font_size: 13.0,
             terminal_font_size: 13.0,
-            sidebar_width: 240.0,
-            right_panel_width: 320.0,
         }
     }
 }
@@ -41,8 +37,6 @@ impl SettingsPolicy {
         self.mount_cap = self.mount_cap.clamp(1, 64);
         self.ui_font_size = self.ui_font_size.clamp(10.0, 20.0);
         self.terminal_font_size = self.terminal_font_size.clamp(9.0, 24.0);
-        self.sidebar_width = self.sidebar_width.clamp(160.0, 480.0);
-        self.right_panel_width = self.right_panel_width.clamp(220.0, 640.0);
         self
     }
 
@@ -70,8 +64,6 @@ mod tests {
             mount_cap: 100,
             ui_font_size: 100.0,
             terminal_font_size: 1.0,
-            sidebar_width: 1.0,
-            right_panel_width: 1_000.0,
             ..Default::default()
         }
         .from_values();
@@ -80,8 +72,6 @@ mod tests {
         assert_eq!(settings.mount_cap, 64);
         assert_eq!(settings.ui_font_size, 20.0);
         assert_eq!(settings.terminal_font_size, 9.0);
-        assert_eq!(settings.sidebar_width, 160.0);
-        assert_eq!(settings.right_panel_width, 640.0);
     }
 
     #[test]
