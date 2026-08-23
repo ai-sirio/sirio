@@ -2060,7 +2060,7 @@ fn section_action_button(
         .px(theme.spacing.titlebar_control_spacing)
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
-        .text_size(px(10.5))
+        .text_size(theme.typography.caption2)
         .text_color(theme.subtitle)
         .hover(|style| style.bg(theme.row_hover).text_color(theme.title))
         .on_click(move |_, _, cx| {

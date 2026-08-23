@@ -493,7 +493,12 @@ impl RightPanel {
     }
 
     fn render_history(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        div().flex_1().min_h(px(0.0)).child(self.ensure_history(cx))
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .child(self.ensure_history(cx))
     }
 }
 
@@ -709,6 +714,60 @@ mod tests {
             PanelView::set(PanelView::History, cx);
             assert_eq!(PanelView::get(cx), PanelView::History);
         });
+    }
+
+    #[gpui::test]
+    fn the_history_view_renders_commit_rows_in_the_drawn_frame(cx: &mut TestAppContext) {
+        cx.update(tiller_theme::Theme::init);
+        let dir = TempDir::new();
+        git(&dir.0, &["init", "-q", "-b", "main"]);
+        git(&dir.0, &["config", "user.email", "probe@tiller.test"]);
+        git(&dir.0, &["config", "user.name", "probe"]);
+        std::fs::write(dir.0.join("a.txt"), "a").expect("write file");
+        git(&dir.0, &["add", "a.txt"]);
+        git(&dir.0, &["commit", "-q", "-m", "initial"]);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let panel = cx.update(|window, _cx| {
+            window
+                .root::<RightPanel>()
+                .flatten()
+                .expect("panel root")
+        });
+        panel.update(&mut cx, |panel, cx| {
+            panel.bind_worktree(dir.0.clone(), cx);
+        });
+        cx.update(|_window, cx| PanelView::set(PanelView::History, cx));
+        cx.run_until_parked();
+
+        let list = cx
+            .debug_bounds("right-panel-history")
+            .expect("the history list is drawn");
+        assert!(
+            f32::from(list.size.height) > 0.0,
+            "the list must have real height, or no row is ever visible"
+        );
+        let row = cx
+            .debug_bounds("history-row")
+            .expect("commit rows render in the History view");
+        assert!(
+            f32::from(row.size.height) > 0.0,
+            "a commit row must be visible in the drawn frame"
+        );
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[gpui::test]

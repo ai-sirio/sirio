@@ -746,16 +746,16 @@ impl Default for BrowserChrome {
 }
 
 /// Interface and code type-scale tokens, re-valued to waku's measured scale:
-/// 11.5px UI chrome, 13.5px body, 20px display, 21px body line height
+/// 12px UI chrome, 13.5px body, 20px display, 21px body line height
 /// (~1.56), a monospace family resolved from what the system actually has at
-/// 11.5px for code.
+/// 12px for code.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Typography {
     /// Body base size, in points (waku markdown body: 13.5px).
     pub base_size: Pixels,
-    /// Code size, in points (waku code body: 11.5px).
+    /// Code size, in points (waku code body: 11.5px; Tiller renders 12px).
     pub code_size: Pixels,
-    /// Code line height (waku: 17.5px).
+    /// Code line height (waku: 17.5px; Tiller renders 18px).
     pub code_line_height: Pixels,
     /// Code font weight (waku's embedded JetBrains Mono renders NORMAL).
     pub code_weight: FontWeight,
@@ -775,21 +775,23 @@ pub struct Typography {
     pub title3: Pixels,
     /// Body/headline size (13.5px).
     pub headline: Pixels,
-    /// Callout/subheadline size (12.5px).
+    /// Callout/subheadline size (13px).
     pub callout: Pixels,
-    /// Footnote/UI chrome size (11.5px).
+    /// Footnote/UI chrome size (12px).
     pub footnote: Pixels,
-    /// Caption-2 size (12px).
+    /// Caption-2 size (13px).
     ///
     /// The one type token that does NOT sit on a waku-measured step. It
     /// was raised from the measured 10.5 for legibility, which leaves it
-    /// larger than [`Typography::footnote`] (11.5) — so despite the name,
-    /// this is no longer the smallest size in the scale. Reach for
+    /// larger than [`Typography::footnote`] (12) — sharing `callout`'s
+    /// step — so despite the name, this is no longer the smallest size in
+    /// the scale. Reach for
     /// `footnote` when what you want is "the small one"; reach for
     /// `caption2` when you want the size the dense Tiller-only strips
     /// (status bar, tab bar, toolbar labels) actually render at.
     pub caption2: Pixels,
-    /// Default UI chrome size (waku: 11.5px for chips, buttons, rows).
+    /// Default UI chrome size (waku: 11.5px for chips, buttons, rows;
+    /// Tiller renders 12px).
     pub ui_size: Pixels,
     /// Body line height (waku markdown body: 21px).
     pub body_line_height: Pixels,
@@ -805,27 +807,27 @@ impl Typography {
 
     /// Returns the type scale for a chosen body base size, preserving waku's
     /// step relationships (headings scale off the body, chrome stays fixed
-    /// at 11.5).
+    /// at 12).
     pub fn for_base_size(base_size: f32) -> Self {
         let delta = base_size - 13.5;
         let scaled = |points: f32| px((points + delta).max(6.0));
 
         Self {
             base_size: px(base_size),
-            code_size: scaled(11.5),
-            code_line_height: px(17.5),
+            code_size: scaled(12.0),
+            code_line_height: px(18.0),
             code_weight: FontWeight::NORMAL,
             code_family: code_family(),
             large_title: scaled(20.0),
             title: scaled(17.0),
             title2: scaled(15.0),
             title3: scaled(14.0),
-            headline: scaled(13.5),
-            callout: scaled(12.5),
-            footnote: scaled(11.5),
+            headline: scaled(14.0),
+            callout: scaled(13.0),
+            footnote: scaled(12.0),
             // Off the measured scale on purpose — see the field doc.
-            caption2: scaled(12.0),
-            ui_size: px(11.5),
+            caption2: scaled(13.0),
+            ui_size: px(12.0),
             body_line_height: px(21.0),
             ui_line_height: px(16.0),
         }
@@ -935,6 +937,11 @@ pub struct Theme {
     pub typography: Typography,
     /// Shared opacity for translucent surfaces.
     pub translucent_surface_opacity: f32,
+    /// Whether the structural surfaces are faded to
+    /// [`Theme::translucent_surface_opacity`] for rendering over native
+    /// window blur. Carried on the theme so every reinstall (`install`,
+    /// `set_mode`, the portal follower) preserves it by construction.
+    pub translucency_enabled: bool,
     /// Compatibility accessor for the original scaffold and the app shell.
     pub canvas: Rgba,
 }
@@ -983,7 +990,10 @@ impl Theme {
         let theme = Self::for_mode_linux(mode, cx.window_appearance());
         #[cfg(not(target_os = "linux"))]
         let theme = Self::for_mode(mode, cx.window_appearance());
-        cx.set_global(theme);
+        let translucency = cx
+            .try_global::<Self>()
+            .is_some_and(|theme| theme.translucency_enabled);
+        cx.set_global(theme.with_translucency(translucency));
     }
 
     /// Resolves and remembers the code family from the families the runtime
@@ -1038,7 +1048,9 @@ impl Theme {
             cx.update(|cx| {
                 let Some(preference) = preference else { return };
                 if cx.global::<Theme>().mode == ThemeMode::System {
-                    cx.set_global(Theme::for_appearance(ThemeMode::System, preference));
+                    let next = Theme::for_appearance(ThemeMode::System, preference)
+                        .with_translucency(cx.global::<Theme>().translucency_enabled);
+                    cx.set_global(next);
                 }
             });
         })
@@ -1080,8 +1092,44 @@ impl Theme {
     }
 
     /// Returns the surface opacity used when translucency is enabled.
+    ///
+    /// The fade is 0.85: strong enough to read as real translucency (the
+    /// original Swift-era 0.96 was imperceptible), light enough that a
+    /// panel at 0.85 alpha still holds its text at WCAG AA against the
+    /// blurred backdrop — the frame material behind it is a near-identical
+    /// grey in both appearances, so the composite barely shifts.
     pub fn surface_opacity(translucency_enabled: bool) -> f32 {
-        if translucency_enabled { 0.96 } else { 1.0 }
+        if translucency_enabled { 0.85 } else { 1.0 }
+    }
+
+    /// Returns the theme resolved for this theme's `mode` and `appearance`,
+    /// with the structural surfaces faded to
+    /// [`Theme::translucent_surface_opacity`] when `enabled` is true.
+    ///
+    /// Re-deriving from `mode` + `appearance` is the point: the opaque base
+    /// is always recoverable, so toggling translucency never needs to
+    /// remember what the unfaded surfaces were. The frame material
+    /// (`frame_surface`) is already translucent by design and is not faded
+    /// again; washes, borders, selection, and text keep full opacity so a
+    /// translucent panel keeps its contrast.
+    pub fn with_translucency(self, enabled: bool) -> Self {
+        let mut theme = Self::for_appearance(self.mode, self.appearance);
+        theme.translucency_enabled = enabled;
+        if !enabled {
+            return theme;
+        }
+        let opacity = Self::surface_opacity(true);
+        let fade = |surface: Rgba| softened(surface, opacity);
+        theme.colors.panel_surface = fade(theme.colors.panel_surface);
+        theme.colors.background = theme.colors.panel_surface;
+        theme.colors.sidebar = theme.colors.panel_surface;
+        theme.colors.chat_surface = theme.colors.panel_surface;
+        theme.colors.chrome_tint = theme.colors.panel_surface;
+        theme.colors.raised = fade(theme.colors.raised);
+        theme.colors.composer = theme.colors.raised;
+        theme.colors.inset = fade(theme.colors.inset);
+        theme.colors.terminal_surface = fade(theme.colors.terminal_surface);
+        theme
     }
 
     fn for_appearance(mode: ThemeMode, appearance: Appearance) -> Self {
@@ -1096,7 +1144,8 @@ impl Theme {
             cosmic: cosmic::CosmicTheme::resolve(mode, appearance),
             browser_chrome: BrowserChrome::default(),
             typography: Typography::default(),
-            translucent_surface_opacity: 0.96,
+            translucent_surface_opacity: Self::surface_opacity(true),
+            translucency_enabled: false,
         }
     }
 }
@@ -2221,26 +2270,76 @@ mod tests {
 
         let typography = Typography::default();
         assert_eq!(typography.base_size, px(13.5));
-        assert_eq!(typography.code_size, px(11.5));
-        assert_eq!(typography.code_line_height, px(17.5));
+        assert_eq!(typography.code_size, px(12.0));
+        assert_eq!(typography.code_line_height, px(18.0));
         assert_eq!(typography.code_weight, FontWeight::NORMAL);
         assert_eq!(typography.large_title, px(20.0));
         assert_eq!(typography.title, px(17.0));
         assert_eq!(typography.title2, px(15.0));
         assert_eq!(typography.title3, px(14.0));
-        assert_eq!(typography.headline, px(13.5));
-        assert_eq!(typography.callout, px(12.5));
-        assert_eq!(typography.footnote, px(11.5));
+        assert_eq!(typography.headline, px(14.0));
+        assert_eq!(typography.callout, px(13.0));
+        assert_eq!(typography.footnote, px(12.0));
         // The single departure from the measured scale: raised from
         // waku's 10.5 for legibility, which puts it above `footnote`.
         // Recorded in `tiller_ui::conformance`'s departures ledger.
-        assert_eq!(typography.caption2, px(12.0));
-        assert_eq!(typography.ui_size, px(11.5));
+        assert_eq!(typography.caption2, px(13.0));
+        assert_eq!(typography.ui_size, px(12.0));
         assert_eq!(typography.body_line_height, px(21.0));
         assert_eq!(typography.ui_line_height, px(16.0));
-        assert_eq!(Theme::dark().translucent_surface_opacity, 0.96);
-        assert_eq!(Theme::surface_opacity(true), 0.96);
+        assert_eq!(Theme::dark().translucent_surface_opacity, 0.85);
+        assert_eq!(Theme::surface_opacity(true), 0.85);
         assert_eq!(Theme::surface_opacity(false), 1.0);
+    }
+
+    #[test]
+    fn with_translucency_fades_structural_surfaces_and_is_reversible() {
+        for base in [Theme::dark(), Theme::light()] {
+            let opacity = Theme::surface_opacity(true);
+            let translucent = base.with_translucency(true);
+
+            assert!(translucent.translucency_enabled);
+            assert_eq!(
+                translucent.panel_surface,
+                softened(base.panel_surface, opacity)
+            );
+            assert_eq!(translucent.background, translucent.panel_surface);
+            assert_eq!(translucent.sidebar, translucent.panel_surface);
+            assert_eq!(translucent.chat_surface, translucent.panel_surface);
+            assert_eq!(translucent.chrome_tint, translucent.panel_surface);
+            assert_eq!(translucent.raised, softened(base.raised, opacity));
+            assert_eq!(translucent.composer, translucent.raised);
+            assert_eq!(translucent.inset, softened(base.inset, opacity));
+            assert_eq!(
+                translucent.terminal_surface,
+                softened(base.terminal_surface, opacity)
+            );
+
+            assert_eq!(
+                translucent.frame_surface, base.frame_surface,
+                "the frame material is already translucent and is not faded twice"
+            );
+            assert_eq!(
+                translucent.frame_fallback, base.frame_fallback,
+                "the opaque fallback stays opaque"
+            );
+            assert_eq!(
+                translucent.panel_border, base.panel_border,
+                "borders stay crisp on a translucent panel"
+            );
+            assert_eq!(translucent.title, base.title, "text is untouched");
+
+            assert_eq!(
+                translucent.with_translucency(true),
+                translucent,
+                "re-derivation is idempotent"
+            );
+            assert_eq!(
+                translucent.with_translucency(false),
+                base,
+                "the opaque base is fully recoverable from mode + appearance"
+            );
+        }
     }
 
     /// The radius tokens are waku's measured de-facto scale §A.2 — the

@@ -3616,10 +3616,19 @@ impl Sidebar {
                                 // coral near enough to Claude's brand to read
                                 // as it, so a Codex or Pi mark was drawn in
                                 // Claude's colour. Shape carried identity;
-                                // colour actively contradicted it.
+                                // colour actively contradicted it. Codex is the
+                                // one exception: its mark is drawn in
+                                // `theme.title` (white) like everywhere else
+                                // in the app — tab bar and status bar never
+                                // use its blue brand hex, so the badge must
+                                // not be the only blue Codex mark on screen.
                                 .child(
                                     IconElement::new(mark.icon, IconSize::Small)
-                                        .text_color(mark.brand.color()),
+                                        .text_color(if matches!(mark.icon, Icon::Codex) {
+                                            theme.title
+                                        } else {
+                                            mark.brand.color()
+                                        }),
                                 )
                         })),
                 )

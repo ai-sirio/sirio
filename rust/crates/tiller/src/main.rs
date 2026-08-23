@@ -4194,6 +4194,15 @@ impl TillerWorkspace {
             return;
         }
         self.translucency_enabled = enabled;
+        // The surface fade follows the *resolved* material, not the toggle:
+        // on a platform without native blur the window stays opaque, and a
+        // faded panel over an opaque frame would only shift its tint (the
+        // spec's "visual consistency is preferable to an unblurred,
+        // partially transparent frame" rule).
+        let material = shell_chrome::current_platform_material(enabled);
+        cx.set_global(Theme::get(cx).with_translucency(
+            material == shell_chrome::ShellMaterial::Blurred,
+        ));
         self.apply_window_background(startup_window_background(enabled), window);
         self.last_applied_translucency = Some(enabled);
         cx.notify();
@@ -18480,6 +18489,25 @@ mod tests {
                 ],
                 "the window-appearance seam records each real material request once"
             );
+            let theme = Theme::get(cx);
+            assert!(
+                !theme.translucency_enabled,
+                "headless tests have no native blur, so the surfaces must not fade \
+                 (the spec's opaque-fallback rule)"
+            );
+            assert_eq!(
+                theme.panel_surface.a, 1.0,
+                "an unfaded theme keeps its opaque panels"
+            );
+        });
+        cx.cx.update(|cx| Theme::set_mode(ThemeMode::Light, cx));
+        workspace.read_with(&cx.cx, |_, cx| {
+            let theme = cx.global::<Theme>();
+            assert!(
+                !theme.translucency_enabled,
+                "a mode-switch reinstall must not invent translucency"
+            );
+            assert_eq!(theme.panel_surface.a, 1.0);
         });
     }
 
