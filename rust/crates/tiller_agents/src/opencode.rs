@@ -90,6 +90,16 @@ impl super::AgentAdapter for OpenCodeAdapter {
         None
     }
 
+    fn builtin_acp(&self) -> Option<crate::AcpProgram> {
+        // Verified live on 2026-08-23 against opencode 1.18.21: piping an
+        // ACP `initialize` into `opencode acp` returns
+        // `agentInfo: {"name":"OpenCode","version":"1.18.21"}` with
+        // sessionCapabilities close/fork/list/resume. The registry agrees —
+        // its own `opencode` entry carries `cmd: "./opencode",
+        // args: ["acp"]`.
+        Some(crate::AcpProgram::new("opencode", &["acp"]))
+    }
+
     fn summarizer_command(&self, prompt: &str) -> Option<String> {
         // `--pure` suppresses the TUI chrome so stdout is only the answer.
         Some(format!("opencode run --pure {}", shell_quote(prompt)))
