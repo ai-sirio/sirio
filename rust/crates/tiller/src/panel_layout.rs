@@ -25,7 +25,7 @@ impl PanelSide {
     /// pinned together by `ranges_match_the_persisted_settings_ranges`.
     pub(crate) fn range(self) -> (f32, f32) {
         match self {
-            PanelSide::Left => (160.0, 480.0),
+            PanelSide::Left => (220.0, 480.0),
             PanelSide::Right => (220.0, 640.0),
         }
     }
@@ -171,7 +171,7 @@ mod tests {
         let (left, right) =
             resolve_panel_widths(400.0, Some(325.0), Some(405.0), None, 4.0, 4.0);
 
-        assert_eq!(left, Some(160.0));
+        assert_eq!(left, Some(220.0));
         assert_eq!(right, Some(220.0));
     }
 

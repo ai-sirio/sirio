@@ -83,7 +83,7 @@
 //! - **Full circles are spelled as half the box** (6×6 dot at r3, 44×22
 //!   swatch at r11, 20px toggle at r10): numerically identical to
 //!   `rounded_full`; naming each would invent tokens for one value.
-//! - **`DEFAULT_SIDEBAR_WIDTH` 325, sidebar 160–480px**: 325 is inside
+//! - **`DEFAULT_SIDEBAR_WIDTH` 325, sidebar 220–480px**: 325 is inside
 //!   waku's resizable 180–420 range, and the reference freezes the range,
 //!   not a default. Same course as the right panel above: the width stopped
 //!   being a frozen constant when the sidebar became user-resizable, so 325
