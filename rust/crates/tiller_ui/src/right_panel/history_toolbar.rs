@@ -5,7 +5,7 @@
 //! would put two unrelated concerns in one place.
 
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
+    Entity, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use tiller_theme::Theme;
