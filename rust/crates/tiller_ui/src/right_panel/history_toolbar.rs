@@ -75,6 +75,17 @@ impl FilterChip {
     }
 }
 
+/// The Date dropdown's fixed choices. The second element is what git is
+/// given for `--since`; `None` clears the filter. Git parses these strings
+/// itself, so this table never computes a date — which also means no test
+/// of it needs a clock.
+pub(super) const DATE_PRESETS: [(&str, Option<&str>); 4] = [
+    ("Any time", None),
+    ("Today", Some("midnight")),
+    ("Last 7 days", Some("7 days ago")),
+    ("Last 30 days", Some("30 days ago")),
+];
+
 /// The search row: field, then the two toggles that change what the text
 /// means rather than what it is.
 pub(super) fn render_search_row(
@@ -253,6 +264,38 @@ pub(super) fn render_chip_popup(
                 .text_color(theme.meta)
                 .child("Authors in the loaded history"),
         );
+    }
+
+    if chip == FilterChip::Date {
+        for (label, since) in DATE_PRESETS {
+            let value = since.map(ToOwned::to_owned);
+            let is_selected = selected.first().map(String::as_str) == since;
+            let row_entity = entity.clone();
+            list = list.child(
+                div()
+                    .id(gpui::SharedString::from(format!("history-date-{label}")))
+                    .w_full()
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .rounded(theme.radii.control)
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.title)
+                    .hover(|style| style.bg(theme.row_hover))
+                    .on_click(move |_, _, cx| {
+                        row_entity.update(cx, |history, cx| {
+                            history.set_date_preset(value.clone(), cx);
+                            history.open_chip = None;
+                            cx.notify();
+                        });
+                    })
+                    .child(if is_selected { "✓" } else { " " })
+                    .child(label),
+            );
+        }
+        return list;
     }
 
     if options.is_empty() {

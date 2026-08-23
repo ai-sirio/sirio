@@ -243,6 +243,16 @@ impl GitHistory {
             .collect()
     }
 
+    /// Sets or clears the `--since` bound. Date is single-select, unlike
+    /// Branch and User: two lower bounds would mean nothing.
+    pub(crate) fn set_date_preset(&mut self, since: Option<String>, cx: &mut Context<Self>) {
+        let filter = LogFilter {
+            since,
+            ..self.filter.clone()
+        };
+        self.set_filter(filter, cx);
+    }
+
     /// Replaces the filter and restarts the query from the top.
     ///
     /// This is a reset, never a narrowing of what is already loaded.
@@ -1317,6 +1327,35 @@ mod tests {
         history.read_with(cx, |history, _| {
             assert_eq!(history.filter.authors, vec!["Tester".to_owned()]);
             assert_eq!(history.commits.len(), 2, "both commits are Tester's");
+        });
+    }
+
+    /// Presets are handed to git verbatim: git parses its own relative
+    /// dates, so nothing here computes a timestamp that would then need a
+    /// clock to test.
+    #[gpui::test]
+    fn a_date_preset_is_passed_to_git_verbatim(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+
+        history.update(cx, |history, cx| {
+            history.set_date_preset(Some("7 days ago".to_owned()), cx);
+        });
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.filter.since.as_deref(), Some("7 days ago"));
+            assert!(history.filter.is_filtering());
+            assert_eq!(history.commits.len(), 2, "both commits are from today");
+        });
+
+        history.update(cx, |history, cx| history.set_date_preset(None, cx));
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+        history.read_with(cx, |history, _| {
+            assert!(history.filter.since.is_none());
+            assert!(!history.filter.is_filtering());
         });
     }
 }
