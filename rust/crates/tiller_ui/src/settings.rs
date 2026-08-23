@@ -1897,6 +1897,18 @@ impl Settings {
         }
     }
 
+    /// The clipboard text a paste into one of these single-line fields
+    /// inserts. A DevTools or URL-bar copy usually carries a trailing
+    /// newline, which would corrupt the stored cookie header and the
+    /// persisted workspace id — so it is trimmed here, once, for every
+    /// field that pastes.
+    fn pasted_field_text(cx: &App) -> Option<String> {
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    }
+
     /// Raw-keystroke handling for the Agents screen's search field
     /// (F-SET-16), the same backspace/character pattern `sidebar.rs`'s
     /// project filter already uses.
@@ -1928,6 +1940,8 @@ impl Settings {
     /// Raw-keystroke handling for the OpenCode Go cookie field (F-SET-12),
     /// the agents search field's backspace/character pattern. The typed
     /// text stays transient — Save moves it into the credential store.
+    /// A cookie is pasted, never typed: ctrl-v/cmd-v insert the clipboard
+    /// text, which the character branch below must not also swallow.
     fn on_opencode_cookie_key(
         &mut self,
         event: &KeyDownEvent,
@@ -1936,7 +1950,13 @@ impl Settings {
     ) {
         self.field_blink.wake();
         let key = event.keystroke.key.as_str();
-        if key == "backspace" || key == "delete" {
+        if key == "v"
+            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+        {
+            if let Some(text) = Self::pasted_field_text(cx) {
+                self.opencode_cookie_input.push_str(&text);
+            }
+        } else if key == "backspace" || key == "delete" {
             self.opencode_cookie_input.pop();
         } else if let Some(character) = event.keystroke.key_char.as_deref()
             && !event.keystroke.modifiers.platform
@@ -1961,7 +1981,13 @@ impl Settings {
     ) {
         self.field_blink.wake();
         let key = event.keystroke.key.as_str();
-        if key == "backspace" || key == "delete" {
+        if key == "v"
+            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+        {
+            if let Some(text) = Self::pasted_field_text(cx) {
+                self.opencode_workspace_id_override.push_str(&text);
+            }
+        } else if key == "backspace" || key == "delete" {
             self.opencode_workspace_id_override.pop();
         } else if let Some(character) = event.keystroke.key_char.as_deref()
             && !event.keystroke.modifiers.platform
@@ -2042,7 +2068,7 @@ impl Settings {
 
     /// Raw-keystroke handling for the Ollama Cloud cookie (F-SET-13) —
     /// transient like [`Self::on_opencode_cookie_key`]: nothing durable
-    /// happens until Save.
+    /// happens until Save. Paste lands the same way, for the same reason.
     fn on_ollama_cookie_key(
         &mut self,
         event: &KeyDownEvent,
@@ -2051,7 +2077,13 @@ impl Settings {
     ) {
         self.field_blink.wake();
         let key = event.keystroke.key.as_str();
-        if key == "backspace" || key == "delete" {
+        if key == "v"
+            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+        {
+            if let Some(text) = Self::pasted_field_text(cx) {
+                self.ollama_cookie_input.push_str(&text);
+            }
+        } else if key == "backspace" || key == "delete" {
             self.ollama_cookie_input.pop();
         } else if let Some(character) = event.keystroke.key_char.as_deref()
             && !event.keystroke.modifiers.platform
@@ -5233,6 +5265,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// F-SET-12: a cookie is pasted, never typed — a `Fe26.2**…` token is
+    /// an opaque blob copied out of the browser's DevTools. Ctrl-V into the
+    /// focused field must insert the clipboard text (with the trailing
+    /// newline a DevTools copy usually carries trimmed away), so the
+    /// placeholder clears and Save has something to store. Regression:
+    /// the raw-keystroke handler rejected every modified key, silently
+    /// dropping the paste.
+    #[gpui::test]
+    async fn opencode_cookie_paste_feeds_the_save_flow(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-cookie-paste-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("Fe26pasted\n".to_string()));
+        });
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+        let field = cx
+            .debug_bounds("provider-opencode-cookie-field")
+            .expect("the cookie field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-v");
+        cx.run_until_parked();
+
+        let (input, signed_in) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.opencode_cookie_input.clone(),
+                settings.provider_accounts.opencode_go.signed_in,
+            )
+        });
+        assert_eq!(
+            input, "Fe26pasted",
+            "the paste lands in the field, trailing newline trimmed"
+        );
+        assert!(!signed_in, "pasting alone does not sign in — Save does");
+
+        let save = cx
+            .debug_bounds("save-opencode-cookie")
+            .expect("Save is live once a cookie is pasted");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            CredentialStore::at(&store_path).get(OpenCodeGoUsageFetcher::COOKIE_KEY),
+            Some("Fe26pasted".to_string()),
+            "the pasted cookie reaches the credential store through Save"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-12: the workspace-ID override is pasted from the opencode.ai
+    /// URL the same way. Ctrl-V must insert it — and because this field
+    /// *is* the durable value, the paste must route through the
+    /// persistence contract like every keystroke does.
+    #[gpui::test]
+    async fn opencode_workspace_override_paste_persists(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir =
+            std::env::temp_dir().join(format!("tiller-settings-override-paste-{}", std::process::id()));
+        let store_path = dir.join("credentials.json");
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("wrkpasted".to_string()));
+        });
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+        let field = cx
+            .debug_bounds("provider-opencode-workspace-override")
+            .expect("the override field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-v");
+        cx.run_until_parked();
+
+        let snapshot = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .snapshot()
+        });
+        assert_eq!(
+            snapshot.opencode_workspace_id_override, "wrkpasted",
+            "the pasted workspace id reaches the persistence contract"
+        );
+        assert_eq!(
+            saved.borrow().last().map(|s| s.opencode_workspace_id_override.clone()),
+            Some("wrkpasted".to_string()),
+            "the paste routed a snapshot through on_change"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// F-SET-12: Clear deletes the stored cookie, signs the provider out
     /// and removes it from the usage bar — the macOS Clear button's side
     /// effects. The masked field never echoed the stored value, so there
@@ -5591,6 +5760,77 @@ mod tests {
             .cloned()
             .expect("Save routed a snapshot through on_change");
         assert!(last.ollama_show_in_bar);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-13: the Ollama cookie is pasted like its OpenCode sibling —
+    /// ctrl-v into the focused field must land the clipboard text in the
+    /// input, so Save has the session cookie to store.
+    #[gpui::test]
+    async fn ollama_cookie_paste_feeds_the_save_flow(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-ollama-paste-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("sesspasted".to_string()));
+        });
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+        let field = cx
+            .debug_bounds("provider-ollama-cookie-field")
+            .expect("the cookie field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-v");
+        cx.run_until_parked();
+
+        let input = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .ollama_cookie_input
+                .clone()
+        });
+        assert_eq!(
+            input, "sesspasted",
+            "the paste lands in the Ollama cookie field"
+        );
+
+        let save = cx
+            .debug_bounds("save-ollama-cookie")
+            .expect("Save is live once a cookie is pasted");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            CredentialStore::at(&store_path).get(OllamaCloudUsageFetcher::COOKIE_KEY),
+            Some("sesspasted".to_string()),
+            "the pasted Ollama cookie reaches the credential store through Save"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
