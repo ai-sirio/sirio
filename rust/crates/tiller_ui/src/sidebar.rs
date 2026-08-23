@@ -5165,12 +5165,12 @@ mod tests {
         );
     }
 
-    /// The shell lets the panel be dragged between 160 and 480, and until
-    /// now the sidebar did not notice: every row was laid out against a
-    /// fixed 325 and the panel's `overflow_hidden` cut off the difference.
-    /// At the 160 floor that read as a worktree name ending mid-word with no
-    /// ellipsis — the text was not overflowing its row, the row was
-    /// overflowing the panel.
+    /// The shell lets the panel be dragged across its whole range, and the
+    /// sidebar did not notice: every row was laid out against a fixed 325
+    /// and the panel's `overflow_hidden` cut off the difference. At the
+    /// floor of the day — 160, before the rows themselves set it — that read
+    /// as a worktree name ending mid-word with no ellipsis: the text was not
+    /// overflowing its row, the row was overflowing the panel.
     #[gpui::test]
     async fn rows_follow_the_panel_width(cx: &mut gpui::TestAppContext) {
         let repo = scratch_repo("panel-width");
