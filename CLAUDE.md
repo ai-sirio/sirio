@@ -87,3 +87,20 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 - **Tests first**, standard Rust `#[test]` (see `Scripts/ci-linux.sh`'s comment on the two workspace-wide tests that need to run per-crate rather than concurrently with every other test binary).
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
 - `Scripts/ci.sh` must print `CI OK` before a PR is opened.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`tillerai/tiller`), driven through the `gh`
+CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` plus `docs/adr/` at the repo root, both created
+lazily by `/domain-modeling` rather than up front. See `docs/agents/domain.md`.
