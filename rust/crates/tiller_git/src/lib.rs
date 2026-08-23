@@ -63,7 +63,7 @@ pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, direct
 pub use error::{GitActionError, GitError};
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
 pub use graph::{GraphRow, layout};
-pub use log::{CommitRecord, GitLog, parse_log};
+pub use log::{CommitRecord, GitLog, LogFilter, parse_log};
 pub use remote::{GitRemote, github_owner, project_name};
 pub use side_by_side::{
     DiffSideBySideLine, DiffSideBySideRow, GitDiffSideBySide, GitDiffSideBySideLine,
