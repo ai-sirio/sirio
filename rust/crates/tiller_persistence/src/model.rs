@@ -386,6 +386,13 @@ pub struct AppSettings {
     /// "appearance.translucency" — default: false. A Linux-rewrite-only
     /// key (F-SET-20); there is no Swift-parity `@AppStorage` field for it.
     pub translucency: bool,
+    /// "appearance.sidebarWidth" — default 325, clamped to 160...480. A
+    /// Linux-rewrite-only key: the Swift app's sidebar was a fixed width, so
+    /// unlike every other key here this one has no `@AppStorage` antecedent.
+    pub sidebar_width: i64,
+    /// "appearance.rightPanelWidth" — default 405, clamped to 220...640.
+    /// Linux-rewrite-only for the same reason as `sidebar_width`.
+    pub right_panel_width: i64,
 }
 
 impl Default for AppSettings {
@@ -410,6 +417,8 @@ impl Default for AppSettings {
             refresh_interval_min: 5,
             opencode_workspace_id_override: String::new(),
             translucency: false,
+            sidebar_width: 325,
+            right_panel_width: 405,
         }
     }
 }
@@ -437,6 +446,10 @@ pub mod settings_keys {
     pub const REFRESH_INTERVAL_MIN: &str = "usage.refreshIntervalMin";
     pub const OPENCODE_WORKSPACE_ID_OVERRIDE: &str = "usage.opencodeGo.workspaceIdOverride";
     pub const TRANSLUCENCY: &str = "appearance.translucency";
+    /// Linux-rewrite-only: no Swift antecedent (the Swift sidebar was fixed).
+    pub const SIDEBAR_WIDTH: &str = "appearance.sidebarWidth";
+    /// Linux-rewrite-only: no Swift antecedent.
+    pub const RIGHT_PANEL_WIDTH: &str = "appearance.rightPanelWidth";
 }
 
 /// The Swift ranges settings values are clamped into.
@@ -448,6 +461,10 @@ pub mod settings_ranges {
     pub const CHAT_RETENTION: std::ops::RangeInclusive<i64> = 5..=500;
     pub const MOUNTED_WORKTREES: std::ops::RangeInclusive<i64> = 2..=50;
     pub const REFRESH_INTERVAL_MIN: std::ops::RangeInclusive<i64> = 1..=60;
+    /// Linux-rewrite-only; no Swift range to mirror.
+    pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<i64> = 160..=480;
+    /// Linux-rewrite-only; no Swift range to mirror.
+    pub const RIGHT_PANEL_WIDTH: std::ops::RangeInclusive<i64> = 220..=640;
 }
 
 /// One isolated agent-CLI account, as persisted (F-SET-15). Mirrors the

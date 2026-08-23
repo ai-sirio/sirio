@@ -12863,6 +12863,12 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
         translucency: snapshot.translucency,
+        // Not in the Settings UI snapshot: the widths belong to the drag.
+        // Callers must re-apply the live values — see the `on_change`
+        // handler below. Filling these from `Default` here would reset a
+        // dragged panel every time any unrelated setting changed.
+        sidebar_width: AppSettings::default().sidebar_width,
+        right_panel_width: AppSettings::default().right_panel_width,
     }
 }
 
@@ -13191,8 +13197,11 @@ fn main() {
                             for (index, color) in snapshot.agent_colors.iter().enumerate() {
                                 session_store_for_settings.save_agent_color_id(index, color.id());
                             }
-                            session_store_for_settings
-                                .save_settings(&app_settings_from_snapshot(snapshot));
+                            let stored = session_store_for_settings.load_settings();
+                            let mut settings = app_settings_from_snapshot(snapshot);
+                            settings.sidebar_width = stored.sidebar_width;
+                            settings.right_panel_width = stored.right_panel_width;
+                            session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
                             }
@@ -18835,6 +18844,8 @@ mod tests {
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
             translucency: true,
+            sidebar_width: 325,
+            right_panel_width: 405,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -18941,6 +18952,8 @@ mod tests {
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
             translucency: true,
+            sidebar_width: 325,
+            right_panel_width: 405,
         };
         store.save_settings(&persisted);
 
