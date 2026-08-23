@@ -1016,21 +1016,18 @@ pub struct Chat {
 impl EventEmitter<ChatEvent> for Chat {}
 
 impl Chat {
-    /// Launches a real ACP agent and returns a `Chat` wired to its event
-    /// stream. The command defaults to the same `npx` agent used by
-    /// `tiller_acp`'s own smoke test, overridable with `TILLER_ACP_PROGRAM`.
-    pub fn launch(cx: &mut Context<Self>) -> Self {
-        let cwd = default_agent_cwd();
-
+    /// Launches a real ACP agent from the command the caller resolved.
+    ///
+    /// There is deliberately no default: a hardcoded `npx …@latest` here
+    /// meant every chat tab could start a network fetch before it could say
+    /// anything, and silently connected a tab to Claude's server whatever
+    /// agent the user picked. `TILLER_ACP_PROGRAM` stays as a test escape
+    /// hatch, because integration tests need one.
+    pub fn launch_from_env(cx: &mut Context<Self>) -> Option<Self> {
         let command = std::env::var_os("TILLER_ACP_PROGRAM")
             .map(PathBuf::from)
-            .map(AgentCommand::new)
-            .unwrap_or_else(|| {
-                AgentCommand::new("npx")
-                    .args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-            });
-
-        Self::launch_with_command(command, cwd, cx)
+            .map(AgentCommand::new)?;
+        Some(Self::launch_with_command(command, default_agent_cwd(), cx))
     }
 
     /// Launches a real ACP agent from an explicit command and returns a
@@ -1073,31 +1070,27 @@ impl Chat {
         chat
     }
 
-    /// [`Self::launch`] with persistence: the same default-agent command,
-    /// but wired to save/restore its transcript and to browse the
-    /// worktree's Chat History (F-CHAT-34).
+    /// [`Self::launch_from_env`] with persistence: the same env-provided
+    /// command, wired to save/restore its transcript and to browse the
+    /// worktree's Chat History (F-CHAT-34). `None` when no command is set.
     pub fn launch_with_persistence(
         database_path: PathBuf,
         tab_id: String,
         worktree_id: String,
         cx: &mut Context<Self>,
-    ) -> Self {
+    ) -> Option<Self> {
         let cwd = default_agent_cwd();
         let command = std::env::var_os("TILLER_ACP_PROGRAM")
             .map(PathBuf::from)
-            .map(AgentCommand::new)
-            .unwrap_or_else(|| {
-                AgentCommand::new("npx")
-                    .args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-            });
-        Self::launch_with_command_and_persistence(
+            .map(AgentCommand::new)?;
+        Some(Self::launch_with_command_and_persistence(
             command,
             cwd,
             database_path,
             tab_id,
             worktree_id,
             cx,
-        )
+        ))
     }
 
     fn new(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {

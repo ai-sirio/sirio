@@ -16,6 +16,7 @@ tiller_theme.workspace = true
 tiller_ui.workspace = true
 tiller_terminal.workspace = true
 tiller_agents.workspace = true
+tiller_registry = { workspace = true }
 tiller_acp.workspace = true
 tiller_project.workspace = true
 tiller_persistence.workspace = true
