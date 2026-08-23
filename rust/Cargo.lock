@@ -6813,6 +6813,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiller_registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tiller_terminal"
 version = "0.1.0"
 dependencies = [
