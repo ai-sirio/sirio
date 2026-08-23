@@ -19,7 +19,7 @@ use crate::editor::fs_actions;
 /// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
 const TOOLBAR_HEIGHT: f32 = 34.0;
 /// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
-pub(crate) const ROW_HEIGHT: f32 = 30.0;
+pub(crate) const ROW_HEIGHT: f32 = 26.0;
 
 /// The git state the Files tree paints, for both halves of the tree.
 ///
@@ -488,12 +488,12 @@ impl RightPanel {
                 this.child(
                     div()
                         .debug_selector(|| "file-file-icon".to_owned())
-                        .w(px(14.0))
+                        .w(px(16.0))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(IconElement::new(glyph, IconSize::Small).text_color(theme.subtitle)),
+                        .child(IconElement::new(glyph, IconSize::Medium).text_color(theme.subtitle)),
                 )
             })
             .child(

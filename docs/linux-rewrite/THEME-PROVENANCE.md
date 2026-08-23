@@ -75,6 +75,28 @@ that raised role. Insets remain a derivation of `panel_surface` with the
 existing 0.72 dark and 0.93 light factors. The compact shell geometry is a
 4px panel gap, 4px outer inset, and 7px shell-panel radius.
 
+## Translucency variant (amended 2026-08-23)
+
+The 2026-08-20 shell design kept panels opaque so the desktop could not
+interfere with terminal, code, chat, or editor readability. That rule is
+amended: when the translucency toggle is on **and** the resolved window
+material is native blur (Windows/macOS), the app installs a theme variant in
+which the structural surfaces are faded to **0.85 alpha** — `panel_surface`
+and its aliases (`background`, `sidebar`, `chat_surface`, `chrome_tint`),
+`raised` and its alias `composer`, `inset`, and `terminal_surface`. The fade
+is strong enough to read as real translucency (the Swift-era 0.96 was
+imperceptible) yet safe to composite: the frame material behind the panels
+is a near-identical grey in both appearances, so a panel at 0.85 alpha
+barely shifts in hue and keeps its text readable.
+
+The frame material keeps its designed alphas (0.88 dark / 0.82 light) and
+is not faded twice; washes, borders, selection, and text keep full opacity.
+The variant is re-derived from `mode` + `appearance` (`Theme::with_translucency`),
+so the opaque base is always recoverable and every theme reinstall (`install`,
+`set_mode`, the portal follower) preserves the flag by construction. On
+platforms without native blur the toggle changes nothing visually — the
+spec's opaque-fallback rule still holds.
+
 The raw sampled meta/disabled values are **not** the final secondary-body
 values. The final `#85888F` / `#667379` secondary tokens are an explicit
 accessibility adjustment: both primary and secondary body roles clear WCAG AA

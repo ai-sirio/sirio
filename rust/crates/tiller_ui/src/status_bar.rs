@@ -361,7 +361,7 @@ impl Render for StatusBar {
                 .text_size(theme.typography.footnote)
                 .text_color(theme.title)
                 .hover(|style| style.bg(theme.row_hover))
-                .child(IconElement::new(icon, IconSize::XSmall).text_color(theme.title))
+                .child(IconElement::new(icon, IconSize::Medium).text_color(theme.title))
         };
 
         // The four provider segments, in the reference order: Claude,

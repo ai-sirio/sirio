@@ -256,15 +256,16 @@ impl Icon {
         )
     }
 
-    /// Whether the mark carries its own chromatic colours (omp's gradient).
-    /// Such marks are painted full-colour and never tinted by the theme;
-    /// the remaining marks are monochrome by design and follow the tinted
-    /// path, exactly as the Swift app renders them with `.primary`.
+    /// Whether the mark carries its own chromatic colours (omp's gradient,
+    /// and every Material file-type asset's baked-in fills). Such marks are
+    /// painted full-colour and never tinted by the theme; the remaining
+    /// marks are monochrome by design and follow the tinted path, exactly
+    /// as the Swift app renders them with `.primary`.
     ///
-    /// Only `OhMyPi` stays in this set. Every Zed-provided mark and Tiller's
-    /// Pi fallback are monochrome and follow the theme tint.
+    /// Only `OhMyPi` and the `FileType` set stay chromatic. Every Zed-provided
+    /// mark and Tiller's Pi fallback are monochrome and follow the theme tint.
     pub fn has_own_colours(self) -> bool {
-        matches!(self, Icon::OhMyPi)
+        matches!(self, Icon::OhMyPi | Icon::FileType(_))
     }
 
     /// Resolves the stable icon for a catalog agent id.
@@ -647,6 +648,24 @@ mod tests {
                 icon.has_own_colours(),
                 icon == Icon::OhMyPi,
                 "unexpected full-colour icon: {icon:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn material_file_type_icons_carry_their_own_colours() {
+        // GPUI's stock svg element tints its whole render with the text
+        // colour, so a FileType icon must take the full-colour raster path
+        // to keep the baked-in fills its Material asset ships with.
+        for icon in [Icon::file_type("rust"), Icon::file_type("javascript")] {
+            assert!(
+                icon.has_own_colours(),
+                "{icon:?} must be painted full-colour, not tinted"
+            );
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            assert!(
+                svg.contains("fill=\"#"),
+                "{icon:?} must bake its chromatic fills into the asset"
             );
         }
     }

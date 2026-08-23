@@ -58,14 +58,16 @@
 //! - **Right panel header 40px, activity rows 48px, `PANEL_WIDTH` 405**:
 //!   Tiller-only surface (waku's right panel is a native webview, "not
 //!   part of Tiller's UI"). No waku measurement exists.
-//! - **`caption2` is 12.0, off the measured scale**: waku's smallest
+//! - **`caption2` is 13.0, off the measured scale**: waku's smallest
 //!   step is 10.5, and Tiller first sized its dense strips there for fit
 //!   — the status bar (three provider segments + worktree context), tab
 //!   bar and toolbar labels. 10.5 read too small on those surfaces, so
-//!   the token was raised to 12.0. Two consequences, both accepted:
-//!   12.0 is not a waku step, and it puts `caption2` ABOVE `footnote`
-//!   (11.5), so the scale is no longer monotonic in the order its names
-//!   imply. The name stays because every call site already spells it.
+//!   the token was raised — and the whole UI scale now reads at 12–13
+//!   rather than waku's 11.5–12.5. Two consequences, both accepted:
+//!   13.0 is not a waku step, and it puts `caption2` ABOVE `footnote`
+//!   (12.0), sharing `callout`'s step — so the scale is no longer
+//!   monotonic in the order its names imply. The name stays because
+//!   every call site already spells it.
 //! - **User pill text at body 13.5/21 instead of waku's 14/20**: Tiller
 //!   keeps one body size; the pill is distinguished by its container
 //!   (max 540, r12, raised, px12/py8 — all pinned below), not by a second
@@ -98,7 +100,7 @@
 //!   (**13.5/12.5/11.5/10.5**) via the `Typography` tokens. The last of
 //!   those steps has since been raised — see the departures ledger.
 //! - File-view code text was 12pt (Swift's mono size), now the frozen
-//!   code size **11.5** (`typography.code_size`).
+//!   code size **12** (`typography.code_size`).
 
 use gpui::{FontWeight, Rgba, px};
 use tiller_theme::{Appearance, Theme};
@@ -156,14 +158,15 @@ fn accent_resolves_to_the_same_coral_under_either_token_name() {
     expect_hex(light.tab_focus_accent, 0xAD_58_1F, "light tab_focus_accent");
 }
 
-/// The type scale is the measured one: body 13.5/21 (the document ratio),
-/// UI chrome 11.5/16, callout 12.5, code 11.5/17.5, and the heading steps
-/// off body (×1.45/×1.28/×1.14/×1.05). These are the values the surfaces
-/// resolve through `theme.typography`; a drift here is a drift everywhere.
+/// The type scale: body 13.5/21 (the document ratio), UI chrome 12/16,
+/// callout 13, code 12/18, and the heading steps off body (×1.45/×1.28/
+/// ×1.15/×1.04). These are the values the surfaces resolve through
+/// `theme.typography`; a drift here is a drift everywhere.
 ///
-/// `caption2` is the one member that is NOT a measured step — it was
-/// raised to 12.0, above `footnote`. It is pinned here all the same: a
-/// value nobody measured still has to be a value somebody decided.
+/// `caption2` shares callout's 13.0 step — above `footnote` (12.0) — the
+/// raised, still-deliberate off-scale size for dense strips. It is pinned
+/// here all the same: a value nobody measured still has to be a value
+/// somebody decided.
 #[test]
 fn type_scale_is_the_measured_one() {
     let typography = Theme::dark().typography;
@@ -174,22 +177,22 @@ fn type_scale_is_the_measured_one() {
         px(21.0),
         "body 13.5 @ 21 (×1.56)"
     );
-    assert_eq!(typography.ui_size, px(11.5), "UI chrome 11.5");
-    assert_eq!(typography.ui_line_height, px(16.0), "chrome 11.5 @ 16");
-    assert_eq!(typography.callout, px(12.5), "callout 12.5");
+    assert_eq!(typography.ui_size, px(12.0), "UI chrome 12.0");
+    assert_eq!(typography.ui_line_height, px(16.0), "chrome 12 @ 16");
+    assert_eq!(typography.callout, px(13.0), "callout 13.0");
     assert_eq!(
         typography.caption2,
-        px(12.0),
-        "caption2 12.0 — the deliberate off-scale step, above footnote"
+        px(13.0),
+        "caption2 13.0 — the deliberate off-scale step, above footnote"
     );
-    assert_eq!(typography.headline, px(13.5), "headline is the body size");
-    assert_eq!(typography.code_size, px(11.5), "code 11.5");
-    assert_eq!(typography.code_line_height, px(17.5), "code 11.5 @ 17.5");
+    assert_eq!(typography.headline, px(14.0), "headline 14.0");
+    assert_eq!(typography.code_size, px(12.0), "code 12.0");
+    assert_eq!(typography.code_line_height, px(18.0), "code 12 @ 18");
     assert_eq!(typography.code_weight, FontWeight::NORMAL);
     assert_eq!(typography.large_title, px(20.0), "h1 13.5 × 1.45");
     assert_eq!(typography.title, px(17.0), "h2 13.5 × 1.28");
-    assert_eq!(typography.title2, px(15.0), "h3 13.5 × 1.14");
-    assert_eq!(typography.title3, px(14.0), "h4 13.5 × 1.05");
+    assert_eq!(typography.title2, px(15.0), "h3 13.5 × 1.15");
+    assert_eq!(typography.title3, px(14.0), "h4 13.5 × 1.04");
 }
 
 /// Radii resolve through the token set, not fresh literals: the measured
@@ -284,7 +287,7 @@ fn bars_and_rows_use_the_measured_density() {
     assert_eq!(changes::DIFF_LINE_HEIGHT, 20.0, "diff lines 20px");
     assert_eq!(
         right_panel::ROW_HEIGHT,
-        30.0,
+        26.0,
         "file tree in the right panel too"
     );
 }

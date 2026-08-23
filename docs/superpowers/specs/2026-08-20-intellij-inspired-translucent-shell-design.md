@@ -276,3 +276,17 @@ The work is complete when:
 - terminal ANSI and syntax colours are unchanged;
 - overlays and content are not clipped;
 - `Scripts/ci.sh` prints `CI OK`.
+
+## Amendment (2026-08-23) — translucent panels
+
+"Panels remain opaque" (above) is amended: when the translucency toggle is
+on and the resolved material is native blur, the structural surfaces
+(`panel_surface` and its aliases, `raised`/`composer`, `inset`,
+`terminal_surface`) are faded to 0.85 alpha via a theme variant
+(`Theme::with_translucency`), re-derived from `mode` + `appearance` so the
+opaque base stays recoverable and every theme reinstall preserves the
+flag. Frame material alphas (0.88/0.82) are unchanged; washes, borders,
+selection, and text keep full opacity. Unsupported platforms keep the
+cleanly-opaque fallback — the toggle changes nothing visually there.
+Recorded in `docs/linux-rewrite/THEME-PROVENANCE.md` (Translucency
+variant).
