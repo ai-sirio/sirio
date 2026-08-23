@@ -12,3 +12,8 @@ publish.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Blocking on purpose: this crate does one 50 KB GET a day plus the
+# occasional download, and a second async runtime beside GPUI's and
+# tiller_acp's would cost more than it buys. `tiller` runs these calls on
+# the background executor.
+ureq = "3.4"

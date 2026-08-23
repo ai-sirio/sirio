@@ -3,9 +3,11 @@
 //!
 //! This crate is a leaf by design — see `Cargo.toml`.
 
+mod client;
 mod model;
 mod resolve;
 
+pub use client::RegistryClient;
 pub use model::{AcpRegistry, BinaryArtifact, Distribution, RegistryAgent};
 pub use resolve::{
     BuiltinAcp, InstalledAgent, Integrity, LaunchSource, ResolveInput, UnavailableReason,
