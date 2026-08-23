@@ -83,8 +83,12 @@
 //! - **Full circles are spelled as half the box** (6×6 dot at r3, 44×22
 //!   swatch at r11, 20px toggle at r10): numerically identical to
 //!   `rounded_full`; naming each would invent tokens for one value.
-//! - **`SIDEBAR_WIDTH` 325**: inside waku's resizable 180–420 range; the
-//!   reference freezes the range, not a default.
+//! - **`DEFAULT_SIDEBAR_WIDTH` 325, sidebar 160–480px**: 325 is inside
+//!   waku's resizable 180–420 range, and the reference freezes the range,
+//!   not a default. Same course as the right panel above: the width stopped
+//!   being a frozen constant when the sidebar became user-resizable, so 325
+//!   survives as the default, not as the geometry. Tiller's range is the
+//!   wider one because its rows carry a checkout path under the branch name.
 //! - **Icons are sized by the iconography scale (9–16px), not the type
 //!   scale**: glyph `text_size` calls are not type-scale members.
 //! - **The top bar is 38px (`BrowserChrome::bar_height`), not the 48px
