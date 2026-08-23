@@ -7,6 +7,7 @@ use gpui::{
 use std::cell::Cell;
 use std::rc::Rc;
 use tiller_agents::{AgentAvailability, discover_availability};
+use tiller_registry::LaunchSource;
 use tiller_theme::Theme;
 
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -195,6 +196,10 @@ pub struct TabBar {
     /// own callback pattern rather than growing either of their payloads.
     on_open_agent_settings: Option<Rc<dyn Fn()>>,
     chat_agents: Vec<AgentAvailability>,
+    /// The resolved launch source per adapter id (Task 9). The New Chat
+    /// picker offers exactly the adapters whose source can launch a chat
+    /// today, instead of asking a compile-time claim.
+    chat_launch_sources: std::collections::BTreeMap<String, LaunchSource>,
 }
 
 impl TabBar {
@@ -226,6 +231,7 @@ impl TabBar {
             on_chat_agent: None,
             on_open_agent_settings: None,
             chat_agents: discover_availability(),
+            chat_launch_sources: std::collections::BTreeMap::new(),
         }
     }
 
@@ -234,6 +240,20 @@ impl TabBar {
     pub fn with_chat_agents(mut self, agents: Vec<AgentAvailability>) -> Self {
         self.chat_agents = agents;
         self
+    }
+
+    /// Pins the launch sources the New Chat picker filters on (Task 9).
+    pub fn with_chat_launch_sources(
+        mut self,
+        sources: Vec<(String, LaunchSource)>,
+    ) -> Self {
+        self.chat_launch_sources = sources.into_iter().collect();
+        self
+    }
+
+    /// Applies a fresh launch-source sweep from the host (Task 8).
+    pub fn apply_chat_launch_sources(&mut self, sources: Vec<(String, LaunchSource)>) {
+        self.chat_launch_sources = sources.into_iter().collect();
     }
 
     /// Installs the callback used by every menu action.
@@ -514,10 +534,19 @@ impl Render for TabBar {
         let chat_picker_open = self.chat_picker_open;
         let anchor_bounds = self.anchor_bounds.clone();
 
+        // The picker offers exactly the adapters whose resolved source can
+        // launch a chat today (Task 9): a Builtin or Installed source.
+        // Before the host pushes sources, nothing is offered — hiding beats
+        // guessing from a compile-time claim.
         let available_chat_agents = self
             .chat_agents
             .iter()
-            .filter(|agent| agent.is_available() && agent.acp_program().is_some())
+            .filter(|agent| {
+                matches!(
+                    self.chat_launch_sources.get(agent.id),
+                    Some(LaunchSource::Builtin { .. } | LaunchSource::Installed(_))
+                )
+            })
             .collect::<Vec<_>>();
         let mut chat_agent_menu = div()
             .id("new-chat-agent-menu")
@@ -760,6 +789,10 @@ mod tests {
         let window = cx.add_window(|_window, cx| {
             TabBar::new(cx)
                 .with_chat_agents(vec![available_agent("codex", "Codex")])
+                .with_chat_launch_sources(vec![(
+                    "codex".to_string(),
+                    LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
+                )])
                 .on_new_tab(move |action| collected.borrow_mut().push(action))
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -981,6 +1014,28 @@ mod tests {
                         executable: None,
                     },
                 ])
+                .with_chat_launch_sources(vec![
+                    (
+                        "codex".to_string(),
+                        LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
+                    ),
+                    (
+                        "pi".to_string(),
+                        LaunchSource::Installed(tiller_registry::InstalledAgent {
+                            id: "pi-acp".into(),
+                            version: "1.0.0".into(),
+                            executable: "/data/pi-acp/bin/pi-acp".into(),
+                            args: vec![],
+                            integrity: tiller_registry::Integrity::Sha256,
+                        }),
+                    ),
+                    (
+                        "claude".to_string(),
+                        LaunchSource::Unavailable(
+                            tiller_registry::UnavailableReason::NotInRegistry,
+                        ),
+                    ),
+                ])
                 .on_new_tab(move |action| collected.borrow_mut().push(action))
                 .on_chat_agent(move |id| selected_agents_for_callback.borrow_mut().push(id))
         });
@@ -1005,12 +1060,12 @@ mod tests {
         assert!(cx.debug_bounds("new-chat-agent-menu").is_some());
         assert!(cx.debug_bounds("new-tab-chat-agent-codex").is_some());
         assert!(
-            cx.debug_bounds("new-tab-chat-agent-pi").is_none(),
-            "an installed adapter without an ACP server must not be offered"
+            cx.debug_bounds("new-tab-chat-agent-pi").is_some(),
+            "a Tiller-managed install is offered whether or not the CLI is on PATH"
         );
         assert!(
             cx.debug_bounds("new-tab-chat-agent-claude").is_none(),
-            "an unavailable adapter must not be offered"
+            "an adapter with no resolvable launch source must not be offered"
         );
 
         let codex = cx

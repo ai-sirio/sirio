@@ -850,13 +850,6 @@ enum WorkspaceAction {
     NewTabForWorktree(PathBuf, NewTabAction),
     NewChatAgent(&'static str),
     InstallSkill(tiller_project::SkillInstallCommand),
-    /// F-SET-18: an agent row's Install button was clicked. `command` is
-    /// [`tiller_agents::AgentAvailability::install_command`]'s documented
-    /// shell line for `agent_id`.
-    InstallAgent {
-        agent_id: &'static str,
-        command: &'static str,
-    },
     OpenSettings,
     /// F-TAB-08: clicking the New Chat menu's "Other agents…" empty-state
     /// card (drawn when no supported agent is on PATH) opens Settings
@@ -2572,7 +2565,7 @@ fn launch_source_in(
     launch: &AgentLaunchState,
     adapter_id: &str,
 ) -> tiller_registry::LaunchSource {
-    launch.sources.get(adapter_id).cloned().unwrap_or_else(|| {
+    launch.sources.get(adapter_id).cloned().unwrap_or({
         tiller_registry::LaunchSource::Unavailable(tiller_registry::UnavailableReason::NotInRegistry)
     })
 }
@@ -2604,13 +2597,6 @@ fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> Terminal
 }
 
 /// Builds the shell that runs an agent row's Install command (F-SET-18) —
-/// the documented `install_command` string, executed through the user's
-/// shell exactly like [`skill_install_shell`] runs the skill provisioner.
-fn agent_install_shell(command: &str) -> TerminalShell {
-    let (program, args) = command_shell_invocation(command);
-    TerminalShell::WithArguments { program, args }
-}
-
 fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
 }
@@ -3785,10 +3771,32 @@ struct PendingPaneClose {
 }
 
 impl TillerWorkspace {
-    /// Recomputes every adapter's launch source from current facts.
-    fn recompute_launch_sources(&mut self) {
+    /// Recomputes every adapter's launch source from current facts and
+    /// pushes them to the surfaces that render them (Task 9).
+    fn recompute_launch_sources(&mut self, cx: &mut Context<Self>) {
         self.launch.sources =
             compute_launch_sources(self.launch.registry.as_ref(), &self.launch.store);
+        let sources: Vec<(String, tiller_registry::LaunchSource)> = self
+            .launch
+            .sources
+            .iter()
+            .map(|(id, source)| (id.clone(), source.clone()))
+            .collect();
+        let mut registry_versions = std::collections::BTreeMap::new();
+        if let Some(registry) = self.launch.registry.as_ref() {
+            for adapter in tiller_agents::ALL {
+                let Some(mapped) = tiller_registry::registry_id(adapter.id()) else {
+                    continue;
+                };
+                if let Some(agent) = registry.agent(mapped) {
+                    registry_versions.insert(adapter.id().to_string(), agent.version.clone());
+                }
+            }
+        }
+        self.tab_bar
+            .update(cx, |tab_bar, _| tab_bar.apply_chat_launch_sources(sources.clone()));
+        self.settings
+            .update(cx, |settings, _| settings.apply_launch_sources(sources, registry_versions));
     }
 
     fn launch_source_for(&self, adapter_id: &str) -> tiller_registry::LaunchSource {
@@ -3903,14 +3911,6 @@ impl TillerWorkspace {
                                     workspace.add_terminal_tab_with_shell(
                                         "Install Skill",
                                         skill_install_shell(command),
-                                        None,
-                                        cx,
-                                    );
-                                }
-                                WorkspaceAction::InstallAgent { agent_id, command } => {
-                                    workspace.add_terminal_tab_with_shell(
-                                        format!("Install {agent_id}"),
-                                        agent_install_shell(command),
                                         None,
                                         cx,
                                     );
@@ -4365,7 +4365,9 @@ impl TillerWorkspace {
         // reconciles the panel's selection state against
         // `has_current_worktree()` every time it runs, including this first
         // call, so construction needs no separate one-off check.
+        workspace.bind_settings(cx);
         workspace.sync_activity(cx);
+        workspace.recompute_launch_sources(cx);
         // Sweep abandoned installs and fetch the registry off the UI
         // thread; the foreground continuation recomputes every launch
         // source with whatever the network added. Until then the sources
@@ -4389,11 +4391,13 @@ impl TillerWorkspace {
                     )
                 })
                 .await;
-            let _ = this.update(cx, |workspace, _| match fetched {
-                Ok(registry) => workspace.launch.registry = Some(registry),
-                Err(error) => eprintln!("[launch] registry fetch failed: {error:#}"),
+            let _ = this.update(cx, |workspace, cx| {
+                match fetched {
+                    Ok(registry) => workspace.launch.registry = Some(registry),
+                    Err(error) => eprintln!("[launch] registry fetch failed: {error:#}"),
+                }
+                workspace.recompute_launch_sources(cx);
             });
-            let _ = this.update(cx, |workspace, _| workspace.recompute_launch_sources());
         })
         .detach();
         workspace
@@ -4605,6 +4609,58 @@ impl TillerWorkspace {
     /// Chat-local edit summaries emit only an intent to open a file; the
     /// workspace owns the editor tab and routes that intent through the same
     /// de-duplicating path used by the file tree and Changes surface.
+    /// Subscribes the workspace to the Agents screen's requests (Task 9):
+    /// Install/Update buttons emit; this host runs the installer on the
+    /// background executor and recomputes when it settles.
+    fn bind_settings(&mut self, cx: &mut Context<Self>) {
+        cx.subscribe(
+            &self.settings,
+            |workspace, _, event: &tiller_ui::settings::SettingsEvent, cx| match event {
+                tiller_ui::settings::SettingsEvent::InstallAgent(id)
+                | tiller_ui::settings::SettingsEvent::UpdateAgent(id) => {
+                    workspace.start_agent_install(id, cx);
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn start_agent_install(&mut self, adapter_id: &str, cx: &mut Context<Self>) {
+        let store = tiller_registry::InstallStore::new(self.launch.store.root().to_path_buf());
+        let platform = tiller_registry::current_platform_key();
+        // An update re-runs the installer for the mapped registry entry; a
+        // fresh install uses the row's own source. Anything else has
+        // nothing honest to run.
+        let agent = match self.launch_source_for(adapter_id) {
+            tiller_registry::LaunchSource::Installable { agent } => agent,
+            tiller_registry::LaunchSource::Installed(_) => {
+                let mapped = tiller_registry::registry_id(adapter_id)
+                    .and_then(|mapped| self.launch.registry.as_ref().and_then(|r| r.agent(mapped)).cloned());
+                let Some(agent) = mapped else {
+                    return;
+                };
+                agent
+            }
+            _ => return,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    tiller_registry::Installer::new(store).install(&agent, platform)
+                })
+                .await;
+            let _ = this.update(cx, |_workspace, _| match result {
+                Ok(installed) => {
+                    eprintln!("[launch] installed {} v{}", installed.id, installed.version)
+                }
+                Err(error) => eprintln!("[launch] install failed: {error}"),
+            });
+            let _ = this.update(cx, |workspace, cx| workspace.recompute_launch_sources(cx));
+        })
+        .detach();
+    }
+
     fn bind_chat(chat: &Entity<Chat>, cx: &mut Context<Self>) {
         cx.subscribe(chat, |workspace, chat_entity, event: &ChatEvent, cx| match event {
             ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
@@ -13590,15 +13646,6 @@ fn main() {
                             move |command| {
                                 if let Ok(mut actions) = pending_actions.lock() {
                                     actions.push(WorkspaceAction::InstallSkill(command));
-                                }
-                            }
-                        })
-                        .on_install_agent({
-                            let pending_actions = pending_for_settings.clone();
-                            move |agent_id, command| {
-                                if let Ok(mut actions) = pending_actions.lock() {
-                                    actions
-                                        .push(WorkspaceAction::InstallAgent { agent_id, command });
                                 }
                             }
                         })
