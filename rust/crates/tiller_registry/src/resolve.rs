@@ -89,6 +89,11 @@ pub fn registry_id(adapter_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether the id names one of Tiller's five built-in adapters.
+fn is_known_adapter(adapter_id: &str) -> bool {
+    matches!(adapter_id, "claude" | "codex" | "pi" | "opencode" | "omp")
+}
+
 pub fn resolve(input: ResolveInput<'_>) -> LaunchSource {
     if let Some(builtin) = input.builtin
         && input.builtin_on_path
@@ -109,10 +114,16 @@ pub fn resolve(input: ResolveInput<'_>) -> LaunchSource {
         return LaunchSource::Unavailable(UnavailableReason::NotInRegistry);
     };
 
-    // An adapter uses its mapped registry id; a bare registry agent uses its
-    // own.
-    let lookup = registry_id(input.adapter_id).unwrap_or(input.adapter_id);
-    let Some(agent) = registry.agent(lookup) else {
+    // A known adapter goes through the explicit table, and a table `None`
+    // is final: if the registry ever published an agent literally named
+    // "omp", it must not silently start answering the omp lookup. Any other
+    // id is a bare registry agent and uses its own id.
+    let lookup = if is_known_adapter(input.adapter_id) {
+        registry_id(input.adapter_id)
+    } else {
+        Some(input.adapter_id)
+    };
+    let Some(agent) = lookup.and_then(|id| registry.agent(id)) else {
         return LaunchSource::Unavailable(UnavailableReason::NotInRegistry);
     };
 
@@ -318,5 +329,64 @@ mod tests {
             LaunchSource::Installable { agent } => assert_eq!(agent.id, "github-copilot-cli"),
             other => panic!("expected Installable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn npx_covers_a_platform_the_binary_does_not_build_for() {
+        // The kilo/sigit shape: a binary that exists only for other
+        // platforms, plus npx which works wherever Node does. Regression
+        // here breaks those agents on exactly the platforms they do not
+        // build for.
+        let registry = registry_with(
+            "kilo-like",
+            vec![
+                binary_for("darwin-aarch64"),
+                Distribution::Npx { package: "@example/kilo-acp".into(), args: Vec::new() },
+            ],
+        );
+        let source = resolve(ResolveInput {
+            adapter_id: "kilo-like",
+            ..input(Some(&registry))
+        });
+        match source {
+            LaunchSource::Installable { agent } => assert_eq!(agent.id, "kilo-like"),
+            other => panic!("expected Installable via npx, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_installed_agent_beats_an_installable_registry_row() {
+        // Both rungs in competition: the managed copy wins over downloading.
+        let registry = registry_with("opencode", vec![binary_for("linux-x86_64")]);
+        assert_eq!(
+            resolve(ResolveInput {
+                installed: Some((installed(), true)),
+                ..input(Some(&registry))
+            }),
+            LaunchSource::Installed(installed())
+        );
+    }
+
+    #[test]
+    fn nothing_known_at_all_is_not_in_registry() {
+        // Reaches the `input.registry` guard: no builtin, no install, and
+        // no cached registry copy.
+        assert_eq!(resolve(input(None)), LaunchSource::Unavailable(UnavailableReason::NotInRegistry));
+    }
+
+    #[test]
+    fn a_known_adapter_never_falls_through_to_bare_name_lookup() {
+        // If the registry ever published an agent literally called "omp",
+        // it must not start answering the omp adapter's lookup: the table's
+        // `None` means "omp is reachable only through its own subcommand",
+        // and that answer is final.
+        let registry = registry_with("omp", vec![binary_for("linux-x86_64")]);
+        assert_eq!(
+            resolve(ResolveInput {
+                adapter_id: "omp",
+                ..input(Some(&registry))
+            }),
+            LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
+        );
     }
 }
