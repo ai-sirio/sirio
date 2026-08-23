@@ -175,4 +175,24 @@ mod tests {
         assert_eq!(right, Some(220.0));
     }
 
+    /// Two numbers, two crates, no compiler tying them together. This test is
+    /// the only thing that notices when one moves without the other.
+    #[test]
+    fn panel_ranges_match_the_persisted_settings_ranges() {
+        use tiller_persistence::settings_ranges;
+
+        let (left_floor, left_ceiling) = PanelSide::Left.range();
+        assert_eq!(left_floor, *settings_ranges::SIDEBAR_WIDTH.start() as f32);
+        assert_eq!(left_ceiling, *settings_ranges::SIDEBAR_WIDTH.end() as f32);
+
+        let (right_floor, right_ceiling) = PanelSide::Right.range();
+        assert_eq!(
+            right_floor,
+            *settings_ranges::RIGHT_PANEL_WIDTH.start() as f32
+        );
+        assert_eq!(
+            right_ceiling,
+            *settings_ranges::RIGHT_PANEL_WIDTH.end() as f32
+        );
+    }
 }
