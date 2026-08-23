@@ -9296,7 +9296,7 @@ impl TillerWorkspace {
             .px(px(10.0))
             .overflow_hidden()
             .rounded_t(px(6.0))
-            .text_size(px(12.0))
+            .text_size(px(13.0))
             .text_color(if active {
                 theme.title_selected
             } else {
@@ -9422,7 +9422,7 @@ impl TillerWorkspace {
                             div()
                                 .id(format!("workspace-tab-exit-{id}"))
                                 .debug_selector(move || format!("workspace-tab-exit-{id}"))
-                                .text_size(px(9.0))
+                                .text_size(px(10.0))
                                 .text_color(theme.meta)
                                 .child(label),
                         )
@@ -9439,7 +9439,7 @@ impl TillerWorkspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(13.0))
+                        .text_size(px(14.0))
                         .text_color(theme.subtitle)
                         .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
                         .on_click(move |_, window, cx| {
@@ -10396,7 +10396,7 @@ impl TillerWorkspace {
                                 .flex()
                                 .items_center()
                                 .bg(theme.background)
-                                .text_size(px(13.0))
+                                .text_size(px(14.0))
                                 .text_color(theme.title)
                                 .child(self.terminal_breadcrumb.clone()),
                         )
@@ -11763,6 +11763,7 @@ impl Render for TillerWorkspace {
                 .flex_col()
                 .size_full()
                 .bg(frame_fill)
+                .font_family(theme.typography.ui_family)
                 .track_focus(&self.root_focus)
                 .capture_key_down(cx.listener(Self::handle_root_key_down))
                 .on_action(cx.listener(Self::handle_close_settings_surface))
@@ -11826,6 +11827,7 @@ impl Render for TillerWorkspace {
             .flex_col()
             .size_full()
             .bg(frame_fill)
+            .font_family(theme.typography.ui_family)
             .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::handle_root_key_down))
             .on_action(cx.listener(Self::handle_new_terminal_tab))

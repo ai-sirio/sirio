@@ -537,11 +537,11 @@ impl Render for Titlebar {
                         .rounded(px(3.0))
                         .bg(cosmic.semantic.accent.base),
                 )
-                .child(div().text_color(bar.on).text_size(px(12.5)).child(title))
+                .child(div().text_color(bar.on).text_size(px(13.5)).child(title))
                 .children(subtitle.map(|subtitle| {
                     div()
                         .text_color(bar.on.opacity(0.55))
-                        .text_size(px(12.5))
+                        .text_size(px(13.5))
                         .child(subtitle)
                 }))
         });

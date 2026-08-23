@@ -278,7 +278,8 @@ struct TerminalHandle {
     last_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     /// The terminal grid's last-measured cell width, in the same window-space
     /// pixels `last_bounds` uses. `TerminalElement::prepaint` measures this
-    /// from the real "MesloLGS Nerd Font Mono" glyph advance every frame
+    /// from the resolved terminal family's (see
+    /// `tiller_theme::terminal_family`) glyph advance every frame
     /// (`window.text_system().advance(..., 'm')`) and writes it here;
     /// `TerminalView::on_left_mouse_down` reads it back to convert a click's
     /// window-space x into a column the same way `prepaint` converted a
@@ -1827,7 +1828,7 @@ impl Element for TerminalElement {
         _: &mut App,
     ) -> Self::PrepaintState {
         *self.terminal.last_bounds.lock() = Some(bounds);
-        let terminal_font = font("MesloLGS Nerd Font Mono");
+        let terminal_font = font(tiller_theme::terminal_family());
         let font_id = window.text_system().resolve_font(&terminal_font);
         let cell_width = window
             .text_system()
@@ -2039,7 +2040,7 @@ impl gpui::Render for TerminalView {
                                     .debug_selector(move || {
                                         format!("terminal-context-item-{index}-reason")
                                     })
-                                    .text_size(px(11.0))
+                                    .text_size(px(12.0))
                                     .text_color(theme.meta)
                                     .child(reason),
                             )
@@ -2081,7 +2082,7 @@ impl gpui::Render for TerminalView {
                     .gap(px(10.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(px(15.0))
                             .text_color(theme.title)
                             .child("No terminal in this pane"),
                     )
@@ -2194,7 +2195,7 @@ impl gpui::Render for TerminalView {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .bg(theme.primary_pill_bg)
-                                .text_size(px(11.0))
+                                .text_size(px(12.0))
                                 .text_color(theme.tab_needs_input)
                                 .child("Running"),
                         )
@@ -2207,7 +2208,7 @@ impl gpui::Render for TerminalView {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .bg(theme.primary_pill_bg)
-                                .text_size(px(11.0))
+                                .text_size(px(12.0))
                                 .text_color(theme.subtitle)
                                 .child(label),
                         )
@@ -2232,7 +2233,7 @@ impl gpui::Render for TerminalView {
                     .px(px(24.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.tab_needs_input)
                             .child("Terminal failed to start"),
@@ -2240,7 +2241,7 @@ impl gpui::Render for TerminalView {
                     .child(
                         div()
                             .w_full()
-                            .text_size(px(12.0))
+                            .text_size(px(13.0))
                             .text_color(theme.subtitle)
                             .child(message.clone()),
                     )
@@ -2252,7 +2253,7 @@ impl gpui::Render for TerminalView {
                             .py(px(6.0))
                             .rounded(px(6.0))
                             .bg(theme.primary_pill_bg)
-                            .text_size(px(12.0))
+                            .text_size(px(13.0))
                             .text_color(theme.title)
                             .hover(|style| style.bg(theme.row_hover))
                             .cursor(gpui::CursorStyle::PointingHand)

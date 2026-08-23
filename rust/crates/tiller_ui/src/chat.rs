@@ -6695,7 +6695,7 @@ impl Chat {
             .on_click(move |_, window, cx| {
                 overflow_entity.update(cx, |chat, cx| chat.toggle_overflow(window, cx));
             })
-            .child(div().text_size(px(14.0)).text_color(colors.meta).child("…"));
+            .child(div().text_size(px(15.0)).text_color(colors.meta).child("…"));
 
         let context_percent = context_usage
             .as_ref()
@@ -7006,7 +7006,7 @@ impl Chat {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(14.0))
+                            .text_size(px(15.0))
                             .bg(if self.streaming || can_send {
                                 colors.overlay_strong
                             } else {

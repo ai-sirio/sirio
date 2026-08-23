@@ -2426,7 +2426,7 @@ impl Settings {
             .child(
                 div()
                     .w(px(18.0))
-                    .text_size(px(17.0))
+                    .text_size(px(18.0))
                     .text_color(glyph_color)
                     .child(text!(
                         id = format!("settings-provider-status-glyph-{title}"),
@@ -3475,7 +3475,7 @@ impl Settings {
                     .when(is_selected, |this| {
                         this.child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(12.0))
                                 .text_color(theme.tab_focus_accent)
                                 .child(text!("✓")),
                         )
@@ -5366,6 +5366,15 @@ mod tests {
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Same reason as the Ollama cookie tests above: the override
+        // field paints where `debug_bounds` can see it but, at the
+        // default test window height, below the window's hit-test
+        // bounds — so the click that focuses it lands on nothing and
+        // the keystrokes go to no one. This test used to clear the
+        // 1080px fold by a hair; the app-wide +1px type scale grew the
+        // rows above it past that margin. A user reaches it by
+        // scrolling; the test grows the window.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
         cx.run_until_parked();
 
         let providers = cx

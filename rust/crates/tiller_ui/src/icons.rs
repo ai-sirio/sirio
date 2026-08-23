@@ -601,10 +601,14 @@ mod tests {
 
     #[test]
     fn semantic_icon_sizes_follow_tiller_typography_scale() {
+        // Glyphs ride `base_size`, so the app-wide +1px on the type
+        // scale reaches them too — that is the property this pins.
+        // Were it to break, icons would shrink against the text they
+        // label rather than staying proportional to it.
         let default = tiller_theme::Typography::default_scale();
-        assert_eq!(IconSize::XSmall.resolve(default), px(12.0));
-        assert_eq!(IconSize::Small.resolve(default), px(14.0));
-        assert_eq!(IconSize::Medium.resolve(default), px(16.0));
+        assert_eq!(IconSize::XSmall.resolve(default), px(13.0));
+        assert_eq!(IconSize::Small.resolve(default), px(15.0));
+        assert_eq!(IconSize::Medium.resolve(default), px(17.0));
         assert_eq!(IconSize::Custom(px(32.0)).resolve(default), px(32.0));
 
         let enlarged = tiller_theme::Typography::for_base_size(15.5);

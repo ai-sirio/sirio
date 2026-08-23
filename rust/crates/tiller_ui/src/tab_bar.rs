@@ -617,7 +617,7 @@ impl Render for TabBar {
             .items_center()
             .justify_center()
             .rounded(theme.radii.control)
-            .text_size(px(13.0))
+            .text_size(px(14.0))
             .text_color(theme.meta)
             .hover(|style| style.bg(theme.row_hover))
             // Swallowing mouse-down here would stop GPUI ever pairing it
