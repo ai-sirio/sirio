@@ -2,18 +2,25 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::TimeZone;
 use gpui::{
-    AppContext as _, Context, Corners, EventEmitter, InteractiveElement as _, IntoElement,
+    AnyElement, AppContext as _, Context, Corners, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, Path, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
     canvas, div, fill, point, prelude::FluentBuilder as _, px, uniform_list,
 };
 use tiller_git::{CommitRecord, GitLog, GraphRow, LogFilter, layout};
 use tiller_theme::Theme;
 
+use super::history_toolbar;
+
 /// Commits requested per chunk.
 const CHUNK: usize = 500;
+/// How long the field sits still before the query runs. Every keystroke
+/// would otherwise start a full walk of every reachable commit: `--grep` is
+/// O(walk), not O(page).
+pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 /// Height of one commit row.
 const ROW_HEIGHT: f32 = 26.0;
 
@@ -38,6 +45,18 @@ pub(crate) struct GitHistory {
     /// The live query. Changing it resets everything below — see
     /// [`GitHistory::set_filter`].
     pub(crate) filter: LogFilter,
+    /// What is typed in the field right now, which is not yet what is
+    /// queried — `filter.text` is. The two differ for `SEARCH_DEBOUNCE`.
+    pub(crate) search_draft: String,
+    pub(crate) search_regex: bool,
+    pub(crate) search_case_sensitive: bool,
+    pub(crate) search_blink: crate::caret::Blink,
+    search_task: Option<Task<()>>,
+    /// Bumped per scheduled search; a timer that wakes stale does nothing.
+    search_generation: u64,
+    /// Created on first render, so the field can be focused before it ever
+    /// exists without panicking on a missing handle.
+    search_focus: Option<FocusHandle>,
     pub(crate) commits: Vec<CommitRecord>,
     pub(crate) rows: Vec<GraphRow>,
     pub(crate) error: Option<String>,
@@ -58,6 +77,13 @@ impl GitHistory {
         let mut history = Self {
             repo_root,
             filter: LogFilter::default(),
+            search_draft: String::new(),
+            search_regex: false,
+            search_case_sensitive: false,
+            search_blink: crate::caret::Blink::new(),
+            search_task: None,
+            search_generation: 0,
+            search_focus: None,
             commits: Vec::new(),
             rows: Vec::new(),
             error: None,
@@ -171,18 +197,107 @@ impl GitHistory {
         self.pagination_error = None;
         self.load_next_chunk(cx);
     }
+
+    /// Runs the current draft as a query immediately — Enter, or a toggle
+    /// flipped, where waiting would feel broken.
+    pub(crate) fn apply_search_now(&mut self, cx: &mut Context<Self>) {
+        self.search_generation += 1;
+        self.search_task = None;
+        let text = (!self.search_draft.is_empty()).then(|| self.search_draft.clone());
+        let filter = LogFilter {
+            text,
+            regex: self.search_regex,
+            case_sensitive: self.search_case_sensitive,
+            ..self.filter.clone()
+        };
+        self.set_filter(filter, cx);
+    }
+
+    /// Runs the draft once the typing stops.
+    ///
+    /// A gpui timer, not `std::thread::sleep`: only the former can be moved
+    /// by `background_executor.advance_clock`, so only the former leaves this
+    /// testable without sleeping for real.
+    pub(crate) fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        self.search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.apply_search_now(cx);
+            });
+        }));
+    }
+
+    /// Keys for the search field.
+    ///
+    /// Typing and Backspace go through the debounce; Enter and Escape do not.
+    /// A key the user meant as "now" must not sit for 250ms.
+    pub(crate) fn on_search_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        self.search_blink.wake();
+        match event.keystroke.key.as_str() {
+            "enter" => self.apply_search_now(cx),
+            "escape" => {
+                self.search_draft.clear();
+                self.apply_search_now(cx);
+            }
+            "backspace" => {
+                self.search_draft.pop();
+                self.schedule_search(cx);
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && character != "\n"
+                {
+                    self.search_draft.push_str(character);
+                    self.schedule_search(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn flip_search_blink(&mut self, cx: &mut Context<Self>) {
+        self.search_blink.flip();
+        cx.notify();
+    }
 }
 
 impl EventEmitter<GitHistoryEvent> for GitHistory {}
 
 impl Render for GitHistory {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let entity = cx.entity();
 
-        if let Some(error) = self.error.clone() {
+        self.search_focus
+            .get_or_insert_with(|| cx.focus_handle().tab_stop(true));
+        let search_focus = self.search_focus.as_ref().expect("just initialized");
+        let search_focused = search_focus.is_focused(window);
+        crate::caret::schedule(
+            &mut self.search_blink,
+            search_focused,
+            Self::flip_search_blink,
+            cx,
+        );
+
+        let toolbar = history_toolbar::render_search_row(
+            &self.search_draft,
+            self.search_regex,
+            self.search_case_sensitive,
+            self.search_blink.visible(),
+            search_focus,
+            entity.clone(),
+            theme,
+        )
+        .into_any_element();
+
+        let content: AnyElement = if let Some(error) = self.error.clone() {
             let retry_entity = entity.clone();
-            return div()
+            div()
                 .id("history-error")
                 .debug_selector(|| "history-error".to_owned())
                 .flex_1()
@@ -214,11 +329,9 @@ impl Render for GitHistory {
                         })
                         .child("Retry"),
                 )
-                .into_any_element();
-        }
-
-        if !self.settled {
-            return div()
+                .into_any_element()
+        } else if !self.settled {
+            div()
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
@@ -226,16 +339,14 @@ impl Render for GitHistory {
                 .justify_center()
                 .text_color(theme.meta)
                 .child("Loading history…")
-                .into_any_element();
-        }
-
-        if let Some(reason) = self.empty_reason {
+                .into_any_element()
+        } else if let Some(reason) = self.empty_reason {
             let label = match reason {
                 EmptyReason::NotARepository => "Not a git repository",
                 EmptyReason::NoCommits => "No commits yet",
                 EmptyReason::NoMatches => "No commits match the filter",
             };
-            return div()
+            div()
                 .id("history-empty")
                 .debug_selector(|| "history-empty".to_owned())
                 .flex_1()
@@ -245,90 +356,102 @@ impl Render for GitHistory {
                 .justify_center()
                 .text_color(theme.meta)
                 .child(label)
-                .into_any_element();
-        }
-
-        let commits = self.commits.clone();
-        let rows = self.rows.clone();
-        // Zero width means "draw no graph": the rows of a filtered set are
-        // not contiguous, so any lane between them would be a lie. `rows` is
-        // still computed and still zips 1:1 with `commits` — emptying it
-        // would make the `zip` in the list builder yield nothing at all.
-        let graph_width = if self.filter.is_filtering() {
-            0.0
+                .into_any_element()
         } else {
-            graph_width(&rows)
-        };
-        let row_entity = entity.clone();
-        let list = uniform_list(
-            "right-panel-history",
-            commits.len(),
-            cx.processor(move |history, range: Range<usize>, _window, _cx| {
-                if range.end >= commits.len()
-                    && !history.exhausted
-                    && history.pagination_error.is_none()
-                {
-                    history.load_next_chunk(_cx);
-                }
-                range
-                    .filter_map(|index| commits.get(index).zip(rows.get(index)))
-                    .map(|(commit, row)| {
-                        render_history_row(
-                            commit.clone(),
-                            row.clone(),
-                            graph_width,
-                            row_entity.clone(),
-                            theme,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .debug_selector(|| "right-panel-history".to_owned())
-        .flex_1()
-        .min_h(px(0.0));
-        let body = div().flex_1().min_h(px(0.0)).flex().flex_col().child(list);
-        if let Some(error) = self.pagination_error.clone() {
-            let retry_entity = entity;
-            body.child(
-                div()
-                    .id("history-pagination-error")
-                    .debug_selector(|| "history-pagination-error".to_owned())
-                    .w_full()
-                    .flex_none()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.git_conflict)
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(format!("History unavailable: {error}")),
-                    )
-                    .child(
-                        div()
-                            .id("history-pagination-retry")
-                            .debug_selector(|| "history-pagination-retry".to_owned())
-                            .px(px(6.0))
-                            .py(px(3.0))
-                            .rounded(theme.radii.control)
-                            .text_color(theme.title)
-                            .bg(theme.row_hover)
-                            .on_click(move |_, _, cx| {
-                                retry_entity.update(cx, |history, cx| history.retry(cx));
-                            })
-                            .child("Retry"),
-                    ),
+            let commits = self.commits.clone();
+            let rows = self.rows.clone();
+            // Zero width means "draw no graph": the rows of a filtered set are
+            // not contiguous, so any lane between them would be a lie. `rows` is
+            // still computed and still zips 1:1 with `commits` — emptying it
+            // would make the `zip` in the list builder yield nothing at all.
+            let graph_width = if self.filter.is_filtering() {
+                0.0
+            } else {
+                graph_width(&rows)
+            };
+            let row_entity = entity.clone();
+            let list = uniform_list(
+                "right-panel-history",
+                commits.len(),
+                cx.processor(move |history, range: Range<usize>, _window, _cx| {
+                    if range.end >= commits.len()
+                        && !history.exhausted
+                        && history.pagination_error.is_none()
+                    {
+                        history.load_next_chunk(_cx);
+                    }
+                    range
+                        .filter_map(|index| commits.get(index).zip(rows.get(index)))
+                        .map(|(commit, row)| {
+                            render_history_row(
+                                commit.clone(),
+                                row.clone(),
+                                graph_width,
+                                row_entity.clone(),
+                                theme,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
             )
-        } else {
-            body
-        }
-        .into_any_element()
+            .debug_selector(|| "right-panel-history".to_owned())
+            .flex_1()
+            .min_h(px(0.0));
+            let body = div().flex_1().min_h(px(0.0)).flex().flex_col().child(list);
+            if let Some(error) = self.pagination_error.clone() {
+                let retry_entity = entity;
+                body.child(
+                    div()
+                        .id("history-pagination-error")
+                        .debug_selector(|| "history-pagination-error".to_owned())
+                        .w_full()
+                        .flex_none()
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.git_conflict)
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(format!("History unavailable: {error}")),
+                        )
+                        .child(
+                            div()
+                                .id("history-pagination-retry")
+                                .debug_selector(|| "history-pagination-retry".to_owned())
+                                .px(px(6.0))
+                                .py(px(3.0))
+                                .rounded(theme.radii.control)
+                                .text_color(theme.title)
+                                .bg(theme.row_hover)
+                                .on_click(move |_, _, cx| {
+                                    retry_entity.update(cx, |history, cx| history.retry(cx));
+                                })
+                                .child("Retry"),
+                        ),
+                )
+            } else {
+                body
+            }
+            .into_any_element()
+        };
+
+        // The toolbar sits above every state — error, loading, empty and
+        // list alike — so the field never disappears under the state it is
+        // meant to change.
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .child(toolbar)
+            .child(content)
+            .into_any_element()
     }
 }
 
@@ -866,5 +989,69 @@ mod tests {
             cx.debug_bounds("history-graph").is_none(),
             "a filtered set draws no lanes"
         );
+    }
+
+    /// Three keystrokes must produce one query, not three: `--grep` walks
+    /// every reachable commit, so a query per keystroke is a query per
+    /// keystroke too many.
+    #[gpui::test]
+    fn typing_debounces_into_a_single_query(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        for draft in ["s", "se", "sec"] {
+            history.update(cx, |history, cx| {
+                history.search_draft = draft.to_owned();
+                history.schedule_search(cx);
+            });
+        }
+        cx.run_until_parked();
+        assert_eq!(
+            history.read_with(cx, |history, _| history.filter.text.clone()),
+            None,
+            "nothing is queried while the typing is still going"
+        );
+
+        cx.executor().advance_clock(SEARCH_DEBOUNCE);
+        cx.run_until_parked();
+
+        assert_eq!(
+            history.read_with(cx, |history, _| history.filter.text.clone()),
+            Some("sec".to_owned()),
+            "one query, with the last draft"
+        );
+    }
+
+    /// An emptied field is not a filter for the empty string.
+    #[gpui::test]
+    fn clearing_the_field_removes_the_filter(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+
+        history.update(cx, |history, cx| {
+            history.search_draft = "second".to_owned();
+            history.apply_search_now(cx);
+        });
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 1)
+        });
+
+        history.update(cx, |history, cx| {
+            history.search_draft.clear();
+            history.apply_search_now(cx);
+        });
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        assert!(history.read_with(cx, |history, _| !history.filter.is_filtering()));
     }
 }
