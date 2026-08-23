@@ -12,6 +12,40 @@ use tiller_theme::Theme;
 
 use super::history::GitHistory;
 
+/// How much of the toolbar fits side by side at the panel's current width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolbarLayout {
+    /// Field, toggles, four chips and IntelliSort on one line.
+    OneRow,
+    /// Field and toggles above; chips and IntelliSort below.
+    TwoRows,
+    /// Two rows, but the four chips share one `Filters (n)` popup.
+    Collapsed,
+}
+
+/// Below this the search field would compress under ~190px, where it stops
+/// being readable, so the chips move to their own row.
+const ONE_ROW_MIN: f32 = 470.0;
+/// Below this the four chips (~257px together) no longer fit on a row of
+/// their own, so they collapse behind a single button.
+const CHIP_ROW_MIN: f32 = 260.0;
+
+/// The toolbar's shape at a given panel width.
+///
+/// The thresholds are derived rather than chosen: four chips measure ~257px
+/// together and the field needs ~190px to stay readable, so one row needs
+/// ~455px plus margin. At the panel's 220px minimum, 204px remain usable —
+/// a 150px field and two 24px toggles.
+pub(super) fn toolbar_layout(panel_width: f32) -> ToolbarLayout {
+    if panel_width >= ONE_ROW_MIN {
+        ToolbarLayout::OneRow
+    } else if panel_width >= CHIP_ROW_MIN {
+        ToolbarLayout::TwoRows
+    } else {
+        ToolbarLayout::Collapsed
+    }
+}
+
 /// The search row: field, then the two toggles that change what the text
 /// means rather than what it is.
 pub(super) fn render_search_row(
@@ -114,4 +148,36 @@ fn toggle(
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| on_click(cx))
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The boundaries, not the middles. A layout exercised at 300 and 500px
+    /// passes whether the threshold sits at 400 or at 470, which is why
+    /// those are the numbers not tested here.
+    #[test]
+    fn the_toolbar_changes_shape_exactly_at_its_thresholds() {
+        assert_eq!(toolbar_layout(469.0), ToolbarLayout::TwoRows);
+        assert_eq!(toolbar_layout(470.0), ToolbarLayout::OneRow);
+        assert_eq!(toolbar_layout(259.0), ToolbarLayout::Collapsed);
+        assert_eq!(toolbar_layout(260.0), ToolbarLayout::TwoRows);
+    }
+
+    /// The panel clamps to 220..=640, so those two are the only widths the
+    /// toolbar will ever actually be asked for at the extremes.
+    #[test]
+    fn both_ends_of_the_panels_range_have_a_shape() {
+        assert_eq!(toolbar_layout(220.0), ToolbarLayout::Collapsed);
+        assert_eq!(toolbar_layout(640.0), ToolbarLayout::OneRow);
+    }
+
+    /// A degenerate width must not panic or fall through to the widest
+    /// shape: during the first frame, before layout has run, zero is a real
+    /// value this can be called with.
+    #[test]
+    fn a_zero_width_collapses_rather_than_expanding() {
+        assert_eq!(toolbar_layout(0.0), ToolbarLayout::Collapsed);
+    }
 }
