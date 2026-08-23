@@ -21,12 +21,14 @@
 //! for that icon alone.
 
 use gpui::{
-    App, AssetSource, Bounds, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce,
+    App, AssetSource, Bounds, IntoElement, Pixels, Rgba, Refineable as _, RenderImage, RenderOnce,
     SharedString, StyleRefinement, Styled, Window, canvas, px, svg,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+
+use tiller_theme::AgentBrandColor;
 
 /// The named icon set. `path` is the asset file name served by
 /// [`TillerAssets`]; `svg` is the embedded byte payload.
@@ -276,6 +278,37 @@ impl Icon {
             "opencode" => Some(Self::OpenCode),
             "pi" => Some(Self::Pi),
             "omp" => Some(Self::OhMyPi),
+            _ => None,
+        }
+    }
+
+    /// The colour a catalog agent's brand mark wears when it stands for the
+    /// agent itself, taken from each project's own published identity:
+    ///
+    /// - **Claude** — Anthropic's Claude orange `#D97757` (the "Crail"
+    ///   accent claude.ai and code.claude.com brand their mark with), which
+    ///   is exactly [`AgentBrandColor::Claude`].
+    /// - **Oh-My-Pi** — its mark *is* its colours: the pink→purple→cyan
+    ///   gradient baked into the asset. `None` — it must never be tinted.
+    /// - **Codex, OpenCode, Pi** — all three publish strictly monochrome
+    ///   marks (OpenAI's black-on-white knot; opencode.ai/brand's grey
+    ///   `#211E1E`/`#CFCECD` wordmarks with no chromatic accent anywhere in
+    ///   the guidelines; pi.dev's `logo-auto.svg`, black on light and white
+    ///   on dark). Their original colour is therefore the UI's own
+    ///   foreground, passed in as `theme_title`, so they stay legible in
+    ///   both appearances — which is precisely how those projects present
+    ///   the marks themselves.
+    ///
+    /// `None` for every non-agent icon: tinting is the caller's business.
+    /// Note this answers *mark* colour only. [`AgentBrandColor`] remains
+    /// the activity-accent table (running dots, worktree badges) whose hues
+    /// are chosen to stay distinguishable at sidebar scale, not to quote
+    /// the brands.
+    pub fn agent_mark_color(self, theme_title: Rgba) -> Option<Rgba> {
+        match self {
+            Icon::OhMyPi => None,
+            Icon::ClaudeCode => Some(AgentBrandColor::Claude.color()),
+            Icon::Codex | Icon::OpenCode | Icon::Pi => Some(theme_title),
             _ => None,
         }
     }
@@ -597,6 +630,30 @@ mod tests {
         assert_eq!(Icon::for_agent_id("pi"), Some(Icon::Pi));
         assert_eq!(Icon::for_agent_id("omp"), Some(Icon::OhMyPi));
         assert_eq!(Icon::for_agent_id("unknown"), None);
+    }
+
+    #[test]
+    fn agent_marks_wear_their_published_brand_colours() {
+        let foreground = gpui::rgb(0x11_12_13);
+        // Claude's mark wears Anthropic's Claude orange.
+        assert_eq!(
+            Icon::ClaudeCode.agent_mark_color(foreground),
+            Some(gpui::rgb(0xD97757)),
+            "claude must wear #D97757, not a theme token"
+        );
+        // Codex, OpenCode and Pi publish monochrome marks only; their
+        // original colour is the UI foreground, adaptive per appearance.
+        for icon in [Icon::Codex, Icon::OpenCode, Icon::Pi] {
+            assert_eq!(
+                icon.agent_mark_color(foreground),
+                Some(foreground),
+                "{icon:?} is a monochrome brand and must take the foreground"
+            );
+        }
+        // omp paints itself with its baked gradient — never tinted.
+        assert_eq!(Icon::OhMyPi.agent_mark_color(foreground), None);
+        // Non-agent icons are nobody's brand.
+        assert_eq!(Icon::FolderFill.agent_mark_color(foreground), None);
     }
 
     #[test]
