@@ -4,9 +4,10 @@ use crate::caret;
 use crate::controls;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, FontWeight, KeyBinding, KeyDownEvent,
-    MouseButton, Render, Rgba, Window, actions, div, prelude::*, px, text,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
+    KeyDownEvent, MouseButton, Render, Rgba, Window, actions, div, prelude::*, px, text,
 };
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
 use tiller_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
@@ -433,6 +434,10 @@ pub struct ProviderRowModel {
     pub icon: Icon,
     pub description: String,
     pub status: ProviderStatus,
+    /// The resolved launch source behind this row, when known.
+    pub launch: Option<tiller_registry::LaunchSource>,
+    /// The version this row would launch or install (Task 9).
+    pub version: Option<String>,
 }
 
 /// The honest status shown on one AI Provider card: what local credential
@@ -635,7 +640,10 @@ fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
 /// The description and status follow the availability data, never a fixed
 /// claim: an installed CLI reports the resolved executable, an absent one
 /// says so in a way the user can act on.
-pub fn provider_row(availability: &AgentAvailability) -> ProviderRowModel {
+pub fn provider_row(
+    availability: &AgentAvailability,
+    source: Option<&tiller_registry::LaunchSource>,
+) -> ProviderRowModel {
     let name = availability.display_name;
     let description = if availability.is_available() {
         format!(
@@ -649,12 +657,56 @@ pub fn provider_row(availability: &AgentAvailability) -> ProviderRowModel {
         Some(path) => ProviderStatus::Installed(path.clone()),
         None => ProviderStatus::NotInstalled,
     };
+    let launch = source.cloned();
+    let version = match source {
+        Some(tiller_registry::LaunchSource::Installed(installed)) => {
+            Some(installed.version.clone())
+        }
+        Some(tiller_registry::LaunchSource::Installable { agent }) => Some(agent.version.clone()),
+        _ => None,
+    };
     ProviderRowModel {
         id: availability.id,
         name,
         icon: provider_icon(availability.id),
         description,
         status,
+        launch,
+        version,
+    }
+}
+
+/// The pill for one agent row. Every arm is a rendering of a resolved fact:
+/// the previous version asked `acp_program()`, a compile-time claim, which
+/// is why OpenCode and Oh-My-Pi were labelled "No ACP server" while their
+/// binaries served one.
+pub(crate) fn launch_badge_label(source: &tiller_registry::LaunchSource) -> &'static str {
+    use tiller_registry::{LaunchSource, UnavailableReason};
+    match source {
+        LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => "ACP chat available",
+        LaunchSource::Installable { .. } => "Install",
+        LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform) => {
+            "Not available for this platform"
+        }
+        LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution) => {
+            "Unsupported install format"
+        }
+        LaunchSource::Unavailable(UnavailableReason::NotInRegistry) => "No ACP server",
+    }
+}
+
+/// What an installed agent could not prove about itself, or `None` when it
+/// could.
+pub(crate) fn installed_integrity_note(
+    source: &tiller_registry::LaunchSource,
+) -> Option<&'static str> {
+    match source {
+        tiller_registry::LaunchSource::Installed(agent)
+            if agent.integrity == tiller_registry::Integrity::None =>
+        {
+            Some("no published checksum")
+        }
+        _ => None,
     }
 }
 
@@ -857,6 +909,17 @@ struct PermissionBadge {
     foreground: Rgba,
 }
 
+/// What an Agents-row button asks the host to do. Emitted only — this
+/// crate never runs installs: `tiller` owns the installer (Task 8), and
+/// `tiller_ui` has no filesystem or network access in this design.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingsEvent {
+    InstallAgent(String),
+    UpdateAgent(String),
+}
+
+impl EventEmitter<SettingsEvent> for Settings {}
+
 pub struct Settings {
     category: SettingsCategory,
     on_back: Option<Rc<dyn Fn()>>,
@@ -938,20 +1001,15 @@ pub struct Settings {
     /// confirmation line under the button naming where the install is
     /// running. Cleared the next time the button is clicked again.
     skill_install_launched: bool,
-    /// Host callback for an agent row's Install button (F-SET-18): the
-    /// provider id and its documented install command
-    /// ([`AgentAvailability::install_command`]). Unset, an agent with a
-    /// known install command still renders the button muted and inert —
-    /// the same dead-control-avoidance convention `on_install_skill` uses
-    /// — rather than looking wired and reaching nothing. An agent with no
-    /// known install command (`install_command` returns `None`) renders no
-    /// button at all: there is nothing honest to offer.
-    on_install_agent: Option<Rc<dyn Fn(&'static str, &'static str)>>,
-    /// Agent ids whose Install button has been clicked (F-SET-18) — mirrors
-    /// [`Self::skill_install_launched`]: the actual install runs in a
-    /// spawned terminal this crate cannot watch finish, so the click must
-    /// still leave its own visible trace on this screen.
-    agent_install_launched: std::collections::HashSet<&'static str>,
+    /// The resolved launch source per adapter id (Task 9). The Agents
+    /// screen's pill, version and Install/Update buttons render from this —
+    /// a resolved fact — instead of the compiled claim they replaced.
+    launch_sources: Vec<(String, tiller_registry::LaunchSource)>,
+    /// The registry's current version per adapter-mapped agent id, when a
+    /// registry document has been fetched. Drives the Update button: an
+    /// installed version behind it offers an update; equal or absent means
+    /// nothing to offer.
+    registry_versions: BTreeMap<String, String>,
     /// Optional host override for a provider card's Add Account button
     /// (F-SET-14). The payload is the provider's stable id (`"claude"`,
     /// `"codex"`, `"opencode"` — [`UsageProvider::id`]'s own convention),
@@ -1145,8 +1203,8 @@ impl Settings {
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             skill_install_launched: false,
-            on_install_agent: None,
-            agent_install_launched: std::collections::HashSet::new(),
+            launch_sources: Vec::new(),
+            registry_versions: BTreeMap::new(),
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
@@ -1410,12 +1468,24 @@ impl Settings {
     /// (F-SET-18). Unset, an agent with a known install command still
     /// renders the button muted and inert — see the field doc on
     /// [`Settings::on_install_agent`].
-    pub fn on_install_agent(
+    /// Pins the launch sources used by the Agents screen (Task 9).
+    pub fn with_launch_sources(
         mut self,
-        callback: impl Fn(&'static str, &'static str) + 'static,
+        sources: Vec<(String, tiller_registry::LaunchSource)>,
     ) -> Self {
-        self.on_install_agent = Some(Rc::new(callback));
+        self.launch_sources = sources;
         self
+    }
+
+    /// Applies a fresh launch-source sweep plus the registry's current
+    /// versions. Called by the host whenever Task 8 recomputes.
+    pub fn apply_launch_sources(
+        &mut self,
+        sources: Vec<(String, tiller_registry::LaunchSource)>,
+        registry_versions: BTreeMap<String, String>,
+    ) {
+        self.launch_sources = sources;
+        self.registry_versions = registry_versions;
     }
 
     /// Installs a host override for a provider card's Add Account button
@@ -1702,24 +1772,6 @@ impl Settings {
         cx.notify();
         if let Some(handler) = self.on_install_skill.clone() {
             handler(tiller_project::agent_skill_install_command());
-        }
-    }
-
-    /// Handles an agent row's Install button (F-SET-18): reaches the wired
-    /// host callback with the provider id and its documented install
-    /// command, and flips the row's `agent_install_launched` flag so the
-    /// click leaves a visible confirmation on this screen — mirrors
-    /// [`Self::install_skill_clicked`].
-    fn install_agent_clicked(
-        &mut self,
-        agent_id: &'static str,
-        command: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        self.agent_install_launched.insert(agent_id);
-        cx.notify();
-        if let Some(handler) = self.on_install_agent.clone() {
-            handler(agent_id, command);
         }
     }
 
@@ -3154,16 +3206,38 @@ impl Settings {
         }
     }
 
-    /// The ACP chat badge for one provider row. An adapter with no ACP
-    /// server is clearly marked: a chat tab must never silently connect it
-    /// to another agent's server. Colours are theme tokens — the neutral
-    /// raised pill for supported agents, the waku warning tone for the
-    /// terminal-only ones.
-    fn render_acp_badge(availability: &AgentAvailability, theme: Theme) -> impl IntoElement {
-        let badge_id = format!("settings-agent-acp-{}", availability.id);
-        let label = availability.acp_status_label();
-        match availability.acp_program() {
-            Some(_) => div()
+    /// Resolves one adapter row's source from the last applied sweep.
+    /// Rows without a known source resolve honestly to NotInRegistry.
+    fn launch_source_for_row(&self, id: &str) -> tiller_registry::LaunchSource {
+        self.launch_sources
+            .iter()
+            .find(|(agent_id, _)| agent_id == id)
+            .map(|(_, source)| source.clone())
+            .unwrap_or_else(|| {
+                tiller_registry::LaunchSource::Unavailable(
+                    tiller_registry::UnavailableReason::NotInRegistry,
+                )
+            })
+    }
+
+    /// The ACP chat badge for one provider row — a rendering of the row's
+    /// resolved [`tiller_registry::LaunchSource`] rather than a compiled
+    /// claim. Colours are theme tokens: the neutral raised pill for
+    /// Builtin/Installed, the waku warning tone for everything else.
+    fn render_acp_badge(
+        badge_key: String,
+        source: &tiller_registry::LaunchSource,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let badge_id = format!("settings-agent-acp-{badge_key}");
+        let label = launch_badge_label(source);
+        let neutral = matches!(
+            source,
+            tiller_registry::LaunchSource::Builtin { .. }
+                | tiller_registry::LaunchSource::Installed(_)
+        );
+        if neutral {
+            div()
                 .id(badge_id.clone())
                 .debug_selector(move || badge_id.clone())
                 .px(px(8.0))
@@ -3172,8 +3246,9 @@ impl Settings {
                 .text_size(theme.typography.caption2)
                 .text_color(theme.subtitle)
                 .bg(theme.primary_pill_bg)
-                .child(text!(label)),
-            None => div()
+                .child(text!(label))
+        } else {
+            div()
                 .id(badge_id.clone())
                 .debug_selector(move || badge_id)
                 .px(px(8.0))
@@ -3183,7 +3258,7 @@ impl Settings {
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(on_status_fill(&theme))
                 .bg(theme.tab_needs_input)
-                .child(text!(label)),
+                .child(text!(label))
         }
     }
 
@@ -3196,7 +3271,8 @@ impl Settings {
         let mut agent_rows = controls::card(theme);
         let mut first_visible_row = true;
         for (index, availability) in self.provider_availability.iter().enumerate() {
-            let row = provider_row(availability);
+            let source = self.launch_source_for_row(availability.id);
+            let row = provider_row(availability, Some(&source));
             if !query.is_empty()
                 && !row.name.to_lowercase().contains(&query)
                 && !row.description.to_lowercase().contains(&query)
@@ -3250,34 +3326,49 @@ impl Settings {
             // confirmation line under the row so the click's effect is
             // visible on this screen even though this crate cannot watch
             // the spawned install finish.
-            let agent_id = availability.id;
-            let install_button = availability
-                .install_command()
-                .filter(|_| !availability.is_available())
-                .map(|command| {
-                    let install_entity = entity.clone();
-                    div()
-                        .id(("settings-agent-install", index))
-                        .debug_selector(move || format!("settings-agent-install-{index}"))
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(theme.radii.row_card)
-                        .text_size(theme.typography.caption2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.title)
-                        .bg(theme.primary_pill_bg)
-                        .hover(|style| style.bg(theme.row_hover))
-                        .on_click(move |_, _, cx| {
-                            install_entity.update(cx, |settings, cx| {
-                                settings.install_agent_clicked(agent_id, command, cx);
-                            });
-                        })
-                        .child(text!(
-                            id = ("settings-agent-install-label", index),
-                            "Install"
-                        ))
-                });
-            let install_launched = self.agent_install_launched.contains(agent_id);
+            // F-SET-18 (closed): Install/Update are renderings of the row's
+            // resolved source. The button emits only — `tiller` owns the
+            // installer, and this crate never runs installs itself.
+            let action = match &source {
+                tiller_registry::LaunchSource::Installable { .. } => Some((
+                    SettingsEvent::InstallAgent(availability.id.to_string()),
+                    "Install",
+                )),
+                tiller_registry::LaunchSource::Installed(installed) => self
+                    .registry_versions
+                    .get(availability.id)
+                    .filter(|latest| *latest != &installed.version)
+                    .map(|_| {
+                        (
+                            SettingsEvent::UpdateAgent(availability.id.to_string()),
+                            "Update",
+                        )
+                    }),
+                _ => None,
+            };
+            let install_button = action.map(|(event, label)| {
+                let install_entity = entity.clone();
+                div()
+                    .id(("settings-agent-install", index))
+                    .debug_selector(move || format!("settings-agent-install-{index}"))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(theme.radii.row_card)
+                    .text_size(theme.typography.caption2)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .bg(theme.primary_pill_bg)
+                    .hover(|style| style.bg(theme.row_hover))
+                    .on_click(move |_, _, cx| {
+                        install_entity.update(cx, |_, cx| {
+                            cx.emit(event.clone());
+                        });
+                    })
+                    .child(text!(
+                        id = ("settings-agent-install-label", index),
+                        label
+                    ))
+            });
             let mut row_container = div()
                 .id(("settings-agent-row", index))
                 .debug_selector(move || format!("settings-agent-row-{index}"))
@@ -3290,19 +3381,31 @@ impl Settings {
                         .items_center()
                         .gap(px(6.0))
                         .child(Self::render_provider_status(availability, theme))
-                        .child(Self::render_acp_badge(availability, theme))
+                        .children(row.version.as_ref().map(|version| {
+                            div()
+                                .px(px(6.0))
+                                .text_size(theme.typography.caption2)
+                                .text_color(theme.meta)
+                                .child(text!(
+                                    id = ("settings-agent-version", index),
+                                    format!("v{version}")
+                                ))
+                        }))
+                        .child(Self::render_acp_badge(availability.id.to_string(), &source, theme))
                         .children(install_button),
                     theme,
                 ));
-            if install_launched {
+            if let Some(note) = installed_integrity_note(&source) {
                 row_container = row_container.child(
                     div()
-                        .id(("settings-agent-install-status", index))
-                        .debug_selector(move || format!("settings-agent-install-status-{index}"))
+                        .id(("settings-agent-integrity", index))
+                        .debug_selector(move || {
+                            format!("settings-agent-integrity-{index}")
+                        })
                         .px(px(theme.cosmic.spacing.xs as f32))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.subtitle)
-                        .child(text!("Installing… running in a new terminal tab.")),
+                        .child(text!(note)),
                 );
             }
             agent_rows = agent_rows.child(row_container);
@@ -4433,7 +4536,7 @@ mod tests {
             executable: None,
         };
 
-        let row = provider_row(&available);
+        let row = provider_row(&available, None);
         assert_eq!(
             row.name, "A Different Name",
             "the name is discovery data, not a hard-coded display table"
@@ -4448,7 +4551,7 @@ mod tests {
             "an installed CLI keeps the on-PATH description"
         );
 
-        let row = provider_row(&absent);
+        let row = provider_row(&absent, None);
         assert_eq!(
             row.status,
             ProviderStatus::NotInstalled,
@@ -4548,16 +4651,16 @@ mod tests {
         );
     }
 
-    /// F-SET-18: a not-installed agent with a known install command
-    /// (`AgentAvailability::install_command`) offers a real Install button
-    /// that reaches the wired host callback with the exact command, and
-    /// leaves a visible confirmation on the row. An agent with no known
-    /// install command (omp, in this fixture) offers no button at all —
-    /// never a fabricated one.
+    /// F-SET-18 (closed): an Installable row draws a real Install button
+    /// whose click emits [`SettingsEvent::InstallAgent`] — the host owns
+    /// the actual install (Task 8); this crate only renders and emits. A
+    /// row with nothing to offer offers no button at all — never a
+    /// fabricated one.
     #[gpui::test]
-    async fn agent_install_click_reaches_host_and_confirms_on_the_row(
+    async fn agent_install_click_emits_the_install_request(
         cx: &mut gpui::TestAppContext,
     ) {
+        use tiller_registry::{Distribution, LaunchSource};
         cx.update(Theme::init);
         let fixture = vec![
             AgentAvailability {
@@ -4571,17 +4674,55 @@ mod tests {
                 executable: None,
             },
         ];
-        let calls = Rc::new(RefCell::new(Vec::<(&'static str, &'static str)>::new()));
-        let recorder = calls.clone();
-        let window = cx.add_window(|_window, cx| {
+        let sources = vec![
+            (
+                "opencode".to_string(),
+                LaunchSource::Installable {
+                    agent: tiller_registry::RegistryAgent {
+                        id: "opencode".into(),
+                        name: "OpenCode".into(),
+                        version: "1.18.21".into(),
+                        description: None,
+                        repository: None,
+                        website: None,
+                        license: None,
+                        icon: None,
+                        distributions: vec![Distribution::Binary(Default::default())],
+                    },
+                },
+            ),
+            (
+                "omp".to_string(),
+                LaunchSource::Unavailable(tiller_registry::UnavailableReason::NotInRegistry),
+            ),
+        ];
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let recorder = events.clone();
+        let window = cx.add_window(move |_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default())
                 .with_availability(fixture)
-                .on_install_agent(move |agent_id, command| {
-                    recorder.borrow_mut().push((agent_id, command));
-                })
+                .with_launch_sources(sources)
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
+        cx.update(|window, app| {
+            let settings = window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root");
+            let subscription =
+                app.subscribe(&settings, move |_entity, event: &SettingsEvent, _| {
+                    match event {
+                        SettingsEvent::InstallAgent(id) => {
+                            recorder.borrow_mut().push(id.clone())
+                        }
+                        SettingsEvent::UpdateAgent(_) => {}
+                    }
+                });
+            // The subscription must outlive this update scope for the whole
+            // test; forgetting it pins it to the entities' lifetimes.
+            std::mem::forget(subscription);
+        });
 
         let agents = cx
             .debug_bounds("settings-category-Agents")
@@ -4591,11 +4732,11 @@ mod tests {
 
         assert!(
             cx.debug_bounds("settings-agent-install-0").is_some(),
-            "opencode has a known install command, so its row offers Install"
+            "an Installable row offers Install"
         );
         assert!(
             cx.debug_bounds("settings-agent-install-1").is_none(),
-            "omp has no known install command, so its row offers no button"
+            "a row with nothing to offer draws no button"
         );
 
         let install = cx
@@ -4607,11 +4748,8 @@ mod tests {
         // `overflow_hidden`, so a button pushed past the row's right
         // edge is invisible AND unhittable while still reporting real
         // `debug_bounds`. That is not hypothetical — the button already
-        // overflowed the 720px column, and this test passed only
-        // because its CENTRE still happened to land inside. Widening
-        // the type scale moved the centre out too and the control went
-        // dead. Assert the containment the click depends on, so the
-        // next few pixels of drift fail here instead of in the app.
+        // overflowed the 720px column once. Assert the containment the
+        // click depends on, so drift fails here instead of in the app.
         let row = cx
             .debug_bounds("settings-agent-row-0")
             .expect("the opencode row draws");
@@ -4626,13 +4764,9 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            calls.borrow().as_slice(),
-            [("opencode", "npm install -g opencode-ai@latest")],
-            "the click hands the host the provider id and its exact install command"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-install-status-0").is_some(),
-            "a confirmation line appears on the row once the install is handed off"
+            events.borrow().as_slice(),
+            ["opencode".to_string()],
+            "the click emits InstallAgent for the row's adapter id"
         );
     }
 
@@ -4938,82 +5072,71 @@ mod tests {
         assert_eq!(rendered, recovered, "recovery replaces the stale rows");
     }
 
-    #[gpui::test]
-    async fn agent_rows_mark_adapters_without_an_acp_server(cx: &mut gpui::TestAppContext) {
-        // An adapter without an ACP server must be visibly marked: a chat
-        // tab must never silently connect it to another agent's server.
-        // Every row draws an ACP badge whose content comes from the same
-        // availability surface the machine tests assert.
-        cx.update(Theme::init);
-        let fixture = vec![
-            AgentAvailability {
-                id: "claude",
-                display_name: "Claude Code",
-                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
-            },
-            AgentAvailability {
-                id: "codex",
-                display_name: "Codex",
-                executable: Some(PathBuf::from("/opt/homebrew/bin/codex")),
-            },
-            AgentAvailability {
-                id: "opencode",
-                display_name: "OpenCode",
-                executable: Some(PathBuf::from("/opt/homebrew/bin/opencode")),
-            },
-            AgentAvailability {
-                id: "omp",
-                display_name: "Oh-My-Pi",
-                executable: None,
-            },
-        ];
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
+    #[test]
+    fn the_badge_reports_the_resolved_source_rather_than_a_compiled_claim() {
+        use tiller_registry::{LaunchSource, UnavailableReason};
 
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        for badge_id in [
-            "settings-agent-acp-claude",
-            "settings-agent-acp-codex",
-            "settings-agent-acp-opencode",
-            "settings-agent-acp-omp",
-        ] {
-            assert!(
-                cx.debug_bounds(badge_id).is_some(),
-                "every provider row renders an ACP chat badge ({badge_id})"
-            );
-        }
-
-        let rendered = cx.update(|window, cx| {
-            window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx)
-                .provider_availability
-                .clone()
-        });
-        let omp = rendered.iter().find(|a| a.id == "omp").expect("omp row");
-        assert_eq!(omp.acp_program(), None);
         assert_eq!(
-            omp.acp_status_label(),
-            "No ACP server",
-            "a terminal-only adapter says so rather than falling back"
+            launch_badge_label(&LaunchSource::Builtin {
+                program: "opencode".into(),
+                args: vec!["acp".into()],
+            }),
+            "ACP chat available",
+            "OpenCode serves ACP from its own binary; the old pill said the opposite"
         );
-        let codex = rendered
-            .iter()
-            .find(|a| a.id == "codex")
-            .expect("codex row");
-        assert!(
-            codex.acp_program().is_some(),
-            "an ACP-backed adapter keeps its own server"
+        assert_eq!(
+            launch_badge_label(&LaunchSource::Unavailable(UnavailableReason::NotInRegistry)),
+            "No ACP server",
+        );
+        assert_eq!(
+            launch_badge_label(&LaunchSource::Unavailable(
+                UnavailableReason::NoArtifactForPlatform
+            )),
+            "Not available for this platform",
+            "an undifferentiated grey pill is the failure mode this work removes"
+        );
+        assert_eq!(
+            launch_badge_label(&LaunchSource::Unavailable(
+                UnavailableReason::UnsupportedDistribution
+            )),
+            "Unsupported install format",
+        );
+    }
+
+    #[test]
+    fn an_installable_row_offers_install_and_says_when_it_cannot_be_verified() {
+        use tiller_registry::{Distribution, LaunchSource, RegistryAgent};
+
+        let agent = RegistryAgent {
+            id: "cursor".into(),
+            name: "Cursor".into(),
+            version: "1.0.0".into(),
+            description: None,
+            repository: None,
+            website: None,
+            license: None,
+            icon: None,
+            distributions: vec![Distribution::Binary(Default::default())],
+        };
+        let source = LaunchSource::Installable { agent };
+        assert_eq!(launch_badge_label(&source), "Install");
+    }
+
+    #[test]
+    fn an_unverified_install_says_so_after_the_fact() {
+        use tiller_registry::{InstalledAgent, Integrity, LaunchSource};
+
+        let installed = InstalledAgent {
+            id: "cursor".into(),
+            version: "1.0.0".into(),
+            executable: "/data/cursor".into(),
+            args: vec![],
+            integrity: Integrity::None,
+        };
+        assert_eq!(
+            installed_integrity_note(&LaunchSource::Installed(installed)),
+            Some("no published checksum"),
+            "9 of 18 binary agents publish at least one unhashed artifact; that stays visible"
         );
     }
 
@@ -6994,11 +7117,14 @@ mod tests {
             ("pi", Icon::Pi),
             ("omp", Icon::OhMyPi),
         ] {
-            let row = provider_row(&AgentAvailability {
-                id,
-                display_name: "irrelevant",
-                executable: None,
-            });
+            let row = provider_row(
+                &AgentAvailability {
+                    id,
+                    display_name: "irrelevant",
+                    executable: None,
+                },
+                None,
+            );
             assert_eq!(
                 row.icon, expected,
                 "the {id} row must carry {id}'s own mark"
