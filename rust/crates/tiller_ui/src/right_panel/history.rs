@@ -1,5 +1,6 @@
 //! The History view: `git log` over local refs, laid out as a commit graph.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -57,6 +58,12 @@ pub(crate) struct GitHistory {
     /// Created on first render, so the field can be focused before it ever
     /// exists without panicking on a missing handle.
     search_focus: Option<FocusHandle>,
+    /// Fetched commit bodies for rows that matched on body text alone, keyed
+    /// by sha. Filled lazily, one body per visible row.
+    bodies: HashMap<String, String>,
+    /// Shas whose body fetch is still in flight, so a scroll does not queue
+    /// the same fetch twice.
+    bodies_fetching: HashSet<String>,
     pub(crate) commits: Vec<CommitRecord>,
     pub(crate) rows: Vec<GraphRow>,
     pub(crate) error: Option<String>,
@@ -84,6 +91,8 @@ impl GitHistory {
             search_task: None,
             search_generation: 0,
             search_focus: None,
+            bodies: HashMap::new(),
+            bodies_fetching: HashSet::new(),
             commits: Vec::new(),
             rows: Vec::new(),
             error: None,
@@ -380,15 +389,74 @@ impl Render for GitHistory {
                     {
                         history.load_next_chunk(_cx);
                     }
+                    // A row whose subject already contains the search text
+                    // needs no explanation; one that does not must have
+                    // matched in the body, so fetch that one body — lazily,
+                    // per visible row, once per sha (see `bodies_fetching`).
+                    if let Some(text) = history.filter.text.clone() {
+                        let case_sensitive = history.search_case_sensitive;
+                        let repo_root = history.repo_root.clone();
+                        for index in range.clone() {
+                            let Some(commit) = commits.get(index) else {
+                                continue;
+                            };
+                            let subject_matches = if case_sensitive {
+                                commit.subject.contains(&text)
+                            } else {
+                                commit
+                                    .subject
+                                    .to_lowercase()
+                                    .contains(&text.to_lowercase())
+                            };
+                            if !subject_matches
+                                && !history.bodies.contains_key(&commit.sha)
+                                && history.bodies_fetching.insert(commit.sha.clone())
+                            {
+                                let sha = commit.sha.clone();
+                                let repo = repo_root.clone();
+                                let fetch_sha = sha.clone();
+                                _cx.spawn(async move |this, cx| {
+                                    let fetched = cx
+                                        .background_spawn(async move {
+                                            GitLog::body(&repo, &fetch_sha)
+                                        })
+                                        .await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.bodies_fetching.remove(&sha);
+                                        if let Ok(body) = fetched {
+                                            this.bodies.insert(sha.clone(), body);
+                                            cx.notify();
+                                        }
+                                    });
+                                })
+                                .detach();
+                            }
+                        }
+                    }
                     range
                         .filter_map(|index| commits.get(index).zip(rows.get(index)))
                         .map(|(commit, row)| {
+                            let body_match = history.filter.text.as_ref().and_then(|text| {
+                                history.bodies.get(&commit.sha).and_then(|body| {
+                                    body.lines()
+                                        .find(|line| {
+                                            if history.search_case_sensitive {
+                                                line.contains(text)
+                                            } else {
+                                                line.to_lowercase()
+                                                    .contains(&text.to_lowercase())
+                                            }
+                                        })
+                                        .map(|line| line.trim().to_owned())
+                                })
+                            });
                             render_history_row(
                                 commit.clone(),
                                 row.clone(),
                                 graph_width,
                                 row_entity.clone(),
                                 theme,
+                                body_match,
                             )
                         })
                         .collect::<Vec<_>>()
@@ -461,6 +529,7 @@ fn render_history_row(
     graph_width: f32,
     entity: gpui::Entity<GitHistory>,
     theme: Theme,
+    body_match: Option<String>,
 ) -> impl IntoElement {
     let sha = commit.sha.clone();
     let subject_color = if commit.parents.len() > 1 {
@@ -506,7 +575,20 @@ fn render_history_row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .text_color(subject_color)
-                .child(commit.subject),
+                .child(commit.subject)
+                // The subject alone does not explain the match, so the
+                // body line that does is drawn beneath it.
+                .when_some(body_match, |column, line| {
+                    column.child(
+                        div()
+                            .debug_selector(|| "history-body-match".to_owned())
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.meta)
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(format!("└ {line}")),
+                    )
+                }),
         )
         .child(
             div()
