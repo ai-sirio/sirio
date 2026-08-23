@@ -159,8 +159,12 @@ mod tests {
         assert_eq!(registry.agents.len(), 39);
 
         let opencode = registry.agent("opencode").expect("opencode row");
-        let Distribution::Binary(artifacts) = &opencode.distribution else {
-            panic!("opencode is a binary distribution, got {:?}", opencode.distribution);
+        let Some(Distribution::Binary(artifacts)) = opencode
+            .distributions
+            .iter()
+            .find(|distribution| matches!(distribution, Distribution::Binary(_)))
+        else {
+            panic!("opencode publishes a binary kind, got {:?}", opencode.distributions);
         };
         let linux = artifacts.get("linux-x86_64").expect("linux-x86_64 artifact");
         assert_eq!(linux.cmd, "./opencode");
@@ -177,11 +181,13 @@ mod tests {
         // missing hash is a disclosure problem, not a decode error.
         let registry =
             AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json")).unwrap();
-        let unhashed = registry.agents.iter().any(|agent| match &agent.distribution {
-            Distribution::Binary(artifacts) => {
-                artifacts.values().any(|artifact| artifact.sha256.is_none())
-            }
-            _ => false,
+        let unhashed = registry.agents.iter().any(|agent| {
+            agent.distributions.iter().any(|distribution| match distribution {
+                Distribution::Binary(artifacts) => {
+                    artifacts.values().any(|artifact| artifact.sha256.is_none())
+                }
+                _ => false,
+            })
         });
         assert!(unhashed, "the recorded registry contains unhashed artifacts");
     }
@@ -197,7 +203,7 @@ mod tests {
         .expect("an unknown kind is not a decode failure");
 
         let agent = registry.agent("future-agent").expect("row survives");
-        assert_eq!(agent.distribution, Distribution::Unknown);
+        assert_eq!(agent.distributions, vec![Distribution::Unknown]);
     }
 
     #[test]
@@ -302,7 +308,10 @@ pub struct RegistryAgent {
     pub website: Option<String>,
     pub license: Option<String>,
     pub icon: Option<String>,
-    pub distribution: Distribution,
+    /// An agent may declare several kinds — verified: `kilo` and `sigit`
+    /// each publish both `binary` and `npx`. Position carries no meaning;
+    /// `resolve` picks by kind and platform, never by index.
+    pub distributions: Vec<Distribution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -534,7 +543,7 @@ mod tests {
         }
     }
 
-    fn registry_with(id: &str, distribution: Distribution) -> AcpRegistry {
+    fn registry_with(id: &str, distributions: Vec<Distribution>) -> AcpRegistry {
         AcpRegistry {
             version: "1.0.0".into(),
             warnings: Vec::new(),
@@ -547,7 +556,7 @@ mod tests {
                 website: None,
                 license: None,
                 icon: None,
-                distribution,
+                distributions,
             }],
         }
     }
@@ -579,7 +588,7 @@ mod tests {
 
     #[test]
     fn a_builtin_on_path_wins_over_everything() {
-        let registry = registry_with("opencode", binary_for("linux-x86_64"));
+        let registry = registry_with("opencode", vec![binary_for("linux-x86_64")]);
         let source = resolve(ResolveInput {
             builtin: Some(builtin()),
             builtin_on_path: true,
@@ -609,7 +618,7 @@ mod tests {
 
     #[test]
     fn a_stale_manifest_offers_a_reinstall_rather_than_failing() {
-        let registry = registry_with("opencode", binary_for("linux-x86_64"));
+        let registry = registry_with("opencode", vec![binary_for("linux-x86_64")]);
         let source = resolve(ResolveInput {
             installed: Some((installed(), false)),
             ..input(Some(&registry))
@@ -622,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_platform_without_an_artifact_says_so() {
-        let registry = registry_with("opencode", binary_for("darwin-aarch64"));
+        let registry = registry_with("opencode", vec![binary_for("darwin-aarch64")]);
         assert_eq!(
             resolve(input(Some(&registry))),
             LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform),
@@ -632,7 +641,7 @@ mod tests {
 
     #[test]
     fn an_unknown_distribution_is_unavailable_not_installable() {
-        let registry = registry_with("opencode", Distribution::Unknown);
+        let registry = registry_with("opencode", vec![Distribution::Unknown]);
         assert_eq!(
             resolve(input(Some(&registry))),
             LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution)
@@ -641,7 +650,7 @@ mod tests {
 
     #[test]
     fn an_agent_the_registry_does_not_carry_is_unavailable() {
-        let registry = registry_with("something-else", binary_for("linux-x86_64"));
+        let registry = registry_with("something-else", vec![binary_for("linux-x86_64")]);
         assert_eq!(
             resolve(input(Some(&registry))),
             LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
@@ -662,7 +671,7 @@ mod tests {
 
     #[test]
     fn a_registry_agent_is_looked_up_by_its_own_id_when_no_adapter_maps_to_it() {
-        let registry = registry_with("github-copilot-cli", binary_for("linux-x86_64"));
+        let registry = registry_with("github-copilot-cli", vec![binary_for("linux-x86_64")]);
         let source = resolve(ResolveInput {
             adapter_id: "github-copilot-cli",
             ..input(Some(&registry))
@@ -804,18 +813,34 @@ pub fn resolve(input: ResolveInput<'_>) -> LaunchSource {
         return LaunchSource::Unavailable(UnavailableReason::NotInRegistry);
     };
 
-    match &agent.distribution {
-        Distribution::Npx { .. } => LaunchSource::Installable { agent: agent.clone() },
-        Distribution::Binary(artifacts) => {
-            if artifacts.contains_key(input.platform_key) {
-                LaunchSource::Installable { agent: agent.clone() }
-            } else {
-                LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform)
-            }
-        }
-        Distribution::Uvx { .. } | Distribution::Unknown => {
-            LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution)
-        }
+    // An agent may declare several distribution kinds — verified against the
+    // published registry: `kilo` and `sigit` each carry both `binary` and
+    // `npx`. `model.rs` deliberately does not pick between them, because it
+    // has no platform context: `binary` is preferable where an artifact
+    // exists for this machine, but on a platform the agent does not build
+    // for, `npx` is the only thing that works. Choosing here, where the
+    // platform is known, is the whole reason the model keeps a Vec.
+    let installable_binary = agent.distributions.iter().any(|distribution| {
+        matches!(distribution, Distribution::Binary(artifacts)
+            if artifacts.contains_key(input.platform_key))
+    });
+    let has_npx = agent
+        .distributions
+        .iter()
+        .any(|distribution| matches!(distribution, Distribution::Npx { .. }));
+    if installable_binary || has_npx {
+        return LaunchSource::Installable { agent: agent.clone() };
+    }
+
+    // Nothing installable: say which kind of "no" this is.
+    let declares_binary = agent
+        .distributions
+        .iter()
+        .any(|distribution| matches!(distribution, Distribution::Binary(_)));
+    if declares_binary {
+        LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform)
+    } else {
+        LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution)
     }
 }
 
@@ -1694,21 +1719,19 @@ impl Installer {
         agent: &RegistryAgent,
         platform_key: &str,
     ) -> Result<InstalledAgent, InstallError> {
-        match &agent.distribution {
-            Distribution::Binary(artifacts) => {
-                let artifact = artifacts.get(platform_key).ok_or_else(|| {
-                    InstallError::NoArtifactForPlatform { agent: agent.id.clone() }
-                })?;
-                self.install_binary(agent, artifact)
-            }
-            // Task 6 fills this in.
-            Distribution::Npx { .. } => {
-                Err(InstallError::UnsupportedDistribution { agent: agent.id.clone() })
-            }
-            Distribution::Uvx { .. } | Distribution::Unknown => {
-                Err(InstallError::UnsupportedDistribution { agent: agent.id.clone() })
-            }
+        // Same precedence `resolve` uses, and for the same reason: prefer a
+        // binary artifact built for this machine, fall back to npx only when
+        // the agent publishes nothing for this platform. An agent may declare
+        // both — `kilo` and `sigit` do.
+        if let Some(artifact) = agent.distributions.iter().find_map(|distribution| match distribution
+        {
+            Distribution::Binary(artifacts) => artifacts.get(platform_key),
+            _ => None,
+        }) {
+            return self.install_binary(agent, artifact);
         }
+        // Task 6 replaces this arm with the real npx install.
+        Err(InstallError::UnsupportedDistribution { agent: agent.id.clone() })
     }
 
     fn install_binary(
@@ -2433,10 +2456,10 @@ Add to the `tests` module in `rust/crates/tiller/src/main.rs`:
             website: None,
             license: None,
             icon: None,
-            distribution: tiller_registry::Distribution::Npx {
+            distributions: vec![tiller_registry::Distribution::Npx {
                 package: "@agentclientprotocol/codex-acp@1.6.2".into(),
                 args: vec![],
-            },
+            }],
         };
         assert!(agent_command_for(&tiller_registry::LaunchSource::Installable { agent }).is_none());
     }
@@ -2647,7 +2670,7 @@ Replace `agent_rows_mark_adapters_without_an_acp_server` in `settings.rs` with:
             website: None,
             license: None,
             icon: None,
-            distribution: Distribution::Binary(Default::default()),
+            distributions: vec![Distribution::Binary(Default::default())],
         };
         let source = LaunchSource::Installable { agent };
         assert_eq!(launch_badge_label(&source), "Install");
