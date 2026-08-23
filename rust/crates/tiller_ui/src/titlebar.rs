@@ -36,6 +36,19 @@
 //! [`tiller_theme::BrowserChrome::macos_traffic_light_cluster_inset`] before
 //! its first button so it begins to the right of AppKit's controls.
 //!
+//! **Windows is the one platform where Server does not mean "the OS drew
+//! it".** gpui_windows suppresses the native caption when
+//! `TitlebarOptions.appears_transparent` is set (which `main.rs` sets) and,
+//! like AppKit, never overrides `window_decorations()` — so the trait default
+//! answers `Server` for a window that in fact has *no* window controls at
+//! all. Taking that report at face value left Windows builds with no way to
+//! close/minimize/maximize by mouse. Zed's own resolution
+//! (`platform_title_bar.rs`) renders its caption buttons unconditionally on
+//! Windows; this file reaches the same result through
+//! [`show_window_controls`]: under `Server`, only Windows draws the
+//! fallback lights, because there they are the *only* controls the window
+//! will ever get.
+//!
 //! Geometry comes from [`tiller_theme::BrowserChrome`] (bar height, fallback
 //! light size/gap/inset, `BrowserChrome::cluster_start` for the derivation of
 //! where a fallback light group hands off to the button cluster, and the
@@ -322,6 +335,25 @@ impl Titlebar {
 
 impl EventEmitter<TitlebarEvent> for Titlebar {}
 
+/// Whether this row must draw the three window controls itself.
+///
+/// `Decorations::Client` always means yes: the platform reported that
+/// nothing else will decorate this window (P102's original case). The
+/// Windows carve-out is the second such case: gpui_windows suppresses the
+/// native caption when `TitlebarOptions.appears_transparent` is set and
+/// never overrides `PlatformWindow::window_decorations()`, so it answers
+/// the trait default `Decorations::Server` for a window that has *no*
+/// controls at all. There, as on Zed's Windows titlebar, our fallback is
+/// not a duplicate — it is the only close button the window will ever
+/// have. On Linux `Server` keeps its P102 meaning ("a window manager drew
+/// the titlebar above us") and must draw nothing.
+fn show_window_controls(decorations: &Decorations) -> bool {
+    match decorations {
+        Decorations::Client { .. } => true,
+        Decorations::Server => cfg!(target_os = "windows"),
+    }
+}
+
 /// One traffic-light dot: a real, circular window control, not a decoration.
 /// `component` supplies COSMIC's own semantic colour for the action
 /// (`destructive`/`warning`/`success` — already red/amber/green, so this
@@ -397,7 +429,7 @@ impl Render for Titlebar {
         let decorations = self
             .decorations_override
             .unwrap_or_else(|| window.window_decorations());
-        let show_traffic_lights = matches!(decorations, Decorations::Client { .. });
+        let show_traffic_lights = show_window_controls(&decorations);
 
         let theme = Theme::get(cx);
         let cosmic = theme.cosmic;
@@ -664,6 +696,24 @@ mod tests {
             DoubleClickAction::from_gsettings_output("'not-a-real-value'\n"),
             DoubleClickAction::ToggleMaximize,
             "an unrecognized value must degrade to the documented default"
+        );
+    }
+
+    /// The full decoration → controls mapping, stated host-independently:
+    /// Client always draws; Server draws only on Windows, where the
+    /// platform suppresses its native caption yet still reports Server
+    /// (see [`show_window_controls`] and the module docs' Windows
+    /// paragraph). The drawn tests below pin `render` to this function;
+    /// this one pins the function itself.
+    #[test]
+    fn window_controls_mapping_covers_both_decoration_reports() {
+        assert!(show_window_controls(&client_side_decorations()));
+        assert_eq!(
+            show_window_controls(&Decorations::Server),
+            cfg!(target_os = "windows"),
+            "Server means 'a WM drew the chrome' on Linux/macOS but \
+             'no chrome exists at all' on Windows -- only the latter may \
+             draw the fallback controls"
         );
     }
 
@@ -1195,15 +1245,23 @@ mod tests {
     /// mouse. The icon cluster must survive in both branches -- the
     /// directive is "OS top bar **+ our icons**", not "OS top bar only".
     #[gpui::test]
-    async fn traffic_lights_draw_only_under_client_side_decorations(cx: &mut TestAppContext) {
+    async fn fallback_controls_follow_the_platform_decoration_report(cx: &mut TestAppContext) {
         let server_window =
             cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
         let mut server_cx = VisualTestContext::from_window(server_window.into(), cx);
         server_cx.run_until_parked();
+        // What "under Server" means is the production decision itself
+        // ([`show_window_controls`]): absence where an OS really drew chrome
+        // (Linux, macOS), presence where nothing else ever will (Windows,
+        // whose platform suppresses its native caption yet reports Server).
+        // Asserting against that function keeps this test honest on every
+        // host without hardcoding one platform's answer.
+        let server_draws = show_window_controls(&Decorations::Server);
         for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
-            assert!(
-                server_cx.debug_bounds(id).is_none(),
-                "{id} must not draw under Decorations::Server, including on macOS where AppKit owns the controls"
+            assert_eq!(
+                server_cx.debug_bounds(id).is_some(),
+                server_draws,
+                "{id} under Decorations::Server must match show_window_controls"
             );
         }
         assert!(
@@ -1290,6 +1348,15 @@ mod tests {
                 "macOS must reserve AppKit's traffic lights before the cluster (Server: {:?}, Client: {:?})",
                 sidebar_server.origin.x,
                 sidebar_client.origin.x
+            );
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(
+                sidebar_server.origin.x, sidebar_client.origin.x,
+                "Windows draws the fallback under both reports (its platform \
+                 suppresses the native caption and reports Server regardless), \
+                 so the cluster must start at the same x either way \
+                 (Server: {:?}, Client: {:?})",
+                sidebar_server.origin.x, sidebar_client.origin.x
             );
         } else {
             assert!(
