@@ -1,8 +1,8 @@
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
     FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton,
-    PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
+    PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, Task, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -3348,6 +3348,11 @@ struct DraggedPanelEdge {
 }
 
 const SPLIT_DIVIDER_SIZE: f32 = 6.0;
+
+/// How long the panel width sits still before it is written to SQLite.
+/// `save_settings` opens a write transaction and rewrites every key, so
+/// calling it per drag frame would be one transaction per frame.
+const PANEL_WIDTH_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const MIN_SPLIT_PANE_SIZE: f32 = 160.0;
 
 fn split_direction_name(direction: SplitDirection) -> &'static str {
@@ -3464,6 +3469,10 @@ struct TillerWorkspace {
     /// measures from the grab, so a dropped frame cannot make the panel
     /// drift.
     panel_drag_anchor: Option<(f32, f32)>,
+    /// Bumped per scheduled save; a timer that wakes to find it stale does
+    /// nothing. Same generation-counter shape as `Terminal::resize`.
+    panel_width_save_generation: u64,
+    panel_width_save_task: Option<Task<()>>,
     left_panel_focus: FocusHandle,
     center_panel_focus: FocusHandle,
     right_panel_focus: FocusHandle,
@@ -4137,6 +4146,8 @@ impl TillerWorkspace {
             right_panel_width,
             dragging_panel: None,
             panel_drag_anchor: None,
+            panel_width_save_generation: 0,
+            panel_width_save_task: None,
             left_panel_focus: cx.focus_handle(),
             center_panel_focus: cx.focus_handle(),
             right_panel_focus: cx.focus_handle(),
@@ -10703,7 +10714,40 @@ impl TillerWorkspace {
             panel_layout::PanelSide::Right => self.right_panel_width = clamped,
         }
         self.dragging_panel = Some(side);
+        self.schedule_panel_width_save(cx);
         cx.notify();
+    }
+
+    /// Persists the current widths once the drag stops moving.
+    ///
+    /// Deliberately not driven off `on_drop` alone: a drag can end without a
+    /// drop — Escape, a panel hidden by shortcut mid-gesture, a release
+    /// outside the window — and the rendered width would then diverge from
+    /// the stored preference until the next restart. The timer closes that,
+    /// leaving `on_drop` doing only what only it can do, which is restoring
+    /// focus.
+    fn schedule_panel_width_save(&mut self, cx: &mut Context<Self>) {
+        self.panel_width_save_generation += 1;
+        let generation = self.panel_width_save_generation;
+        // Rounded here, not at the range check: every other numeric settings
+        // key is an i64 and drag positions are fractional.
+        let sidebar = self.sidebar_width.round() as i64;
+        let right_panel = self.right_panel_width.round() as i64;
+        self.panel_width_save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(PANEL_WIDTH_SAVE_DEBOUNCE)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.panel_width_save_generation != generation {
+                    return;
+                }
+                let mut settings =
+                    app_settings_from_snapshot(this.settings.read(cx).snapshot());
+                settings.sidebar_width = sidebar;
+                settings.right_panel_width = right_panel;
+                this.session.save_settings(&settings);
+            });
+        }));
     }
 
     fn handle_new_terminal_tab(
@@ -20872,6 +20916,56 @@ mod tests {
                 "the drop clears drag priority, so the panels stop favouring one side"
             );
         });
+    }
+
+    /// A drag writes to SQLite after it settles, not once per frame: nothing is
+    /// stored while the width is still moving, and the width that lands is the
+    /// last one asked for.
+    ///
+    /// What this test does *not* prove is a literal write count — that would need
+    /// a spy `SessionStore`, which this codebase has no seam for. What it does
+    /// prove is the property the debounce exists for: two superseded schedules
+    /// leave no trace.
+    ///
+    /// The debounce is a gpui timer rather than the `std::thread::sleep` shape
+    /// `Terminal::resize` uses, precisely so `advance_clock` can drive it:
+    /// neither that sleep nor the session flusher's `Instant::now` polling can be
+    /// advanced by the executor, and a test for either would have to sleep for
+    /// real.
+    #[gpui::test]
+    async fn panel_width_persists_once_after_the_drag_settles(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        for width in [420.0, 440.0, 460.0] {
+            workspace.update(&mut cx.cx, |workspace, cx| {
+                workspace.right_panel_width = width;
+                workspace.schedule_panel_width_save(cx);
+            });
+        }
+        cx.run_until_parked();
+
+        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
+        assert_eq!(
+            session.load_settings().right_panel_width, 405,
+            "nothing is written while the drag is still moving"
+        );
+
+        cx.background_executor.advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
+        cx.run_until_parked();
+
+        assert_eq!(
+            session.load_settings().right_panel_width, 460,
+            "the last width wins, and only it is written"
+        );
     }
 
     #[gpui::test]
