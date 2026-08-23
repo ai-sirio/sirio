@@ -31,8 +31,8 @@ pub enum InstallError {
     NoArtifactForPlatform { agent: String },
     #[error("{agent}: archive format is not supported ({url})")]
     UnsupportedArchive { agent: String, url: String },
-    #[error("{agent}: distribution kind is not supported")]
-    UnsupportedDistribution { agent: String },
+    #[error("{agent}: distribution kind '{kind}' is not supported")]
+    UnsupportedDistribution { agent: String, kind: String },
     #[error("{agent}: checksum did not match; nothing was installed")]
     ChecksumMismatch { agent: String },
     #[error("{agent}: archive entry {entry} escapes the destination")]
@@ -165,7 +165,10 @@ impl Installer {
             return self.install_binary(agent, artifact);
         }
         // Task 6 replaces this arm with the real npx install.
-        Err(InstallError::UnsupportedDistribution { agent: agent.id.clone() })
+        Err(InstallError::UnsupportedDistribution {
+            agent: agent.id.clone(),
+            kind: unsupported_kind_name(agent),
+        })
     }
 
     fn install_binary(
@@ -276,6 +279,19 @@ fn download(url: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn unpack_zip(agent: &str, bytes: &[u8], destination: &Path) -> Result<(), InstallError> {
+    unpack_zip_capped(agent, bytes, destination, MAX_UNPACKED_BYTES)
+}
+
+/// Copies through a reader limited to the remaining budget (`budget + 1`, so
+/// crossing it is detectable) and counts what is *actually written* — the
+/// sizes an archive declares can lie, and that lie defeats a declared-size
+/// ceiling exactly where the ceiling matters.
+fn unpack_zip_capped(
+    agent: &str,
+    bytes: &[u8],
+    destination: &Path,
+    max_unpacked_bytes: u64,
+) -> Result<(), InstallError> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|error| InstallError::Failed { agent: agent.into(), message: error.to_string() })?;
     let mut written: u64 = 0;
@@ -297,29 +313,43 @@ fn unpack_zip(agent: &str, bytes: &[u8], destination: &Path) -> Result<(), Insta
             let _ = std::fs::create_dir_all(&target);
             continue;
         }
-        written += entry.size();
-        if written > MAX_UNPACKED_BYTES {
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let budget = max_unpacked_bytes - written;
+        let mut file = std::fs::File::create(&target).map_err(|error| InstallError::Failed {
+            agent: agent.into(),
+            message: error.to_string(),
+        })?;
+        let mut limited = entry.by_ref().take(budget + 1);
+        let copied = std::io::copy(&mut limited, &mut file).map_err(|error| InstallError::Failed {
+            agent: agent.into(),
+            message: error.to_string(),
+        })?;
+        written += copied;
+        if copied > budget {
             return Err(InstallError::Failed {
                 agent: agent.into(),
                 message: "unpacked size exceeds the ceiling".into(),
             });
         }
-        if let Some(parent) = target.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut file = std::fs::File::create(&target).map_err(|error| InstallError::Failed {
-            agent: agent.into(),
-            message: error.to_string(),
-        })?;
-        std::io::copy(&mut entry, &mut file).map_err(|error| InstallError::Failed {
-            agent: agent.into(),
-            message: error.to_string(),
-        })?;
     }
     Ok(())
 }
 
 fn unpack_tar_gz(agent: &str, bytes: &[u8], destination: &Path) -> Result<(), InstallError> {
+    unpack_tar_gz_capped(agent, bytes, destination, MAX_UNPACKED_BYTES)
+}
+
+/// Same actual-bytes accounting as [`unpack_zip_capped`] — for tar the
+/// header size usually tells the truth, but one code path for both keeps
+/// them behaving identically.
+fn unpack_tar_gz_capped(
+    agent: &str,
+    bytes: &[u8],
+    destination: &Path,
+    max_unpacked_bytes: u64,
+) -> Result<(), InstallError> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
     let mut archive = tar::Archive::new(decoder);
     let entries = archive.entries().map_err(|error| InstallError::Failed {
@@ -353,22 +383,51 @@ fn unpack_tar_gz(agent: &str, bytes: &[u8], destination: &Path) -> Result<(), In
             let _ = std::fs::create_dir_all(&target);
             continue;
         }
-        written += entry.header().size().unwrap_or(0);
-        if written > MAX_UNPACKED_BYTES {
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let budget = max_unpacked_bytes - written;
+        let mut file = std::fs::File::create(&target).map_err(|error| InstallError::Failed {
+            agent: agent.into(),
+            message: error.to_string(),
+        })?;
+        let mut limited = entry.by_ref().take(budget + 1);
+        let copied = std::io::copy(&mut limited, &mut file).map_err(|error| InstallError::Failed {
+            agent: agent.into(),
+            message: error.to_string(),
+        })?;
+        written += copied;
+        if copied > budget {
             return Err(InstallError::Failed {
                 agent: agent.into(),
                 message: "unpacked size exceeds the ceiling".into(),
             });
         }
-        if let Some(parent) = target.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        entry.unpack(&target).map_err(|error| InstallError::Failed {
-            agent: agent.into(),
-            message: error.to_string(),
-        })?;
     }
     Ok(())
+}
+
+/// Names the kinds being refused, so the error reads "uvx" rather than
+/// something vague. A `Binary` kind is never named here: its absence *for
+/// this platform* is a different failure upstream.
+fn unsupported_kind_name(agent: &RegistryAgent) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for distribution in &agent.distributions {
+        let name = match distribution {
+            Distribution::Binary(_) => continue,
+            Distribution::Npx { .. } => "npx",
+            Distribution::Uvx { .. } => "uvx",
+            Distribution::Unknown => "unknown",
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
 }
 
 /// Exactly one path, so `tar` (which preserves modes) and `zip` (which does
@@ -488,5 +547,176 @@ mod tests {
         let rendered = error.to_string();
         assert!(rendered.contains("goose"));
         assert!(rendered.contains("tar.bz2"), "the gap is visible, not mysterious");
+    }
+
+    // ---- End-to-end safety checks: hostile archives built in memory, no
+    // network, exercising the real unpackers rather than their helpers.
+
+    /// Builds an in-memory tar.gz containing exactly `entries` regular
+    /// files (path, content).
+    fn tar_gz_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, content) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *content).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn staging_for(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("tiller-install-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn unpack_tar_gz_refuses_a_traversal_entry_and_writes_nothing_outside() {
+        let staging = staging_for("tar-traversal");
+        // `tar::Builder`'s own path setter refuses `..`, so a writer cannot
+        // produce this archive — but a hostile one can exist, so the name
+        // field is patched raw and appended without going through it.
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.as_gnu_mut().unwrap().name[..7].copy_from_slice(b"../evil");
+        header.set_cksum();
+        builder.append(&mut header, b"bad".as_slice()).unwrap();
+        let bytes = builder.into_inner().unwrap().finish().unwrap();
+
+        let result = unpack_tar_gz("evil", &bytes, &staging);
+
+        assert!(matches!(result, Err(InstallError::UnsafeArchiveEntry { .. })));
+        let outside = staging.parent().unwrap().join("evil");
+        assert!(!outside.exists(), "no file may land outside staging");
+    }
+
+    #[test]
+    fn unpack_tar_gz_refuses_a_symlink_entry() {
+        // A symlink pointing anywhere passes a pure path check; the entry
+        // *type* filter must catch it first.
+        let staging = staging_for("tar-symlink");
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_cksum();
+        builder.append_link(&mut header, "link", "/etc/passwd").unwrap();
+        let bytes = builder.into_inner().unwrap().finish().unwrap();
+
+        let result = unpack_tar_gz("evil", &bytes, &staging);
+
+        assert!(matches!(result, Err(InstallError::UnsafeArchiveEntry { .. })));
+    }
+
+    #[test]
+    fn unpack_zip_refuses_a_traversal_entry_and_writes_nothing_outside() {
+        let staging = staging_for("zip-traversal");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("../evil", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"bad").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let result = unpack_zip("evil", &bytes, &staging);
+
+        assert!(matches!(result, Err(InstallError::UnsafeArchiveEntry { .. })));
+        let outside = staging.parent().unwrap().join("evil");
+        assert!(!outside.exists(), "no file may land outside staging");
+    }
+
+    #[test]
+    fn a_well_formed_tar_gz_unpacks_where_it_should() {
+        let staging = staging_for("tar-happy");
+        let bytes = tar_gz_of(&[("bin/agent", b"payload" as &[u8])]);
+
+        unpack_tar_gz("good", &bytes, &staging).unwrap();
+
+        assert_eq!(std::fs::read(staging.join("bin/agent")).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn a_well_formed_zip_unpacks_where_it_should() {
+        let staging = staging_for("zip-happy");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("bin/agent", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"payload").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        unpack_zip("good", &bytes, &staging).unwrap();
+
+        assert_eq!(std::fs::read(staging.join("bin/agent")).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn an_unsupported_distribution_names_the_kind() {
+        // The global rule: `.tar.bz2` AND `uvx` are refused with an error
+        // that names the format.
+        let store = InstallStore::new(staging_for("uvx-kind"));
+        let agent = RegistryAgent {
+            id: "goose".into(),
+            name: "goose".into(),
+            version: "1.0.0".into(),
+            description: None,
+            repository: None,
+            website: None,
+            license: None,
+            icon: None,
+            distributions: vec![Distribution::Uvx {
+                package: "goose-acp".into(),
+                args: Vec::new(),
+            }],
+        };
+
+        let error = Installer::new(store).install(&agent, "linux-x86_64").unwrap_err();
+
+        assert!(error.to_string().contains("uvx"), "got: {error}");
+    }
+
+    #[test]
+    fn a_small_declared_payload_over_the_ceiling_is_refused_zip() {
+        // The ceiling counts bytes actually written, not declared sizes:
+        // a ZIP central directory can lie. Lowering the ceiling stands in
+        // for generating hundreds of megabytes.
+        let staging = staging_for("zip-bomb");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("data.bin", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, &[0u8; 256]).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let result = unpack_zip_capped("bomb", &bytes, &staging, 8);
+
+        assert!(
+            matches!(&result, Err(InstallError::Failed { message, .. })
+                if message.contains("ceiling")),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_small_declared_payload_over_the_ceiling_is_refused_tar_gz() {
+        let staging = staging_for("tar-bomb");
+        let bytes = tar_gz_of(&[("data.bin", &[0u8; 256])]);
+
+        let result = unpack_tar_gz_capped("bomb", &bytes, &staging, 8);
+
+        assert!(
+            matches!(&result, Err(InstallError::Failed { message, .. })
+                if message.contains("ceiling")),
+            "got: {result:?}"
+        );
     }
 }
