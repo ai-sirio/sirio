@@ -30,6 +30,10 @@ actions!(settings_summarizer, [CloseSummarizerPicker]);
 pub(crate) const CONTENT_WIDTH: f32 = 720.0;
 const HEADER_HEIGHT: f32 = 40.0;
 const CATEGORY_WIDTH: f32 = 200.0;
+/// The header's back control: a square target holding the arrow alone. It
+/// used to be a 24px-tall strip carrying a chevron and the word "Back";
+/// the word is gone and the arrow is the control.
+const BACK_CONTROL_SIZE: f32 = 28.0;
 const DETAIL_TOP_PADDING: f32 = 15.0;
 const DETAIL_BOTTOM_PADDING: f32 = 12.0;
 const DETAIL_SECTION_MARGIN: f32 = 20.0;
@@ -424,7 +428,9 @@ impl Default for SettingsSnapshot {
 pub struct ProviderRowModel {
     pub id: &'static str,
     pub name: &'static str,
-    pub glyph: &'static str,
+    /// The agent's own brand mark, resolved through the same
+    /// [`Icon::for_agent_id`] the tab bar uses.
+    pub icon: Icon,
     pub description: String,
     pub status: ProviderStatus,
 }
@@ -599,13 +605,15 @@ pub enum ProviderStatus {
     NotInstalled,
 }
 
-fn provider_glyph(id: &str) -> &'static str {
-    match id {
-        "claude" => "✳",
-        "codex" => "◉",
-        "opencode" => "▣",
-        _ => "π",
-    }
+/// The brand mark for a discovered agent id.
+///
+/// This screen used to draw Unicode stand-ins here. A code point is not an
+/// asset: the UI face does not carry those marks on every platform, so the
+/// column rendered blank or tofu, and where it did resolve it still was not
+/// the agent's logo. `Icon::for_agent_id` is the answer the tab bar already
+/// uses, so settings uses it too.
+fn provider_icon(id: &str) -> Icon {
+    Icon::for_agent_id(id).unwrap_or(Icon::Sparkles)
 }
 
 fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
@@ -639,7 +647,7 @@ pub fn provider_row(availability: &AgentAvailability) -> ProviderRowModel {
     ProviderRowModel {
         id: availability.id,
         name,
-        glyph: provider_glyph(availability.id),
+        icon: provider_icon(availability.id),
         description,
         status,
     }
@@ -651,6 +659,33 @@ enum ProviderKind {
     Codex,
     OpenCodeGo,
     OllamaCloud,
+}
+
+impl ProviderKind {
+    /// The brand mark this card shows.
+    ///
+    /// Ollama has no mark in the vendored catalog, so the globe stands in —
+    /// the same admission the cloud code point used to make, except a globe
+    /// is an asset that draws on every platform.
+    fn icon(self) -> Icon {
+        match self {
+            Self::Claude => Icon::ClaudeCode,
+            Self::Codex => Icon::Codex,
+            Self::OpenCodeGo => Icon::OpenCode,
+            Self::OllamaCloud => Icon::Globe,
+        }
+    }
+}
+
+/// The foreground for text painted on one of the saturated status fills
+/// (`tab_error`, `tab_needs_input`).
+///
+/// `title` is tuned for the *page*, so on a saturated chip it lands at the
+/// chip's own lightness and vanishes. The page ground is the neutral that
+/// actually contrasts with both fills, and it is already what the granted
+/// permission badge uses two screens over.
+fn on_status_fill(theme: &Theme) -> Rgba {
+    theme.background
 }
 
 /// Every process id currently a descendant of `root` (not including `root`
@@ -1021,24 +1056,20 @@ pub struct Settings {
 struct ProviderCardView {
     kind: ProviderKind,
     title: &'static str,
-    glyph: &'static str,
     glyph_color: Rgba,
     status: ProviderAccountStatus,
 }
 
 impl ProviderCardView {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         kind: ProviderKind,
         title: &'static str,
-        glyph: &'static str,
         glyph_color: Rgba,
         status: ProviderAccountStatus,
     ) -> Self {
         Self {
             kind,
             title,
-            glyph,
             glyph_color,
             status,
         }
@@ -2139,15 +2170,18 @@ impl Settings {
             .gap(px(10.0))
             .bg(theme.background)
             .child(
+                // The arrow is the control: no word beside it, and sized
+                // off `large_title` so it still tracks the interface font
+                // size rather than freezing at one pixel count.
                 div()
                     .id("settings-back")
                     .debug_selector(|| "settings-back".into())
-                    .h(px(24.0))
+                    .w(px(BACK_CONTROL_SIZE))
+                    .h(px(BACK_CONTROL_SIZE))
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
+                    .justify_center()
                     .rounded(theme.radii.chip_active)
-                    .text_size(theme.typography.headline)
                     .text_color(theme.title)
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, _| {
@@ -2156,10 +2190,12 @@ impl Settings {
                         }
                     })
                     .child(
-                        IconElement::new(Icon::ChevronLeft, IconSize::Small)
-                            .text_color(theme.title),
-                    )
-                    .child(text!("Back")),
+                        IconElement::new(
+                            Icon::ChevronLeft,
+                            IconSize::Custom(theme.typography.large_title),
+                        )
+                        .text_color(theme.title),
+                    ),
             )
             .child(
                 div()
@@ -2413,7 +2449,6 @@ impl Settings {
         let ProviderCardView {
             kind: provider,
             title,
-            glyph,
             glyph_color,
             status,
         } = view;
@@ -2426,12 +2461,13 @@ impl Settings {
             .child(
                 div()
                     .w(px(18.0))
-                    .text_size(px(18.0))
-                    .text_color(glyph_color)
-                    .child(text!(
-                        id = format!("settings-provider-status-glyph-{title}"),
-                        glyph
-                    )),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        IconElement::new(provider.icon(), IconSize::Medium)
+                            .text_color(glyph_color),
+                    ),
             )
             .child(text!(
                 id = format!("settings-provider-status-label-{title}"),
@@ -3034,31 +3070,22 @@ impl Settings {
             ProviderCardView::new(
                 ProviderKind::Claude,
                 "Claude Code",
-                "✳",
                 theme.rail_question,
                 accounts.claude,
             ),
-            ProviderCardView::new(
-                ProviderKind::Codex,
-                "Codex",
-                "◉",
-                theme.subtitle,
-                accounts.codex,
-            ),
+            ProviderCardView::new(ProviderKind::Codex, "Codex", theme.subtitle, accounts.codex),
             ProviderCardView::new(
                 ProviderKind::OpenCodeGo,
                 "OpenCode Go",
-                "▣",
                 theme.tab_needs_input,
                 accounts.opencode_go,
             ),
-            // F-SET-13: the fourth reference card. No Ollama brand glyph
-            // exists in the comet set — the cloud mark is a declared
+            // F-SET-13: the fourth reference card. No Ollama brand mark
+            // exists in the vendored catalog — the globe is a declared
             // stand-in, not a silent leftover.
             ProviderCardView::new(
                 ProviderKind::OllamaCloud,
                 "Ollama Cloud",
-                "☁",
                 theme.subtitle,
                 accounts.ollama_cloud,
             ),
@@ -3102,7 +3129,7 @@ impl Settings {
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title_selected)
+                .text_color(on_status_fill(&theme))
                 .bg(theme.tab_error)
                 .child(text!(availability.status_label())),
         }
@@ -3135,7 +3162,7 @@ impl Settings {
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title_selected)
+                .text_color(on_status_fill(&theme))
                 .bg(theme.tab_needs_input)
                 .child(text!(label)),
         }
@@ -3168,8 +3195,13 @@ impl Settings {
                 .child(
                     div()
                         .w(px(18.0))
-                        .text_color(provider_glyph_color(theme, row.id))
-                        .child(text!(id = ("settings-agent-glyph", index), row.glyph)),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            IconElement::new(row.icon, IconSize::Small)
+                                .text_color(provider_glyph_color(theme, row.id)),
+                        ),
                 )
                 .child(
                     div()
@@ -3923,7 +3955,7 @@ impl Settings {
                 PermissionBadge {
                     label: "DENIED",
                     background: denied,
-                    foreground: theme.title_selected,
+                    foreground: on_status_fill(&theme),
                 },
                 "Open Settings",
                 theme,
@@ -4043,21 +4075,49 @@ impl Render for Settings {
             .child(self.render_header(theme))
             .child(div().h(px(1.0)).w_full().bg(theme.hairline))
             .child(
+                // `min_h(0)` is what lets this row be shorter than what it
+                // holds. A column flex item takes its content height as its
+                // automatic minimum, so without this the row grew to the
+                // full height of the settings page (measured: 1572px inside
+                // a 600px window) and every viewport nested in it grew with
+                // it — which is why no scroller here could ever have
+                // anything to scroll. Same guard `changes-list` carries.
                 div()
                     .flex_1()
+                    .min_h(px(0.0))
                     .w_full()
                     .flex()
                     .child(category_sidebar)
                     .child(div().w(px(1.0)).h_full().bg(theme.hairline))
                     .child(
+                        // A column, not a row. GPUI derives a scroller's
+                        // `content_size` from its children's laid-out bounds,
+                        // and a row stretches its child to the viewport's
+                        // height — so the page was always exactly as tall as
+                        // the viewport, `scroll_max` was zero, and the wheel
+                        // moved nothing. Scrolling down a page means the page
+                        // must be free to be taller than what shows it:
+                        // `flex_col` puts the overflow on the scrolled axis,
+                        // `items_center` keeps the 720px column centred the
+                        // way `justify_center` used to, and `flex_none` stops
+                        // the page being shrunk back to the viewport.
                         div()
                             .id("settings-detail-scroll")
+                            .debug_selector(|| "settings-detail-scroll".into())
                             .flex_1()
                             .h_full()
+                            .min_h(px(0.0))
                             .flex()
-                            .justify_center()
+                            .flex_col()
+                            .items_center()
                             .overflow_y_scroll()
-                            .child(detail),
+                            .child(
+                                div()
+                                    .id("settings-detail-page")
+                                    .debug_selector(|| "settings-detail-page".into())
+                                    .flex_none()
+                                    .child(detail),
+                            ),
                     ),
             );
         // The summarizer menu floats above the whole surface — outside the
@@ -5367,13 +5427,13 @@ mod tests {
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         // Same reason as the Ollama cookie tests above: the override
-        // field paints where `debug_bounds` can see it but, at the
-        // default test window height, below the window's hit-test
-        // bounds — so the click that focuses it lands on nothing and
-        // the keystrokes go to no one. This test used to clear the
-        // 1080px fold by a hair; the app-wide +1px type scale grew the
-        // rows above it past that margin. A user reaches it by
-        // scrolling; the test grows the window.
+        // field sits on the third card, below the fold at the default test
+        // window height, so the click that should focus it lands outside
+        // the detail column and the keystrokes go to no one. This test used
+        // to clear the 1080px fold by a hair; the app-wide +1px type scale
+        // grew the rows above it past that margin, and the detail column is
+        // now a real viewport that clips rather than a surface that grew to
+        // fit. A user reaches it by scrolling; the test grows the window.
         cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
         cx.run_until_parked();
 
@@ -6810,5 +6870,178 @@ mod tests {
             closed.get(),
             "after the menu closes, Escape reaches the shell's handler again"
         );
+    }
+
+    /// WCAG 2.1 contrast between two opaque colours, the same ratio
+    /// `tiller_theme`'s own palette tests use.
+    fn contrast_ratio(one: Rgba, other: Rgba) -> f32 {
+        let luminance = |color: Rgba| {
+            let channel = |c: f32| {
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+        };
+        let (a, b) = (luminance(one), luminance(other));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The detail column must scroll under the wheel.
+    ///
+    /// It did not. The column was a flex *row*, so the page it holds was
+    /// stretched to the viewport's height by the default `align-items:
+    /// stretch`; GPUI derives a scroller's `content_size` from its
+    /// children's laid-out bounds (`div.rs`), so a page exactly as tall as
+    /// the viewport yields `scroll_max == 0` and the wheel moves nothing.
+    /// Everything below the fold was unreachable — which is why three
+    /// tests in this file grow the window to click a control instead of
+    /// scrolling to it.
+    #[gpui::test]
+    async fn the_detail_column_scrolls_under_the_wheel(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Deliberately shorter than the AI Providers page: the four cards
+        // do not fit, so there is something to scroll to.
+        cx.simulate_resize(gpui::size(px(1100.0), px(600.0)));
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("settings-detail-scroll")
+            .expect("the scroll viewport is drawn");
+        let page = cx
+            .debug_bounds("settings-detail-page")
+            .expect("the page is drawn");
+        // Stated first because it is the failure that hides behind a dead
+        // wheel: if the viewport is as tall as the page, nothing overflows
+        // and there is no scrolling to test.
+        assert!(
+            viewport.size.height < page.size.height,
+            "the viewport must be shorter than the page it shows: viewport              {:?}, page {:?}",
+            viewport.size.height,
+            page.size.height
+        );
+        let before = cx
+            .debug_bounds("settings-provider-account-status-Claude Code")
+            .expect("the first card is drawn");
+
+        // A point over the detail column, clear of the category rail.
+        let over = gpui::point(px(CATEGORY_WIDTH + 260.0), px(300.0));
+        cx.simulate_mouse_move(over, None, Modifiers::none());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let after = cx
+            .debug_bounds("settings-provider-account-status-Claude Code")
+            .expect("the first card stays drawn after scrolling");
+        assert!(
+            after.origin.y < before.origin.y - px(50.0),
+            "the wheel must move the detail column: the first card sat at \
+             {:?} before the wheel and {:?} after",
+            before.origin.y,
+            after.origin.y
+        );
+    }
+
+    /// Every agent row and provider card shows its own brand mark, not a
+    /// Unicode stand-in.
+    ///
+    /// The screen used to draw `✳ ◉ ▣ π ☁` as text. Those code points are
+    /// not in the UI face on every platform, so the column rendered blank
+    /// or tofu — and even where they resolve they are not the agents'
+    /// marks. `Icon::for_agent_id` already answers this question for the
+    /// tab bar; settings must use the same answer.
+    #[test]
+    fn provider_rows_and_cards_carry_their_brand_marks() {
+        for (id, expected) in [
+            ("claude", Icon::ClaudeCode),
+            ("codex", Icon::Codex),
+            ("opencode", Icon::OpenCode),
+            ("pi", Icon::Pi),
+            ("omp", Icon::OhMyPi),
+        ] {
+            let row = provider_row(&AgentAvailability {
+                id,
+                display_name: "irrelevant",
+                executable: None,
+            });
+            assert_eq!(
+                row.icon, expected,
+                "the {id} row must carry {id}'s own mark"
+            );
+        }
+
+        assert_eq!(ProviderKind::Claude.icon(), Icon::ClaudeCode);
+        assert_eq!(ProviderKind::Codex.icon(), Icon::Codex);
+        assert_eq!(ProviderKind::OpenCodeGo.icon(), Icon::OpenCode);
+        // Ollama has no mark in the vendored catalog. The globe is a
+        // declared stand-in, and it is still a drawn asset rather than a
+        // code point the platform may not have.
+        assert_eq!(ProviderKind::OllamaCloud.icon(), Icon::Globe);
+    }
+
+    /// Text on a saturated status fill has to be readable in both
+    /// appearances.
+    ///
+    /// The "not installed" pill and the terminal-only ACP badge painted
+    /// `title_selected` — which *is* `title`, the page's body colour — on
+    /// `tab_error` and `tab_needs_input`. Measured, that lands at 1.13:1
+    /// (warning, dark) and 1.66:1 (danger, light): the text is the same
+    /// lightness as the chip under it and simply disappears.
+    #[test]
+    fn status_pill_text_stays_readable_on_its_fill() {
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            let theme = match mode {
+                ThemeMode::Dark => Theme::dark(),
+                _ => Theme::light(),
+            };
+            for (name, fill) in [
+                ("tab_error", theme.tab_error),
+                ("tab_needs_input", theme.tab_needs_input),
+            ] {
+                let ratio = contrast_ratio(on_status_fill(&theme), fill);
+                assert!(
+                    ratio >= 4.0,
+                    "{mode:?}: status text on {name} is {ratio:.2}:1, which no \
+                     reader can use"
+                );
+            }
+        }
+    }
+
+    /// The header's back control is the arrow alone, at a size that reads
+    /// as a target rather than a hint next to a word.
+    #[gpui::test]
+    async fn the_back_control_is_a_square_arrow_with_no_label(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let back = cx
+            .debug_bounds("settings-back")
+            .expect("the back control is drawn");
+        assert_eq!(
+            back.size.width,
+            px(BACK_CONTROL_SIZE),
+            "the label is gone, so the control is as wide as it is tall"
+        );
+        assert_eq!(back.size.height, px(BACK_CONTROL_SIZE));
     }
 }
