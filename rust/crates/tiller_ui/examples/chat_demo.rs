@@ -38,7 +38,11 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(Chat::launch),
+            |_, cx| {
+                cx.new(|cx| {
+                    Chat::launch_from_env(cx).expect("set TILLER_ACP_PROGRAM to run the chat demo")
+                })
+            },
         )
         .unwrap();
         cx.activate(true);

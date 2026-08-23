@@ -43,7 +43,7 @@ use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
+    chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::open_command as platform_open_command,
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
@@ -2476,6 +2476,117 @@ fn parse_settings_category(value: &str) -> Result<SettingsCategory, String> {
     Ok(category)
 }
 
+/// The `AgentCommand` a resolved source launches, or `None` when there is
+/// nothing honest to launch. `Installable` deliberately returns `None`: an
+/// agent that is not installed yet must offer an Install button, never a
+/// silent download at chat-open time.
+fn agent_command_for(source: &tiller_registry::LaunchSource) -> Option<AgentCommand> {
+    match source {
+        tiller_registry::LaunchSource::Builtin { program, args } => {
+            Some(AgentCommand::new(program).args(args.iter().cloned()))
+        }
+        tiller_registry::LaunchSource::Installed(agent) => {
+            Some(AgentCommand::new(&agent.executable).args(agent.args.iter().cloned()))
+        }
+        tiller_registry::LaunchSource::Installable { .. }
+        | tiller_registry::LaunchSource::Unavailable(_) => None,
+    }
+}
+
+/// Everything needed to answer "how does agent X launch". Refreshed when
+/// Settings -> Agents opens and when Refresh is pressed; never on the UI
+/// thread.
+struct AgentLaunchState {
+    registry: Option<tiller_registry::AcpRegistry>,
+    store: tiller_registry::InstallStore,
+    sources: std::collections::BTreeMap<String, tiller_registry::LaunchSource>,
+}
+
+impl AgentLaunchState {
+    /// Store at the XDG default root, no registry document yet, sources
+    /// already resolved against that empty state: builtin availability and
+    /// installed manifests are PATH/disk facts and hold fully offline.
+    fn for_startup() -> Self {
+        let environment: std::collections::BTreeMap<String, String> =
+            std::env::vars().collect();
+        // Test-only redirect: fixtures seed manifests into a temp root
+        // instead of the user's data directory.
+        #[cfg(test)]
+        let override_root = TEST_AGENTS_ROOT.read().ok().and_then(|guard| guard.clone());
+        #[cfg(not(test))]
+        let override_root: Option<PathBuf> = None;
+        let mut state = Self {
+            registry: None,
+            store: tiller_registry::InstallStore::new(override_root.unwrap_or_else(|| {
+                tiller_registry::InstallStore::default_root(&environment)
+            })),
+            sources: std::collections::BTreeMap::new(),
+        };
+        state.sources = compute_launch_sources(state.registry.as_ref(), &state.store);
+        state
+    }
+}
+
+/// Test-only redirect for [`AgentLaunchState::for_startup`], so fixtures
+/// can seed manifests without touching the user's data directory.
+#[cfg(test)]
+static TEST_AGENTS_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// One pass over the catalog answering each adapter's launch source from
+/// existence facts: is the CLI on PATH, is there a manifest whose
+/// executable still exists, and what does the cached registry document
+/// (`None` before the first fetch lands) offer.
+fn compute_launch_sources(
+    registry: Option<&tiller_registry::AcpRegistry>,
+    store: &tiller_registry::InstallStore,
+) -> std::collections::BTreeMap<String, tiller_registry::LaunchSource> {
+    let platform = tiller_registry::current_platform_key();
+    let mut sources = std::collections::BTreeMap::new();
+    for adapter in tiller_agents::ALL {
+        let availability = adapter.availability();
+        let installed = tiller_registry::registry_id(adapter.id())
+            .and_then(|id| store.manifest(id))
+            .map(|installed| {
+                let exists = installed.executable.exists();
+                (installed, exists)
+            });
+        let source = tiller_registry::resolve(tiller_registry::ResolveInput {
+            adapter_id: adapter.id(),
+            builtin: adapter.builtin_acp().map(|program| tiller_registry::BuiltinAcp {
+                program: program.program,
+                args: program.args,
+            }),
+            builtin_on_path: availability.is_available(),
+            installed,
+            registry,
+            platform_key: platform,
+        });
+        sources.insert(adapter.id().to_string(), source);
+    }
+    sources
+}
+
+/// The lookup behind [`TillerWorkspace::launch_source_for`], shared with
+/// restore paths that run before a workspace exists.
+fn launch_source_in(
+    launch: &AgentLaunchState,
+    adapter_id: &str,
+) -> tiller_registry::LaunchSource {
+    launch.sources.get(adapter_id).cloned().unwrap_or_else(|| {
+        tiller_registry::LaunchSource::Unavailable(tiller_registry::UnavailableReason::NotInRegistry)
+    })
+}
+
+/// Tiller's cached copy of the registry document lives beside the agents
+/// root, not inside it: the store owns per-agent directories.
+fn registry_cache_path(store: &tiller_registry::InstallStore) -> PathBuf {
+    store
+        .root()
+        .parent()
+        .map(|dir| dir.join("registry.json"))
+        .unwrap_or_else(|| PathBuf::from("registry.json"))
+}
+
 fn default_chat_command() -> AgentCommand {
     std::env::var_os("TILLER_ACP_PROGRAM")
         .map(PathBuf::from)
@@ -2706,9 +2817,13 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
 }
 
 /// Resolves persisted chat identity into the command and tab metadata that
-/// can actually be restored. Legacy rows and adapters without an ACP server
-/// use the default chat command but do not retain a misleading agent id.
-fn restored_chat_spec(agent_id: Option<&str>) -> (AgentCommand, Option<Icon>, Option<String>) {
+/// can actually be restored. Legacy rows and adapters whose source cannot
+/// launch yet use the default chat command but do not retain a misleading
+/// agent id.
+fn restored_chat_spec(
+    launch: &AgentLaunchState,
+    agent_id: Option<&str>,
+) -> (AgentCommand, Option<Icon>, Option<String>) {
     let Some(adapter) = agent_id.and_then(|id| {
         AGENT_CATALOG
             .iter()
@@ -2717,11 +2832,17 @@ fn restored_chat_spec(agent_id: Option<&str>) -> (AgentCommand, Option<Icon>, Op
     }) else {
         return (default_chat_command(), None, None);
     };
-    let Some(program) = adapter.acp_program() else {
+    let source = launch_source_in(launch, adapter.id());
+    let Some(command) = agent_command_for(&source) else {
+        // Nothing honest to launch (not installed; no registry document
+        // fetched yet): restore on the legacy default rather than dropping
+        // the user's persisted tab, but do not keep a misleading agent id —
+        // a codex-labelled tab silently connected to another agent's server
+        // was the original defect's shape.
         return (default_chat_command(), None, None);
     };
     (
-        acp_agent_command(program),
+        command,
         Icon::for_agent_id(adapter.id()),
         Some(adapter.id().to_string()),
     )
@@ -3515,6 +3636,7 @@ struct TillerWorkspace {
     worktree_label: String,
     terminal_breadcrumb: String,
     launch_snapshot: RestoredSession,
+    launch: AgentLaunchState,
     tab_machinery: TabMachinery,
     overflow_menu_open: bool,
     tab_menu_open: bool,
@@ -3663,6 +3785,16 @@ struct PendingPaneClose {
 }
 
 impl TillerWorkspace {
+    /// Recomputes every adapter's launch source from current facts.
+    fn recompute_launch_sources(&mut self) {
+        self.launch.sources =
+            compute_launch_sources(self.launch.registry.as_ref(), &self.launch.store);
+    }
+
+    fn launch_source_for(&self, adapter_id: &str) -> tiller_registry::LaunchSource {
+        launch_source_in(&self.launch, adapter_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         titlebar: Entity<Titlebar>,
@@ -4133,6 +4265,9 @@ impl TillerWorkspace {
                 .update(cx, |bar, cx| bar.apply_preferences(prefs, cx));
         })
         .detach();
+        // Task 8: how every agent launches is resolved state, held here and
+        // refreshed off the UI thread.
+        let launch = AgentLaunchState::for_startup();
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -4172,6 +4307,7 @@ impl TillerWorkspace {
             worktree_label,
             terminal_breadcrumb,
             launch_snapshot,
+            launch,
             tab_machinery,
             overflow_menu_open: false,
             tab_menu_open: false,
@@ -4230,6 +4366,36 @@ impl TillerWorkspace {
         // `has_current_worktree()` every time it runs, including this first
         // call, so construction needs no separate one-off check.
         workspace.sync_activity(cx);
+        // Sweep abandoned installs and fetch the registry off the UI
+        // thread; the foreground continuation recomputes every launch
+        // source with whatever the network added. Until then the sources
+        // computed at construction still answer — builtin availability and
+        // installed manifests are offline facts.
+        let cache_path = registry_cache_path(&workspace.launch.store);
+        let sweep_store =
+            tiller_registry::InstallStore::new(workspace.launch.store.root().to_path_buf());
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move {
+                    if let Err(error) =
+                        tiller_registry::Installer::new(sweep_store).sweep_staging()
+                    {
+                        eprintln!("[launch] staging sweep failed: {error}");
+                    }
+                    tiller_registry::RegistryClient::with_http(cache_path).registry(
+                        tiller_registry::RegistryClient::DEFAULT_MAX_AGE,
+                        false,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |workspace, _| match fetched {
+                Ok(registry) => workspace.launch.registry = Some(registry),
+                Err(error) => eprintln!("[launch] registry fetch failed: {error:#}"),
+            });
+            let _ = this.update(cx, |workspace, _| workspace.recompute_launch_sources());
+        })
+        .detach();
         workspace
     }
 
@@ -7183,14 +7349,14 @@ impl TillerWorkspace {
         let worktree_id = session::persisted_worktree_id(&self.working_directory);
         let chat = match adapter {
             Some(adapter) => {
-                let Some(program) = adapter.acp_program() else {
+                let source = self.launch_source_for(adapter.id());
+                let Some(command) = agent_command_for(&source) else {
                     eprintln!(
-                        "[chat] {} has no ACP server; refusing a silent fallback",
+                        "[chat] {} cannot launch right now ({source:?}); refusing a silent fallback",
                         adapter.display_name()
                     );
                     return;
                 };
-                let command = acp_agent_command(program);
                 let cwd = self.working_directory.clone();
                 let tab_id = persistence_id.clone();
                 cx.new(|cx| {
@@ -7205,8 +7371,18 @@ impl TillerWorkspace {
                 })
             }
             None => {
+                if std::env::var_os("TILLER_ACP_PROGRAM").is_none() {
+                    eprintln!(
+                        "[chat] no adapter picked and TILLER_ACP_PROGRAM unset; \
+                         not opening an unresolvable chat"
+                    );
+                    return;
+                }
                 let tab_id = persistence_id.clone();
-                cx.new(|cx| Chat::launch_with_persistence(database_path, tab_id, worktree_id, cx))
+                cx.new(|cx| {
+                    Chat::launch_with_persistence(database_path, tab_id, worktree_id, cx)
+                        .expect("checked TILLER_ACP_PROGRAM above")
+                })
             }
         };
         let composer_focus = chat.focus_handle(cx);
@@ -7263,7 +7439,8 @@ impl TillerWorkspace {
         let retained = self.retained_chats.remove(index);
         let title = retained.title.clone();
         let transcript = retained.transcript;
-        let (command, agent_icon, agent_id) = restored_chat_spec(retained.agent_id.as_deref());
+        let (command, agent_icon, agent_id) =
+            restored_chat_spec(&self.launch, retained.agent_id.as_deref());
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
@@ -12445,6 +12622,9 @@ fn restore_tabs(
     saved_session_refs: &BTreeMap<String, String>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
+    // Chat launch sources resolve here from offline facts; the registry
+    // document joins once the startup fetch lands on the workspace.
+    let launch = AgentLaunchState::for_startup();
     let resumable = resumable_session_refs(
         restored,
         saved_session_refs,
@@ -12473,7 +12653,7 @@ fn restore_tabs(
             .unwrap_or_default();
         let pane_id = tab_state.root_id.unwrap_or(id);
         let (command, agent_icon, agent_id) = if tab.kind == "chat" {
-            let (command, icon, agent_id) = restored_chat_spec(tab.agent_id.as_deref());
+            let (command, icon, agent_id) = restored_chat_spec(&launch, tab.agent_id.as_deref());
             (Some(command), icon, agent_id)
         } else {
             (
@@ -12614,6 +12794,8 @@ fn restore_tabs_in_workspace(
     window: &mut Window,
     cx: &mut Context<TillerWorkspace>,
 ) -> (Vec<OpenTab>, usize) {
+    // Same offline resolution as `restore_tabs`; see its comment.
+    let launch = AgentLaunchState::for_startup();
     let resumable = resumable_session_refs(
         restored,
         saved_session_refs,
@@ -12637,7 +12819,7 @@ fn restore_tabs_in_workspace(
             .root_id
             .unwrap_or_else(|| pane_id_start + tabs.len());
         let (command, agent_icon, agent_id) = if tab.kind == "chat" {
-            let (command, icon, agent_id) = restored_chat_spec(tab.agent_id.as_deref());
+            let (command, icon, agent_id) = restored_chat_spec(&launch, tab.agent_id.as_deref());
             (Some(command), icon, agent_id)
         } else {
             (
@@ -13592,6 +13774,110 @@ mod tests {
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn a_chat_launches_the_resolved_source_not_a_hardcoded_default() {
+        // The two `npx …@latest` defaults in chat.rs were the last place a
+        // chat could start a network fetch before it could say anything.
+        let source = tiller_registry::LaunchSource::Builtin {
+            program: "opencode".into(),
+            args: vec!["acp".into()],
+        };
+        let command = agent_command_for(&source).expect("a builtin source launches");
+        // `AgentCommand`'s fields are public (`tiller_acp/src/lib.rs:141-146`);
+        // there are no accessor methods.
+        assert_eq!(command.program, std::path::PathBuf::from("opencode"));
+        assert_eq!(command.args, vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn an_unavailable_source_launches_nothing() {
+        let source = tiller_registry::LaunchSource::Unavailable(
+            tiller_registry::UnavailableReason::NotInRegistry,
+        );
+        assert!(
+            agent_command_for(&source).is_none(),
+            "no fallback to another agent's server, and no invented program name"
+        );
+    }
+
+    #[test]
+    fn an_installable_source_launches_nothing_until_it_is_installed() {
+        let agent = tiller_registry::RegistryAgent {
+            id: "codex-acp".into(),
+            name: "Codex".into(),
+            version: "1.6.2".into(),
+            description: None,
+            repository: None,
+            website: None,
+            license: None,
+            icon: None,
+            distributions: vec![tiller_registry::Distribution::Npx {
+                package: "@agentclientprotocol/codex-acp@1.6.2".into(),
+                args: vec![],
+            }],
+        };
+        assert!(agent_command_for(&tiller_registry::LaunchSource::Installable { agent }).is_none());
+    }
+
+    #[test]
+    fn every_adapter_in_the_catalog_is_a_known_registry_client() {
+        // The adapter-id table inside `tiller_registry` and
+        // `tiller_agents::ALL` are two lists kept in sync by hand; nothing
+        // else links them, and a leaf cannot depend on the catalog. So the
+        // join is pinned here, where both crates are visible: for EVERY
+        // adapter, resolve with a registry carrying an agent named exactly
+        // like the adapter must NOT find it via bare-name passthrough.
+        // Mapped adapters look their mapped id up instead; a known-but-
+        // unmapped one (omp) refuses; an adapter missing from the table
+        // entirely would silently pass through and fail here.
+        for adapter in tiller_agents::ALL {
+            let id = adapter.id();
+            let registry = tiller_registry::AcpRegistry {
+                version: "1.0.0".into(),
+                warnings: Vec::new(),
+                agents: vec![tiller_registry::RegistryAgent {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    version: "1.0.0".into(),
+                    description: None,
+                    repository: None,
+                    website: None,
+                    license: None,
+                    icon: None,
+                    distributions: vec![tiller_registry::Distribution::Npx {
+                        package: format!("{id}@1.0.0"),
+                        args: Vec::new(),
+                    }],
+                }],
+            };
+            let source = tiller_registry::resolve(tiller_registry::ResolveInput {
+                adapter_id: id,
+                builtin: adapter.builtin_acp().map(|program| tiller_registry::BuiltinAcp {
+                    program: program.program,
+                    args: program.args,
+                }),
+                builtin_on_path: false,
+                installed: None,
+                registry: Some(&registry),
+                platform_key: "linux-x86_64",
+            });
+            let self_mapped = tiller_registry::registry_id(id) == Some(id);
+            if self_mapped {
+                // opencode maps onto its own registry row by design.
+                continue;
+            }
+            assert_eq!(
+                source,
+                tiller_registry::LaunchSource::Unavailable(
+                    tiller_registry::UnavailableReason::NotInRegistry
+                ),
+                "{id}: tiller_registry does not know this catalog adapter; \
+                 it fell back to bare-name matching"
+            );
+        }
+    }
+
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -18233,6 +18519,13 @@ mod tests {
     #[gpui::test]
     async fn drawn_tab_context_resume_chat_reopens_the_retained_session(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        // A chat now opens only from a resolvable source: give the fixture's
+        // workspace an installed codex-acp manifest in a private store root.
+        let agents_root = std::env::temp_dir()
+            .join(format!("tiller-resume-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         // ACP owns an OS worker, so this test must allow its event channel to
@@ -19780,32 +20073,87 @@ mod tests {
     }
 
     #[test]
-    fn restored_codex_chat_uses_codex_command_and_identity() {
-        let (command, icon, agent_id) = restored_chat_spec(Some("codex"));
-        assert_eq!(command.program, PathBuf::from("npx"));
-        assert_eq!(
-            command.args,
-            ["-y", "@agentclientprotocol/codex-acp@latest"]
-        );
+    fn restored_codex_chat_falls_back_without_identity_until_launchable() {
+        let mut launch = test_launch_state();
+        let (command, icon, agent_id) = restored_chat_spec(&launch, Some("codex"));
+        // Nothing installed and no registry document yet: there is no honest
+        // codex command, so restoration uses the legacy default WITHOUT
+        // claiming codex identity.
+        assert_eq!(command, default_chat_command());
+        assert_eq!(icon, None);
+        assert_eq!(agent_id, None);
+
+        // An installed manifest flips it back to identity-preserving even
+        // fully offline. The manifest's executable must really exist — the
+        // Installed rung checks.
+        let agents_root = std::env::temp_dir()
+            .join(format!("tiller-launch-seeded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        let executable = seed_codex_acp_manifest(&agents_root);
+        launch.store = tiller_registry::InstallStore::new(agents_root);
+        launch.sources = compute_launch_sources(None, &launch.store);
+        let (command, icon, agent_id) = restored_chat_spec(&launch, Some("codex"));
+        assert_eq!(command.program, executable);
         assert_eq!(icon, Some(Icon::Codex));
         assert_eq!(agent_id.as_deref(), Some("codex"));
-
-        let (claude_command, _, _) = restored_chat_spec(Some("claude"));
-        assert_ne!(
-            command.args, claude_command.args,
-            "restoration must preserve the selected adapter's ACP command"
-        );
     }
 
     #[test]
     fn restored_unknown_or_absent_chat_identity_falls_back_without_claiming_an_agent() {
-        let (default_command, default_icon, default_id) = restored_chat_spec(None);
-        let (unknown_command, unknown_icon, unknown_id) = restored_chat_spec(Some("unknown-agent"));
+        let launch = test_launch_state();
+        let (default_command, default_icon, default_id) = restored_chat_spec(&launch, None);
+        let (unknown_command, unknown_icon, unknown_id) =
+            restored_chat_spec(&launch, Some("unknown-agent"));
         assert_eq!(unknown_command, default_command);
         assert_eq!(unknown_icon, None);
         assert_eq!(unknown_id, None);
         assert_eq!(default_icon, None);
         assert_eq!(default_id, None);
+    }
+
+    fn test_launch_state() -> AgentLaunchState {
+        let mut launch = AgentLaunchState {
+            registry: None,
+            store: tiller_registry::InstallStore::new(
+                std::env::temp_dir().join(format!("tiller-launch-test-{}", std::process::id())),
+            ),
+            sources: std::collections::BTreeMap::new(),
+        };
+        launch.sources = compute_launch_sources(None, &launch.store);
+        launch
+    }
+
+    /// Writes a codex-acp manifest whose executable really exists (the
+    /// Installed rung checks `executable.exists()`). Returns the stub path.
+    fn seed_codex_acp_manifest(root: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(root).unwrap();
+        let executable = root.join(format!("codex-acp-stub-{}", std::process::id()));
+        std::fs::create_dir_all(root).unwrap();
+        let executable = root.join(format!("codex-acp-stub-{}", std::process::id()));
+        std::fs::write(&executable, b"stub").unwrap();
+        tiller_registry::InstallStore::new(root.to_path_buf())
+            .write(&tiller_registry::InstalledAgent {
+                id: "codex-acp".into(),
+                version: "1.6.2".into(),
+                executable: executable.clone(),
+                args: vec![],
+                integrity: tiller_registry::Integrity::Sha256,
+            })
+            .unwrap();
+        executable
+    }
+
+    /// Points `TILLER_ACP_PROGRAM` at a stub file so adapter-less chat-tab
+    /// fixtures exercise tab machinery instead of the (correct) refusal.
+    /// Set once, process-lifetime; nothing asserts it stays unset.
+    fn ensure_stub_acp_program() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let stub =
+                std::env::temp_dir().join(format!("tiller-stub-acp-{}", std::process::id()));
+            std::fs::write(&stub, b"stub").unwrap();
+            unsafe { std::env::set_var("TILLER_ACP_PROGRAM", &stub) };
+        });
     }
 
     #[test]
@@ -21974,6 +22322,14 @@ mod tests {
         drop(store);
         let restored = session::restore(&database_path, &working_directory);
 
+        // The identity round-trip requires codex to be resolvable at
+        // restore time: seed an installed manifest in a private store root.
+        let agents_root = std::env::temp_dir()
+            .join(format!("tiller-p73-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
+
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         // Chat restoration starts an ACP worker. Permit its late wakeup while
@@ -23696,6 +24052,10 @@ mod tests {
     /// triggers cannot reach a real network call.
     #[gpui::test]
     async fn chat_turn_ended_wires_into_auto_rename(cx: &mut TestAppContext) {
+        // An adapter-less chat tab now opens only through the documented
+        // escape hatch; this test exercises tab/auto-rename machinery, not
+        // launch resolution.
+        ensure_stub_acp_program();
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
