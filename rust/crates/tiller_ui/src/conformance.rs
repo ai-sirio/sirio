@@ -55,9 +55,11 @@
 //! - **Tab bar 34px, toolbars 34px** (tab_bar, changes, right panel): waku
 //!   has no tab strip and no toolbars — it is one conversation. Tiller's
 //!   chrome rows are its own; no waku measurement exists for them.
-//! - **Right panel header 40px, activity rows 48px, `PANEL_WIDTH` 405**:
-//!   Tiller-only surface (waku's right panel is a native webview, "not
-//!   part of Tiller's UI"). No waku measurement exists.
+//! - **Right panel header 40px, activity rows 48px, right panel 220–640px
+//!   (default 405)**: Tiller-only surface (waku's right panel is a native
+//!   webview, "not part of Tiller's UI"). No waku measurement exists. The
+//!   width stopped being a frozen constant when the panel became
+//!   user-resizable; 405 survives as the default, not as the geometry.
 //! - **`caption2` is 13.0, off the measured scale**: waku's smallest
 //!   step is 10.5, and Tiller first sized its dense strips there for fit
 //!   — the status bar (three provider segments + worktree context), tab
