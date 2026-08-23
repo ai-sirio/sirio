@@ -177,6 +177,25 @@ const TAB_INDENT: f32 = 35.0;
 fn row_width(panel_width: f32, depth: usize) -> f32 {
     (panel_width - (ROW_LEFT_INSET + depth as f32 * TAB_INDENT) - ROW_RIGHT_INSET).max(0.0)
 }
+
+/// How many lines a row's title is laid out for.
+///
+/// The estimate is a character count against a fixed
+/// [`PROJECT_TITLE_CHARS_PER_LINE`], which is only ever right at one width.
+/// That is tolerable *because* the same number is used twice: `row_height`
+/// budgets this many lines and the title is clamped to exactly this many, so
+/// the height and the text cannot disagree however wrong the estimate is —
+/// a narrow panel costs an ellipsis, not a title drawn over its neighbours.
+/// Measuring the text properly would mean laying it out to find its height
+/// and sizing the row from that, which gpui gives no way to do before the
+/// frame the row is in.
+fn title_lines(title: &str) -> usize {
+    title
+        .chars()
+        .count()
+        .div_ceil(PROJECT_TITLE_CHARS_PER_LINE)
+        .max(1)
+}
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
@@ -1706,13 +1725,7 @@ impl Sidebar {
     /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
     /// the session-card math). Long titles add one 18px line each.
     fn row_height(row: &SidebarRow) -> f32 {
-        let lines = row
-            .title
-            .chars()
-            .count()
-            .div_ceil(PROJECT_TITLE_CHARS_PER_LINE)
-            .max(1);
-        let extra_lines = lines.saturating_sub(1) as f32;
+        let extra_lines = title_lines(&row.title).saturating_sub(1) as f32;
         let is_card =
             row.path.is_some() && matches!(row.kind, RowKind::Project | RowKind::Worktree);
         if is_card {
@@ -3589,6 +3602,15 @@ impl Sidebar {
                     .w(px(title_width))
                     .flex_none()
                     .whitespace_normal()
+                    // Clamped to what `row_height` budgeted for this same
+                    // title. Wrapping is the reference design — a project
+                    // path breaks over two lines on purpose — but the row's
+                    // height is fixed, so a title that wraps further than
+                    // predicted draws over the rows beneath it. It did, as
+                    // soon as the panel could be dragged narrow.
+                    .line_clamp(title_lines(&title))
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .line_height(px(ROW_TITLE_LINE_HEIGHT))
                     .font_weight(if is_project {
                         FontWeight::SEMIBOLD
@@ -4422,6 +4444,43 @@ mod tests {
             row_width(DEFAULT_SIDEBAR_WIDTH, 0) - TAB_INDENT
         );
         assert_eq!(row_width(20.0, 3), 0.0, "a width is never negative");
+    }
+
+    /// The row's height and the title's clamp must come from one number, or
+    /// a title that wraps further than the height budgeted for draws over
+    /// the row beneath it — which is what a narrow panel produced.
+    #[test]
+    fn a_rows_height_budgets_exactly_the_lines_its_title_is_clamped_to() {
+        let mut row = SidebarRow {
+            id: 0,
+            kind: RowKind::Project,
+            depth: 0,
+            title: "tiller".to_owned(),
+            selected: false,
+            expanded: true,
+            is_primary: false,
+            agent_status: None,
+            is_git: true,
+            path: Some(PathBuf::from("/tmp/tiller")),
+            tab_id: None,
+            tab_kind: None,
+            agent_icon: None,
+            agent_brand: None,
+            comment: None,
+            running_agents: Vec::new(),
+        };
+        assert_eq!(title_lines(&row.title), 1);
+        assert_eq!(Sidebar::row_height(&row), CARD_TWO_LINE_HEIGHT);
+
+        row.title = "a".repeat(PROJECT_TITLE_CHARS_PER_LINE + 1);
+        assert_eq!(title_lines(&row.title), 2);
+        assert_eq!(
+            Sidebar::row_height(&row),
+            CARD_TWO_LINE_HEIGHT + ROW_TITLE_LINE_HEIGHT,
+            "the second line the title is clamped to is the second line the row pays for"
+        );
+
+        assert_eq!(title_lines(""), 1, "an empty title still occupies a line");
     }
 
     #[test]
