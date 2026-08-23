@@ -244,6 +244,17 @@ pub(super) fn render_chip_popup(
         .bg(theme.card_fill)
         .shadow_lg();
 
+    if chip == FilterChip::User {
+        list = list.child(
+            div()
+                .px(px(6.0))
+                .py(px(3.0))
+                .text_size(theme.typography.caption2)
+                .text_color(theme.meta)
+                .child("Authors in the loaded history"),
+        );
+    }
+
     if options.is_empty() {
         return list.child(
             div()
