@@ -316,8 +316,6 @@ fn bind_window_keys(cx: &mut App) {
 
 /// Fixed panel geometry, measured off the frozen reference shots — see
 /// `reference/MEASURED.md`.
-const SIDEBAR_WIDTH: f32 = 325.;
-const RIGHT_PANEL_WIDTH: f32 = 405.;
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
@@ -330,20 +328,26 @@ const TAB_STATUS_WIDTH: f32 = 16.;
 const TAB_CLOSE_WIDTH: f32 = 14.;
 const TAB_TITLE_ESTIMATED_CHAR_WIDTH: f32 = 7.5;
 
+/// Space the tab strip has left once the side panels, the gaps and the outer
+/// inset are taken out. `None` means the panel is hidden — visibility and
+/// width are one concept here, because a hidden panel subtracts neither a
+/// width nor a gap.
+///
+/// The widths passed in must be the **rendered** ones from
+/// `panel_layout::resolve_panel_widths`, never the preferences: when the
+/// viewport clamp is active a preference is wider than what was actually
+/// taken, and the tab strip would size itself against space that does not
+/// exist.
 fn tab_strip_available_width_for_shell(
     viewport_width: f32,
-    sidebar_visible: bool,
-    right_panel_visible: bool,
+    sidebar_width: Option<f32>,
+    right_panel_width: Option<f32>,
     outer_inset: f32,
     gap: f32,
 ) -> f32 {
-    let fixed_panels = (if sidebar_visible { SIDEBAR_WIDTH } else { 0.0 })
-        + if right_panel_visible {
-            RIGHT_PANEL_WIDTH
-        } else {
-            0.0
-        };
-    let visible_gaps = usize::from(sidebar_visible) + usize::from(right_panel_visible);
+    let fixed_panels = sidebar_width.unwrap_or(0.0) + right_panel_width.unwrap_or(0.0);
+    let visible_gaps = usize::from(sidebar_width.is_some())
+        + usize::from(right_panel_width.is_some());
 
     viewport_width - fixed_panels - (gap * visible_gaps as f32) - (2.0 * outer_inset)
 }
@@ -3433,6 +3437,15 @@ struct TillerWorkspace {
     right_panel: Entity<RightPanel>,
     sidebar_visible: bool,
     right_panel_visible: bool,
+    /// Preferred width, not the drawn width: `panel_layout::resolve_panel_widths`
+    /// narrows both of these to what the viewport can give, and the narrowed
+    /// value is deliberately never written back here.
+    sidebar_width: f32,
+    right_panel_width: f32,
+    /// Which edge is under the hand right now. Gives that panel priority when
+    /// the two compete for space, so the panel the user is *not* touching
+    /// stays still.
+    dragging_panel: Option<panel_layout::PanelSide>,
     left_panel_focus: FocusHandle,
     center_panel_focus: FocusHandle,
     right_panel_focus: FocusHandle,
@@ -3649,6 +3662,8 @@ impl TillerWorkspace {
         tray_requests: Option<tray::TrayRequestQueue>,
         tray_handle: Option<tray::TrayHandle>,
         translucency_enabled: bool,
+        sidebar_width: f32,
+        right_panel_width: f32,
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
@@ -4100,6 +4115,9 @@ impl TillerWorkspace {
             right_panel,
             sidebar_visible: true,
             right_panel_visible: true,
+            sidebar_width,
+            right_panel_width,
+            dragging_panel: None,
             left_panel_focus: cx.focus_handle(),
             center_panel_focus: cx.focus_handle(),
             right_panel_focus: cx.focus_handle(),
@@ -10113,10 +10131,18 @@ impl TillerWorkspace {
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
+        let (left_width, right_width) = panel_layout::resolve_panel_widths(
+            f32::from(window.bounds().size.width),
+            self.sidebar_visible.then_some(self.sidebar_width),
+            self.right_panel_visible.then_some(self.right_panel_width),
+            self.dragging_panel,
+            f32::from(theme.spacing.shell_outer_inset),
+            f32::from(theme.spacing.shell_gap),
+        );
         tab_strip_available_width_for_shell(
             f32::from(window.bounds().size.width),
-            self.sidebar_visible,
-            self.right_panel_visible,
+            left_width,
+            right_width,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
         ) - f32::from(theme.spacing.titlebar_control_frame.width)
@@ -10465,6 +10491,17 @@ impl TillerWorkspace {
             )
             .child(centre_surface);
 
+        let (left_width, right_width) = panel_layout::resolve_panel_widths(
+            // Same expression `tab_strip_available_width` already uses at
+            // `main.rs:10116` — not `viewport_size()`.
+            f32::from(window.bounds().size.width),
+            self.sidebar_visible.then_some(self.sidebar_width),
+            self.right_panel_visible.then_some(self.right_panel_width),
+            self.dragging_panel,
+            f32::from(theme.spacing.shell_outer_inset),
+            f32::from(theme.spacing.shell_gap),
+        );
+
         div()
             .id("shell-work-area")
             .debug_selector(|| "shell-work-area".into())
@@ -10484,7 +10521,7 @@ impl TillerWorkspace {
                         left_focus_visible,
                         theme,
                     )
-                    .w(px(SIDEBAR_WIDTH))
+                    .w(px(left_width.unwrap_or(0.0)))
                     .flex_none()
                     .child(self.sidebar.clone()),
                 )
@@ -10508,7 +10545,7 @@ impl TillerWorkspace {
                         right_focus_visible,
                         theme,
                     )
-                    .w(px(RIGHT_PANEL_WIDTH))
+                    .w(px(right_width.unwrap_or(0.0)))
                     .flex_none()
                     .child(self.right_panel.clone()),
                 )
@@ -13033,7 +13070,7 @@ fn main() {
         // General screen can display the path the live socket listens on
         // (P23: the socket row must show the real path, not a template).
         let settings_snapshot = {
-            let mut snapshot = settings_snapshot_from_app_settings(saved_settings);
+            let mut snapshot = settings_snapshot_from_app_settings(saved_settings.clone());
             snapshot.socket_path = socket_info.path.to_string_lossy().into_owned();
             // F-SET-22: AppSettings has no agent_colors column yet, so the
             // persisted choices are overlaid from the session store's
@@ -13282,6 +13319,8 @@ fn main() {
                         tray_requests.clone(),
                         tray_handle,
                         initial_translucency,
+                        saved_settings.sidebar_width as f32,
+                        saved_settings.right_panel_width as f32,
                         cx,
                     )
                 });
@@ -13958,6 +13997,8 @@ mod tests {
             None,
             None,
             translucency_enabled,
+            325.0,
+            405.0,
             cx,
         )
     }
@@ -14032,6 +14073,8 @@ mod tests {
             None,
             None,
             false,
+            325.0,
+            405.0,
             cx,
         )
     }
@@ -14125,6 +14168,8 @@ mod tests {
             None,
             None,
             false,
+            325.0,
+            405.0,
             cx,
         )
     }
@@ -14226,6 +14271,8 @@ mod tests {
             None,
             None,
             false,
+            325.0,
+            405.0,
             cx,
         )
     }
@@ -20464,6 +20511,44 @@ mod tests {
         assert_eq!(work.right() - center.right(), px(4.0));
     }
 
+    /// The test whose absence let `right_panel_width` sit in the settings model
+    /// for months with a clamp, a test, and no reader: it compares the *drawn*
+    /// panel against the *configured* width. The pre-existing geometry tests
+    /// compare drawn bounds against the constant the render code itself reads,
+    /// so they cannot fail when the render ignores configuration — they assert
+    /// that 405 == 405.
+    #[gpui::test]
+    async fn a_configured_panel_width_is_the_width_actually_drawn(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // 280 + 380 = 660, deliberately inside the test window's budget. The
+        // gpui test window is 1024x768, so budget = 1024 - 8 - 8 - 320 = 688.
+        // Asking for more (500 on the right, say) makes the resolver correctly
+        // narrow the panels and this test then fails against perfectly good
+        // wiring — a false red that looks exactly like a real one.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sidebar_width = 280.0;
+            workspace.right_panel_width = 380.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let left = cx.debug_bounds("shell-left-panel").expect("left panel");
+        let right = cx.debug_bounds("shell-right-panel").expect("right panel");
+
+        assert_eq!(left.size.width, px(280.0));
+        assert_eq!(right.size.width, px(380.0));
+    }
+
     #[gpui::test]
     async fn mixed_sidebar_visibility_keeps_the_center_inset_and_gap(cx: &mut TestAppContext) {
         cx.set_global(Theme::dark());
@@ -20477,6 +20562,10 @@ mod tests {
                 .expect("workspace root")
         });
         let both_visible_center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        let (workspace_sidebar_width, workspace_right_panel_width) =
+            workspace.read_with(&cx.cx, |workspace, _| {
+                (workspace.sidebar_width, workspace.right_panel_width)
+            });
 
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.sidebar_visible = false;
@@ -20490,7 +20579,7 @@ mod tests {
         let right = cx.debug_bounds("shell-right-panel").expect("right panel");
         assert_eq!(
             center.size.width - both_visible_center.size.width,
-            px(SIDEBAR_WIDTH + 4.0)
+            px(workspace_sidebar_width + 4.0)
         );
         assert_eq!(right.left() - center.right(), px(4.0));
         assert_eq!(center.left() - work.left(), px(4.0));
@@ -20511,7 +20600,7 @@ mod tests {
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
         assert_eq!(
             center.size.width - both_visible_center.size.width,
-            px(RIGHT_PANEL_WIDTH + 4.0)
+            px(workspace_right_panel_width + 4.0)
         );
         assert_eq!(center.left() - left.right(), px(4.0));
         assert_eq!(work.right() - center.right(), px(4.0));
@@ -20525,22 +20614,33 @@ mod tests {
         let viewport_width = 1_000.0;
         let outer_inset = 4.0;
         let gap = 4.0;
+        // Named rather than inlined: these used to be 405 and 325 in
+        // disguise, which is exactly why the numbers below never moved when
+        // the panels were meant to become resizable.
+        let sidebar = 325.0;
+        let right = 405.0;
 
         assert_eq!(
-            tab_strip_available_width_for_shell(viewport_width, true, true, outer_inset, gap),
-            254.0,
+            tab_strip_available_width_for_shell(
+                viewport_width, Some(sidebar), Some(right), outer_inset, gap
+            ),
+            viewport_width - sidebar - right - (2.0 * gap) - (2.0 * outer_inset),
         );
         assert_eq!(
-            tab_strip_available_width_for_shell(viewport_width, true, false, outer_inset, gap),
-            663.0,
+            tab_strip_available_width_for_shell(
+                viewport_width, Some(sidebar), None, outer_inset, gap
+            ),
+            viewport_width - sidebar - gap - (2.0 * outer_inset),
         );
         assert_eq!(
-            tab_strip_available_width_for_shell(viewport_width, false, true, outer_inset, gap),
-            583.0,
+            tab_strip_available_width_for_shell(
+                viewport_width, None, Some(right), outer_inset, gap
+            ),
+            viewport_width - right - gap - (2.0 * outer_inset),
         );
         assert_eq!(
-            tab_strip_available_width_for_shell(viewport_width, false, false, outer_inset, gap),
-            992.0,
+            tab_strip_available_width_for_shell(viewport_width, None, None, outer_inset, gap),
+            viewport_width - (2.0 * outer_inset),
         );
     }
 
