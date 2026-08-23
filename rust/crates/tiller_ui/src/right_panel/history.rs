@@ -24,6 +24,14 @@ const CHUNK: usize = 500;
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 /// Height of one commit row.
 const ROW_HEIGHT: f32 = 26.0;
+/// Height of one commit row while a text filter is active.
+///
+/// A row that matched on body text carries a second line explaining why, and
+/// `uniform_list` gives every row in the list the same height — so the whole
+/// list grows for the duration of the search rather than only the annotated
+/// rows, which it has no way to make taller on their own. Without this the
+/// annotation drew straight over the next row's subject.
+const ROW_HEIGHT_ANNOTATED: f32 = 42.0;
 
 /// Membership toggle that keeps the vector a set: `LogFilter` treats a
 /// repeated value as a repeated git argument, and git would then OR a term
@@ -591,6 +599,16 @@ impl Render for GitHistory {
             } else {
                 graph_width(&rows)
             };
+            // Every row in a `uniform_list` is the same height, so the list
+            // has to be tall enough for the tallest row it might draw. While a
+            // text search is on, any row can gain a body-match line, so they
+            // all get the room — rather than the annotated ones spilling over
+            // their neighbours, which is what the running app showed.
+            let row_height = if self.filter.text.is_some() {
+                ROW_HEIGHT_ANNOTATED
+            } else {
+                ROW_HEIGHT
+            };
             let row_entity = entity.clone();
             let list = uniform_list(
                 "right-panel-history",
@@ -670,6 +688,7 @@ impl Render for GitHistory {
                                 row_entity.clone(),
                                 theme,
                                 body_match,
+                                row_height,
                             )
                         })
                         .collect::<Vec<_>>()
@@ -743,6 +762,7 @@ fn render_history_row(
     entity: gpui::Entity<GitHistory>,
     theme: Theme,
     body_match: Option<String>,
+    row_height: f32,
 ) -> impl IntoElement {
     let sha = commit.sha.clone();
     let subject_color = if commit.parents.len() > 1 {
@@ -758,7 +778,7 @@ fn render_history_row(
     div()
         .id(format!("history-row-{sha}"))
         .debug_selector(|| "history-row".to_owned())
-        .h(px(ROW_HEIGHT))
+        .h(px(row_height))
         .w_full()
         .flex()
         .items_center()
@@ -787,6 +807,12 @@ fn render_history_row(
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .text_ellipsis()
+                // Footnote, not the panel's inherited base size: the History
+                // list is a dense strip like the status and tab bars, and at
+                // the panel's narrow end the base size truncated subjects to
+                // "docs…" with room for nothing else. It also matches the
+                // body-match line below, so a row reads as one unit.
+                .text_size(theme.typography.footnote)
                 .text_color(subject_color)
                 .child(commit.subject)
                 // The subject alone does not explain the match, so the
@@ -809,6 +835,7 @@ fn render_history_row(
                 .flex_none()
                 .overflow_hidden()
                 .text_ellipsis()
+                .text_size(theme.typography.footnote)
                 .text_color(theme.meta)
                 .child(commit.author),
         )
@@ -816,6 +843,7 @@ fn render_history_row(
             div()
                 .w(px(72.0))
                 .flex_none()
+                .text_size(theme.typography.footnote)
                 .text_color(theme.meta)
                 .child(date),
         )
@@ -1285,6 +1313,60 @@ mod tests {
         assert!(
             cx.debug_bounds("history-graph").is_none(),
             "a filtered set draws no lanes"
+        );
+    }
+
+    /// Found by running the app, not by any of the tests above: the
+    /// body-match line drew straight over the next row's subject.
+    ///
+    /// `uniform_list` gives every row one height, and it has no way to make
+    /// just the annotated ones taller — so the list has to be tall enough for
+    /// the tallest row it might draw, which means all rows grow while a text
+    /// search is on. Asserting on the drawn height is the only way to see
+    /// this: every test that checks the data was already green.
+    #[gpui::test]
+    async fn rows_grow_to_fit_a_body_match_line(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let history = cx.update(|window, _| {
+            window.root::<GitHistory>().flatten().expect("history root")
+        });
+        pump_until(&cx.cx, || {
+            history.read_with(&cx.cx, |history, _| history.commits.len() == 2)
+        });
+        cx.run_until_parked();
+        let unfiltered = cx
+            .debug_bounds("history-row")
+            .expect("a row with no filter")
+            .size
+            .height;
+
+        history.update(&mut cx.cx, |history, cx| {
+            history.set_filter(
+                LogFilter {
+                    text: Some("second".to_owned()),
+                    ..LogFilter::default()
+                },
+                cx,
+            );
+        });
+        pump_until(&cx.cx, || {
+            history.read_with(&cx.cx, |history, _| history.commits.len() == 1)
+        });
+        cx.run_until_parked();
+        let filtered = cx
+            .debug_bounds("history-row")
+            .expect("a row with a filter")
+            .size
+            .height;
+
+        assert!(
+            filtered > unfiltered,
+            "rows must make room for the annotation: {filtered:?} is not taller than {unfiltered:?}"
         );
     }
 
