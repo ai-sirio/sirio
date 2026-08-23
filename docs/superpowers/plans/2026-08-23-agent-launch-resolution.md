@@ -1523,6 +1523,8 @@ cd rust && cargo test -p tiller_registry installer
 
 Expected: FAIL — no `installer` module.
 
+**Note on the `ureq` calls below.** This task and Task 3 spell the `ureq` response API differently, and at most one of them matches ureq 3.4. Verify the real API once and use one consistent form across both modules. The binding requirements are the ceilings and timeouts — a 600-second global timeout and a 512 MB download cap here, 30 seconds on the registry fetch in Task 3 — not the method names.
+
 - [ ] **Step 3: Add the unpacking dependencies**
 
 In `rust/crates/tiller_registry/Cargo.toml`. `tar` is the one crate not already in the local registry, so this build needs network once:
@@ -2535,9 +2537,11 @@ impl TillerWorkspace {
 
 At startup, before the first render, run `Installer::new(store).sweep_staging()` and the first `RegistryClient::registry(DEFAULT_MAX_AGE, false)` on `cx.background_executor()`, then `recompute_launch_sources` on the foreground.
 
-- [ ] **Step 6: Replace the chat-tab launch path**
+- [ ] **Step 6: Replace both chat-tab launch paths**
 
-Wherever `add_chat_tab` resolves an adapter's `acp_program()` and calls `acp_agent_command`, call `self.launch_source_for(adapter_id)` and `agent_command_for(&source)` instead. When it returns `None`, do not open a chat tab — surface the reason from `LaunchSource` rather than opening a tab that cannot connect.
+There are **two** sites resolving `adapter.acp_program()` into `acp_agent_command`, not one — `main.rs:2720-2724` and `main.rs:7186-7193` (inside `add_chat_tab`). Convert both to `self.launch_source_for(adapter_id)` plus `agent_command_for(&source)`. Leaving either behind keeps one launch path on the compile-time claim, and Task 10's removal would then fail to compile.
+
+When `agent_command_for` returns `None`, do not open a chat tab — surface the reason carried by `LaunchSource` rather than opening a tab that cannot connect.
 
 - [ ] **Step 7: Delete the two hardcoded defaults in `chat.rs`**
 
@@ -2583,7 +2587,8 @@ git commit -m "feat(chat): launch the resolved agent instead of a hardcoded npx 
 **Files:**
 - Modify: `rust/crates/tiller_ui/src/settings.rs:3161-3189` (`render_acp_badge`)
 - Modify: `rust/crates/tiller_ui/src/settings.rs:3190+` (`render_agents`)
-- Modify: `rust/crates/tiller_ui/src/settings.rs:635-660` (`provider_row`, `ProviderRowModel`)
+- Modify: `rust/crates/tiller_ui/src/settings.rs:638-660` (`provider_row`, `ProviderRowModel`) — and its four call sites: `:3199`, `:4436`, `:4451`, `:6997`. The last three are tests; an unlisted call site is how a task reports green while the crate does not build.
+- Modify: `rust/crates/tiller_ui/src/tab_bar.rs:520` — the new-chat picker filters on `agent.acp_program().is_some()`. It is the only consumer of that method outside Settings, and Task 10 removes it, so the picker moves to `LaunchSource` here, where the same state is already being threaded.
 - Modify: `rust/crates/tiller_ui/src/settings.rs:4942-5010` (the existing badge test)
 - Modify: `rust/crates/tiller/src/main.rs` — add `bind_settings`, modelled on `bind_chat` (`main.rs:4442`), to receive `SettingsEvent` and run the install on the background executor
 
@@ -2745,7 +2750,8 @@ git commit -m "feat(settings): render the resolved launch source with install ac
 **Files:**
 - Modify: `rust/crates/tiller_agents/src/lib.rs` (remove `acp_program` from the trait and from `AgentAvailability`; keep `AcpProgram`)
 - Modify: `rust/crates/tiller_agents/src/{claude,codex,opencode,pi,omp}.rs`
-- Modify: `rust/crates/tiller_ui/src/chat.rs` (`acp_agent_command`, ~line 897)
+- Modify: `rust/crates/tiller_ui/src/chat.rs` (`acp_agent_command`, ~line 897; its doc reference at `:1040-1042`; its test at `:10317`)
+- Modify: `rust/crates/tiller_ui/src/tab_bar.rs:520` (converted by Task 9; confirm no `acp_program` reference survives)
 - Modify: `rust/crates/tiller_acp/src/lib.rs:2745`, `rust/crates/tiller_acp/src/mcp_config.rs:17`, `rust/crates/tiller_acp/tests/real_claude.rs`
 - Modify: `CLAUDE.md`
 
