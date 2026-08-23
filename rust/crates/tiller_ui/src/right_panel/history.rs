@@ -63,6 +63,9 @@ pub(crate) struct GitHistory {
     pub(crate) search_regex: bool,
     pub(crate) search_case_sensitive: bool,
     pub(crate) search_blink: crate::caret::Blink,
+    /// The pathspec being typed. Free text rather than a directory picker: a
+    /// pathspec is more expressive than a picker, and git validates it.
+    pub(crate) path_draft: String,
     search_task: Option<Task<()>>,
     /// Bumped per scheduled search; a timer that wakes stale does nothing.
     search_generation: u64,
@@ -105,6 +108,7 @@ impl GitHistory {
             search_regex: false,
             search_case_sensitive: false,
             search_blink: crate::caret::Blink::new(),
+            path_draft: String::new(),
             search_task: None,
             search_generation: 0,
             search_focus: None,
@@ -253,6 +257,30 @@ impl GitHistory {
         self.set_filter(filter, cx);
     }
 
+    /// Applies the typed pathspec, or clears it when the field is empty.
+    pub(crate) fn set_path_filter(&mut self, cx: &mut Context<Self>) {
+        let paths = if self.path_draft.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![PathBuf::from(self.path_draft.trim())]
+        };
+        let filter = LogFilter {
+            paths,
+            ..self.filter.clone()
+        };
+        self.set_filter(filter, cx);
+    }
+
+    /// IntelliSort: `--topo-order` keeps a merged branch's commits
+    /// contiguous instead of interleaving them by date.
+    pub(crate) fn toggle_topo_order(&mut self, cx: &mut Context<Self>) {
+        let filter = LogFilter {
+            topo_order: !self.filter.topo_order,
+            ..self.filter.clone()
+        };
+        self.set_filter(filter, cx);
+    }
+
     /// Replaces the filter and restarts the query from the top.
     ///
     /// This is a reset, never a narrowing of what is already loaded.
@@ -391,6 +419,30 @@ impl GitHistory {
 
     fn flip_search_blink(&mut self, cx: &mut Context<Self>) {
         self.search_blink.flip();
+        cx.notify();
+    }
+
+    /// Key handling for the pathspec row: the same shape as
+    /// [`GitHistory::on_search_key`], but with no debounce to schedule —
+    /// git validates the pathspec only when it is applied.
+    pub(crate) fn on_path_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "enter" => self.set_path_filter(cx),
+            "escape" => {
+                self.path_draft.clear();
+                self.set_path_filter(cx);
+            }
+            "backspace" => {
+                self.path_draft.pop();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && character != "\n"
+                {
+                    self.path_draft.push_str(character);
+                }
+            }
+        }
         cx.notify();
     }
 }
@@ -1356,6 +1408,56 @@ mod tests {
         history.read_with(cx, |history, _| {
             assert!(history.filter.since.is_none());
             assert!(!history.filter.is_filtering());
+        });
+    }
+
+    /// A pathspec narrows to the commits that touched it. `b.txt` arrives
+    /// with the second commit, so it must not match the first.
+    #[gpui::test]
+    fn a_pathspec_narrows_to_the_commits_that_touched_it(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        history.update(cx, |history, cx| {
+            history.path_draft = "b.txt".to_owned();
+            history.set_path_filter(cx);
+        });
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.settled && history.commits.len() == 1)
+        });
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.commits[0].subject, "second");
+        });
+    }
+
+    /// IntelliSort changes the ordering flag and nothing else — in
+    /// particular it is not filtering, so the graph stays and an empty
+    /// result would still mean "no commits", not "no matches".
+    #[gpui::test]
+    fn intellisort_reorders_without_filtering(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        history.update(cx, |history, cx| history.toggle_topo_order(cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.settled && history.commits.len() == 2)
+        });
+        history.read_with(cx, |history, _| {
+            assert!(history.filter.topo_order);
+            assert!(
+                !history.filter.is_filtering(),
+                "ordering is not filtering: the graph must stay"
+            );
         });
     }
 }
