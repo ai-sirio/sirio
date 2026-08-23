@@ -10538,6 +10538,13 @@ impl TillerWorkspace {
         self.right_panel.update(cx, |panel, cx| {
             panel.set_panel_width(right_width.unwrap_or(0.0), cx);
         });
+        // Same push for the sidebar, and it is not optional: its rows are
+        // laid out to an explicit width, so without this they keep the
+        // default 325 and the panel's `overflow_hidden` silently cuts
+        // whatever the drag took away.
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_panel_width(left_width.unwrap_or(0.0), cx);
+        });
 
         div()
             .id("shell-work-area")
