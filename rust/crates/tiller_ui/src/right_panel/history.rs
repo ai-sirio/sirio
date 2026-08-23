@@ -32,10 +32,22 @@ const ROW_HEIGHT: f32 = 26.0;
 /// rows, which it has no way to make taller on their own. Without this the
 /// annotation drew straight over the next row's subject.
 const ROW_HEIGHT_ANNOTATED: f32 = 42.0;
-/// Fixed width of the author column.
-const AUTHOR_WIDTH: f32 = 90.0;
-/// Fixed width of the date column.
-const DATE_WIDTH: f32 = 72.0;
+// The three widths below were measured off the running app at
+// `Typography::footnote` (13px), not estimated: `conformance.rs` records
+// that gpui's headless text system reports the same advance for every
+// character of every family, so a test cannot be the ruler here and a
+// screenshot has to be. Measured 2026-08-23: "e.palmisano" 52px,
+// "2026-08-23" 63px. Lowercase runs about 4.7px per character and digits
+// about 6.3 — a third apart, which is why there is no single "character
+// width" constant to divide by.
+//
+/// Author column. A budget, not a fit: names have no bound, so the column
+/// truncates by design. Holds the 52px name this repository writes with
+/// half as much again for a longer one.
+const AUTHOR_WIDTH: f32 = 78.0;
+/// Date column. A fit, not a budget: `%Y-%m-%d` is always the same ten
+/// characters and can never grow past this.
+const DATE_WIDTH: f32 = 71.0;
 /// Horizontal gap between a row's columns.
 const ROW_GAP: f32 = 6.0;
 /// What a commit row loses to chrome it does not control: the panel's two
@@ -44,9 +56,9 @@ const ROW_GAP: f32 = 6.0;
 /// to take them off again.
 const ROW_CHROME: f32 = 18.0;
 /// Narrowest a subject may get before a trailing column is dropped to feed
-/// it — roughly twenty characters at `Typography::footnote` (13px), which is
-/// about where a conventional-commit subject stops being identifiable
-/// (`feat(history): add …`).
+/// it: about twenty-seven characters at the measured advance above — far
+/// enough past a conventional-commit prefix to reach the message, which is
+/// where two `fix(sidebar):` commits start to differ.
 const MIN_SUBJECT_WIDTH: f32 = 130.0;
 
 /// Membership toggle that keeps the vector a set: `LogFilter` treats a
@@ -1394,6 +1406,38 @@ mod tests {
                 author: true,
                 date: true
             }
+        );
+    }
+
+    /// The width the app starts at must clear the first rung by a readable
+    /// margin, not by a rounding error. It used to clear it by 5px — the
+    /// author column was one pixel of chrome away from vanishing at the
+    /// default, which would have read as a bug rather than as the ladder
+    /// working.
+    ///
+    /// Deliberately not bought by lowering `MIN_SUBJECT_WIDTH`: the margin
+    /// is the distance to that floor, so moving the floor to widen the
+    /// margin measures nothing. It is bought by charging each column what it
+    /// actually holds.
+    #[test]
+    fn the_default_panel_width_clears_the_first_rung_with_room_to_spare() {
+        let graph = MAX_LANES as f32 * LANE_WIDTH;
+        let subject = subject_width(
+            405.0 - ROW_CHROME,
+            graph,
+            RowColumns {
+                author: true,
+                date: true,
+            },
+        );
+
+        // Three characters of clearance, so a change to any one piece of
+        // chrome cannot flip the default's behaviour on its own.
+        assert!(
+            subject >= MIN_SUBJECT_WIDTH + 14.0,
+            "the default width leaves the subject {subject}px, only {}px clear of the \
+             {MIN_SUBJECT_WIDTH}px floor",
+            subject - MIN_SUBJECT_WIDTH
         );
     }
 
