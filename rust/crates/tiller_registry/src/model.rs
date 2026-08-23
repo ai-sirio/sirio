@@ -30,7 +30,10 @@ pub struct RegistryAgent {
     pub website: Option<String>,
     pub license: Option<String>,
     pub icon: Option<String>,
-    pub distribution: Distribution,
+    /// Every kind the document declares for this agent, in document order.
+    /// Most agents declare one; a few declare two (binary + npx). Choosing
+    /// between them belongs to whoever knows the platform, not to decoding.
+    pub distributions: Vec<Distribution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,21 +71,10 @@ struct AgentWire {
     license: Option<String>,
     #[serde(default)]
     icon: Option<String>,
+    /// Raw on purpose: decoded kind by kind below, so one malformed
+    /// artifact costs one platform, not the whole agent or document.
     #[serde(default)]
-    distribution: DistributionWire,
-}
-
-/// Every field optional: a document carrying only kinds this build has
-/// never seen leaves all of them `None`, which is exactly
-/// [`Distribution::Unknown`].
-#[derive(Default, Deserialize)]
-struct DistributionWire {
-    #[serde(default)]
-    npx: Option<PackageWire>,
-    #[serde(default)]
-    binary: Option<BTreeMap<String, ArtifactWire>>,
-    #[serde(default)]
-    uvx: Option<PackageWire>,
+    distribution: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -118,7 +110,8 @@ impl AcpRegistry {
             .agents
             .into_iter()
             .map(|agent| {
-                let distribution = decode_distribution(&agent.id, agent.distribution, &mut warnings);
+                let distribution =
+                    decode_distribution(&agent.id, agent.distribution, &mut warnings);
                 RegistryAgent {
                     id: agent.id,
                     name: agent.name,
@@ -128,7 +121,7 @@ impl AcpRegistry {
                     website: agent.website,
                     license: agent.license,
                     icon: agent.icon,
-                    distribution,
+                    distributions: distribution,
                 }
             })
             .collect();
@@ -142,41 +135,73 @@ impl AcpRegistry {
 
 fn decode_distribution(
     agent_id: &str,
-    wire: DistributionWire,
+    wire: serde_json::Value,
     warnings: &mut Vec<String>,
-) -> Distribution {
-    if let Some(npx) = wire.npx {
-        return Distribution::Npx { package: npx.package, args: npx.args };
-    }
-    if let Some(binary) = wire.binary {
-        let artifacts: BTreeMap<String, BinaryArtifact> = binary
-            .into_iter()
-            .filter_map(|(platform, artifact)| {
-                // Rejected before anything can fetch it: an `http://` or
-                // `file://` archive is a downgrade, not a variation.
-                if !artifact.archive.starts_with("https://") {
-                    warnings.push(format!(
-                        "{agent_id}: dropped {platform} artifact with non-https archive URL"
-                    ));
-                    return None;
+) -> Vec<Distribution> {
+    // Walked in map order, which is the document's order for every agent
+    // published today (`binary` < `npx` < `uvx`). A kind this build has
+    // never heard of is skipped here and disclosed as [`Distribution::Unknown`]
+    // when nothing else decoded.
+    let entries: Vec<(String, serde_json::Value)> = match wire {
+        serde_json::Value::Object(map) => map.into_iter().collect(),
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (kind, value) in entries {
+        match kind.as_str() {
+            "npx" => {
+                if let Ok(package) = serde_json::from_value::<PackageWire>(value) {
+                    out.push(Distribution::Npx { package: package.package, args: package.args });
                 }
-                Some((
-                    platform,
-                    BinaryArtifact {
-                        archive: artifact.archive,
-                        cmd: artifact.cmd,
-                        args: artifact.args,
-                        sha256: artifact.sha256,
-                    },
-                ))
-            })
-            .collect();
-        return Distribution::Binary(artifacts);
+            }
+            "binary" => {
+                let serde_json::Value::Object(platforms) = value else { continue };
+                let artifacts: BTreeMap<String, BinaryArtifact> = platforms
+                    .into_iter()
+                    .filter_map(|(platform, artifact)| {
+                        match serde_json::from_value::<ArtifactWire>(artifact) {
+                            Ok(artifact) if artifact.archive.starts_with("https://") => Some((
+                                platform,
+                                BinaryArtifact {
+                                    archive: artifact.archive,
+                                    cmd: artifact.cmd,
+                                    args: artifact.args,
+                                    sha256: artifact.sha256,
+                                },
+                            )),
+                            // Rejected before anything can fetch it: an
+                            // `http://` or `file://` archive is a downgrade,
+                            // not a variation.
+                            Ok(_) => {
+                                warnings.push(format!(
+                                    "{agent_id}: dropped {platform} artifact with non-https archive URL"
+                                ));
+                                None
+                            }
+                            Err(_) => {
+                                warnings.push(format!(
+                                    "{agent_id}: dropped {platform} artifact missing required fields"
+                                ));
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+                out.push(Distribution::Binary(artifacts));
+            }
+            "uvx" => {
+                if let Ok(package) = serde_json::from_value::<PackageWire>(value) {
+                    out.push(Distribution::Uvx { package: package.package, args: package.args });
+                }
+            }
+            _ => {}
+        }
     }
-    if let Some(uvx) = wire.uvx {
-        return Distribution::Uvx { package: uvx.package, args: uvx.args };
+    if out.is_empty() {
+        vec![Distribution::Unknown]
+    } else {
+        out
     }
-    Distribution::Unknown
 }
 
 #[cfg(test)]
@@ -193,9 +218,14 @@ mod tests {
         assert_eq!(registry.agents.len(), 39);
 
         let opencode = registry.agent("opencode").expect("opencode row");
-        let Distribution::Binary(artifacts) = &opencode.distribution else {
-            panic!("opencode is a binary distribution, got {:?}", opencode.distribution);
-        };
+        let artifacts = opencode
+            .distributions
+            .iter()
+            .find_map(|dist| match dist {
+                Distribution::Binary(artifacts) => Some(artifacts),
+                _ => None,
+            })
+            .expect("opencode declares a binary distribution");
         let linux = artifacts.get("linux-x86_64").expect("linux-x86_64 artifact");
         assert_eq!(linux.cmd, "./opencode");
         assert_eq!(linux.args, vec!["acp".to_string()]);
@@ -211,11 +241,13 @@ mod tests {
         // missing hash is a disclosure problem, not a decode error.
         let registry =
             AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json")).unwrap();
-        let unhashed = registry.agents.iter().any(|agent| match &agent.distribution {
-            Distribution::Binary(artifacts) => {
-                artifacts.values().any(|artifact| artifact.sha256.is_none())
-            }
-            _ => false,
+        let unhashed = registry.agents.iter().any(|agent| {
+            agent.distributions.iter().any(|dist| match dist {
+                Distribution::Binary(artifacts) => {
+                    artifacts.values().any(|artifact| artifact.sha256.is_none())
+                }
+                _ => false,
+            })
         });
         assert!(unhashed, "the recorded registry contains unhashed artifacts");
     }
@@ -231,7 +263,7 @@ mod tests {
         .expect("an unknown kind is not a decode failure");
 
         let agent = registry.agent("future-agent").expect("row survives");
-        assert_eq!(agent.distribution, Distribution::Unknown);
+        assert_eq!(agent.distributions, vec![Distribution::Unknown]);
     }
 
     #[test]
@@ -242,7 +274,7 @@ mod tests {
                 .expect("the document still decodes");
 
         let agent = registry.agent("downgrade-agent").expect("row survives");
-        let Distribution::Binary(artifacts) = &agent.distribution else {
+        let Distribution::Binary(artifacts) = &agent.distributions[0] else {
             panic!("expected a binary distribution");
         };
         assert!(
@@ -252,5 +284,46 @@ mod tests {
         assert!(artifacts.contains_key("darwin-aarch64"), "the https one stays");
         assert_eq!(registry.warnings.len(), 1);
         assert!(registry.warnings[0].contains("downgrade-agent"));
+    }
+
+    #[test]
+    fn a_malformed_artifact_costs_one_platform_not_the_document() {
+        // An artifact missing `cmd` must not fail the whole map, the whole
+        // agent, or the whole document — exactly one platform is lost.
+        let registry = AcpRegistry::from_json(include_str!(
+            "../tests/fixtures/registry-malformed-artifact.json"
+        ))
+        .expect("one broken artifact must not sink the document");
+
+        let agent = registry.agent("broken-artifact-agent").expect("row survives");
+        let Distribution::Binary(artifacts) = &agent.distributions[0] else {
+            panic!("expected a binary distribution");
+        };
+        assert!(artifacts.contains_key("linux-x86_64"), "the valid platform stays");
+        assert!(
+            !artifacts.contains_key("darwin-aarch64"),
+            "the artifact missing `cmd` is dropped"
+        );
+        assert_eq!(registry.warnings.len(), 1);
+        assert!(registry.warnings[0].contains("broken-artifact-agent"));
+    }
+
+    #[test]
+    fn multi_kind_agents_keep_every_kind_in_document_order() {
+        // kilo and sigit declare binary AND npx. Both survive, in the order
+        // the document lists them; choosing between them belongs to whoever
+        // knows the platform, in a later task.
+        let registry =
+            AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json")).unwrap();
+
+        for (id, platforms) in [("kilo", 5), ("sigit", 6)] {
+            let agent = registry.agent(id).unwrap_or_else(|| panic!("{id} row"));
+            assert_eq!(agent.distributions.len(), 2, "{id} keeps both kinds");
+            let Distribution::Binary(artifacts) = &agent.distributions[0] else {
+                panic!("{id}: first kind is binary, got {:?}", agent.distributions[0]);
+            };
+            assert_eq!(artifacts.len(), platforms, "{id} binary platforms");
+            assert!(matches!(&agent.distributions[1], Distribution::Npx { .. }), "{id} second kind is npx");
+        }
     }
 }
