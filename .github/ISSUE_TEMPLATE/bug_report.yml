@@ -1,0 +1,110 @@
+name: Bug report
+description: Something in Tiller does not behave the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. The two fields that resolve most Tiller reports are
+        **Environment** (Wayland vs X11 and the GPU driver — Tiller renders through gpui)
+        and **Which agent** — several bugs only reproduce with one CLI's title or hook
+        conventions.
+
+  - type: input
+    id: version
+    attributes:
+      label: Tiller version or commit
+      description: "`git rev-parse --short HEAD`, or the release tag you installed."
+      placeholder: c3f7f2fa
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Tiller? Pick the closest — a guess is fine.
+      multiple: true
+      options:
+        - "UI / layout / theming (tiller_ui, tiller_theme)"
+        - "Terminal & PTY (tiller_terminal)"
+        - "Agent activity: running / idle / needs-input (tiller_activity)"
+        - "Agent adapters & hooks (tiller_agents)"
+        - "ACP protocol (tiller_acp)"
+        - "Git & worktrees (tiller_git, tiller_project)"
+        - "Session / settings persistence (tiller_persistence)"
+        - "Control socket & tillerctl (tiller_control)"
+        - "Usage & cost tracking (tiller_usage)"
+        - "Markdown rendering (tiller_markdown)"
+        - "App shell / window / startup (tiller)"
+        - "Build, CI or packaging"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Which agent CLI
+      description: Leave as "Not agent-specific" if it reproduces with any of them.
+      multiple: true
+      options:
+        - "Not agent-specific"
+        - "Claude Code"
+        - "Codex"
+        - "OpenCode"
+        - "Pi"
+        - "Oh-My-Pi (omp)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        The pane kept showing the running spinner after the agent had finished.
+        I expected it to flip back to idle.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Number them. If it only happens sometimes, say roughly how often.
+      placeholder: |
+        1. Open a project with two worktrees
+        2. Start Codex in the second worktree
+        3. Let it finish a task
+        4. The tab still shows as running
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Tiller renders through gpui, so the display server and GPU driver matter more
+        here than in a typical app. `echo $XDG_SESSION_TYPE` gives you wayland or x11.
+      value: |
+        - Distro / version:
+        - Display server (wayland / x11):
+        - GPU + driver (e.g. AMD RADV, NVIDIA 560, Intel ANV):
+        - Desktop environment:
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, backtrace, or failing test output
+      description: |
+        Anything from stderr, a `RUST_BACKTRACE=1` trace, or the output of
+        `Scripts/ci.sh` if a test is failing. Pasted here it is formatted automatically.
+      render: shell
+    validations:
+      required: false
