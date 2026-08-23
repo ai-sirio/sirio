@@ -3340,6 +3340,13 @@ struct DraggedPaneDivider {
     direction: SplitDirection,
 }
 
+/// Payload for a panel-edge drag. Carries only which edge; the arithmetic
+/// lives in `update_panel_width` against the anchor taken at mouse-down.
+#[derive(Clone, Copy, Debug)]
+struct DraggedPanelEdge {
+    side: panel_layout::PanelSide,
+}
+
 const SPLIT_DIVIDER_SIZE: f32 = 6.0;
 const MIN_SPLIT_PANE_SIZE: f32 = 160.0;
 
@@ -3446,6 +3453,17 @@ struct TillerWorkspace {
     /// the two compete for space, so the panel the user is *not* touching
     /// stays still.
     dragging_panel: Option<panel_layout::PanelSide>,
+    /// Pointer x and panel width at the moment the edge was grabbed.
+    ///
+    /// The width is derived as `grab_width ± (pointer − grab_x)` rather than
+    /// from the pointer's absolute position, for a reason that is only 3px
+    /// wide but visible: the grab strip is 6px, so the pointer starts at the
+    /// panel edge *plus* wherever inside the strip it landed. Reading the
+    /// absolute position makes the edge jump to the cursor on the first
+    /// move. Anchoring is not the same as accumulating — every frame still
+    /// measures from the grab, so a dropped frame cannot make the panel
+    /// drift.
+    panel_drag_anchor: Option<(f32, f32)>,
     left_panel_focus: FocusHandle,
     center_panel_focus: FocusHandle,
     right_panel_focus: FocusHandle,
@@ -4118,6 +4136,7 @@ impl TillerWorkspace {
             sidebar_width,
             right_panel_width,
             dragging_panel: None,
+            panel_drag_anchor: None,
             left_panel_focus: cx.focus_handle(),
             center_panel_focus: cx.focus_handle(),
             right_panel_focus: cx.focus_handle(),
@@ -10513,6 +10532,31 @@ impl TillerWorkspace {
             .w_full()
             .p(theme.spacing.shell_outer_inset)
             .gap(theme.spacing.shell_gap)
+            .on_drag_move::<DraggedPanelEdge>({
+                let entity = entity.clone();
+                move |event, _, cx| {
+                    let drag = *event.drag(cx);
+                    entity.update(cx, |workspace, cx| {
+                        workspace.update_panel_width(drag.side, event, cx)
+                    });
+                }
+            })
+            .on_drop::<DraggedPanelEdge>({
+                let entity = entity.clone();
+                move |_, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        // GPUI's drag machinery clears focus after mouse-down
+                        // and a next-frame re-focus loses the race — the
+                        // split divider carries the same comment. Drop is the
+                        // only point where restoring focus actually sticks.
+                        let active_tab = workspace.active_tab;
+                        workspace.refocus_focused_pane(active_tab, window, cx);
+                        workspace.dragging_panel = None;
+                        workspace.panel_drag_anchor = None;
+                        cx.notify();
+                    });
+                }
+            })
             .when(self.sidebar_visible, |row| {
                 row.child(
                     shell_chrome::panel(
@@ -10523,7 +10567,11 @@ impl TillerWorkspace {
                     )
                     .w(px(left_width.unwrap_or(0.0)))
                     .flex_none()
-                    .child(self.sidebar.clone()),
+                    .child(self.sidebar.clone())
+                    .child(self.render_panel_resize_handle(
+                        panel_layout::PanelSide::Left,
+                        entity.clone(),
+                    )),
                 )
             })
             .child(
@@ -10547,13 +10595,117 @@ impl TillerWorkspace {
                     )
                     .w(px(right_width.unwrap_or(0.0)))
                     .flex_none()
-                    .child(self.right_panel.clone()),
+                    .child(self.right_panel.clone())
+                    .child(self.render_panel_resize_handle(
+                        panel_layout::PanelSide::Right,
+                        entity.clone(),
+                    )),
                 )
             })
     }
 }
 
 impl TillerWorkspace {
+    /// A 6px grab strip on the panel's inner edge, absolutely positioned and
+    /// therefore out of layout flow.
+    ///
+    /// Out of flow is not a style choice. The shell row is
+    /// `.flex().flex_row().gap(shell_gap)`, so a flex child here would put
+    /// two gaps where there is one and break the five existing assertions on
+    /// `right.left() - center.right() == px(4.0)`. Inside the panel rather
+    /// than straddling its border, because `shell_chrome::panel` sets
+    /// `.overflow_hidden()` and would clip anything hanging outside — which
+    /// also means the handle travels with the panel and cannot drift out of
+    /// the window if the window is resized mid-drag.
+    ///
+    /// Accepted cost: 6px of the adjacent content stops being clickable.
+    fn render_panel_resize_handle(
+        &self,
+        side: panel_layout::PanelSide,
+        entity: Entity<Self>,
+    ) -> impl IntoElement {
+        let id: &'static str = match side {
+            panel_layout::PanelSide::Left => "panel-resize-left",
+            panel_layout::PanelSide::Right => "panel-resize-right",
+        };
+        let active_tab = self.active_tab;
+        let handle = div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(SPLIT_DIVIDER_SIZE))
+            .cursor_col_resize()
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let entity = entity.clone();
+                move |event, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        // Take the anchor here, not in the drag payload: the
+                        // payload is built at render time and cannot know
+                        // where inside the 6px strip the pointer landed.
+                        let width = match side {
+                            panel_layout::PanelSide::Left => workspace.sidebar_width,
+                            panel_layout::PanelSide::Right => workspace.right_panel_width,
+                        };
+                        workspace.panel_drag_anchor =
+                            Some((f32::from(event.position.x), width));
+                        workspace.refocus_focused_pane(active_tab, window, cx);
+                    });
+                }
+            })
+            .on_drag(DraggedPanelEdge { side }, |_, _, _, cx| {
+                cx.new(|_| gpui::Empty)
+            });
+        match side {
+            // Each panel's *inner* edge: the sidebar's right, the right
+            // panel's left.
+            panel_layout::PanelSide::Left => handle.right_0(),
+            panel_layout::PanelSide::Right => handle.left_0(),
+        }
+    }
+
+    /// Derives the panel's width from how far the pointer has travelled since
+    /// the edge was grabbed, then clamps it into that panel's settings range.
+    ///
+    /// Dragging the left sidebar's right edge rightwards widens it; dragging
+    /// the right panel's left edge leftwards widens it — hence the opposite
+    /// signs.
+    fn update_panel_width(
+        &mut self,
+        side: panel_layout::PanelSide,
+        event: &gpui::DragMoveEvent<DraggedPanelEdge>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((grab_x, grab_width)) = self.panel_drag_anchor else {
+            return;
+        };
+        let travelled = f32::from(event.event.position.x) - grab_x;
+        let width = match side {
+            panel_layout::PanelSide::Left => grab_width + travelled,
+            panel_layout::PanelSide::Right => grab_width - travelled,
+        };
+        if !width.is_finite() {
+            return;
+        }
+        let (floor, ceiling) = side.range();
+        let clamped = width.clamp(floor, ceiling);
+        let current = match side {
+            panel_layout::PanelSide::Left => self.sidebar_width,
+            panel_layout::PanelSide::Right => self.right_panel_width,
+        };
+        // Sub-pixel jitter would repaint every frame for nothing.
+        if (current - clamped).abs() < 0.5 {
+            return;
+        }
+        match side {
+            panel_layout::PanelSide::Left => self.sidebar_width = clamped,
+            panel_layout::PanelSide::Right => self.right_panel_width = clamped,
+        }
+        self.dragging_panel = Some(side);
+        cx.notify();
+    }
+
     fn handle_new_terminal_tab(
         &mut self,
         _: &NewTerminalTab,
@@ -20547,6 +20699,179 @@ mod tests {
 
         assert_eq!(left.size.width, px(280.0));
         assert_eq!(right.size.width, px(380.0));
+    }
+
+    /// Dragging the right panel's inner edge leftwards makes it wider, because
+    /// that edge is its left border. The handle is drawn out of layout flow, so
+    /// this must not disturb the 4px shell gaps the geometry tests pin.
+    #[gpui::test]
+    async fn dragging_the_right_panel_edge_changes_its_drawn_width(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Start from widths that fit, so rendered == preferred and the assertion
+        // below measures the drag rather than the viewport clamp. The gpui test
+        // window is 1024 wide (budget 688); the shipped defaults are 325 + 405 =
+        // 730, which the resolver would correctly narrow — and then `before`
+        // would not be the preference this drag is moving.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sidebar_width = 280.0;
+            workspace.right_panel_width = 300.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let before = cx.debug_bounds("shell-right-panel").expect("right panel");
+        let handle = cx.debug_bounds("panel-resize-right").expect("resize handle");
+        let centre = cx.debug_bounds("shell-center-panel").expect("centre panel");
+        assert_eq!(before.size.width, px(300.0), "baseline: nothing is clamped yet");
+
+        // Hover first, as a real pointer would, then press.
+        cx.simulate_event(MouseMoveEvent {
+            position: handle.center(),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(MouseDownEvent {
+            position: handle.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        // Two moves, not one. The first crosses GPUI's drag-start threshold and
+        // is swallowed; only the second reaches `on_drag_move`. The codebase's
+        // other drag tests (`drawn_divider_drag_leaves_pane_focus_untouched`,
+        // `main.rs:16603`) carry the same comment — a single move here silently
+        // asserts nothing.
+        cx.simulate_event(MouseMoveEvent {
+            position: point(handle.center().x - px(4.0), handle.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(handle.center().x - px(60.0), handle.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+
+        let after = cx.debug_bounds("shell-right-panel").expect("right panel");
+        assert_eq!(
+            after.size.width,
+            before.size.width + px(60.0),
+            "dragging the left border leftwards widens the right panel"
+        );
+
+        let centre_after = cx.debug_bounds("shell-center-panel").expect("centre panel");
+        assert_eq!(
+            after.left() - centre_after.right(),
+            px(4.0),
+            "the shell gap is untouched: the handle is out of layout flow"
+        );
+        assert!(centre_after.size.width < centre.size.width);
+    }
+
+    /// Resizing a panel must not cost the focused pane its keyboard focus.
+    /// GPUI clears focus after mouse-down and a next-frame re-focus loses the
+    /// race, so `on_drop` is the only place the restore sticks — and this is what
+    /// proves it does.
+    #[gpui::test]
+    async fn dragging_a_panel_edge_leaves_the_focused_pane_focused(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Capture the focused pane's handle the same way
+        // `drawn_divider_drag_leaves_pane_focus_untouched` (main.rs:16603) does,
+        // and assert the baseline before touching anything: a test that cannot
+        // observe a real focus change proves nothing when focus does not move.
+        //
+        // The headless fixture starts with *nobody* focused (no window was
+        // ever clicked), so the pane is given focus explicitly first — the
+        // same setup `moving_a_tab_to_another_pane_returns_focus_to_the_moved_tab`
+        // uses — and the baseline then proves the handle observes real focus.
+        let focus = workspace.read_with(&cx.cx, |workspace, cx| {
+            let tab = &workspace.tabs[workspace.active_tab];
+            let mut handle = None;
+            tab.panes.for_each(&mut |id, content| {
+                let TabContent::Terminal { view } = content else {
+                    return;
+                };
+                if id == tab.focused_pane {
+                    handle = Some(view.focus_handle(cx));
+                }
+            });
+            handle.expect("the palette test workspace has a terminal pane")
+        });
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            assert!(focus.is_focused(window), "baseline: the pane starts focused");
+        });
+
+        let handle = cx.debug_bounds("panel-resize-right").expect("resize handle");
+        let start = handle.center();
+
+        cx.simulate_event(MouseMoveEvent {
+            position: start,
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        cx.simulate_event(MouseDownEvent {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(start.x - px(4.0), start.y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(start.x - px(30.0), start.y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: point(start.x - px(30.0), start.y),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, _| {
+            assert!(
+                focus.is_focused(window),
+                "the drop must hand focus back to the pane"
+            );
+        });
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.dragging_panel, None,
+                "the drop clears drag priority, so the panels stop favouring one side"
+            );
+        });
     }
 
     #[gpui::test]
