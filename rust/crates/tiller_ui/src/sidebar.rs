@@ -3608,8 +3608,18 @@ impl Sidebar {
                     // height is fixed, so a title that wraps further than
                     // predicted draws over the rows beneath it. It did, as
                     // soon as the panel could be dragged narrow.
+                    //
+                    // Not covered by a drawn test, and not for want of
+                    // trying: this div's bounds stay one line high however
+                    // many lines the text paints, so `debug_bounds` reports
+                    // 18px either way. The overflow was only ever visible by
+                    // running the app. The selector is here for whatever
+                    // harness can eventually see it.
+                    .debug_selector(move || format!("sidebar-row-title-{row_id}"))
                     .line_clamp(title_lines(&title))
-                    .overflow_hidden()
+                    // `line_clamp` implies `overflow_hidden`, but the "…"
+                    // affix comes only from `TextOverflow::Truncate` — with
+                    // no `text_ellipsis` the clamp would cut the title dead.
                     .text_ellipsis()
                     .line_height(px(ROW_TITLE_LINE_HEIGHT))
                     .font_weight(if is_project {
@@ -4446,11 +4456,11 @@ mod tests {
         assert_eq!(row_width(20.0, 3), 0.0, "a width is never negative");
     }
 
-    /// The row's height and the title's clamp must come from one number, or
-    /// a title that wraps further than the height budgeted for draws over
-    /// the row beneath it — which is what a narrow panel produced.
+    /// The arithmetic half of the invariant: a row pays for the lines
+    /// `title_lines` counts. On its own this proves nothing about the
+    /// drawing — see `a_title_never_draws_taller_than_its_row` for that.
     #[test]
-    fn a_rows_height_budgets_exactly_the_lines_its_title_is_clamped_to() {
+    fn a_rows_height_grows_with_the_lines_its_title_needs() {
         let mut row = SidebarRow {
             id: 0,
             kind: RowKind::Project,
