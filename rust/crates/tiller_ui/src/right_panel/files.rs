@@ -16,9 +16,7 @@ use tiller_project::FileIconKey;
 
 use crate::editor::fs_actions;
 
-/// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
-const TOOLBAR_HEIGHT: f32 = 34.0;
-/// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
+/// File-tree rows: 12.5px text at 26px, the app's single-line row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 26.0;
 
 /// The git state the Files tree paints, for both halves of the tree.
@@ -86,6 +84,9 @@ struct FileRow {
 #[derive(Clone, Debug)]
 pub(super) struct FileContextMenu {
     path: PathBuf,
+    /// Directories get the same menu as files minus `Open`, which
+    /// would otherwise emit an `OpenFile` for a path no editor opens.
+    is_dir: bool,
     position: Point<Pixels>,
 }
 
@@ -253,11 +254,16 @@ impl RightPanel {
     fn open_file_context_menu(
         &mut self,
         path: PathBuf,
+        is_dir: bool,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
         self.selected_path = Some(path.clone());
-        self.file_context_menu = Some(FileContextMenu { path, position });
+        self.file_context_menu = Some(FileContextMenu {
+            path,
+            is_dir,
+            position,
+        });
         cx.notify();
     }
 
@@ -273,6 +279,7 @@ impl RightPanel {
         theme: Theme,
     ) -> impl IntoElement {
         let path = menu.path;
+        let is_dir = menu.is_dir;
         let position = menu.position;
         let mut view = div()
             .id("file-context-menu")
@@ -285,11 +292,19 @@ impl RightPanel {
             .bg(theme.card_fill)
             .shadow_lg();
 
-        for (label, selector) in [
-            ("Open", "file-context-open"),
-            ("Reveal in File Manager", "file-context-reveal"),
-            ("Copy Path", "file-context-copy-path"),
-        ] {
+        // `Open` is the one entry a directory must not offer: it emits
+        // `OpenFile`, and a directory is not a document. Everything
+        // else — reveal, copy, and the tree-wide Refresh — reads the
+        // same for both kinds of row.
+        let mut entries: Vec<(&'static str, &'static str)> = Vec::new();
+        if !is_dir {
+            entries.push(("Open", "file-context-open"));
+        }
+        entries.push(("Reveal in File Manager", "file-context-reveal"));
+        entries.push(("Copy Path", "file-context-copy-path"));
+        entries.push(("Refresh", "file-context-refresh"));
+
+        for (label, selector) in entries {
             let action_entity = entity.clone();
             let action_path = path.clone();
             let mut row = div()
@@ -328,6 +343,18 @@ impl RightPanel {
                         &action_path,
                     )));
                     action_entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
+                }),
+                // The Files view's only Refresh affordance — the
+                // toolbar that used to carry one is gone. It is a
+                // manual nudge, not the sole route back to a current
+                // tree: `ensure_tree_refresh` re-walks every second on
+                // its own, which is also what covers the states with no
+                // row to right-click.
+                "file-context-refresh" => row.on_click(move |_, _, cx| {
+                    action_entity.update(cx, |panel, cx| {
+                        panel.refresh(cx);
+                        panel.close_file_context_menu(cx);
+                    });
                 }),
                 _ => row,
             };
@@ -447,9 +474,12 @@ impl RightPanel {
             .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                 cx.stop_propagation();
                 context_entity.update(cx, |panel, cx| {
-                    if !is_dir {
-                        panel.open_file_context_menu(context_path.clone(), event.position, cx);
-                    }
+                    panel.open_file_context_menu(
+                        context_path.clone(),
+                        is_dir,
+                        event.position,
+                        cx,
+                    );
                 });
             })
             // F-CORE-FILE-03: give every non-directory row a real drag source
@@ -603,7 +633,6 @@ impl RightPanel {
     ) -> AnyElement {
         let rows = self.file_rows();
         let row_entity = entity.clone();
-        let refresh_entity = entity.clone();
         let file_focus = self
             .file_focus
             .as_ref()
@@ -612,30 +641,13 @@ impl RightPanel {
         let selected_path = self.selected_path.clone();
         let processor_focus = file_focus.clone();
         let repo_root = self.repo_root.clone();
-        let toolbar = div()
-            .h(px(TOOLBAR_HEIGHT))
-            .w_full()
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .border_b_1()
-            .border_color(theme.hairline)
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_size(px(11.5))
-                    .text_color(theme.meta)
-                    .child(self.repo_root.to_string_lossy().to_string()),
-            )
-            .child(files_action_button(
-                "Refresh",
-                "files-refresh",
-                theme,
-                move |cx| refresh_entity.update(cx, |panel, cx| panel.refresh(cx)),
-            ));
+        // The Files view has no toolbar of its own. The row it used to
+        // hold showed the checkout path — which the sidebar already
+        // names — and its bottom border stacked a second hairline
+        // directly under the view rail's, reading as a doubled rule.
+        // Refresh moved into the file/folder context menu; the error
+        // branch below keeps its own Retry, which is what covers the
+        // one state that has no row to right-click.
         // "Loading files…" is the *first-load* state, not the refresh state
         // — see the `settled` field. A refresh over a settled panel happens
         // in place: whatever the panel was truthfully showing stays on
@@ -714,7 +726,6 @@ impl RightPanel {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .child(toolbar)
             .child(body)
             .into_any_element()
     }
@@ -1280,11 +1291,17 @@ mod tests {
         }
     }
 
-    /// F-CHG-03: the same refresh guard that prevents a second refresh from
-    /// starting must be visible as a drawn loading state, with a Refresh
-    /// affordance available in the toolbar.
+    /// F-CHG-03: the same refresh guard that prevents a second refresh
+    /// from starting must be visible as a drawn loading state.
+    ///
+    /// This also asserted a Refresh control in the Files toolbar. That
+    /// toolbar is gone and Refresh lives in the file/folder context
+    /// menu, which needs a row to right-click — and a panel on its
+    /// first load has none. Nothing is left uncovered by dropping the
+    /// assertion: what carries this window is `ensure_tree_refresh`'s
+    /// 1 s loop, which keeps walking with no gesture at all.
     #[gpui::test]
-    async fn a_refresh_in_flight_draws_loading_and_refresh(cx: &mut TestAppContext) {
+    async fn a_refresh_in_flight_draws_the_loading_state(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         std::fs::write(dir.0.join("visible.txt"), "x").expect("write file");
 
@@ -1300,10 +1317,6 @@ mod tests {
         assert!(
             cx.debug_bounds("files-loading").is_some(),
             "an in-flight refresh reaches a loading pixel"
-        );
-        assert!(
-            cx.debug_bounds("files-refresh").is_some(),
-            "the Files toolbar keeps a Refresh action visible"
         );
     }
 
@@ -1461,19 +1474,7 @@ mod tests {
         });
 
         let row = cx.debug_bounds("file-row").expect("the file row is drawn");
-        cx.simulate_event(MouseDownEvent {
-            position: row.center(),
-            button: MouseButton::Right,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        cx.simulate_event(MouseUpEvent {
-            position: row.center(),
-            button: MouseButton::Right,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-        });
+        right_click(&mut cx, row.center());
         cx.run_until_parked();
 
         let menu = cx
@@ -1495,6 +1496,7 @@ mod tests {
             "file-context-open",
             "file-context-reveal",
             "file-context-copy-path",
+            "file-context-refresh",
         ] {
             assert!(
                 cx.debug_bounds(selector).is_some(),
@@ -2354,6 +2356,67 @@ mod tests {
         (cx, panel)
     }
 
+    /// The two events a real secondary click delivers, in order — gpui
+    /// does not synthesize the up from the down.
+    fn right_click(cx: &mut VisualTestContext, position: Point<Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+    }
+
+    /// A folder must open the same menu a file does: it is now the only
+    /// place Refresh lives, and the old `!is_dir` gate left every folder
+    /// row with no menu at all. `Open` is the one entry a directory must
+    /// not carry — it emits `OpenFile` for a path no editor opens.
+    #[gpui::test]
+    async fn right_clicking_a_folder_offers_refresh_but_not_open(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        std::fs::create_dir(dir.0.join("nested")).expect("create folder");
+
+        let (mut cx, _panel) = settled_panel(cx, dir.0.clone());
+        let row = cx
+            .debug_bounds("file-directory-row")
+            .expect("the folder row is drawn");
+        right_click(&mut cx, row.center());
+        cx.cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("file-context-menu").is_some(),
+            "a folder opens the context menu, not just a file"
+        );
+        assert!(
+            cx.debug_bounds("file-context-open").is_none(),
+            "a directory offers no Open — it would emit OpenFile for a \
+             path no editor can open"
+        );
+        let refresh = cx
+            .debug_bounds("file-context-refresh")
+            .expect("the folder menu offers Refresh");
+
+        cx.simulate_click(refresh.center(), Modifiers::none());
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-context-menu").is_none(),
+            "acting on the menu closes it"
+        );
+        assert!(
+            cx.debug_bounds("file-directory-row").is_some(),
+            "the tree survives the refresh the menu triggered"
+        );
+    }
+
     /// The Files panel spent most of its time showing "Loading files…": the
     /// 1 s `ensure_tree_refresh` tick calls `refresh()`, which sets
     /// `refresh_started`, and the body swapped the whole tree for a
@@ -2379,9 +2442,17 @@ mod tests {
         );
 
         // Gesture half: the drawn control reaches the refresh path.
+        // Refresh now lives in the row context menu, so the gesture is
+        // the real two-step one a user performs — right-click a row,
+        // then click the entry.
+        let row = cx
+            .debug_bounds("file-row")
+            .expect("a row to open the context menu on");
+        right_click(&mut cx, row.center());
+        cx.cx.run_until_parked();
         let refresh = cx
-            .debug_bounds("files-refresh")
-            .expect("the Refresh control is drawn");
+            .debug_bounds("file-context-refresh")
+            .expect("the context menu offers Refresh");
         cx.simulate_click(refresh.center(), Modifiers::none());
         cx.cx.run_until_parked();
         assert!(
