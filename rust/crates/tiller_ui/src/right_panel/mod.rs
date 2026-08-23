@@ -11,6 +11,7 @@
 mod activity;
 mod files;
 mod history;
+mod history_toolbar;
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*,
