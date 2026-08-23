@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "broken-artifact-agent",
+      "name": "Broken Artifact Agent",
+      "version": "1.0.0",
+      "distribution": {
+        "binary": {
+          "linux-x86_64": {
+            "archive": "https://example.invalid/agent-linux-x64.zip",
+            "cmd": "./agent",
+            "args": ["acp"]
+          },
+          "darwin-aarch64": {
+            "archive": "https://example.invalid/agent-darwin-arm64.zip",
+            "args": ["acp"]
+          }
+        }
+      }
+    }
+  ]
+}
