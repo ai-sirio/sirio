@@ -1,0 +1,89 @@
+name: Feature request
+description: Propose new behaviour or a change to how Tiller works today
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tiller deliberately has a smaller scope than the tools it steers. The most useful
+        thing you can write here is the **problem**, not the solution — a well-described
+        problem often has a cheaper answer than the feature that prompted it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting
+      description: What are you trying to do today, and where does Tiller get in the way?
+      placeholder: |
+        I run four agents at once and I cannot tell which one has been idle longest,
+        so I keep clicking through tabs to find the one waiting on me.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What behaviour would solve it
+      description: Describe it from the outside — what you would see and do, not how it is built.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - "UI / layout / theming (tiller_ui, tiller_theme)"
+        - "Terminal & PTY (tiller_terminal)"
+        - "Agent activity: running / idle / needs-input (tiller_activity)"
+        - "Agent adapters & hooks (tiller_agents)"
+        - "ACP protocol (tiller_acp)"
+        - "Git & worktrees (tiller_git, tiller_project)"
+        - "Session / settings persistence (tiller_persistence)"
+        - "Control socket & tillerctl (tiller_control)"
+        - "Usage & cost tracking (tiller_usage)"
+        - "Markdown rendering (tiller_markdown)"
+        - "App shell / window / startup (tiller)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: |
+        Workarounds, other tools, or a version of this you rejected — and why it did not hold.
+    validations:
+      required: false
+
+  # Routing mirrors this repo's Wayfinder decision-ticket taxonomy (the wayfinder:*
+  # labels). It records how an open decision would get *resolved* — not how urgent or
+  # how large the request is. Issue forms cannot apply a label conditionally, so a
+  # maintainer still puts the matching wayfinder:* label on during triage.
+  - type: dropdown
+    id: routing
+    attributes:
+      label: What still has to be decided
+      description: |
+        Pick what stands between this request and someone being able to plan the work.
+        If none of these obviously fits, take the last option and leave it to triage.
+      options:
+        - "Nothing — the behaviour is settled, this can go straight to a spec and plan"
+        - "The shape itself — it needs talking through, one question at a time (wayfinder:grilling)"
+        - "How it should look or behave — needs something rough to react to first (wayfinder:prototype)"
+        - "A fact from outside this repo — an agent CLI's behaviour, a gpui or protocol detail (wayfinder:research)"
+        - "Something has to happen first — access, data or a service, before this can even be judged (wayfinder:task)"
+        - "More than one decision — this is a whole effort, not a single request (wayfinder:map)"
+        - "Not sure — let triage route it"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: "I have checked this is not something the agent CLI itself should do rather than Tiller"
+          required: false
