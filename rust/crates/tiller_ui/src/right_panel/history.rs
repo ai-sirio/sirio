@@ -22,6 +22,9 @@ const ROW_HEIGHT: f32 = 26.0;
 pub(crate) enum EmptyReason {
     NotARepository,
     NoCommits,
+    /// A filter is active and matched nothing. Distinct from `NoCommits`:
+    /// the repository is not empty, the query is.
+    NoMatches,
 }
 
 /// Emitted upward when a commit row is clicked.
@@ -32,6 +35,9 @@ pub(crate) enum GitHistoryEvent {
 
 pub(crate) struct GitHistory {
     repo_root: PathBuf,
+    /// The live query. Changing it resets everything below — see
+    /// [`GitHistory::set_filter`].
+    pub(crate) filter: LogFilter,
     pub(crate) commits: Vec<CommitRecord>,
     pub(crate) rows: Vec<GraphRow>,
     pub(crate) error: Option<String>,
@@ -51,6 +57,7 @@ impl GitHistory {
     pub(crate) fn new(repo_root: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut history = Self {
             repo_root,
+            filter: LogFilter::default(),
             commits: Vec::new(),
             rows: Vec::new(),
             error: None,
@@ -74,6 +81,7 @@ impl GitHistory {
         self.error = None;
         self.pagination_error = None;
         let repo_root = self.repo_root.clone();
+        let filter = self.filter.clone();
         let skip = self.commits.len();
         self.generation += 1;
         let generation = self.generation;
@@ -84,7 +92,7 @@ impl GitHistory {
             // subprocess there stalls the frame.
             let loaded = cx
                 .background_spawn(async move {
-                    let commits = GitLog::commits(&repo_root, skip, CHUNK, &LogFilter::default());
+                    let commits = GitLog::commits(&repo_root, skip, CHUNK, &filter);
                     let has_commits = matches!(&commits, Ok(loaded) if loaded.is_empty())
                         .then(|| GitLog::has_commits(&repo_root));
                     (commits, has_commits)
@@ -105,6 +113,12 @@ impl GitHistory {
                         this.commits.extend(commits);
                         this.rows = layout(&this.commits);
                         this.empty_reason = match (this.commits.is_empty(), has_commits) {
+                            // Order matters: on a repository with commits *and*
+                            // a filter, both arms could fire, and the filter is
+                            // the one that explains the emptiness.
+                            (true, _) if this.filter.is_filtering() => {
+                                Some(EmptyReason::NoMatches)
+                            }
                             (true, Some(false)) => Some(EmptyReason::NoCommits),
                             _ => None,
                         };
@@ -129,6 +143,32 @@ impl GitHistory {
 
     fn retry(&mut self, cx: &mut Context<Self>) {
         self.exhausted = false;
+        self.load_next_chunk(cx);
+    }
+
+    /// Replaces the filter and restarts the query from the top.
+    ///
+    /// This is a reset, never a narrowing of what is already loaded.
+    /// `load_next_chunk` computes `skip` as `self.commits.len()`, which is
+    /// only true while `commits` is exactly a prefix of the log; dropping
+    /// rows out of it would make every later page skip the wrong commits.
+    pub(crate) fn set_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
+        if self.filter == filter {
+            return;
+        }
+        self.filter = filter;
+        // Strand any chunk still in flight: it was fetched for the old query
+        // and must not land in the new set. Dropping the task cancels it;
+        // the generation bump covers a result already on its way back.
+        self.generation += 1;
+        self.load_task = None;
+        self.commits.clear();
+        self.rows.clear();
+        self.exhausted = false;
+        self.settled = false;
+        self.empty_reason = None;
+        self.error = None;
+        self.pagination_error = None;
         self.load_next_chunk(cx);
     }
 }
@@ -193,6 +233,7 @@ impl Render for GitHistory {
             let label = match reason {
                 EmptyReason::NotARepository => "Not a git repository",
                 EmptyReason::NoCommits => "No commits yet",
+                EmptyReason::NoMatches => "No commits match the filter",
             };
             return div()
                 .id("history-empty")
@@ -704,5 +745,70 @@ mod tests {
         };
 
         assert_eq!(graph_width(std::slice::from_ref(&settled)), LANE_WIDTH);
+    }
+
+    /// A filter that matches nothing must not claim the repository is empty.
+    #[gpui::test]
+    fn a_filter_with_no_matches_is_not_an_empty_repository(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+
+        history.update(cx, |history, cx| {
+            history.set_filter(
+                LogFilter {
+                    text: Some("nothing-matches-this".to_owned()),
+                    ..LogFilter::default()
+                },
+                cx,
+            );
+        });
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.settled && history.commits.is_empty())
+        });
+
+        assert_eq!(
+            history.read_with(cx, |history, _| history.empty_reason),
+            Some(EmptyReason::NoMatches),
+            "the repository has two commits; only the filter is empty"
+        );
+    }
+
+    /// A filter change restarts the query from the top. Narrowing the loaded
+    /// vector instead would break `skip = self.commits.len()`, which assumes
+    /// `commits` is exactly a prefix of the log.
+    #[gpui::test]
+    fn changing_the_filter_reloads_from_the_first_commit(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        history.update(cx, |history, cx| {
+            history.set_filter(
+                LogFilter {
+                    text: Some("second".to_owned()),
+                    ..LogFilter::default()
+                },
+                cx,
+            );
+        });
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.settled && history.commits.len() == 1)
+        });
+
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.commits[0].subject, "second");
+            assert_eq!(
+                history.rows.len(),
+                history.commits.len(),
+                "the graph rows are rebuilt for the new result set, not left stale"
+            );
+        });
     }
 }
