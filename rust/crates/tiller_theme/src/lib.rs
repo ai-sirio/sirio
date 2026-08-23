@@ -773,7 +773,12 @@ pub struct Typography {
     pub title2: Pixels,
     /// Markdown h4 size (13.5 × 1.05 → 14px).
     pub title3: Pixels,
-    /// Body/headline size (13.5px).
+    /// Headline size (14px).
+    ///
+    /// This was exactly `base_size` — the conformance test used to spell
+    /// it "headline is the body size" — and it no longer is: 14 sits one
+    /// step above the 13.5 body, and coincides with
+    /// [`Typography::title3`], so an h4 and a headline now render alike.
     pub headline: Pixels,
     /// Callout/subheadline size (13px).
     pub callout: Pixels,
