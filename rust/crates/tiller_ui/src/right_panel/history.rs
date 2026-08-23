@@ -11,7 +11,7 @@ use gpui::{
     ParentElement as _, Path, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
     canvas, div, fill, point, prelude::FluentBuilder as _, px, uniform_list,
 };
-use tiller_git::{CommitRecord, GitLog, GraphRow, LogFilter, layout};
+use tiller_git::{CommitRecord, GitBranches, GitLog, GraphRow, LogFilter, layout};
 use tiller_theme::Theme;
 
 use super::history_toolbar;
@@ -24,6 +24,17 @@ const CHUNK: usize = 500;
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 /// Height of one commit row.
 const ROW_HEIGHT: f32 = 26.0;
+
+/// Membership toggle that keeps the vector a set: `LogFilter` treats a
+/// repeated value as a repeated git argument, and git would then OR a term
+/// with itself.
+fn toggle_in(values: &mut Vec<String>, value: String) {
+    if let Some(index) = values.iter().position(|existing| *existing == value) {
+        values.remove(index);
+    } else {
+        values.push(value);
+    }
+}
 
 /// Why the list is empty, when it is empty for a reason worth naming.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +69,12 @@ pub(crate) struct GitHistory {
     /// Created on first render, so the field can be focused before it ever
     /// exists without panicking on a missing handle.
     search_focus: Option<FocusHandle>,
+    /// Which dropdown is open, if any. One at a time: two popups at once
+    /// would need a z-order and a dismissal rule neither of them earns.
+    pub(crate) open_chip: Option<history_toolbar::FilterChip>,
+    /// Local branch names, read once per repository and refreshed with the
+    /// tree. Empty until the first read returns.
+    pub(crate) branch_options: Vec<String>,
     /// Fetched commit bodies for rows that matched on body text alone, keyed
     /// by sha. Filled lazily, one body per visible row.
     bodies: HashMap<String, String>,
@@ -91,6 +108,8 @@ impl GitHistory {
             search_task: None,
             search_generation: 0,
             search_focus: None,
+            open_chip: None,
+            branch_options: Vec::new(),
             bodies: HashMap::new(),
             bodies_fetching: HashSet::new(),
             commits: Vec::new(),
@@ -130,15 +149,23 @@ impl GitHistory {
                     let commits = GitLog::commits(&repo_root, skip, CHUNK, &filter);
                     let has_commits = matches!(&commits, Ok(loaded) if loaded.is_empty())
                         .then(|| GitLog::has_commits(&repo_root));
-                    (commits, has_commits)
+                    // Branches shell out too, so they ride the same background
+                    // task as the first chunk and never run on the render
+                    // thread. `None` means this round was not the first chunk.
+                    let branch_options = (skip == 0)
+                        .then(|| GitBranches::list(&repo_root).unwrap_or_default());
+                    (commits, has_commits, branch_options)
                 })
                 .await;
-            let (loaded, has_commits) = loaded;
+            let (loaded, has_commits, branch_options) = loaded;
             let _ = this.update(cx, |this, cx| {
                 this.load_task = None;
                 this.settled = true;
                 if generation != this.generation {
                     return;
+                }
+                if let Some(options) = branch_options {
+                    this.branch_options = options;
                 }
                 match loaded {
                     Ok(commits) => {
@@ -179,6 +206,26 @@ impl GitHistory {
     fn retry(&mut self, cx: &mut Context<Self>) {
         self.exhausted = false;
         self.load_next_chunk(cx);
+    }
+
+    /// Adds or removes one value from a chip's selection and re-runs the
+    /// query. Every chip writes a different `LogFilter` field, which is the
+    /// only place their behaviour differs.
+    pub(crate) fn toggle_chip_option(
+        &mut self,
+        chip: history_toolbar::FilterChip,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        let mut filter = self.filter.clone();
+        match chip {
+            history_toolbar::FilterChip::Branch => toggle_in(&mut filter.branches, value),
+            history_toolbar::FilterChip::User => toggle_in(&mut filter.authors, value),
+            // Date and Paths do not multi-select; Tasks 4 and 5 give them
+            // their own entry points rather than bending this one.
+            history_toolbar::FilterChip::Date | history_toolbar::FilterChip::Paths => return,
+        }
+        self.set_filter(filter, cx);
     }
 
     /// Replaces the filter and restarts the query from the top.
@@ -783,6 +830,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tiller_theme::Theme;
 
+    use history_toolbar::FilterChip;
+
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -1183,5 +1232,42 @@ mod tests {
         });
 
         assert!(history.read_with(cx, |history, _| !history.filter.is_filtering()));
+    }
+
+    /// Selecting a branch narrows the query to it, and deselecting it puts
+    /// the view back to every local branch — which is `LogFilter`'s empty
+    /// `branches`, not a branch list containing everything.
+    #[gpui::test]
+    fn choosing_a_branch_narrows_the_query_and_deselecting_widens_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let history = cx.new(|cx| GitHistory::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            history.read_with(cx, |history, _| history.commits.len() == 2)
+        });
+
+        history.update(cx, |history, cx| {
+            history.toggle_chip_option(FilterChip::Branch, "main".to_owned(), cx);
+        });
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+        history.read_with(cx, |history, _| {
+            assert_eq!(history.filter.branches, vec!["main".to_owned()]);
+            assert!(history.filter.is_filtering());
+        });
+
+        history.update(cx, |history, cx| {
+            history.toggle_chip_option(FilterChip::Branch, "main".to_owned(), cx);
+        });
+        pump_until(cx, || history.read_with(cx, |history, _| history.settled));
+        history.read_with(cx, |history, _| {
+            assert!(
+                history.filter.branches.is_empty(),
+                "empty means every branch; it must not become a list of all of them"
+            );
+            assert!(!history.filter.is_filtering());
+        });
     }
 }
