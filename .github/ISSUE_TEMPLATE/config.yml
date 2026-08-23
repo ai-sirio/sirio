@@ -1,0 +1,4 @@
+# Blank issues stay enabled on purpose: the templates below shape what arrives from
+# the browser, while `gh issue create --title ... --body ...` from a working session
+# stays frictionless and does not have to satisfy a form.
+blank_issues_enabled: true
