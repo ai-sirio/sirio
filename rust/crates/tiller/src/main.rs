@@ -10531,6 +10531,13 @@ impl TillerWorkspace {
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
         );
+        // The History toolbar shapes itself from the panel's width, and the
+        // view cannot measure its own container — push the resolved width
+        // every frame, the same every-render push as `set_activity`. No-op
+        // unless a drag or window resize actually moved it.
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_panel_width(right_width.unwrap_or(0.0), cx);
+        });
 
         div()
             .id("shell-work-area")

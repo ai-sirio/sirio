@@ -401,6 +401,132 @@ pub(super) fn render_intellisort(
     })
 }
 
+/// The single button that stands in for the four chips below ~260px. The
+/// count is what keeps a hidden filter from being silently on.
+pub(super) fn render_collapsed_chips(
+    active: usize,
+    open: bool,
+    entity: Entity<GitHistory>,
+    theme: Theme,
+) -> impl IntoElement {
+    let click_entity = entity;
+    let label = format!("Filters ({active})");
+    div()
+        .id("history-chips-collapsed")
+        .debug_selector(|| "history-chips-collapsed".to_owned())
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.footnote)
+        .text_color(if active > 0 { theme.title } else { theme.meta })
+        .bg(if open { theme.row_hover } else { theme.background })
+        .hover(|style| style.bg(theme.row_hover))
+        .on_click(move |_, _, cx| {
+            // ponytail: the combined four-in-one popup is not drawn yet; the
+            // click only dismisses any open chip popup until it lands.
+            click_entity.update(cx, |history, cx| {
+                history.open_chip = None;
+                cx.notify();
+            });
+        })
+        .child(label)
+}
+
+/// The whole toolbar at the current width.
+///
+/// `OneRow` puts field, toggles, chips and IntelliSort on one line;
+/// `TwoRows` moves the chips to a line of their own; `Collapsed` replaces
+/// the four chips with a single `Filters (n)` button whose popup holds them.
+/// The count on that button is why a collapsed filter is never silently on.
+pub(super) fn render_toolbar(
+    layout: ToolbarLayout,
+    history: &GitHistory,
+    entity: Entity<GitHistory>,
+    theme: Theme,
+) -> impl IntoElement {
+    let search = render_search_row(
+        &history.search_draft,
+        history.search_regex,
+        history.search_case_sensitive,
+        history.search_blink.visible(),
+        history.search_focus_handle(),
+        entity.clone(),
+        theme,
+    );
+    let chips = [
+        FilterChip::Branch,
+        FilterChip::User,
+        FilterChip::Date,
+        FilterChip::Paths,
+    ];
+    // The count is what keeps a filter from being silently on when its chip
+    // is off-screen or folded away.
+    let active_of = |chip: FilterChip| -> usize {
+        match chip {
+            FilterChip::Branch => history.filter.branches.len(),
+            FilterChip::User => history.filter.authors.len(),
+            FilterChip::Date => usize::from(history.filter.since.is_some()),
+            FilterChip::Paths => history.filter.paths.len(),
+        }
+    };
+
+    let mut chip_row = div().relative().flex().items_center().gap(px(6.0));
+    if layout == ToolbarLayout::Collapsed {
+        let total: usize = chips.iter().copied().map(active_of).sum();
+        chip_row = chip_row.child(render_collapsed_chips(
+            total,
+            history.open_chip.is_some(),
+            entity.clone(),
+            theme,
+        ));
+    } else {
+        for chip in chips {
+            chip_row = chip_row.child(render_filter_chip(
+                chip,
+                active_of(chip),
+                history.open_chip == Some(chip),
+                entity.clone(),
+                theme,
+            ));
+        }
+    }
+    chip_row = chip_row.child(render_intellisort(
+        history.filter.topo_order,
+        entity.clone(),
+        theme,
+    ));
+    if let Some(open) = history.open_chip {
+        if open == FilterChip::Paths {
+            chip_row = chip_row.child(render_paths_popup(
+                &history.path_draft,
+                history.path_focus_handle(),
+                entity.clone(),
+                theme,
+            ));
+        } else {
+            chip_row = chip_row.child(render_chip_popup(
+                open,
+                &history.options_for(open),
+                &history.selection_for(open),
+                entity.clone(),
+                theme,
+            ));
+        }
+    }
+
+    let mut toolbar = div().w_full().flex_none().flex();
+    if layout == ToolbarLayout::OneRow {
+        toolbar = toolbar.flex_row().items_center().gap(px(6.0));
+    } else {
+        toolbar = toolbar.flex_col().gap(px(4.0));
+    }
+    toolbar.child(search).child(chip_row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

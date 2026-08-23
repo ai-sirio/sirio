@@ -66,12 +66,19 @@ pub(crate) struct GitHistory {
     /// The pathspec being typed. Free text rather than a directory picker: a
     /// pathspec is more expressive than a picker, and git validates it.
     pub(crate) path_draft: String,
+    /// The panel's current width, pushed in by the host each render. The
+    /// view has no way to measure its own container, and guessing from the
+    /// last drawn frame would lag a frame behind every drag.
+    pub(crate) panel_width: f32,
     search_task: Option<Task<()>>,
     /// Bumped per scheduled search; a timer that wakes stale does nothing.
     search_generation: u64,
     /// Created on first render, so the field can be focused before it ever
     /// exists without panicking on a missing handle.
     search_focus: Option<FocusHandle>,
+    /// Same lifecycle as [`GitHistory::search_focus`], for the Paths popup's
+    /// free-text row.
+    path_focus: Option<FocusHandle>,
     /// Which dropdown is open, if any. One at a time: two popups at once
     /// would need a z-order and a dismissal rule neither of them earns.
     pub(crate) open_chip: Option<history_toolbar::FilterChip>,
@@ -109,9 +116,11 @@ impl GitHistory {
             search_case_sensitive: false,
             search_blink: crate::caret::Blink::new(),
             path_draft: String::new(),
+            panel_width: 405.0,
             search_task: None,
             search_generation: 0,
             search_focus: None,
+            path_focus: None,
             open_chip: None,
             branch_options: Vec::new(),
             bodies: HashMap::new(),
@@ -245,6 +254,39 @@ impl GitHistory {
             .filter(|commit| seen.insert(commit.author.clone()))
             .map(|commit| commit.author.clone())
             .collect()
+    }
+
+    /// The search field's focus handle; created lazily on first render.
+    pub(crate) fn search_focus_handle(&self) -> &FocusHandle {
+        self.search_focus.as_ref().expect("just initialized")
+    }
+
+    /// The Paths popup's focus handle; created lazily on first render.
+    pub(crate) fn path_focus_handle(&self) -> &FocusHandle {
+        self.path_focus.as_ref().expect("just initialized")
+    }
+
+    /// Where each chip's option list comes from.
+    pub(crate) fn options_for(&self, chip: history_toolbar::FilterChip) -> Vec<String> {
+        match chip {
+            history_toolbar::FilterChip::Branch => self.branch_options.clone(),
+            history_toolbar::FilterChip::User => self.author_options(),
+            // The Date popup renders its own fixed presets.
+            history_toolbar::FilterChip::Date => Vec::new(),
+            // The Paths popup renders the free-text draft row instead.
+            history_toolbar::FilterChip::Paths => Vec::new(),
+        }
+    }
+
+    /// What each chip currently has selected, in the shape its popup ticks.
+    pub(crate) fn selection_for(&self, chip: history_toolbar::FilterChip) -> Vec<String> {
+        match chip {
+            history_toolbar::FilterChip::Branch => self.filter.branches.clone(),
+            history_toolbar::FilterChip::User => self.filter.authors.clone(),
+            // Single-select: the one bound, or nothing.
+            history_toolbar::FilterChip::Date => self.filter.since.iter().cloned().collect(),
+            history_toolbar::FilterChip::Paths => vec![self.path_draft.clone()],
+        }
     }
 
     /// Sets or clears the `--since` bound. Date is single-select, unlike
@@ -456,6 +498,8 @@ impl Render for GitHistory {
 
         self.search_focus
             .get_or_insert_with(|| cx.focus_handle().tab_stop(true));
+        self.path_focus
+            .get_or_insert_with(|| cx.focus_handle().tab_stop(true));
         let search_focus = self.search_focus.as_ref().expect("just initialized");
         let search_focused = search_focus.is_focused(window);
         crate::caret::schedule(
@@ -465,12 +509,9 @@ impl Render for GitHistory {
             cx,
         );
 
-        let toolbar = history_toolbar::render_search_row(
-            &self.search_draft,
-            self.search_regex,
-            self.search_case_sensitive,
-            self.search_blink.visible(),
-            search_focus,
+        let toolbar = history_toolbar::render_toolbar(
+            history_toolbar::toolbar_layout(self.panel_width),
+            self,
             entity.clone(),
             theme,
         )
@@ -1459,5 +1500,38 @@ mod tests {
                 "ordering is not filtering: the graph must stay"
             );
         });
+    }
+
+    /// At the panel's narrow end the four chips collapse behind one button,
+    /// and at its wide end they are all present. The drawn frame is the only
+    /// place this is actually true or false.
+    #[gpui::test]
+    async fn the_chips_collapse_when_the_panel_is_narrow(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // The test window is wide, so every chip is drawn.
+        assert!(cx.debug_bounds("history-chip-branch").is_some());
+        assert!(cx.debug_bounds("history-chip-paths").is_some());
+        assert!(cx.debug_bounds("history-chips-collapsed").is_none());
+
+        let history = cx.update(|window, _| {
+            window.root::<GitHistory>().flatten().expect("history root")
+        });
+        history.update(&mut cx.cx, |history, cx| {
+            history.panel_width = 230.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("history-chip-branch").is_none());
+        assert!(
+            cx.debug_bounds("history-chips-collapsed").is_some(),
+            "the four chips are behind one button, not gone"
+        );
     }
 }
