@@ -7,7 +7,7 @@ use chrono::TimeZone;
 use gpui::{
     AppContext as _, Context, Corners, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Path, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
-    canvas, div, fill, point, px, uniform_list,
+    canvas, div, fill, point, prelude::FluentBuilder as _, px, uniform_list,
 };
 use tiller_git::{CommitRecord, GitLog, GraphRow, LogFilter, layout};
 use tiller_theme::Theme;
@@ -250,7 +250,15 @@ impl Render for GitHistory {
 
         let commits = self.commits.clone();
         let rows = self.rows.clone();
-        let graph_width = graph_width(&rows);
+        // Zero width means "draw no graph": the rows of a filtered set are
+        // not contiguous, so any lane between them would be a lie. `rows` is
+        // still computed and still zips 1:1 with `commits` — emptying it
+        // would make the `zip` in the list builder yield nothing at all.
+        let graph_width = if self.filter.is_filtering() {
+            0.0
+        } else {
+            graph_width(&rows)
+        };
         let row_entity = entity.clone();
         let list = uniform_list(
             "right-panel-history",
@@ -326,7 +334,7 @@ impl Render for GitHistory {
 
 fn render_history_row(
     commit: CommitRecord,
-    row: GraphRow,
+    row_data: GraphRow,
     graph_width: f32,
     entity: gpui::Entity<GitHistory>,
     theme: Theme,
@@ -357,13 +365,17 @@ fn render_history_row(
                 cx.emit(GitHistoryEvent::OpenCommit(sha.clone()))
             });
         })
-        .child(
-            div()
-                .w(px(graph_width))
-                .h_full()
-                .flex_none()
-                .child(graph_column(&row, theme)),
-        )
+        .when(graph_width > 0.0, |row| {
+            row.child(
+                div()
+                    .id("history-graph")
+                    .debug_selector(|| "history-graph".to_owned())
+                    .w(px(graph_width))
+                    .h_full()
+                    .flex_none()
+                    .child(graph_column(&row_data, theme)),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -512,7 +524,7 @@ fn graph_column(row: &GraphRow, theme: Theme) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -810,5 +822,49 @@ mod tests {
                 "the graph rows are rebuilt for the new result set, not left stale"
             );
         });
+    }
+
+    /// On a filtered set the rows are not contiguous in history, so a lane
+    /// drawn between two of them would connect commits that are not parent
+    /// and child. Hiding is the only option that draws nothing false.
+    #[gpui::test]
+    async fn the_graph_column_disappears_while_a_filter_is_active(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let history = cx.update(|window, _| {
+            window.root::<GitHistory>().flatten().expect("history root")
+        });
+        pump_until(&cx.cx, || {
+            history.read_with(&cx.cx, |history, _| history.commits.len() == 2)
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("history-graph").is_some(),
+            "baseline: the graph column is drawn without a filter"
+        );
+
+        history.update(&mut cx.cx, |history, cx| {
+            history.set_filter(
+                LogFilter {
+                    text: Some("second".to_owned()),
+                    ..LogFilter::default()
+                },
+                cx,
+            );
+        });
+        pump_until(&cx.cx, || {
+            history.read_with(&cx.cx, |history, _| history.commits.len() == 1)
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("history-graph").is_none(),
+            "a filtered set draws no lanes"
+        );
     }
 }
