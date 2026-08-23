@@ -164,11 +164,74 @@ impl Installer {
         }) {
             return self.install_binary(agent, artifact);
         }
-        // Task 6 replaces this arm with the real npx install.
+        // Same fallback `resolve` uses: npx works wherever Node does.
+        if let Some(Distribution::Npx { package, args }) = agent
+            .distributions
+            .iter()
+            .find(|distribution| matches!(distribution, Distribution::Npx { .. }))
+        {
+            return self.install_npx(agent, package, args);
+        }
         Err(InstallError::UnsupportedDistribution {
             agent: agent.id.clone(),
             kind: unsupported_kind_name(agent),
         })
+    }
+
+    fn install_npx(
+        &self,
+        agent: &RegistryAgent,
+        package: &str,
+        args: &[String],
+    ) -> Result<InstalledAgent, InstallError> {
+        let staging = staging_dir(self.store.root(), &agent.id, &agent.version);
+        let _guard = InstallGuard::acquire(self.store.root(), &agent.id)?;
+        let fail = |message: String| InstallError::Failed { agent: agent.id.clone(), message };
+
+        std::fs::create_dir_all(&staging).map_err(|error| fail(error.to_string()))?;
+
+        let output = std::process::Command::new(npm_binary())
+            .args(npm_install_argv(&staging.to_string_lossy(), package, false))
+            .current_dir(&staging)
+            .output()
+            .map_err(|error| {
+                fail(format!(
+                    "npm could not be run ({error}); the npx distribution needs Node on PATH"
+                ))
+            })?;
+        if !output.status.success() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(fail(String::from_utf8_lossy(&output.stderr).into_owned()));
+        }
+
+        let bin_dir = staging.join("node_modules/.bin");
+        let entries: Vec<String> = std::fs::read_dir(&bin_dir)
+            .map_err(|error| fail(error.to_string()))?
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let bin = resolve_bin_name(&entries, package).ok_or_else(|| {
+            fail("the installed package exposes no executable".to_string())
+        })?;
+
+        let final_dir = self.store.root().join(&agent.id).join(&agent.version);
+        if let Some(parent) = final_dir.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| fail(error.to_string()))?;
+        }
+        let _ = std::fs::remove_dir_all(&final_dir);
+        std::fs::rename(&staging, &final_dir).map_err(|error| fail(error.to_string()))?;
+
+        let installed = InstalledAgent {
+            id: agent.id.clone(),
+            version: agent.version.clone(),
+            executable: final_dir.join("node_modules/.bin").join(&bin),
+            args: args.to_vec(),
+            // npm publishes no hash this code can check against the
+            // registry document. Recorded honestly.
+            integrity: Integrity::None,
+        };
+        self.store.write(&installed).map_err(|error| fail(error.to_string()))?;
+        Ok(installed)
     }
 
     fn install_binary(
@@ -261,6 +324,57 @@ impl Drop for InstallGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+    /// Picks the launchable entry in `node_modules/.bin`.
+    ///
+    /// A single entry wins. Otherwise the bin matching the package's own name
+    /// (scope and version stripped) wins — dependency bins land in the same
+    /// directory (`codex` beside `codex-acp` from `@openai/codex`) and must
+    /// never be preferred. Falls back to the longest entry contained in the
+    /// package name.
+pub(crate) fn resolve_bin_name(entries: &[String], package: &str) -> Option<String> {
+    let mut candidates: Vec<&String> =
+        entries.iter().filter(|entry| !entry.starts_with('.')).collect();
+    candidates.sort();
+    if candidates.len() == 1 {
+        return Some(candidates[0].clone());
+    }
+    let without_scope = package.rsplit('/').next().unwrap_or(package);
+    let base = without_scope.split('@').next().filter(|name| !name.is_empty()).unwrap_or(without_scope);
+    if let Some(exact) = candidates.iter().find(|entry| entry.as_str() == base) {
+        return Some((*exact).clone());
+    }
+    candidates
+        .iter()
+        .filter(|entry| package.contains(entry.as_str()))
+        .max_by_key(|entry| entry.len())
+        .map(|entry| (*entry).clone())
+        .or_else(|| candidates.first().map(|entry| (*entry).clone()))
+}
+
+/// The argv for one npm install. `--ignore-scripts` is the default: a
+/// package's `preinstall`/`postinstall` runs maintainer code with the
+/// user's privileges *before* they have chosen to launch that agent. The
+/// `allow_scripts` path exists for the retry the UI offers after naming
+/// which package asked for it.
+pub(crate) fn npm_install_argv(prefix: &str, package: &str, allow_scripts: bool) -> Vec<String> {
+    let mut argv = vec![
+        "install".to_string(),
+        "--prefix".to_string(),
+        prefix.to_string(),
+        "--no-audit".to_string(),
+        "--no-fund".to_string(),
+    ];
+    if !allow_scripts {
+        argv.push("--ignore-scripts".to_string());
+    }
+    argv.push(package.to_string());
+    argv
+}
+
+fn npm_binary() -> &'static str {
+    if cfg!(windows) { "npm.cmd" } else { "npm" }
 }
 
 fn download(url: &str) -> anyhow::Result<Vec<u8>> {
@@ -718,5 +832,58 @@ mod tests {
                 if message.contains("ceiling")),
             "got: {result:?}"
         );
+    }
+
+    #[test]
+    fn a_single_bin_entry_wins() {
+        let entries = vec!["claude-agent-acp".to_string()];
+        assert_eq!(
+            resolve_bin_name(&entries, "@agentclientprotocol/claude-agent-acp@0.70.0"),
+            Some("claude-agent-acp".to_string())
+        );
+    }
+
+    #[test]
+    fn a_dependency_bin_is_never_preferred_over_the_package_bin() {
+        // Installing codex-acp also drops a `codex` bin from its
+        // @openai/codex dependency. Preferring it would silently launch the
+        // wrong program — the Swift original's comment says "must never be
+        // preferred".
+        let entries = vec!["codex".to_string(), "codex-acp".to_string()];
+        assert_eq!(
+            resolve_bin_name(&entries, "@agentclientprotocol/codex-acp@1.6.2"),
+            Some("codex-acp".to_string())
+        );
+    }
+
+    #[test]
+    fn the_longest_entry_contained_in_the_package_name_is_the_fallback() {
+        let entries = vec!["ag".to_string(), "agent-cli".to_string()];
+        assert_eq!(
+            resolve_bin_name(&entries, "agent-cli-tools@1.0.0"),
+            Some("agent-cli".to_string())
+        );
+    }
+
+    #[test]
+    fn no_bin_entries_yields_none_rather_than_a_guess() {
+        assert_eq!(resolve_bin_name(&[], "whatever@1.0.0"), None);
+    }
+
+    #[test]
+    fn dotfiles_are_not_candidates() {
+        let entries = vec![".package-lock.json".to_string(), "real-bin".to_string()];
+        assert_eq!(resolve_bin_name(&entries, "real-bin@1.0.0"), Some("real-bin".to_string()));
+    }
+
+    #[test]
+    fn npm_runs_with_scripts_disabled_by_default() {
+        let command = npm_install_argv("/tmp/staging", "codex-acp@1.6.2", false);
+        assert!(
+            command.contains(&"--ignore-scripts".to_string()),
+            "installing must not run maintainer preinstall/postinstall by default"
+        );
+        let with_scripts = npm_install_argv("/tmp/staging", "codex-acp@1.6.2", true);
+        assert!(!with_scripts.contains(&"--ignore-scripts".to_string()));
     }
 }
