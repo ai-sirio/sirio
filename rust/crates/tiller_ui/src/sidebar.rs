@@ -2656,7 +2656,7 @@ impl Sidebar {
             if let Some(reason) = item.disabled_reason {
                 row = row.child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(11.0))
                         .text_color(theme.meta)
                         .child(reason.to_string()),
                 );
@@ -3013,7 +3013,7 @@ impl Sidebar {
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(11.0))
                     .text_color(theme.meta)
                     .child(card.id),
             )
@@ -3077,7 +3077,7 @@ impl Sidebar {
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(px(11.0))
                                     .text_color(theme.meta)
                                     .child(subtitle),
                             ),
@@ -3178,7 +3178,7 @@ impl Sidebar {
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(11.0))
                     .text_color(theme.meta)
                     .child(format!(
                         "Parent folder for new worktrees. Empty uses the default: {default_location}"
@@ -3255,7 +3255,7 @@ impl Sidebar {
                         .id("project-worktree-location-restore")
                         .debug_selector(|| "project-worktree-location-restore".to_owned())
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .text_size(px(10.0))
+                        .text_size(px(11.0))
                         .text_color(theme.meta)
                         .hover(|style| style.text_color(theme.title))
                         .on_click(move |_, _, cx| {
@@ -3365,7 +3365,7 @@ impl Sidebar {
         let icon_size = IconSize::Small;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
-                .text_size(px(14.0))
+                .text_size(px(15.0))
                 .child(emoji.clone())
                 .into_any_element(),
             // A locally chosen PNG is real file content already on disk — no
@@ -3409,7 +3409,7 @@ impl Sidebar {
             // project block, worktree, or tab can only reorder inside its
             // own scope.
             .cursor_default()
-            .text_size(px(13.5))
+            .text_size(px(14.5))
             .text_color(text_color)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, window, cx| {
@@ -3484,7 +3484,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(11.0))
+                    .text_size(px(12.0))
                     .text_color(theme.meta)
                     .child(match status_glyph {
                         // Swift's `RunningDots`, tinted by the agent: a
@@ -3571,7 +3571,7 @@ impl Sidebar {
                         .cursor(gpui::CursorStyle::PointingHand)
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(px(12.0))
+                        .text_size(px(13.0))
                         .text_color(theme.meta)
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
@@ -3641,7 +3641,7 @@ impl Sidebar {
                         .debug_selector(move || format!("remove-worktree-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
                         .text_color(theme.meta)
                         .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.row_hover))
@@ -3665,7 +3665,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-tab-close-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(px(13.0))
+                        .text_size(px(14.0))
                         .text_color(theme.subtitle)
                         .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.row_hover))
@@ -3697,7 +3697,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .text_size(px(11.5))
+                    .text_size(px(12.5))
                     .line_height(px(ROW_SUB_LINE_HEIGHT))
                     .text_color(theme.meta)
                     .child(div().min_w_0().truncate().child(sub))
@@ -3710,7 +3710,7 @@ impl Sidebar {
                                 .rounded(theme.radii.chip)
                                 .bg(theme.primary_pill_bg)
                                 .text_color(theme.title)
-                                .text_size(px(10.0))
+                                .text_size(px(11.0))
                                 .child("Primary"),
                         )
                     })
@@ -3835,7 +3835,7 @@ impl Render for Sidebar {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_size(px(11.5))
+                    .text_size(px(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.meta)
                     .child("Projects")
@@ -3848,7 +3848,7 @@ impl Render for Sidebar {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(16.0))
+                            .text_size(px(17.0))
                             .text_color(theme.meta)
                             .hover(|style| style.bg(theme.row_hover).rounded(theme.radii.control))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3887,11 +3887,11 @@ impl Render for Sidebar {
                         }),
                     )
                     .on_key_down(cx.listener(Self::on_filter_key))
-                    .child(div().text_size(px(11.5)).text_color(theme.meta).child("⌕"))
+                    .child(div().text_size(px(12.5)).text_color(theme.meta).child("⌕"))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.5))
+                            .text_size(px(12.5))
                             .text_color(if filter_text.is_empty() {
                                 theme.meta
                             } else {

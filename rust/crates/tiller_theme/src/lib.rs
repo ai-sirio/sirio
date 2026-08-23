@@ -745,17 +745,28 @@ impl Default for BrowserChrome {
     }
 }
 
-/// Interface and code type-scale tokens, re-valued to waku's measured scale:
-/// 12px UI chrome, 13.5px body, 20px display, 21px body line height
-/// (~1.56), a monospace family resolved from what the system actually has at
-/// 12px for code.
+/// Interface and code type-scale tokens: waku's measured scale with a
+/// uniform **+1px** applied. waku's 13.5px body reads at 14.5, its 12px
+/// UI chrome at 13, its 20px display at 21; the line heights move with
+/// them so the leading ratios hold.
+///
+/// The offset is applied in ONE place — [`Typography::default_scale`] —
+/// because every heading step in [`Typography::for_base_size`] is
+/// expressed as a delta from 13.5 and inherits it for free. Only the
+/// three tokens that deliberately do not follow the base (`ui_size` and
+/// the two line heights) carry their raised values literally.
+///
+/// Each field below names waku's measurement first and what Tiller
+/// renders second: since the offset, those are two different numbers
+/// everywhere, and collapsing them would lose the provenance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Typography {
-    /// Body base size, in points (waku markdown body: 13.5px).
+    /// Body base size, in points (waku markdown body: 13.5px; Tiller
+    /// renders 14.5px).
     pub base_size: Pixels,
-    /// Code size, in points (waku code body: 11.5px; Tiller renders 12px).
+    /// Code size, in points (waku code body: 11.5px; Tiller renders 13px).
     pub code_size: Pixels,
-    /// Code line height (waku: 17.5px; Tiller renders 18px).
+    /// Code line height (waku: 17.5px; Tiller renders 19px).
     pub code_line_height: Pixels,
     /// Code font weight (waku's embedded JetBrains Mono renders NORMAL).
     pub code_weight: FontWeight,
@@ -765,30 +776,36 @@ pub struct Typography {
     /// literals. `SFMono-Regular` does not exist on Linux; the fallback
     /// chain picks what does.
     pub code_family: &'static str,
-    /// Display size (waku empty-state headline: 20px MEDIUM).
+    /// The sans-serif family the application UI renders in — the one answer
+    /// to "what is our UI font", resolved once at runtime from the families
+    /// actually installed (see [`Theme::resolve_ui_family`]). JetBrains Sans
+    /// leads off macOS, Apple's SF Pro leads on it.
+    pub ui_family: &'static str,
+    /// Display size (waku empty-state headline: 20px MEDIUM; Tiller
+    /// renders 21px).
     pub large_title: Pixels,
-    /// Markdown h2 size (13.5 × 1.28 → 17px).
+    /// Markdown h2 size (waku 17px; Tiller renders 18px).
     pub title: Pixels,
-    /// Markdown h3 size (13.5 × 1.14 → 15px).
+    /// Markdown h3 size (waku 15px; Tiller renders 16px).
     pub title2: Pixels,
-    /// Markdown h4 size (13.5 × 1.05 → 14px).
+    /// Markdown h4 size (waku 14px; Tiller renders 15px).
     pub title3: Pixels,
-    /// Headline size (14px).
+    /// Headline size (15px).
     ///
     /// This was exactly `base_size` — the conformance test used to spell
-    /// it "headline is the body size" — and it no longer is: 14 sits one
-    /// step above the 13.5 body, and coincides with
-    /// [`Typography::title3`], so an h4 and a headline now render alike.
+    /// it "headline is the body size" — and it no longer is: it sits one
+    /// step above the body and coincides with [`Typography::title3`], so
+    /// an h4 and a headline render alike.
     pub headline: Pixels,
-    /// Callout/subheadline size (13px).
+    /// Callout/subheadline size (14px).
     pub callout: Pixels,
-    /// Footnote/UI chrome size (12px).
+    /// Footnote/UI chrome size (13px).
     pub footnote: Pixels,
-    /// Caption-2 size (13px).
+    /// Caption-2 size (14px).
     ///
     /// The one type token that does NOT sit on a waku-measured step. It
     /// was raised from the measured 10.5 for legibility, which leaves it
-    /// larger than [`Typography::footnote`] (12) — sharing `callout`'s
+    /// larger than [`Typography::footnote`] (13) — sharing `callout`'s
     /// step — so despite the name, this is no longer the smallest size in
     /// the scale. Reach for
     /// `footnote` when what you want is "the small one"; reach for
@@ -796,23 +813,36 @@ pub struct Typography {
     /// (status bar, tab bar, toolbar labels) actually render at.
     pub caption2: Pixels,
     /// Default UI chrome size (waku: 11.5px for chips, buttons, rows;
-    /// Tiller renders 12px).
+    /// Tiller renders 13px).
     pub ui_size: Pixels,
-    /// Body line height (waku markdown body: 21px).
+    /// Body line height (waku markdown body: 21px; Tiller renders 22px).
     pub body_line_height: Pixels,
-    /// UI chrome line height (waku rows: 14-16px; 16 is the reading default).
+    /// UI chrome line height (waku rows: 14-16px, 16 the reading default;
+    /// Tiller renders 17px).
     pub ui_line_height: Pixels,
 }
 
 impl Typography {
-    /// Returns the default 13.5-point scale.
+    /// Returns the default scale: waku's 13.5px body plus the app-wide
+    /// +1px.
+    ///
+    /// This single number moves the whole interface. Every heading step
+    /// in [`Self::for_base_size`] is written as an offset from 13.5, so
+    /// raising the base raises them together; `IconSize::resolve` reads
+    /// `base_size` for the same delta, so glyphs keep pace with the text
+    /// beside them instead of shrinking against it.
+    ///
+    /// What it does NOT move: `ui_size` and the two line heights are
+    /// fixed in `for_base_size`, and the `text_size(px(…))` literals
+    /// scattered through the UI crates, which resolve nothing. Both had
+    /// to be raised by hand alongside this.
     pub fn default_scale() -> Self {
-        Self::for_base_size(13.5)
+        Self::for_base_size(14.5)
     }
 
     /// Returns the type scale for a chosen body base size, preserving waku's
     /// step relationships (headings scale off the body, chrome stays fixed
-    /// at 12).
+    /// at 13).
     pub fn for_base_size(base_size: f32) -> Self {
         let delta = base_size - 13.5;
         let scaled = |points: f32| px((points + delta).max(6.0));
@@ -820,9 +850,10 @@ impl Typography {
         Self {
             base_size: px(base_size),
             code_size: scaled(12.0),
-            code_line_height: px(18.0),
+            code_line_height: px(19.0),
             code_weight: FontWeight::NORMAL,
             code_family: code_family(),
+            ui_family: ui_family(),
             large_title: scaled(20.0),
             title: scaled(17.0),
             title2: scaled(15.0),
@@ -832,9 +863,9 @@ impl Typography {
             footnote: scaled(12.0),
             // Off the measured scale on purpose — see the field doc.
             caption2: scaled(13.0),
-            ui_size: px(12.0),
-            body_line_height: px(21.0),
-            ui_line_height: px(16.0),
+            ui_size: px(13.0),
+            body_line_height: px(22.0),
+            ui_line_height: px(17.0),
         }
     }
 }
@@ -845,27 +876,55 @@ impl Default for Typography {
     }
 }
 
-// ── the code font family ─────────────────────────────────────────────────
+// ── the font families ────────────────────────────────────────────────────
 //
-// Five call sites used to ask for `SFMono-Regular` by name, a family that
-// does not exist on Linux. GPUI falls back silently, so every code span,
-// diff line and file view rendered in a family chosen by the font stack
-// rather than one we picked — and it looked fine, which is why it survived.
-// This is the same class of defect as the "SF Symbols" file-icon entry in
-// Settings: a macOS assumption that is invisible until you look for it.
+// Three families are resolved once, at runtime, from what is actually
+// installed — never hard-coded: the UI (sans) family, the code (mono)
+// family, and the terminal (Nerd Font mono) family. The old code-font
+// comment tells the story that motivated the whole section: five call
+// sites used to ask for `SFMono-Regular` by name, a family that does not
+// exist on Linux, and GPUI fell back silently so every code span rendered
+// in a family chosen by the font stack rather than one we picked — and it
+// looked fine, which is why it survived. The same class of defect as the
+// "SF Symbols" file-icon entry in Settings: a macOS assumption that is
+// invisible until you look for it.
 //
-// One resolution, at runtime, from what is actually installed; one answer
-// to "what is our mono font", sitting next to the code-font weight in
-// [`Typography`].
+// Platform split: on macOS the Apple/Xcode faces (SF Mono, SF Pro) lead;
+// elsewhere the JetBrains faces (JetBrains Mono — SIL OFL 1.1; JetBrains
+// Sans — Apache 2.0 — both open source) lead. Each list was verified
+// against `fc-list : family` on the Linux build machine rather than
+// assumed.
+
+/// The sans-serif families to prefer, in order, when resolving the UI font.
+#[cfg(not(target_os = "macos"))]
+pub const UI_FAMILY_CANDIDATES: &[&str] = &[
+    "JetBrains Sans",
+    "Inter",
+    "Ubuntu",
+    "Noto Sans",
+    "Cantarell",
+    "DejaVu Sans",
+];
+
+/// The sans-serif families to prefer, in order, when resolving the UI font
+/// on macOS — Apple's own SF Pro (Xcode's UI face) first.
+#[cfg(target_os = "macos")]
+pub const UI_FAMILY_CANDIDATES: &[&str] = &[
+    "SF Pro",
+    "SF Pro Text",
+    "SF Pro Display",
+    "JetBrains Sans",
+    "Inter",
+    "Helvetica Neue",
+];
 
 /// Monospace families to prefer, in order, when resolving the code font.
 ///
 /// First the family the visual bar is set in (waku's JetBrains Mono), then
 /// common good monospaced faces, then whatever the system's generic
 /// "monospace" resolves to (fontconfig's alias on Linux, always present).
-/// A candidate that is not installed is skipped — never guessed at. The
-/// list was verified against `fc-list : family` on the Linux build machine
-/// rather than assumed.
+/// A candidate that is not installed is skipped — never guessed at.
+#[cfg(not(target_os = "macos"))]
 pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
     "JetBrains Mono",
     "Fira Mono",
@@ -876,11 +935,89 @@ pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
     "Noto Sans Mono",
 ];
 
+/// Monospace families to prefer, in order, when resolving the code font on
+/// macOS — Apple's own SF Mono (Xcode's editor face) first.
+#[cfg(target_os = "macos")]
+pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
+    "SF Mono",
+    "JetBrains Mono",
+    "Fira Mono",
+    "Hack",
+    "Ubuntu Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+];
+
+/// Monospace families to prefer, in order, when resolving the terminal
+/// font. The terminal renders agent TUIs whose glyph set needs a Nerd Font
+/// (MesloLGS Nerd Font Mono is what Claude Code itself asks to be
+/// installed), so the Nerd Font builds of JetBrains Mono lead, with the
+/// plain JetBrains Mono and the generic chain behind them.
+#[cfg(not(target_os = "macos"))]
+pub const TERMINAL_FAMILY_CANDIDATES: &[&str] = &[
+    "JetBrainsMono Nerd Font",
+    "JetBrains Mono NL Nerd Font",
+    "MesloLGS Nerd Font Mono",
+    "JetBrains Mono",
+    "Fira Mono",
+    "Hack",
+    "Ubuntu Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+];
+
+/// Monospace families to prefer, in order, when resolving the terminal
+/// font on macOS — Apple's own SF Mono first, the Nerd Font faces after.
+#[cfg(target_os = "macos")]
+pub const TERMINAL_FAMILY_CANDIDATES: &[&str] = &[
+    "SF Mono",
+    "JetBrainsMono Nerd Font",
+    "JetBrains Mono NL Nerd Font",
+    "MesloLGS Nerd Font Mono",
+    "JetBrains Mono",
+    "Fira Mono",
+    "Hack",
+    "Ubuntu Mono",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Noto Sans Mono",
+];
+
+/// The resolved UI family, remembered once. The first caller wins: in the
+/// app that is [`Theme::resolve_ui_family`] with the real installed list;
+/// in tests it is whichever theme accessor runs first, which gets the
+/// system's generic sans-serif answer — a real family either way.
+static UI_FAMILY: OnceLock<String> = OnceLock::new();
+
 /// The resolved code family, remembered once. The first caller wins: in the
 /// app that is [`Theme::resolve_code_family`] with the real installed list;
 /// in tests it is whichever theme accessor runs first, which gets the
 /// system's generic monospace answer — a real family either way.
 static CODE_FAMILY: OnceLock<String> = OnceLock::new();
+
+/// The resolved terminal family, remembered once. The first caller wins: in
+/// the app that is [`Theme::resolve_terminal_family`] with the real
+/// installed list; in tests it is whichever theme accessor runs first,
+/// which gets the system's generic monospace answer — a real family either
+/// way.
+static TERMINAL_FAMILY: OnceLock<String> = OnceLock::new();
+
+/// Resolves the sans-serif family from a set of installed family names.
+///
+/// `installed` should be the runtime font list — GPUI's
+/// `TextSystem::all_font_names()`, which on Linux reports the same families
+/// as `fc-list : family`. Returns the first [`UI_FAMILY_CANDIDATES`] entry
+/// present, falling back to the system's generic sans-serif answer.
+pub fn resolve_ui_family(installed: &HashSet<String>) -> String {
+    for candidate in UI_FAMILY_CANDIDATES {
+        if installed.contains(*candidate) {
+            return (*candidate).to_string();
+        }
+    }
+    system_sans_family()
+}
 
 /// Resolves the monospace family from a set of installed family names.
 ///
@@ -897,6 +1034,30 @@ pub fn resolve_code_family(installed: &HashSet<String>) -> String {
     system_monospace_family()
 }
 
+/// Resolves the terminal (Nerd Font) family from a set of installed family
+/// names. Returns the first [`TERMINAL_FAMILY_CANDIDATES`] entry present,
+/// falling back to the system's generic monospace answer.
+pub fn resolve_terminal_family(installed: &HashSet<String>) -> String {
+    for candidate in TERMINAL_FAMILY_CANDIDATES {
+        if installed.contains(*candidate) {
+            return (*candidate).to_string();
+        }
+    }
+    system_monospace_family()
+}
+
+/// The family the system maps the generic "sans-serif" to.
+///
+/// Queried through fontdb — the same database gpui's Linux text system
+/// loads — so the answer is the system's own (fontconfig's `sans-serif`
+/// alias on Linux, e.g. `fc-match sans-serif`), not a hard-coded family
+/// that happens to exist here. Non-Linux keeps fontdb's built-in generic.
+pub fn system_sans_family() -> String {
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+    database.family_name(&fontdb::Family::SansSerif).to_string()
+}
+
 /// The family the system maps the generic "monospace" to.
 ///
 /// Queried through fontdb — the same database gpui's Linux text system
@@ -909,10 +1070,22 @@ pub fn system_monospace_family() -> String {
     database.family_name(&fontdb::Family::Monospace).to_string()
 }
 
+/// The resolved UI font family, resolving the system's generic sans-serif
+/// answer if nothing has been resolved yet.
+pub fn ui_family() -> &'static str {
+    UI_FAMILY.get_or_init(system_sans_family).as_str()
+}
+
 /// The resolved code font family, resolving the system's generic monospace
 /// answer if nothing has been resolved yet.
 pub fn code_family() -> &'static str {
     CODE_FAMILY.get_or_init(system_monospace_family).as_str()
+}
+
+/// The resolved terminal font family, resolving the system's generic
+/// monospace answer if nothing has been resolved yet.
+pub fn terminal_family() -> &'static str {
+    TERMINAL_FAMILY.get_or_init(system_monospace_family).as_str()
 }
 
 /// The resolved Tiller theme stored as a GPUI global.
@@ -990,7 +1163,7 @@ impl Theme {
     /// appearance. On Linux the resolution is dark-biased until the portal
     /// is heard from (see [`ThemeMode::resolve_system`]).
     pub fn install(mode: ThemeMode, cx: &mut App) {
-        Self::resolve_code_family(cx);
+        Self::resolve_font_families(cx);
         #[cfg(target_os = "linux")]
         let theme = Self::for_mode_linux(mode, cx.window_appearance());
         #[cfg(not(target_os = "linux"))]
@@ -1001,11 +1174,31 @@ impl Theme {
         cx.set_global(theme.with_translucency(translucency));
     }
 
+    /// Resolves and remembers the UI, code and terminal families from the
+    /// families the runtime text system actually has installed. Idempotent
+    /// — the first call wins — and called from [`Theme::install`] so the
+    /// app has every answer before the first frame. The pure, testable
+    /// forms are the free `resolve_ui_family`, `resolve_code_family` and
+    /// `resolve_terminal_family`.
+    pub fn resolve_font_families(cx: &App) {
+        let installed: HashSet<String> = cx.text_system().all_font_names().into_iter().collect();
+        let _ = UI_FAMILY
+            .get_or_init(|| resolve_ui_family(&installed))
+            .as_str();
+        let _ = CODE_FAMILY
+            .get_or_init(|| resolve_code_family(&installed))
+            .as_str();
+        let _ = TERMINAL_FAMILY
+            .get_or_init(|| resolve_terminal_family(&installed))
+            .as_str();
+    }
+
     /// Resolves and remembers the code family from the families the runtime
     /// text system actually has installed. Idempotent — the first call
-    /// wins — and called from [`Theme::install`] so the app has the answer
-    /// before the first frame. The pure, testable form is the free
-    /// [`resolve_code_family`].
+    /// wins — and kept as a convenience accessor beside the all-at-once
+    /// [`Theme::resolve_font_families`] (which is what [`Theme::install`]
+    /// calls) for callers that only need the mono answer. The pure,
+    /// testable form is the free [`resolve_code_family`].
     pub fn resolve_code_family(cx: &App) -> &'static str {
         let installed: HashSet<String> = cx.text_system().all_font_names().into_iter().collect();
         CODE_FAMILY
@@ -2274,24 +2467,24 @@ mod tests {
         assert_eq!(spacing.bottom_bar_height, px(40.0));
 
         let typography = Typography::default();
-        assert_eq!(typography.base_size, px(13.5));
-        assert_eq!(typography.code_size, px(12.0));
-        assert_eq!(typography.code_line_height, px(18.0));
+        assert_eq!(typography.base_size, px(14.5));
+        assert_eq!(typography.code_size, px(13.0));
+        assert_eq!(typography.code_line_height, px(19.0));
         assert_eq!(typography.code_weight, FontWeight::NORMAL);
-        assert_eq!(typography.large_title, px(20.0));
-        assert_eq!(typography.title, px(17.0));
-        assert_eq!(typography.title2, px(15.0));
-        assert_eq!(typography.title3, px(14.0));
-        assert_eq!(typography.headline, px(14.0));
-        assert_eq!(typography.callout, px(13.0));
-        assert_eq!(typography.footnote, px(12.0));
+        assert_eq!(typography.large_title, px(21.0));
+        assert_eq!(typography.title, px(18.0));
+        assert_eq!(typography.title2, px(16.0));
+        assert_eq!(typography.title3, px(15.0));
+        assert_eq!(typography.headline, px(15.0));
+        assert_eq!(typography.callout, px(14.0));
+        assert_eq!(typography.footnote, px(13.0));
         // The single departure from the measured scale: raised from
         // waku's 10.5 for legibility, which puts it above `footnote`.
         // Recorded in `tiller_ui::conformance`'s departures ledger.
-        assert_eq!(typography.caption2, px(13.0));
-        assert_eq!(typography.ui_size, px(12.0));
-        assert_eq!(typography.body_line_height, px(21.0));
-        assert_eq!(typography.ui_line_height, px(16.0));
+        assert_eq!(typography.caption2, px(14.0));
+        assert_eq!(typography.ui_size, px(13.0));
+        assert_eq!(typography.body_line_height, px(22.0));
+        assert_eq!(typography.ui_line_height, px(17.0));
         assert_eq!(Theme::dark().translucent_surface_opacity, 0.85);
         assert_eq!(Theme::surface_opacity(true), 0.85);
         assert_eq!(Theme::surface_opacity(false), 1.0);
@@ -2421,6 +2614,89 @@ mod tests {
         assert_eq!(resolve_code_family(&installed), "JetBrains Mono");
     }
 
+    /// The UI family picks the first installed candidate in preference
+    /// order, and the JetBrains Sans face (open source, Apache 2.0) wins
+    /// when it is actually installed.
+    #[test]
+    fn ui_family_resolution_prefers_candidates_in_order() {
+        let installed: HashSet<String> = ["DejaVu Sans", "Noto Sans", "Inter"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(resolve_ui_family(&installed), "Inter");
+    }
+
+    #[test]
+    fn ui_family_resolution_takes_jetbrains_sans_first_when_installed() {
+        let installed: HashSet<String> = ["JetBrains Sans", "DejaVu Sans"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(resolve_ui_family(&installed), "JetBrains Sans");
+    }
+
+    /// The UI family falls back to the system's generic sans-serif answer
+    /// — a family fontdb actually loaded, i.e. one that exists here.
+    #[test]
+    fn ui_family_resolution_falls_back_to_a_family_that_exists() {
+        let resolved = resolve_ui_family(&HashSet::new());
+        assert_eq!(resolved, system_sans_family());
+        assert!(!resolved.is_empty());
+        let mut database = fontdb::Database::new();
+        database.load_system_fonts();
+        let exists = database
+            .faces()
+            .any(|face| face.families.iter().any(|family| family.0 == resolved));
+        assert!(
+            exists,
+            "resolved family {resolved:?} is not an installed face"
+        );
+    }
+
+    /// The terminal family prefers the Nerd Font build of JetBrains Mono
+    /// (the agent TUIs' glyph set needs a Nerd Font), then the classic
+    /// MesloLGS Nerd Font, then plain JetBrains Mono.
+    #[test]
+    fn terminal_family_resolution_prefers_nerd_fonts_in_order() {
+        let installed: HashSet<String> = [
+            "MesloLGS Nerd Font Mono",
+            "JetBrains Mono",
+            "JetBrainsMono Nerd Font",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            resolve_terminal_family(&installed),
+            "JetBrainsMono Nerd Font"
+        );
+
+        let without_jetbrains_nerd: HashSet<String> =
+            ["MesloLGS Nerd Font Mono", "JetBrains Mono"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        assert_eq!(
+            resolve_terminal_family(&without_jetbrains_nerd),
+            "MesloLGS Nerd Font Mono"
+        );
+
+        let only_plain: HashSet<String> = ["JetBrains Mono", "DejaVu Sans Mono"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(resolve_terminal_family(&only_plain), "JetBrains Mono");
+    }
+
+    /// The terminal family falls back to the system's generic monospace
+    /// answer — a family fontdb actually loaded.
+    #[test]
+    fn terminal_family_resolution_falls_back_to_a_family_that_exists() {
+        let resolved = resolve_terminal_family(&HashSet::new());
+        assert_eq!(resolved, system_monospace_family());
+        assert!(!resolved.is_empty());
+    }
+
     /// With nothing installed, the fallback is the system's generic
     /// monospace answer — and that answer must be a face fontdb actually
     /// loaded, i.e. a family that exists here (on this machine fontconfig
@@ -2448,6 +2724,15 @@ mod tests {
         let family = Theme::dark().typography.code_family;
         assert!(!family.is_empty());
         assert_eq!(Theme::light().typography.code_family, family);
+    }
+
+    /// The theme carries one UI-family answer too, real and non-empty
+    /// before any GPUI app resolves it.
+    #[test]
+    fn typography_carries_a_ui_family_token() {
+        let family = Theme::dark().typography.ui_family;
+        assert!(!family.is_empty());
+        assert_eq!(Theme::light().typography.ui_family, family);
     }
 
     /// COSMIC-02: `Theme::dark()`/`light()` must carry a `cosmic` field

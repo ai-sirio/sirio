@@ -447,7 +447,7 @@ impl RightPanel {
             .flex()
             .items_center()
             .gap(theme.spacing.titlebar_control_spacing)
-            .text_size(px(12.5))
+            .text_size(px(13.5))
             // Names are neutral text; the status dot carries the git state
             // (three distinguishable colours, not one "modified" amber),
             // and unreadable directories dim rather than shout.
@@ -543,7 +543,7 @@ impl RightPanel {
             .when(read_error.is_some(), |this| {
                 this.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
                         .text_color(theme.git_conflict)
                         .child("⚠"),
                 )

@@ -101,14 +101,14 @@ impl RightPanel {
                 div()
                     .id(status_id.clone())
                     .debug_selector(move || status_id.clone())
-                    .text_size(px(11.0))
+                    .text_size(px(12.0))
                     .text_color(status)
                     .child(activity_status_glyph(surface.status)),
             )
             .child(
                 div()
                     .id(format!("activity-close-{index}"))
-                    .text_size(px(16.0))
+                    .text_size(px(17.0))
                     .text_color(theme.subtitle)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();

@@ -158,41 +158,46 @@ fn accent_resolves_to_the_same_coral_under_either_token_name() {
     expect_hex(light.tab_focus_accent, 0xAD_58_1F, "light tab_focus_accent");
 }
 
-/// The type scale: body 13.5/21 (the document ratio), UI chrome 12/16,
-/// callout 13, code 12/18, and the heading steps off body (×1.45/×1.28/
-/// ×1.15/×1.04). These are the values the surfaces resolve through
+/// The type scale: waku's measured steps with a uniform +1px. Body
+/// 14.5/22, UI chrome 13/17, callout 14, code 13/19, and the heading
+/// steps 21/18/16/15. These are the values the surfaces resolve through
 /// `theme.typography`; a drift here is a drift everywhere.
 ///
-/// `caption2` shares callout's 13.0 step — above `footnote` (12.0) — the
-/// raised, still-deliberate off-scale size for dense strips. It is pinned
-/// here all the same: a value nobody measured still has to be a value
+/// The steps are waku's OFFSET, not waku's re-multiplied: a uniform +1
+/// necessarily changes every ratio against the body, so the old
+/// ×1.45/×1.28/… labels no longer describe what these are and have been
+/// dropped rather than quietly recomputed.
+///
+/// `caption2` shares callout's step — above `footnote` — the raised,
+/// still-deliberate off-scale size for dense strips. It is pinned here
+/// all the same: a value nobody measured still has to be a value
 /// somebody decided.
 #[test]
 fn type_scale_is_the_measured_one() {
     let typography = Theme::dark().typography;
 
-    assert_eq!(typography.base_size, px(13.5), "body base 13.5");
+    assert_eq!(typography.base_size, px(14.5), "body base 14.5");
     assert_eq!(
         typography.body_line_height,
-        px(21.0),
-        "body 13.5 @ 21 (×1.56)"
+        px(22.0),
+        "body 14.5 @ 22"
     );
-    assert_eq!(typography.ui_size, px(12.0), "UI chrome 12.0");
-    assert_eq!(typography.ui_line_height, px(16.0), "chrome 12 @ 16");
-    assert_eq!(typography.callout, px(13.0), "callout 13.0");
+    assert_eq!(typography.ui_size, px(13.0), "UI chrome 13.0");
+    assert_eq!(typography.ui_line_height, px(17.0), "chrome 13 @ 17");
+    assert_eq!(typography.callout, px(14.0), "callout 14.0");
     assert_eq!(
         typography.caption2,
-        px(13.0),
-        "caption2 13.0 — the deliberate off-scale step, above footnote"
+        px(14.0),
+        "caption2 14.0 — the deliberate off-scale step, above footnote"
     );
-    assert_eq!(typography.headline, px(14.0), "headline 14.0");
-    assert_eq!(typography.code_size, px(12.0), "code 12.0");
-    assert_eq!(typography.code_line_height, px(18.0), "code 12 @ 18");
+    assert_eq!(typography.headline, px(15.0), "headline 15.0");
+    assert_eq!(typography.code_size, px(13.0), "code 13.0");
+    assert_eq!(typography.code_line_height, px(19.0), "code 13 @ 19");
     assert_eq!(typography.code_weight, FontWeight::NORMAL);
-    assert_eq!(typography.large_title, px(20.0), "h1 13.5 × 1.45");
-    assert_eq!(typography.title, px(17.0), "h2 13.5 × 1.28");
-    assert_eq!(typography.title2, px(15.0), "h3 13.5 × 1.15");
-    assert_eq!(typography.title3, px(14.0), "h4 13.5 × 1.04");
+    assert_eq!(typography.large_title, px(21.0), "h1, waku 20 + 1");
+    assert_eq!(typography.title, px(18.0), "h2, waku 17 + 1");
+    assert_eq!(typography.title2, px(16.0), "h3, waku 15 + 1");
+    assert_eq!(typography.title3, px(15.0), "h4, waku 14 + 1");
 }
 
 /// Radii resolve through the token set, not fresh literals: the measured

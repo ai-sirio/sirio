@@ -9,9 +9,13 @@ use tiller_ui::changes::ChangesTab;
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         Theme::init(cx);
-        // Evidence for the fonts pass: the family is resolved once at
+        // Evidence for the fonts pass: the families are resolved once at
         // runtime from what is installed, never hard-coded (P16).
-        eprintln!("mono family: {}", Theme::get(cx).typography.code_family);
+        eprintln!(
+            "ui family: {}\nmono family: {}",
+            Theme::get(cx).typography.ui_family,
+            Theme::get(cx).typography.code_family
+        );
         let cwd = std::env::args()
             .nth(1)
             .map(std::path::PathBuf::from)

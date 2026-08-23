@@ -1036,7 +1036,7 @@ impl ChangesTab {
                 .px(px(10.0))
                 .flex()
                 .items_center()
-                .text_size(px(11.5))
+                .text_size(px(12.5))
                 .text_color(theme.subtitle)
                 .bg(theme.diff_hunk_background)
                 .child(header)
@@ -1076,7 +1076,7 @@ impl ChangesTab {
                 .px(px(6.0))
                 .flex()
                 .items_center()
-                .text_size(px(11.5))
+                .text_size(px(12.5))
                 .text_color(theme.meta)
                 .child(
                     div()
@@ -1164,7 +1164,7 @@ impl ChangesTab {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(11.5))
+            .text_size(px(12.5))
             .bg(theme.diff_hunk_background)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| {
@@ -1255,7 +1255,7 @@ impl ChangesTab {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(12.5))
+            .text_size(px(13.5))
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.title)
             .hover(|style| style.bg(theme.row_hover))
@@ -1430,7 +1430,7 @@ impl ChangesTab {
             .flex()
             .items_stretch()
             .font_family(theme.typography.code_family)
-            .text_size(px(11.5))
+            .text_size(px(12.5))
             .child(split_cell(row.left, true, theme).debug_selector(|| "changes-split-left".into()))
             .child(
                 div()
@@ -1470,7 +1470,7 @@ impl ChangesTab {
             .flex()
             .items_center()
             .font_family(theme.typography.code_family)
-            .text_size(px(11.5))
+            .text_size(px(12.5))
             .text_color(theme.title)
             .bg(background)
             .child(
@@ -1537,7 +1537,7 @@ impl ChangesTab {
                 div()
                     .flex_1()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(11.5))
+                    .text_size(px(12.5))
                     .text_color(theme.title)
                     .child(title),
             )
@@ -2089,7 +2089,7 @@ where
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(6.0))
-        .text_size(px(11.5))
+        .text_size(px(12.5))
         .text_color(theme.subtitle)
         .hover(|style| style.text_color(theme.git_conflict))
         .on_click(move |_, window, cx| {
