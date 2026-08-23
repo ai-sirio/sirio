@@ -165,6 +165,19 @@ impl GitLog {
     pub fn has_commits(repo: &Path) -> bool {
         git::run_accepting(&["rev-parse", "--verify", "HEAD"], repo, &[0]).is_ok()
     }
+
+    /// The body of one commit.
+    ///
+    /// Deliberately not part of `LOG_FORMAT`: adding `%b` to the bulk read
+    /// grows 500 commits from 91KB to 467KB — 5.1x measured on this
+    /// repository — for text almost none of which is ever displayed. It
+    /// would also make the record seven fields, and a body may legitimately
+    /// contain the 0x1e/0x1f bytes this format uses as separators. Fetching
+    /// one body for one visible row costs neither.
+    pub fn body(repo: &Path, sha: &str) -> Result<String, GitError> {
+        let output = git::run_accepting(&["show", "-s", "--format=%b", sha], repo, &[0])?;
+        Ok(output.stdout_string().trim_end().to_owned())
+    }
 }
 
 fn is_unborn_head(error: &GitError) -> bool {
@@ -508,6 +521,48 @@ mod tests {
             "--skip counts within the filtered results, not within the whole log"
         );
         assert_eq!(second_page[0].subject, "alpha one");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--grep` matches the whole message, so a row can be returned for text
+    /// that appears nowhere on screen. When the subject does not contain the
+    /// search text, the match is necessarily in the body — no need to ask git
+    /// why it returned the row.
+    #[test]
+    fn a_body_is_fetched_for_one_commit_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("tiller-log-body-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp repo");
+
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("spawn git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "Tester"]);
+        std::fs::write(dir.join("a.txt"), "x").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "subject line", "-m", "the body mentions sockets"]);
+
+        let filter = LogFilter {
+            text: Some("sockets".to_owned()),
+            ..LogFilter::default()
+        };
+        let commits = GitLog::commits(&dir, 0, 10, &filter).expect("log");
+        assert_eq!(commits.len(), 1, "matched on body text alone");
+        assert!(
+            !commits[0].subject.contains("sockets"),
+            "the subject does not explain the match, which is the whole case"
+        );
+
+        let body = GitLog::body(&dir, &commits[0].sha).expect("body");
+        assert!(body.contains("the body mentions sockets"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
