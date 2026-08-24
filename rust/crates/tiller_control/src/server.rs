@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(windows)]
-use crate::windows_pipe::{PipeListener, ListenerError, post_bind_sanity_check};
 use crate::protocol::{ControlRequest, ControlResponse, decode_request, encode_line};
+#[cfg(windows)]
+use crate::windows_pipe::{ListenerError, PipeListener, post_bind_sanity_check};
 
 /// Per-connection input buffer cap (1 MiB), matching the Swift server.
 /// Prevents a local memory DoS from an unbounded request line.
@@ -198,7 +198,9 @@ impl ControlServer {
         let listener = match PipeListener::bind(&self.socket_path) {
             Ok(listener) => listener,
             Err(ListenerError::AlreadyRunning { name }) => {
-                return Err(ServerError::AlreadyRunning { path: PathBuf::from(name) });
+                return Err(ServerError::AlreadyRunning {
+                    path: PathBuf::from(name),
+                });
             }
             Err(ListenerError::Bind { detail }) => {
                 return Err(ServerError::BindFailed {

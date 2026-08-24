@@ -786,33 +786,36 @@ impl Render for FileView {
         let editor_focused = self.editor_focus.is_focused(window);
         let caret_sig = (
             self.caret,
-            self.source_selection.map(|selection| (selection.start, selection.end)),
+            self.source_selection
+                .map(|selection| (selection.start, selection.end)),
         );
         if caret_sig != self.editor_caret_sig {
             self.editor_blink.wake();
             self.editor_caret_sig = caret_sig;
         }
-        let caret_visible =
-            editor_focused && self.effective_mode() != MarkdownMode::Preview;
-        caret::schedule(&mut self.editor_blink, caret_visible, Self::flip_editor_blink, cx);
-        let caret_offset = self.caret.min(
-            match &self.state {
-                ViewState::Ready(editor) => editor.buffer().len(),
-                _ => 0,
-            },
+        let caret_visible = editor_focused && self.effective_mode() != MarkdownMode::Preview;
+        caret::schedule(
+            &mut self.editor_blink,
+            caret_visible,
+            Self::flip_editor_blink,
+            cx,
         );
+        let caret_offset = self.caret.min(match &self.state {
+            ViewState::Ready(editor) => editor.buffer().len(),
+            _ => 0,
+        });
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.chat_surface)
             .child(self.render_header(theme, entity))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .child(self.render_state(theme, cx.entity(), caret_visible, caret_offset)),
-            )
+            .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
+                theme,
+                cx.entity(),
+                caret_visible,
+                caret_offset,
+            )))
     }
 }
 
@@ -1207,10 +1210,7 @@ fn render_content(
                                 && caret_offset >= line_selection.start
                                 && caret_offset <= line_selection.end
                             {
-                                Some(
-                                    (caret_offset - line_selection.start)
-                                        .min(line.len()),
-                                )
+                                Some((caret_offset - line_selection.start).min(line.len()))
                             } else {
                                 None
                             },

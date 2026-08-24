@@ -86,12 +86,8 @@ fn windows_process_inspection_reads_agent_names_from_a_real_child() {
     use std::thread;
     use std::time::Duration;
 
-    let comspec =
-        std::env::var("ComSpec").expect("ComSpec is set on every Windows install");
-    let root = std::env::temp_dir().join(format!(
-        "tiller-activity-win-{}",
-        std::process::id()
-    ));
+    let comspec = std::env::var("ComSpec").expect("ComSpec is set on every Windows install");
+    let root = std::env::temp_dir().join(format!("tiller-activity-win-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("create process fixture directory");
     let agent = root.join("codex.exe");

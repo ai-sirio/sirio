@@ -49,8 +49,7 @@ pub(crate) fn resolve_panel_widths(
     gap: f32,
 ) -> (Option<f32>, Option<f32>) {
     let visible = usize::from(left_pref.is_some()) + usize::from(right_pref.is_some());
-    let budget =
-        viewport_width - (2.0 * outer_inset) - (gap * visible as f32) - MIN_CENTER_WIDTH;
+    let budget = viewport_width - (2.0 * outer_inset) - (gap * visible as f32) - MIN_CENTER_WIDTH;
 
     let left = left_pref.unwrap_or(0.0);
     let right = right_pref.unwrap_or(0.0);
@@ -77,7 +76,11 @@ pub(crate) fn resolve_panel_widths(
         // touched", so they scale together and keep their ratio.
         None => {
             let requested = left + right;
-            let scale = if requested > 0.0 { budget / requested } else { 0.0 };
+            let scale = if requested > 0.0 {
+                budget / requested
+            } else {
+                0.0
+            };
             (
                 (left * scale).max(left_floor),
                 (right * scale).max(right_floor),
@@ -96,8 +99,7 @@ mod tests {
     /// nothing is touched.
     #[test]
     fn preferences_survive_untouched_when_they_fit() {
-        let (left, right) =
-            resolve_panel_widths(1470.0, Some(325.0), Some(405.0), None, 4.0, 4.0);
+        let (left, right) = resolve_panel_widths(1470.0, Some(325.0), Some(405.0), None, 4.0, 4.0);
 
         assert_eq!(left, Some(325.0));
         assert_eq!(right, Some(405.0));
@@ -126,8 +128,7 @@ mod tests {
     /// touched", so they shrink together and their ratio survives.
     #[test]
     fn without_a_drag_both_shrink_proportionally() {
-        let (left, right) =
-            resolve_panel_widths(1000.0, Some(400.0), Some(400.0), None, 4.0, 4.0);
+        let (left, right) = resolve_panel_widths(1000.0, Some(400.0), Some(400.0), None, 4.0, 4.0);
 
         assert_eq!(left, Some(332.0));
         assert_eq!(right, Some(332.0));
@@ -168,8 +169,7 @@ mod tests {
     /// going to zero or negative.
     #[test]
     fn a_window_too_small_for_both_floors_still_returns_the_floors() {
-        let (left, right) =
-            resolve_panel_widths(400.0, Some(325.0), Some(405.0), None, 4.0, 4.0);
+        let (left, right) = resolve_panel_widths(400.0, Some(325.0), Some(405.0), None, 4.0, 4.0);
 
         assert_eq!(left, Some(160.0));
         assert_eq!(right, Some(220.0));

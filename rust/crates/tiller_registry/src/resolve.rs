@@ -143,7 +143,9 @@ pub fn resolve(input: ResolveInput<'_>) -> LaunchSource {
         .iter()
         .any(|distribution| matches!(distribution, Distribution::Npx { .. }));
     if installable_binary || has_npx {
-        return LaunchSource::Installable { agent: agent.clone() };
+        return LaunchSource::Installable {
+            agent: agent.clone(),
+        };
     }
 
     // Nothing installable: say which kind of "no" this is.
@@ -179,7 +181,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn builtin() -> BuiltinAcp {
-        BuiltinAcp { program: "opencode", args: &["acp"] }
+        BuiltinAcp {
+            program: "opencode",
+            args: &["acp"],
+        }
     }
 
     fn installed() -> InstalledAgent {
@@ -246,7 +251,10 @@ mod tests {
         });
         assert_eq!(
             source,
-            LaunchSource::Builtin { program: "opencode".into(), args: vec!["acp".into()] },
+            LaunchSource::Builtin {
+                program: "opencode".into(),
+                args: vec!["acp".into()]
+            },
             "the user's own CLI is used, and nothing is downloaded"
         );
     }
@@ -314,7 +322,11 @@ mod tests {
         assert_eq!(registry_id("codex"), Some("codex-acp"));
         assert_eq!(registry_id("pi"), Some("pi-acp"));
         assert_eq!(registry_id("opencode"), Some("opencode"));
-        assert_eq!(registry_id("omp"), None, "omp is not in the registry at all");
+        assert_eq!(
+            registry_id("omp"),
+            None,
+            "omp is not in the registry at all"
+        );
         assert_eq!(registry_id("not-an-adapter"), None);
     }
 
@@ -341,7 +353,10 @@ mod tests {
             "kilo-like",
             vec![
                 binary_for("darwin-aarch64"),
-                Distribution::Npx { package: "@example/kilo-acp".into(), args: Vec::new() },
+                Distribution::Npx {
+                    package: "@example/kilo-acp".into(),
+                    args: Vec::new(),
+                },
             ],
         );
         let source = resolve(ResolveInput {
@@ -371,7 +386,10 @@ mod tests {
     fn nothing_known_at_all_is_not_in_registry() {
         // Reaches the `input.registry` guard: no builtin, no install, and
         // no cached registry copy.
-        assert_eq!(resolve(input(None)), LaunchSource::Unavailable(UnavailableReason::NotInRegistry));
+        assert_eq!(
+            resolve(input(None)),
+            LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
+        );
     }
 
     #[test]

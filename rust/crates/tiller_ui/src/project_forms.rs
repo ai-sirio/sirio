@@ -29,7 +29,10 @@ pub enum CloneStatus {
     /// `GitCommandResult::truncated`); the clone itself still completed, so
     /// this is a notice, not a failure — see `clone_status_line` for how it
     /// is worded and colored.
-    Complete { destination: PathBuf, truncated: bool },
+    Complete {
+        destination: PathBuf,
+        truncated: bool,
+    },
 }
 
 /// Pure state and guards for [`CloneForm`].
@@ -116,7 +119,10 @@ pub enum CloneFormEvent {
     /// this event (as `Sidebar` does) should keep it open when `truncated`
     /// is set, so the status line's notice is actually seen rather than
     /// closed the same frame it appears — see `Sidebar::start_clone_project`.
-    Cloned { destination: PathBuf, truncated: bool },
+    Cloned {
+        destination: PathBuf,
+        truncated: bool,
+    },
 }
 
 enum CloneWorkerMessage {
@@ -826,9 +832,9 @@ mod tests {
         clone_status_line,
     };
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
-    use tiller_theme::Theme;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::time::Duration;
+    use tiller_theme::Theme;
 
     struct TempDir(PathBuf);
 

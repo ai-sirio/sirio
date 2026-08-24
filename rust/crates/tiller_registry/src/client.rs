@@ -26,7 +26,11 @@ impl RegistryClient {
         fetch: impl Fn() -> anyhow::Result<String> + Send + Sync + 'static,
         now: impl Fn() -> SystemTime + Send + Sync + 'static,
     ) -> Self {
-        Self { cache_path: cache_path.into(), fetch: Box::new(fetch), now: Box::new(now) }
+        Self {
+            cache_path: cache_path.into(),
+            fetch: Box::new(fetch),
+            now: Box::new(now),
+        }
     }
 
     /// The production constructor.
@@ -48,9 +52,7 @@ impl RegistryClient {
     }
 
     pub fn registry(&self, max_age: Duration, force: bool) -> anyhow::Result<AcpRegistry> {
-        if !force
-            && let Some(cached) = self.fresh_cache(max_age)
-        {
+        if !force && let Some(cached) = self.fresh_cache(max_age) {
             return Ok(cached);
         }
 
@@ -106,7 +108,8 @@ mod tests {
     const OTHER: &str = r#"{"version":"2.0.0","agents":[]}"#;
 
     fn temp_cache(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tiller-registry-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tiller-registry-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("registry.json")
     }
@@ -164,8 +167,7 @@ mod tests {
     fn a_successful_fetch_replaces_the_cache() {
         let cache = temp_cache("replace");
         std::fs::write(&cache, GOOD).unwrap();
-        let client =
-            RegistryClient::new(cache.clone(), || Ok(OTHER.to_string()), SystemTime::now);
+        let client = RegistryClient::new(cache.clone(), || Ok(OTHER.to_string()), SystemTime::now);
         let registry = client.registry(Duration::ZERO, true).unwrap();
         assert_eq!(registry.version, "2.0.0");
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), OTHER);
@@ -181,8 +183,7 @@ mod tests {
         // the Agents screen permanently unopenable.
         let cache = temp_cache("corrupt");
         std::fs::write(&cache, "{ truncated").unwrap();
-        let client =
-            RegistryClient::new(cache, || Ok(GOOD.to_string()), SystemTime::now);
+        let client = RegistryClient::new(cache, || Ok(GOOD.to_string()), SystemTime::now);
         let registry = client.registry(Duration::from_secs(86_400), false).unwrap();
         assert_eq!(registry.version, "1.0.0");
     }
@@ -191,8 +192,11 @@ mod tests {
     fn no_cache_and_no_network_is_an_error_not_a_fabricated_registry() {
         let cache = temp_cache("nothing");
         let _ = std::fs::remove_file(&cache);
-        let client =
-            RegistryClient::new(cache, || Err(anyhow::anyhow!("no network")), SystemTime::now);
+        let client = RegistryClient::new(
+            cache,
+            || Err(anyhow::anyhow!("no network")),
+            SystemTime::now,
+        );
         assert!(client.registry(Duration::ZERO, true).is_err());
     }
 }
