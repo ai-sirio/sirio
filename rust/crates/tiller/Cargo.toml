@@ -25,6 +25,18 @@ tiller_control.workspace = true
 tiller_git.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The window icon (`WindowOptions.icon`): decoded once at startup from the
+# embedded PNG. Same crate and version family gpui itself uses, so the
+# `Arc<RgbaImage>` type is the same instance gpui_linux reads into
+# `_NET_WM_ICON`. `png` is the only format the asset set needs.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+# Compiles `build.rs`'s generated `1 ICON "app-icon.ico"` resource with the
+# MSVC `rc.exe`. The gpui Windows backend loads resource ID 1 once via
+# `LoadImageW` and registers it as the window-class icon (`WNDCLASS.hIcon`);
+# it has no per-window icon API, so this is the whole Windows story.
+embed-resource = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # F-CTRL-BROWSER-05: browser.wait pumps the same process-global GTK main
