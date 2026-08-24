@@ -2575,8 +2575,7 @@ impl Settings {
                     .items_center()
                     .justify_center()
                     .child(
-                        IconElement::new(provider.icon(), IconSize::Medium)
-                            .text_color(glyph_color),
+                        IconElement::new(provider.icon(), IconSize::Medium).text_color(glyph_color),
                     ),
             )
             .child(text!(
@@ -3187,7 +3186,12 @@ impl Settings {
                 claude_mark,
                 accounts.claude,
             ),
-            ProviderCardView::new(ProviderKind::Codex, "Codex", monochrome_mark, accounts.codex),
+            ProviderCardView::new(
+                ProviderKind::Codex,
+                "Codex",
+                monochrome_mark,
+                accounts.codex,
+            ),
             ProviderCardView::new(
                 ProviderKind::OpenCodeGo,
                 "OpenCode Go",
@@ -3380,21 +3384,21 @@ impl Settings {
                 None
             } else {
                 match &source {
-                tiller_registry::LaunchSource::Installable { .. } => Some((
-                    SettingsEvent::InstallAgent(availability.id.to_string()),
-                    "Install",
-                )),
-                tiller_registry::LaunchSource::Installed(installed) => self
-                    .registry_versions
-                    .get(availability.id)
-                    .filter(|latest| *latest != &installed.version)
-                    .map(|_| {
-                        (
-                            SettingsEvent::UpdateAgent(availability.id.to_string()),
-                            "Update",
-                        )
-                    }),
-                _ => None,
+                    tiller_registry::LaunchSource::Installable { .. } => Some((
+                        SettingsEvent::InstallAgent(availability.id.to_string()),
+                        "Install",
+                    )),
+                    tiller_registry::LaunchSource::Installed(installed) => self
+                        .registry_versions
+                        .get(availability.id)
+                        .filter(|latest| *latest != &installed.version)
+                        .map(|_| {
+                            (
+                                SettingsEvent::UpdateAgent(availability.id.to_string()),
+                                "Update",
+                            )
+                        }),
+                    _ => None,
                 }
             };
             let install_button = action.map(|(event, label)| {
@@ -3415,10 +3419,7 @@ impl Settings {
                             cx.emit(event.clone());
                         });
                     })
-                    .child(text!(
-                        id = ("settings-agent-install-label", index),
-                        label
-                    ))
+                    .child(text!(id = ("settings-agent-install-label", index), label))
             });
             let mut row_container = div()
                 .id(("settings-agent-row", index))
@@ -3442,7 +3443,11 @@ impl Settings {
                                     format!("v{version}")
                                 ))
                         }))
-                        .child(Self::render_acp_badge(availability.id.to_string(), &source, theme))
+                        .child(Self::render_acp_badge(
+                            availability.id.to_string(),
+                            &source,
+                            theme,
+                        ))
                         .children(install_button),
                     theme,
                 ));
@@ -3450,9 +3455,7 @@ impl Settings {
                 row_container = row_container.child(
                     div()
                         .id(("settings-agent-integrity", index))
-                        .debug_selector(move || {
-                            format!("settings-agent-integrity-{index}")
-                        })
+                        .debug_selector(move || format!("settings-agent-integrity-{index}"))
                         .px(px(theme.cosmic.spacing.xs as f32))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.subtitle)
@@ -3471,9 +3474,7 @@ impl Settings {
                 row_container = row_container.child(
                     div()
                         .id((kind, index))
-                        .debug_selector(move || {
-                            format!("settings-agent-install-{kind}-{index}")
-                        })
+                        .debug_selector(move || format!("settings-agent-install-{kind}-{index}"))
                         .px(px(theme.cosmic.spacing.xs as f32))
                         .text_size(theme.typography.footnote)
                         .font_weight(if failed {
@@ -4734,9 +4735,7 @@ mod tests {
     /// row with nothing to offer offers no button at all — never a
     /// fabricated one.
     #[gpui::test]
-    async fn agent_install_click_emits_the_install_request(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn agent_install_click_emits_the_install_request(cx: &mut gpui::TestAppContext) {
         use tiller_registry::{Distribution, LaunchSource};
         cx.update(Theme::init);
         let fixture = vec![
@@ -4783,19 +4782,14 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         cx.update(|window, app| {
-            let settings = window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root");
-            let subscription =
-                app.subscribe(&settings, move |_entity, event: &SettingsEvent, _| {
-                    match event {
-                        SettingsEvent::InstallAgent(id) => {
-                            recorder.borrow_mut().push(id.clone())
-                        }
-                        SettingsEvent::UpdateAgent(_) | SettingsEvent::RefreshAgentSources => {}
-                    }
-                });
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let subscription = app.subscribe(
+                &settings,
+                move |_entity, event: &SettingsEvent, _| match event {
+                    SettingsEvent::InstallAgent(id) => recorder.borrow_mut().push(id.clone()),
+                    SettingsEvent::UpdateAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                },
+            );
             // The subscription must outlive this update scope for the whole
             // test; forgetting it pins it to the entities' lifetimes.
             std::mem::forget(subscription);
@@ -4831,8 +4825,7 @@ mod tests {
             .debug_bounds("settings-agent-row-0")
             .expect("the opencode row draws");
         assert!(
-            install.origin.x + install.size.width
-                <= row.origin.x + row.size.width,
+            install.origin.x + install.size.width <= row.origin.x + row.size.width,
             "Install must sit inside the row that clips it, not past its \
              right edge: install={install:?} row={row:?}"
         );
@@ -4920,9 +4913,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn a_failed_install_shows_the_reason_and_allows_retry(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn a_failed_install_shows_the_reason_and_allows_retry(cx: &mut gpui::TestAppContext) {
         let (window, settings) = install_state_window(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -4950,9 +4941,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn a_settled_install_returns_to_the_normal_row(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn a_settled_install_returns_to_the_normal_row(cx: &mut gpui::TestAppContext) {
         let (window, settings) = install_state_window(cx);
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -4988,27 +4977,28 @@ mod tests {
         cx.update(Theme::init);
         let sources = vec![(
             "codex".to_string(),
-            LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
+            LaunchSource::Builtin {
+                program: "codex-acp".into(),
+                args: vec![],
+            },
         )];
         let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default())
-                .with_launch_sources(sources)
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_launch_sources(sources)
         });
         let events = Rc::new(RefCell::new(Vec::<String>::new()));
         let recorder = events.clone();
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let settings = cx.update(|window, app| {
-            let settings_entity = window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root");
-            let subscription =
-                app.subscribe(&settings_entity, move |_entity, event: &SettingsEvent, _app| {
+            let settings_entity = window.root::<Settings>().flatten().expect("settings root");
+            let subscription = app.subscribe(
+                &settings_entity,
+                move |_entity, event: &SettingsEvent, _app| {
                     if let SettingsEvent::RefreshAgentSources = event {
                         recorder.borrow_mut().push("recheck".to_string());
                     }
-                });
+                },
+            );
             // The subscription must outlive this update scope for the whole
             // test; forgetting it pins it to the entities' lifetimes.
             std::mem::forget(subscription);
@@ -5035,27 +5025,28 @@ mod tests {
         cx.update(Theme::init);
         let sources = vec![(
             "codex".to_string(),
-            LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
+            LaunchSource::Builtin {
+                program: "codex-acp".into(),
+                args: vec![],
+            },
         )];
         let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default())
-                .with_launch_sources(sources)
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_launch_sources(sources)
         });
         let events = Rc::new(RefCell::new(Vec::<String>::new()));
         let recorder = events.clone();
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let settings = cx.update(|window, app| {
-            let settings_entity = window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root");
-            let subscription =
-                app.subscribe(&settings_entity, move |_entity, event: &SettingsEvent, _app| {
+            let settings_entity = window.root::<Settings>().flatten().expect("settings root");
+            let subscription = app.subscribe(
+                &settings_entity,
+                move |_entity, event: &SettingsEvent, _app| {
                     if let SettingsEvent::RefreshAgentSources = event {
                         recorder.borrow_mut().push("recheck".to_string());
                     }
-                });
+                },
+            );
             // The subscription must outlive this update scope for the whole
             // test; forgetting it pins it to the entities' lifetimes.
             std::mem::forget(subscription);

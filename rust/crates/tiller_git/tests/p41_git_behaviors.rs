@@ -62,8 +62,7 @@ fn repo(tag: &str) -> TempDir {
     // on Windows the global core.autocrlf default would otherwise rewrite
     // the checked-out file to CRLF and break byte-level content asserts.
     // On Unix this is a no-op — the worktree bytes were already literal.
-    std::fs::write(repo.path().join(".gitattributes"), "* -text\n")
-        .expect("write gitattributes");
+    std::fs::write(repo.path().join(".gitattributes"), "* -text\n").expect("write gitattributes");
     git(repo.path(), &["add", "-A"]);
     git(repo.path(), &["commit", "-q", "-m", "root"]);
     repo
@@ -108,13 +107,13 @@ fn streaming_runner_delivers_stderr_before_the_child_exits() {
         })
         .expect("streaming command succeeds");
 
-    assert!(first_seen.exists(), "child published first-seen before exit");
+    assert!(
+        first_seen.exists(),
+        "child published first-seen before exit"
+    );
     let lines = arrival.lock().unwrap();
     assert_eq!(
-        lines
-            .iter()
-            .map(|line| line.as_str())
-            .collect::<Vec<_>>(),
+        lines.iter().map(|line| line.as_str()).collect::<Vec<_>>(),
         ["first", "second"]
     );
     assert_eq!(result.stderr, "first\rsecond\n");

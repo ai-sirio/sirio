@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use tiller_git::{
-    diff_entry, directory_statuses, list_branches, run_streaming, status, DiffOrigin,
-    DirectoryGitStatus, GitBranches, GitRunner, DEFAULT_CONTEXT_LINES,
+    DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, GitRunner, diff_entry,
+    directory_statuses, list_branches, run_streaming, status,
 };
 
 struct TempDir(PathBuf);

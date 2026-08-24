@@ -179,11 +179,7 @@ fn type_scale_is_the_measured_one() {
     let typography = Theme::dark().typography;
 
     assert_eq!(typography.base_size, px(14.5), "body base 14.5");
-    assert_eq!(
-        typography.body_line_height,
-        px(22.0),
-        "body 14.5 @ 22"
-    );
+    assert_eq!(typography.body_line_height, px(22.0), "body 14.5 @ 22");
     assert_eq!(typography.ui_size, px(13.0), "UI chrome 13.0");
     assert_eq!(typography.ui_line_height, px(17.0), "chrome 13 @ 17");
     assert_eq!(typography.callout, px(14.0), "callout 14.0");

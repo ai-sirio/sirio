@@ -5664,8 +5664,7 @@ impl Chat {
             cx,
         );
         let caret_visible = focused && self.composer_blink.visible();
-        let caret_bar =
-            || caret::bar(typography.body_line_height, colors.accent, caret_visible);
+        let caret_bar = || caret::bar(typography.body_line_height, colors.accent, caret_visible);
         // Where the insertion caret sits in the draft: `(part index, char
         // offset inside that Text part)`, `part == parts.len()` at the end.
         let (caret_part, caret_offset) = self.composer.cursor();
@@ -6749,10 +6748,8 @@ impl Chat {
                         // rendered inline at the exact char offset, so the
                         // draft reads as one continuous line.
                         if index == caret_part {
-                            let before: String =
-                                text.chars().take(caret_offset).collect();
-                            let after: String =
-                                text.chars().skip(caret_offset).collect();
+                            let before: String = text.chars().take(caret_offset).collect();
+                            let after: String = text.chars().skip(caret_offset).collect();
                             let mut split = Vec::with_capacity(3);
                             if !before.is_empty() {
                                 split.push(
@@ -6773,10 +6770,12 @@ impl Chat {
                             }
                             return split;
                         }
-                        vec![div()
-                            .text_color(colors.primary_text_color)
-                            .child(text.clone())
-                            .into_any_element()]
+                        vec![
+                            div()
+                                .text_color(colors.primary_text_color)
+                                .child(text.clone())
+                                .into_any_element(),
+                        ]
                     }
                     ComposerPart::Chip(chip) => {
                         // On a chip part the caret always sits just before it.
