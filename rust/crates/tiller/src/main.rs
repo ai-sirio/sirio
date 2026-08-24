@@ -2809,6 +2809,43 @@ fn restored_chat_spec(
     ))
 }
 
+/// Why a persisted chat could not be restored, in the same voice the Agents
+/// screen uses.
+///
+/// Mirrors `restored_chat_spec`: wherever that returns `None`, this says why
+/// in a sentence meant to be read. It never calls `launch_refusal_reason`
+/// for a source that helper treats as unreachable — a panic during session
+/// restore would cost the user every tab, which is a far worse failure than
+/// the vague sentence the fallback produces.
+fn restored_chat_refusal(launch: &AgentLaunchState, agent_id: Option<&str>) -> String {
+    let Some(id) = agent_id else {
+        return "This chat was saved before Tiller recorded which agent it belonged to, \
+                so there is no way to tell which one to reopen it with. Start a new chat \
+                to pick an agent."
+            .to_string();
+    };
+    let Some(adapter) = AGENT_CATALOG
+        .iter()
+        .find(|adapter| adapter.id() == id)
+        .copied()
+    else {
+        return format!(
+            "This chat used \"{id}\", which this version of Tiller does not know about."
+        );
+    };
+    let name = adapter.display_name();
+    match launch_source_in(launch, adapter.id()) {
+        source @ (tiller_registry::LaunchSource::Installable { .. }
+        | tiller_registry::LaunchSource::Unavailable(_)) => {
+            format!(
+                "{name} chat cannot start: {}.",
+                launch_refusal_reason(&source)
+            )
+        }
+        _ => format!("{name} chat cannot start on this machine right now."),
+    }
+}
+
 /// The user-facing reason a resolved source cannot open a chat right now
 /// — the same truth the Agents screen renders as its pill.
 fn launch_refusal_reason(source: &tiller_registry::LaunchSource) -> String {
@@ -4719,6 +4756,15 @@ impl TillerWorkspace {
                 // captured once at bind time) and synthesize the
                 // running->done `Transition` the existing, tested function
                 // expects.
+                // The Unavailable box's only action. Reuses the action
+                // F-TAB-08 already added for the New Chat menu's "Other
+                // agents..." card, so both doors land on the same section the
+                // box's own text names.
+                ChatEvent::OpenSettings => {
+                    if let Ok(mut actions) = workspace.pending_actions.lock() {
+                        actions.push(WorkspaceAction::OpenAgentSettings);
+                    }
+                }
                 ChatEvent::TurnEnded => {
                     let chat_id = chat_entity.entity_id();
                     let mut pane_id = None;
@@ -7545,27 +7591,54 @@ impl TillerWorkspace {
         let retained = self.retained_chats.remove(index);
         let title = retained.title.clone();
         let transcript = retained.transcript;
-        let Some((command, agent_icon, agent_id)) =
-            restored_chat_spec(&self.launch, retained.agent_id.as_deref())
-        else {
-            eprintln!(
-                "[chat] retained session for {:?} has no resolvable launch source; \
-                 not restoring it onto another agent's server",
-                retained.agent_id
-            );
-            return;
-        };
+        // Reopening from Chat History used to do nothing whatsoever when the
+        // agent no longer resolved: the user clicked, and no tab appeared and
+        // nothing said why. The tab now opens disarmed and states the reason,
+        // the same as session restore.
+        let (command, agent_icon, agent_id, unavailable) =
+            match restored_chat_spec(&self.launch, retained.agent_id.as_deref()) {
+                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+                None => (
+                    None,
+                    retained.agent_id.as_deref().and_then(Icon::for_agent_id),
+                    retained.agent_id.clone(),
+                    Some(restored_chat_refusal(
+                        &self.launch,
+                        retained.agent_id.as_deref(),
+                    )),
+                ),
+            };
+        let is_unavailable = unavailable.is_some();
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
-        let chat = cx.new(|cx| {
-            let mut chat = Chat::launch_with_command(command, cwd, cx);
-            chat.restore_transcript(&transcript, cx);
-            chat
+        let chat = cx.new(|cx| match unavailable {
+            // No transcript: the box is the whole point, and a conversation
+            // shown above an explanation of why it cannot continue invites
+            // the user to type into a composer that is already disabled.
+            Some(reason) => Chat::unavailable(reason, cwd, cx),
+            None => {
+                let mut chat = Chat::launch_with_command(
+                    command.expect("a retained chat with no refusal reason carries its command"),
+                    cwd,
+                    cx,
+                );
+                chat.restore_transcript(&transcript, cx);
+                chat
+            }
         });
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
-        register_restored_agent(&mut self.activity, pane_id, agent_id.as_deref());
+        register_restored_agent(
+            &mut self.activity,
+            pane_id,
+            // Nothing was started, so the activity model is not told one was.
+            if is_unavailable {
+                None
+            } else {
+                agent_id.as_deref()
+            },
+        );
         let tab_id = self.next_tab_id;
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -12784,31 +12857,51 @@ fn restore_tabs(
             .cloned()
             .unwrap_or_default();
         let pane_id = tab_state.root_id.unwrap_or(id);
-        let (command, agent_icon, agent_id): (Option<AgentCommand>, Option<Icon>, Option<String>) =
-            if tab.kind == "chat" {
-                let Some((command, icon, agent_id)) =
-                    restored_chat_spec(&launch, tab.agent_id.as_deref())
-                else {
-                    eprintln!(
-                        "[chat] persisted {:?} chat has no resolvable launch source; \
-                     skipping its restoration",
-                        tab.agent_id
-                    );
-                    continue;
-                };
-                (Some(command), icon, agent_id)
-            } else {
-                (
+        // A chat whose source will not resolve is restored disarmed rather
+        // than dropped: it used to vanish with its reason on stderr, which a
+        // desktop user never sees. The safety rule is unchanged -- no command
+        // means nothing is launched -- but the tab now says so itself.
+        let (command, agent_icon, agent_id, unavailable): (
+            Option<AgentCommand>,
+            Option<Icon>,
+            Option<String>,
+            Option<String>,
+        ) = if tab.kind == "chat" {
+            match restored_chat_spec(&launch, tab.agent_id.as_deref()) {
+                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+                None => (
                     None,
                     tab.agent_id.as_deref().and_then(Icon::for_agent_id),
                     tab.agent_id.clone(),
-                )
-            };
-        register_restored_agent(activity, pane_id, agent_id.as_deref());
+                    Some(restored_chat_refusal(&launch, tab.agent_id.as_deref())),
+                ),
+            }
+        } else {
+            (
+                None,
+                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
+                tab.agent_id.clone(),
+                None,
+            )
+        };
+        // Registering the identity would tell the activity model this pane
+        // hosts a running agent. Nothing was started, so it does not.
+        register_restored_agent(
+            activity,
+            pane_id,
+            if unavailable.is_some() {
+                None
+            } else {
+                agent_id.as_deref()
+            },
+        );
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
+                if let Some(reason) = unavailable {
+                    return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+                }
                 let mut chat = Chat::launch_with_command_and_persistence(
-                    command.expect("chat restoration always has a fallback command"),
+                    command.expect("a chat with no refusal reason carries its command"),
                     working_directory.to_path_buf(),
                     database_path.clone(),
                     tab.id.clone(),
@@ -12960,31 +13053,51 @@ fn restore_tabs_in_workspace(
         let pane_id = tab_state
             .root_id
             .unwrap_or_else(|| pane_id_start + tabs.len());
-        let (command, agent_icon, agent_id): (Option<AgentCommand>, Option<Icon>, Option<String>) =
-            if tab.kind == "chat" {
-                let Some((command, icon, agent_id)) =
-                    restored_chat_spec(&launch, tab.agent_id.as_deref())
-                else {
-                    eprintln!(
-                        "[chat] persisted {:?} chat has no resolvable launch source; \
-                     skipping its restoration",
-                        tab.agent_id
-                    );
-                    continue;
-                };
-                (Some(command), icon, agent_id)
-            } else {
-                (
+        // A chat whose source will not resolve is restored disarmed rather
+        // than dropped: it used to vanish with its reason on stderr, which a
+        // desktop user never sees. The safety rule is unchanged -- no command
+        // means nothing is launched -- but the tab now says so itself.
+        let (command, agent_icon, agent_id, unavailable): (
+            Option<AgentCommand>,
+            Option<Icon>,
+            Option<String>,
+            Option<String>,
+        ) = if tab.kind == "chat" {
+            match restored_chat_spec(&launch, tab.agent_id.as_deref()) {
+                Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
+                None => (
                     None,
                     tab.agent_id.as_deref().and_then(Icon::for_agent_id),
                     tab.agent_id.clone(),
-                )
-            };
-        register_restored_agent(activity, pane_id, agent_id.as_deref());
+                    Some(restored_chat_refusal(&launch, tab.agent_id.as_deref())),
+                ),
+            }
+        } else {
+            (
+                None,
+                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
+                tab.agent_id.clone(),
+                None,
+            )
+        };
+        // Registering the identity would tell the activity model this pane
+        // hosts a running agent. Nothing was started, so it does not.
+        register_restored_agent(
+            activity,
+            pane_id,
+            if unavailable.is_some() {
+                None
+            } else {
+                agent_id.as_deref()
+            },
+        );
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
+                if let Some(reason) = unavailable {
+                    return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+                }
                 let mut chat = Chat::launch_with_command_and_persistence(
-                    command.expect("chat restoration always has a fallback command"),
+                    command.expect("a chat with no refusal reason carries its command"),
                     working_directory.to_path_buf(),
                     database_path.clone(),
                     tab.id.clone(),
@@ -20267,6 +20380,35 @@ mod tests {
                 Some(Icon::Codex),
                 Some("codex".to_string())
             )
+        );
+    }
+
+    #[test]
+    fn a_chat_that_cannot_be_restored_says_why_in_readable_words() {
+        let launch = test_launch_state();
+
+        let nameless = restored_chat_refusal(&launch, None);
+        assert!(
+            nameless.contains("before Tiller recorded which agent"),
+            "a row with no identity gets its own sentence, not a blank name: {nameless}"
+        );
+
+        let unknown = restored_chat_refusal(&launch, Some("some-retired-agent"));
+        assert!(
+            unknown.contains("some-retired-agent"),
+            "an agent this build does not know is named back to the user: {unknown}"
+        );
+
+        // Nothing installed and no registry document: codex resolves to
+        // nothing, which is exactly the case that used to vanish in silence.
+        let codex = restored_chat_refusal(&launch, Some("codex"));
+        assert!(
+            codex.starts_with("Codex chat cannot start"),
+            "the agent is named in the user's own words: {codex}"
+        );
+        assert!(
+            !codex.contains('{') && !codex.contains("LaunchSource"),
+            "no Debug formatting reaches the transcript: {codex}"
         );
     }
 

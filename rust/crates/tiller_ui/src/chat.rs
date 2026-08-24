@@ -525,6 +525,14 @@ enum ErrorKind {
     /// (F-CHAT-33) — informational, not a transport failure: the session is
     /// still live, so this is never retryable and never clears the client.
     McpWarning,
+    /// The chat's agent cannot be launched on this machine at all — not
+    /// installed, nothing published for this platform, or no ACP server
+    /// known for it. Distinct from every other kind because nothing here
+    /// failed: there is no request to retry and no process to restart, only
+    /// a source to acquire, so the box offers Settings and withholds both
+    /// Retry and the "OK to dismiss" every other error carries. Dismissing
+    /// is the wrong affordance when this row IS the tab's whole content.
+    Unavailable,
 }
 
 /// A mid-session `TransportError` never carries the typed `AcpError` that
@@ -612,6 +620,10 @@ pub enum ChatEvent {
     /// synthesizes the running->done `Transition` `request_auto_rename`
     /// expects.
     TurnEnded,
+    /// The Unavailable box's action. The workspace owns the Settings
+    /// surface, so the chat states the problem and asks; it does not reach
+    /// across and open a window itself.
+    OpenSettings,
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -890,7 +902,8 @@ impl IntoElement for TranscriptSelectableText {
 /// A chat surface wired to one live [`AcpClient`] session.
 pub struct Chat {
     client: Option<AcpClient>,
-    agent_command: AgentCommand,
+    /// `None` when there is nothing to launch — see [`Chat::unavailable`].
+    agent_command: Option<AgentCommand>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
     composer: Composer,
@@ -1031,7 +1044,7 @@ impl Chat {
         cwd: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut chat = Self::new(command, cwd, cx);
+        let mut chat = Self::new(Some(command), cwd, cx);
         chat.start_connection(cx);
 
         chat
@@ -1047,7 +1060,7 @@ impl Chat {
         worktree_id: String,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut chat = Self::new(command, cwd, cx);
+        let mut chat = Self::new(Some(command), cwd, cx);
         chat.persistence = Some(ChatPersistence {
             database_path,
             tab_id,
@@ -1081,7 +1094,11 @@ impl Chat {
         ))
     }
 
-    fn new(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+    /// `command` is `None` for a chat that has nothing to launch — see
+    /// [`Chat::unavailable`]. Storing a placeholder command instead would
+    /// reintroduce, in miniature, the exact lie this crate spent a branch
+    /// removing: a command that names something nobody verified exists.
+    fn new(command: Option<AgentCommand>, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         Self::bind_keys(cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(2048.0));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -3127,9 +3144,14 @@ impl Chat {
             return;
         }
 
+        let Some(command) = self.agent_command.clone() else {
+            // An unavailable chat has no command by construction, so there
+            // is nothing to spawn and no failure to report either.
+            return;
+        };
+
         self.client.take();
         self.connecting = true;
-        let command = self.agent_command.clone();
         let cwd = self.agent_cwd.clone();
         self._event_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -3242,9 +3264,24 @@ impl Chat {
         cx.notify();
     }
 
+    /// A chat that states why it cannot run and never starts anything.
+    ///
+    /// `reason` is the caller's already-user-facing prose — the same text
+    /// the Agents screen renders as its pill — so this method neither
+    /// invents wording nor knows about launch sources.
+    pub fn unavailable(reason: String, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
+        let mut chat = Self::new(None, cwd, cx);
+        chat.push_entry(Entry::Error {
+            message: reason,
+            retryable: false,
+            kind: ErrorKind::Unavailable,
+        });
+        chat
+    }
+
     #[cfg(test)]
     fn from_test_command(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut chat = Self::new(command, cwd, cx);
+        let mut chat = Self::new(Some(command), cwd, cx);
         chat.start_connection(cx);
         chat
     }
@@ -4968,7 +5005,14 @@ impl Chat {
                 // (Swift's `ChatState.disconnected` banner names the same
                 // distinction; `ChatPaneView.swift:82`).
                 let is_disconnected = kind == ErrorKind::Disconnected;
-                let (banner_bg, banner_border, banner_text) = if is_auth_required {
+                // Nothing broke, so this must not look like breakage: the
+                // agent simply is not available here. It borrows the amber
+                // treatment AuthRequired uses for the same reason -- both
+                // say "there is an action for you", not "something failed".
+                let is_unavailable = kind == ErrorKind::Unavailable;
+                let settings_entity = entity.clone();
+                let (banner_bg, banner_border, banner_text) = if is_auth_required || is_unavailable
+                {
                     (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), colors.title)
                 } else {
                     (
@@ -4987,6 +5031,9 @@ impl Chat {
                     })
                     .when(is_mcp_warning, |this| {
                         this.debug_selector(|| "chat-mcp-warning-banner".into())
+                    })
+                    .when(is_unavailable, |this| {
+                        this.debug_selector(|| "chat-unavailable-banner".into())
                     })
                     .w_full()
                     .rounded(theme.radii.code_block)
@@ -5050,6 +5097,29 @@ impl Chat {
                                 }),
                         )
                     })
+                    // The one action that can change the outcome. The chat
+                    // does not open Settings itself: the workspace owns that
+                    // surface and subscribes to the event, the same way it
+                    // already handles OpenFile and OpenLink.
+                    .when(is_unavailable, |this| {
+                        this.child(
+                            div()
+                                .id(("open-settings", entry_index))
+                                .debug_selector(|| "chat-open-settings".into())
+                                .flex_shrink_0()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(theme.radii.control)
+                                .text_color(colors.title)
+                                .bg(colors.card_fill)
+                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .on_click(move |_, _, cx| {
+                                    settings_entity
+                                        .update(cx, |_, cx| cx.emit(ChatEvent::OpenSettings));
+                                })
+                                .child("Open Settings"),
+                        )
+                    })
                     // F-CHAT-33: "OK to dismiss" -- present for every error,
                     // retryable or not (Swift's `promptError`/`mcpWarning`
                     // banners both carry exactly this one action). It never
@@ -5057,24 +5127,30 @@ impl Chat {
                     // row, so it stays available even when Retry/Restart is
                     // also shown above: dismissing without retrying is a
                     // real, distinct choice.
-                    .child(
-                        div()
-                            .id(("dismiss-error", entry_index))
-                            .debug_selector(|| "chat-error-ok".into())
-                            .flex_shrink_0()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(theme.radii.control)
-                            .text_color(colors.title)
-                            .bg(colors.card_fill)
-                            .hover(|style| style.bg(colors.chat_row_hover))
-                            .on_click(move |_, _, cx| {
-                                dismiss_entity.update(cx, |chat, cx| {
-                                    chat.dismiss_error(entry_index, cx);
-                                });
-                            })
-                            .child("OK"),
-                    )
+                    //
+                    // Withheld for Unavailable alone: there the box is the
+                    // tab's entire content, so dismissing would leave a chat
+                    // that neither explains itself nor does anything.
+                    .when(!is_unavailable, |this| {
+                        this.child(
+                            div()
+                                .id(("dismiss-error", entry_index))
+                                .debug_selector(|| "chat-error-ok".into())
+                                .flex_shrink_0()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(theme.radii.control)
+                                .text_color(colors.title)
+                                .bg(colors.card_fill)
+                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .on_click(move |_, _, cx| {
+                                    dismiss_entity.update(cx, |chat, cx| {
+                                        chat.dismiss_error(entry_index, cx);
+                                    });
+                                })
+                                .child("OK"),
+                        )
+                    })
                     .into_any_element()
             }
         }
@@ -8474,7 +8550,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -8517,7 +8593,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -8590,7 +8666,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 dir.0.clone(),
                 cx,
             );
@@ -10311,7 +10387,10 @@ mod tests {
 
         chat.read_with(cx, |chat, _| {
             assert_eq!(
-                chat.agent_command.program,
+                chat.agent_command
+                    .as_ref()
+                    .expect("a launched chat has its command")
+                    .program,
                 PathBuf::from("/definitely/missing/tiller-acp-agent"),
                 "the command given to the constructor is the command wired"
             );
@@ -10622,7 +10701,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -10680,7 +10759,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -10981,7 +11060,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11028,7 +11107,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             )
@@ -11093,7 +11172,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11157,7 +11236,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11212,7 +11291,7 @@ mod tests {
         cx.update(Theme::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11279,7 +11358,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11312,7 +11391,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11349,7 +11428,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11364,7 +11443,7 @@ mod tests {
 
         let (restored, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -11421,10 +11500,10 @@ mod tests {
         // The only path back online: the transcript error banner's explicit
         // Retry control, not a side effect of a disabled Send.
         chat.update(cx, |chat, cx| {
-            chat.agent_command = AgentCommand::new("/bin/sh").args([
+            chat.agent_command = Some(AgentCommand::new("/bin/sh").args([
                 "-c",
                 r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;; esac; done"#,
-            ]);
+            ]));
             chat.retry(cx);
         });
 
@@ -11476,7 +11555,7 @@ mod tests {
         cx.update(Theme::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -12043,7 +12122,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             )
@@ -12382,7 +12461,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -12467,7 +12546,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -12533,7 +12612,7 @@ mod tests {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                Some(AgentCommand::new("/definitely/missing/tiller-acp-agent")),
                 std::env::temp_dir(),
                 cx,
             );
@@ -12687,5 +12766,55 @@ mod tests {
             text.contains("diff: src/lib.rs"),
             "the diff still names its file in the copied transcript"
         );
+    }
+
+    /// A restored chat whose agent cannot be launched states why, in the
+    /// transcript, and offers the one action that fixes it.
+    ///
+    /// The tab used to be dropped silently during restore: the reason went
+    /// to stderr, which a desktop user never sees, so the tab was simply
+    /// gone. It comes back disarmed instead — the safety rule the whole
+    /// launch-resolution effort exists for is "never connect to another
+    /// agent's server", and showing the tab breaks none of it.
+    #[gpui::test]
+    async fn an_unavailable_chat_states_the_reason_and_never_connects(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::unavailable(
+                "Codex chat cannot start: it is not installed yet — install it \
+                 from Settings → Agents."
+                    .to_string(),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("chat-unavailable-banner").is_some(),
+            "the reason is stated in the transcript, not on stderr"
+        );
+        assert!(
+            cx.debug_bounds("chat-open-settings").is_some(),
+            "the box carries the way to fix it"
+        );
+        assert!(
+            cx.debug_bounds("chat-retry").is_none(),
+            "an unresolvable source has nothing to retry"
+        );
+        assert!(
+            cx.debug_bounds("chat-error-ok").is_none(),
+            "this box is the tab's whole content: dismissing it would leave \
+             a chat that explains nothing and does nothing"
+        );
+
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                chat.client.is_none() && chat.agent_command.is_none(),
+                "no process was started and no command was invented to start one"
+            );
+            assert!(!chat.can_send(), "the composer stays disabled");
+        });
     }
 }
