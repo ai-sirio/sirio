@@ -73,13 +73,11 @@ impl InstallStore {
         })
     }
 
-    /// The commit point of an install. Temp + rename, so a crash here
-    /// leaves the previously recorded version fully intact.
+    /// The commit point of an install. Published atomically, so a crash
+    /// here leaves the previously recorded version fully intact and two
+    /// concurrent installs cannot take each other's scratch file away.
     pub fn write(&self, agent: &InstalledAgent) -> anyhow::Result<()> {
         let path = self.manifest_path(&agent.id);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let wire = ManifestWire {
             id: agent.id.clone(),
             version: agent.version.clone(),
@@ -90,10 +88,7 @@ impl InstallStore {
                 Integrity::None => "none".to_string(),
             },
         };
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, serde_json::to_vec_pretty(&wire)?)?;
-        std::fs::rename(&temp, &path)?;
-        Ok(())
+        crate::atomic::write_atomically(&path, &serde_json::to_vec_pretty(&wire)?)
     }
 
     pub fn remove(&self, id: &str) -> anyhow::Result<()> {
@@ -112,6 +107,7 @@ fn absolute(environment: &BTreeMap<String, String>, key: &str) -> Option<PathBuf
         .filter(|path| path.is_absolute())
         .map(Path::to_path_buf)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +216,47 @@ mod tests {
         assert_eq!(
             InstallStore::default_root(&env),
             home.join(".local/share").join("tiller").join("agents")
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_all_publish_their_manifest() {
+        // A shared scratch name does not corrupt the manifest — it makes
+        // the loser's rename fail with NotFound, because the winner
+        // already moved the one temp file away. A good payload then
+        // reports as a write failure.
+        let root = temp_root("concurrent");
+        let store = std::sync::Arc::new(InstallStore::new(root));
+
+        let failures: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let store = std::sync::Arc::clone(&store);
+                    scope.spawn(move || {
+                        let mut errors = Vec::new();
+                        for _ in 0..25 {
+                            if let Err(error) = store.write(&agent()) {
+                                errors.push(error.to_string());
+                            }
+                        }
+                        errors
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect()
+        });
+
+        assert!(
+            failures.is_empty(),
+            "writers collided on a shared scratch file: {failures:?}"
+        );
+        assert_eq!(
+            store.manifest("codex-acp").as_ref(),
+            Some(&agent()),
+            "the published manifest must be one writer's payload, whole"
         );
     }
 }
