@@ -1483,7 +1483,11 @@ impl Sidebar {
             .get(project_id)
             .cloned()
             .unwrap_or_else(|| row.title.clone());
-        let display_name = if row.title != base_name { row.title.clone() } else { Default::default() };
+        let display_name = if row.title != base_name {
+            row.title.clone()
+        } else {
+            Default::default()
+        };
         // F-PRJ-17: the primary worktree's branch, for the "Following
         // primary (…)" subtitle — scanned from this project's own child
         // rows, the same `rows[project_index+1..]` traversal
@@ -1556,9 +1560,9 @@ impl Sidebar {
                         row.kind == RowKind::Worktree && row.path.as_deref() == Some(path.as_path())
                     })
                     .map(|row| row.id)
-                {
-                    self.request_remove_worktree_row(row_id, window, cx);
-                }
+            {
+                self.request_remove_worktree_row(row_id, window, cx);
+            }
             return;
         }
         cx.emit(SidebarEvent::ContextAction { target, action });
@@ -3375,7 +3379,10 @@ impl Sidebar {
         let worktree_path = path.clone();
         let is_project = kind == RowKind::Project;
         let is_worktree = kind == RowKind::Worktree;
-        let guide = matches!(kind, RowKind::Worktree | RowKind::Tab | RowKind::NewWorktree);
+        let guide = matches!(
+            kind,
+            RowKind::Worktree | RowKind::Tab | RowKind::NewWorktree
+        );
         // waku's card rhythm: projects and worktrees are two-line cards
         // (13.5px title over an 11.5px context line); leaf rows are
         // single-line at the 32px action-row height.
@@ -3731,14 +3738,13 @@ impl Sidebar {
                                 // in the app — tab bar and status bar never
                                 // use its blue brand hex, so the badge must
                                 // not be the only blue Codex mark on screen.
-                                .child(
-                                    IconElement::new(mark.icon, IconSize::Small)
-                                        .text_color(if matches!(mark.icon, Icon::Codex) {
-                                            theme.title
-                                        } else {
-                                            mark.brand.color()
-                                        }),
-                                )
+                                .child(IconElement::new(mark.icon, IconSize::Small).text_color(
+                                    if matches!(mark.icon, Icon::Codex) {
+                                        theme.title
+                                    } else {
+                                        mark.brand.color()
+                                    },
+                                ))
                         })),
                 )
             })

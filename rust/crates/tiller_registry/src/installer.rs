@@ -80,7 +80,11 @@ pub fn unpack_kind(url: &str) -> UnpackKind {
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// `None` means the registry published no hash — recorded as
@@ -108,11 +112,15 @@ pub(crate) fn safe_entry_path(destination: &Path, entry: &Path) -> Result<PathBu
             _ => return Err(()),
         }
     }
-    resolved.starts_with(destination).then_some(resolved).ok_or(())
+    resolved
+        .starts_with(destination)
+        .then_some(resolved)
+        .ok_or(())
 }
 
 pub(crate) fn staging_dir(root: &Path, id: &str, version: &str) -> PathBuf {
-    root.join(".staging").join(format!("{id}-{version}-{}", std::process::id()))
+    root.join(".staging")
+        .join(format!("{id}-{version}-{}", std::process::id()))
 }
 
 impl Installer {
@@ -162,11 +170,15 @@ impl Installer {
         // binary artifact built for this machine, fall back to npx only when
         // the agent publishes nothing for this platform. An agent may declare
         // both — `kilo` and `sigit` do.
-        if let Some(artifact) = agent.distributions.iter().find_map(|distribution| match distribution
+        if let Some(artifact) =
+            agent
+                .distributions
+                .iter()
+                .find_map(|distribution| match distribution {
+                    Distribution::Binary(artifacts) => artifacts.get(platform_key),
+                    _ => None,
+                })
         {
-            Distribution::Binary(artifacts) => artifacts.get(platform_key),
-            _ => None,
-        }) {
             return self.install_binary(agent, artifact);
         }
         // Same fallback `resolve` uses: npx works wherever Node does.
@@ -191,7 +203,10 @@ impl Installer {
     ) -> Result<InstalledAgent, InstallError> {
         let staging = staging_dir(self.store.root(), &agent.id, &agent.version);
         let _guard = InstallGuard::acquire(self.store.root(), &agent.id)?;
-        let fail = |message: String| InstallError::Failed { agent: agent.id.clone(), message };
+        let fail = |message: String| InstallError::Failed {
+            agent: agent.id.clone(),
+            message,
+        };
 
         std::fs::create_dir_all(&staging).map_err(|error| fail(error.to_string()))?;
 
@@ -218,7 +233,10 @@ impl Installer {
                 text
             })
         };
-        if matches!(wait_up_to(&mut child, NPM_INSTALL_TIMEOUT), WaitOutcome::TimedOut) {
+        if matches!(
+            wait_up_to(&mut child, NPM_INSTALL_TIMEOUT),
+            WaitOutcome::TimedOut
+        ) {
             return Err(fail(format!(
                 "npm install timed out after {} s; nothing was installed",
                 NPM_INSTALL_TIMEOUT.as_secs()
@@ -237,9 +255,8 @@ impl Installer {
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        let bin = resolve_bin_name(&entries, package).ok_or_else(|| {
-            fail("the installed package exposes no executable".to_string())
-        })?;
+        let bin = resolve_bin_name(&entries, package)
+            .ok_or_else(|| fail("the installed package exposes no executable".to_string()))?;
 
         let final_dir = self.store.root().join(&agent.id).join(&agent.version);
         if let Some(parent) = final_dir.parent() {
@@ -257,7 +274,9 @@ impl Installer {
             // registry document. Recorded honestly.
             integrity: Integrity::None,
         };
-        self.store.write(&installed).map_err(|error| fail(error.to_string()))?;
+        self.store
+            .write(&installed)
+            .map_err(|error| fail(error.to_string()))?;
         Ok(installed)
     }
 
@@ -276,13 +295,19 @@ impl Installer {
 
         let staging = staging_dir(self.store.root(), &agent.id, &agent.version);
         let _guard = InstallGuard::acquire(self.store.root(), &agent.id)?;
-        let fail = |message: String| InstallError::Failed { agent: agent.id.clone(), message };
+        let fail = |message: String| InstallError::Failed {
+            agent: agent.id.clone(),
+            message,
+        };
 
         std::fs::create_dir_all(&staging).map_err(|error| fail(error.to_string()))?;
 
         let bytes = download(&artifact.archive).map_err(|error| fail(error.to_string()))?;
-        let integrity = verify_sha256(&bytes, artifact.sha256.as_deref())
-            .map_err(|()| InstallError::ChecksumMismatch { agent: agent.id.clone() })?;
+        let integrity = verify_sha256(&bytes, artifact.sha256.as_deref()).map_err(|()| {
+            InstallError::ChecksumMismatch {
+                agent: agent.id.clone(),
+            }
+        })?;
 
         match kind {
             UnpackKind::Zip => unpack_zip(&agent.id, &bytes, &staging)?,
@@ -321,7 +346,9 @@ impl Installer {
             integrity,
         };
         // The commit point: everything above is recoverable, this is not.
-        self.store.write(&installed).map_err(|error| fail(error.to_string()))?;
+        self.store
+            .write(&installed)
+            .map_err(|error| fail(error.to_string()))?;
         Ok(installed)
     }
 }
@@ -342,7 +369,9 @@ impl InstallGuard {
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|_| InstallError::AlreadyRunning { agent: id.to_string() })?;
+            .map_err(|_| InstallError::AlreadyRunning {
+                agent: id.to_string(),
+            })?;
         Ok(Self { path })
     }
 }
@@ -353,22 +382,28 @@ impl Drop for InstallGuard {
     }
 }
 
-    /// Picks the launchable entry in `node_modules/.bin`.
-    ///
-    /// A single entry wins. Otherwise the bin matching the package's own name
-    /// (scope and version stripped) wins — dependency bins land in the same
-    /// directory (`codex` beside `codex-acp` from `@openai/codex`) and must
-    /// never be preferred. Falls back to the longest entry contained in the
-    /// package name.
+/// Picks the launchable entry in `node_modules/.bin`.
+///
+/// A single entry wins. Otherwise the bin matching the package's own name
+/// (scope and version stripped) wins — dependency bins land in the same
+/// directory (`codex` beside `codex-acp` from `@openai/codex`) and must
+/// never be preferred. Falls back to the longest entry contained in the
+/// package name.
 pub(crate) fn resolve_bin_name(entries: &[String], package: &str) -> Option<String> {
-    let mut candidates: Vec<&String> =
-        entries.iter().filter(|entry| !entry.starts_with('.')).collect();
+    let mut candidates: Vec<&String> = entries
+        .iter()
+        .filter(|entry| !entry.starts_with('.'))
+        .collect();
     candidates.sort();
     if candidates.len() == 1 {
         return Some(candidates[0].clone());
     }
     let without_scope = package.rsplit('/').next().unwrap_or(package);
-    let base = without_scope.split('@').next().filter(|name| !name.is_empty()).unwrap_or(without_scope);
+    let base = without_scope
+        .split('@')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(without_scope);
     if let Some(exact) = candidates.iter().find(|entry| entry.as_str() == base) {
         return Some((*exact).clone());
     }
@@ -460,23 +495,31 @@ fn unpack_zip_capped(
     destination: &Path,
     max_unpacked_bytes: u64,
 ) -> Result<(), InstallError> {
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-        .map_err(|error| InstallError::Failed { agent: agent.into(), message: error.to_string() })?;
-    let mut written: u64 = 0;
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|error| InstallError::Failed {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|error| {
+        InstallError::Failed {
             agent: agent.into(),
             message: error.to_string(),
-        })?;
+        }
+    })?;
+    let mut written: u64 = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| InstallError::Failed {
+                agent: agent.into(),
+                message: error.to_string(),
+            })?;
         let Some(name) = entry.enclosed_name() else {
             return Err(InstallError::UnsafeArchiveEntry {
                 agent: agent.into(),
                 entry: entry.name().to_string(),
             });
         };
-        let target = safe_entry_path(destination, &name).map_err(|()| {
-            InstallError::UnsafeArchiveEntry { agent: agent.into(), entry: name.display().to_string() }
-        })?;
+        let target =
+            safe_entry_path(destination, &name).map_err(|()| InstallError::UnsafeArchiveEntry {
+                agent: agent.into(),
+                entry: name.display().to_string(),
+            })?;
         if entry.is_dir() {
             let _ = std::fs::create_dir_all(&target);
             continue;
@@ -490,10 +533,11 @@ fn unpack_zip_capped(
             message: error.to_string(),
         })?;
         let mut limited = entry.by_ref().take(budget + 1);
-        let copied = std::io::copy(&mut limited, &mut file).map_err(|error| InstallError::Failed {
-            agent: agent.into(),
-            message: error.to_string(),
-        })?;
+        let copied =
+            std::io::copy(&mut limited, &mut file).map_err(|error| InstallError::Failed {
+                agent: agent.into(),
+                message: error.to_string(),
+            })?;
         written += copied;
         if copied > budget {
             return Err(InstallError::Failed {
@@ -544,9 +588,11 @@ fn unpack_tar_gz_capped(
             agent: agent.into(),
             message: error.to_string(),
         })?;
-        let target = safe_entry_path(destination, &path).map_err(|()| {
-            InstallError::UnsafeArchiveEntry { agent: agent.into(), entry: path.display().to_string() }
-        })?;
+        let target =
+            safe_entry_path(destination, &path).map_err(|()| InstallError::UnsafeArchiveEntry {
+                agent: agent.into(),
+                entry: path.display().to_string(),
+            })?;
         if kind.is_dir() {
             let _ = std::fs::create_dir_all(&target);
             continue;
@@ -560,10 +606,11 @@ fn unpack_tar_gz_capped(
             message: error.to_string(),
         })?;
         let mut limited = entry.by_ref().take(budget + 1);
-        let copied = std::io::copy(&mut limited, &mut file).map_err(|error| InstallError::Failed {
-            agent: agent.into(),
-            message: error.to_string(),
-        })?;
+        let copied =
+            std::io::copy(&mut limited, &mut file).map_err(|error| InstallError::Failed {
+                agent: agent.into(),
+                message: error.to_string(),
+            })?;
         written += copied;
         if copied > budget {
             return Err(InstallError::Failed {
@@ -621,15 +668,27 @@ mod tests {
         // Measured across the registry's 95 artifacts: tar.gz 55, zip 32,
         // tar.bz2 4, bare executable 4. The bare case has no unpacking step
         // at all, so it cannot be an afterthought.
-        assert_eq!(unpack_kind("https://x/opencode-linux-x64.zip"), UnpackKind::Zip);
-        assert_eq!(unpack_kind("https://x/agent-linux.tar.gz"), UnpackKind::TarGz);
+        assert_eq!(
+            unpack_kind("https://x/opencode-linux-x64.zip"),
+            UnpackKind::Zip
+        );
+        assert_eq!(
+            unpack_kind("https://x/agent-linux.tar.gz"),
+            UnpackKind::TarGz
+        );
         assert_eq!(unpack_kind("https://x/agent-linux.tgz"), UnpackKind::TarGz);
         assert_eq!(
             unpack_kind("https://x/goose-x86_64-unknown-linux-gnu.tar.bz2"),
             UnpackKind::Unsupported
         );
-        assert_eq!(unpack_kind("https://x/sigit-linux-amd64"), UnpackKind::BareExecutable);
-        assert_eq!(unpack_kind("https://x/sigit-win-amd64.exe"), UnpackKind::BareExecutable);
+        assert_eq!(
+            unpack_kind("https://x/sigit-linux-amd64"),
+            UnpackKind::BareExecutable
+        );
+        assert_eq!(
+            unpack_kind("https://x/sigit-win-amd64.exe"),
+            UnpackKind::BareExecutable
+        );
     }
 
     #[test]
@@ -642,7 +701,10 @@ mod tests {
     fn a_matching_hash_passes_and_is_recorded() {
         let bytes = b"payload";
         let digest = sha256_hex(bytes);
-        assert_eq!(verify_sha256(bytes, Some(&digest)).unwrap(), Integrity::Sha256);
+        assert_eq!(
+            verify_sha256(bytes, Some(&digest)).unwrap(),
+            Integrity::Sha256
+        );
     }
 
     #[test]
@@ -670,20 +732,24 @@ mod tests {
             name.ends_with(&std::process::id().to_string()),
             "the pid lets a startup sweep tell live staging from abandoned"
         );
-        assert_eq!(staging.parent().unwrap(), std::path::Path::new("/data/.staging"));
+        assert_eq!(
+            staging.parent().unwrap(),
+            std::path::Path::new("/data/.staging")
+        );
     }
 
     #[test]
     fn sweeping_removes_staging_left_by_a_dead_process() {
-        let root = std::env::temp_dir()
-            .join(format!("tiller-sweep-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tiller-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dead = root.join(".staging/codex-acp-1.6.2-1");
         let live = staging_dir(&root, "codex-acp", "1.6.2");
         std::fs::create_dir_all(&dead).unwrap();
         std::fs::create_dir_all(&live).unwrap();
 
-        Installer::new(InstallStore::new(root.clone())).sweep_staging().unwrap();
+        Installer::new(InstallStore::new(root.clone()))
+            .sweep_staging()
+            .unwrap();
 
         assert!(!dead.exists(), "abandoned staging is collected");
         assert!(live.exists(), "this process's own staging is left alone");
@@ -694,14 +760,15 @@ mod tests {
         // Without this, one killed install makes that agent permanently
         // uninstallable: `InstallGuard::acquire` uses create_new, so the
         // orphaned lock rejects every later attempt with AlreadyRunning.
-        let root = std::env::temp_dir()
-            .join(format!("tiller-sweep-lock-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tiller-sweep-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let lock = root.join(".staging/codex-acp.lock");
         std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
         std::fs::write(&lock, "").unwrap();
 
-        Installer::new(InstallStore::new(root.clone())).sweep_staging().unwrap();
+        Installer::new(InstallStore::new(root.clone()))
+            .sweep_staging()
+            .unwrap();
 
         assert!(!lock.exists(), "a lock that outlived its process is stale");
     }
@@ -714,7 +781,10 @@ mod tests {
         };
         let rendered = error.to_string();
         assert!(rendered.contains("goose"));
-        assert!(rendered.contains("tar.bz2"), "the gap is visible, not mysterious");
+        assert!(
+            rendered.contains("tar.bz2"),
+            "the gap is visible, not mysterious"
+        );
     }
 
     // ---- End-to-end safety checks: hostile archives built in memory, no
@@ -736,7 +806,8 @@ mod tests {
     }
 
     fn staging_for(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("tiller-install-{name}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("tiller-install-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -761,7 +832,10 @@ mod tests {
 
         let result = unpack_tar_gz("evil", &bytes, &staging);
 
-        assert!(matches!(result, Err(InstallError::UnsafeArchiveEntry { .. })));
+        assert!(matches!(
+            result,
+            Err(InstallError::UnsafeArchiveEntry { .. })
+        ));
         let outside = staging.parent().unwrap().join("evil");
         assert!(!outside.exists(), "no file may land outside staging");
     }
@@ -777,12 +851,17 @@ mod tests {
         header.set_size(0);
         header.set_entry_type(tar::EntryType::Symlink);
         header.set_cksum();
-        builder.append_link(&mut header, "link", "/etc/passwd").unwrap();
+        builder
+            .append_link(&mut header, "link", "/etc/passwd")
+            .unwrap();
         let bytes = builder.into_inner().unwrap().finish().unwrap();
 
         let result = unpack_tar_gz("evil", &bytes, &staging);
 
-        assert!(matches!(result, Err(InstallError::UnsafeArchiveEntry { .. })));
+        assert!(matches!(
+            result,
+            Err(InstallError::UnsafeArchiveEntry { .. })
+        ));
     }
 
     #[test]
@@ -797,7 +876,10 @@ mod tests {
 
         let result = unpack_zip("evil", &bytes, &staging);
 
-        assert!(matches!(result, Err(InstallError::UnsafeArchiveEntry { .. })));
+        assert!(matches!(
+            result,
+            Err(InstallError::UnsafeArchiveEntry { .. })
+        ));
         let outside = staging.parent().unwrap().join("evil");
         assert!(!outside.exists(), "no file may land outside staging");
     }
@@ -809,7 +891,10 @@ mod tests {
 
         unpack_tar_gz("good", &bytes, &staging).unwrap();
 
-        assert_eq!(std::fs::read(staging.join("bin/agent")).unwrap(), b"payload");
+        assert_eq!(
+            std::fs::read(staging.join("bin/agent")).unwrap(),
+            b"payload"
+        );
     }
 
     #[test]
@@ -824,7 +909,10 @@ mod tests {
 
         unpack_zip("good", &bytes, &staging).unwrap();
 
-        assert_eq!(std::fs::read(staging.join("bin/agent")).unwrap(), b"payload");
+        assert_eq!(
+            std::fs::read(staging.join("bin/agent")).unwrap(),
+            b"payload"
+        );
     }
 
     #[test]
@@ -847,7 +935,9 @@ mod tests {
             }],
         };
 
-        let error = Installer::new(store).install(&agent, "linux-x86_64").unwrap_err();
+        let error = Installer::new(store)
+            .install(&agent, "linux-x86_64")
+            .unwrap_err();
 
         assert!(error.to_string().contains("uvx"), "got: {error}");
     }
@@ -927,7 +1017,10 @@ mod tests {
     #[test]
     fn dotfiles_are_not_candidates() {
         let entries = vec![".package-lock.json".to_string(), "real-bin".to_string()];
-        assert_eq!(resolve_bin_name(&entries, "real-bin@1.0.0"), Some("real-bin".to_string()));
+        assert_eq!(
+            resolve_bin_name(&entries, "real-bin@1.0.0"),
+            Some("real-bin".to_string())
+        );
     }
 
     #[test]
@@ -981,7 +1074,10 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "the child was killed at the deadline, not waited out"
         );
-        assert!(child.try_wait().unwrap().is_some(), "the killed child was reaped");
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the killed child was reaped"
+        );
     }
 
     /// A command that exits immediately (`succeed`) or hangs for a long
@@ -992,7 +1088,11 @@ mod tests {
             let mut command = std::process::Command::new("cmd");
             command.args([
                 "/C",
-                if succeed { "exit 0" } else { "ping -n 30 127.0.0.1 > nul" },
+                if succeed {
+                    "exit 0"
+                } else {
+                    "ping -n 30 127.0.0.1 > nul"
+                },
             ]);
             command
         }

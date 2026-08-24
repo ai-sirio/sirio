@@ -321,13 +321,24 @@ mod tests {
     #[test]
     fn material_assets_cover_common_file_types_and_leave_generic_keys_unmatched() {
         let cases = [
-            ("a.java", "java"), ("a.py", "python"), ("a.rs", "rust"),
-            ("a.go", "go"), ("a.ts", "typescript"), ("a.js", "javascript"),
-            ("a.json", "json"), ("a.yaml", "yaml"), ("a.md", "markdown"),
-            ("a.html", "html"), ("a.css", "css"), ("a.toml", "toml"),
+            ("a.java", "java"),
+            ("a.py", "python"),
+            ("a.rs", "rust"),
+            ("a.go", "go"),
+            ("a.ts", "typescript"),
+            ("a.js", "javascript"),
+            ("a.json", "json"),
+            ("a.yaml", "yaml"),
+            ("a.md", "markdown"),
+            ("a.html", "html"),
+            ("a.css", "css"),
+            ("a.toml", "toml"),
         ];
         for (name, asset) in cases {
-            assert_eq!(FileIconKey::for_file_name(name).material_asset(), Some(asset));
+            assert_eq!(
+                FileIconKey::for_file_name(name).material_asset(),
+                Some(asset)
+            );
         }
         assert_eq!(FileIconKey::for_file_name("README").material_asset(), None);
         assert_eq!(FileIconKey::for_file_name("a.txt").material_asset(), None);

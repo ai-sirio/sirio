@@ -1916,7 +1916,10 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
         let db = AppDatabase::open(&path).expect("open");
         let fresh = db.settings().expect("load defaults");
         assert_eq!(fresh.sidebar_width, 325, "matches the geometry drawn today");
-        assert_eq!(fresh.right_panel_width, 405, "matches the geometry drawn today");
+        assert_eq!(
+            fresh.right_panel_width, 405,
+            "matches the geometry drawn today"
+        );
 
         db.save_settings(&AppSettings {
             sidebar_width: 900,     // above the 220...480 range
@@ -1929,7 +1932,10 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
     let db = AppDatabase::open(&path).expect("reopen");
     let settings = db.settings().expect("load");
     assert_eq!(settings.sidebar_width, 480, "clamped to the upper bound");
-    assert_eq!(settings.right_panel_width, 220, "clamped to the lower bound");
+    assert_eq!(
+        settings.right_panel_width, 220,
+        "clamped to the lower bound"
+    );
 
     // The sidebar's own floor, which nothing on this side pinned before. It
     // moved from 160 to 220 when the panel's rows turned out not to fit
@@ -1953,6 +1959,9 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
     })
     .expect("save in-range values");
     let settings = db.settings().expect("reload");
-    assert_eq!(settings.sidebar_width, 300, "an in-range width survives verbatim");
+    assert_eq!(
+        settings.sidebar_width, 300,
+        "an in-range width survives verbatim"
+    );
     assert_eq!(settings.right_panel_width, 500);
 }

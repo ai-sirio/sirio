@@ -38,14 +38,16 @@ Scripts/build-dev.sh
 
 ```
 tiller_theme, tiller_project, tiller_git, tiller_persistence,
-tiller_agents, tiller_activity, tiller_markdown, tiller_usage   (leaves — no local deps)
+tiller_agents, tiller_activity, tiller_markdown, tiller_usage,
+tiller_registry   (leaves — no local deps)
     ^
 tiller_acp        (-> tiller_persistence)
 tiller_terminal    (-> tiller_project, tiller_theme)
 tiller_control    (-> tiller_acp, tiller_persistence)
     ^
 tiller_ui         (-> tiller_acp, tiller_agents, tiller_git, tiller_markdown,
-                      tiller_persistence, tiller_project, tiller_theme, tiller_usage)
+                      tiller_persistence, tiller_project, tiller_registry, tiller_theme,
+                      tiller_usage)
     ^
 tiller            (the app: main.rs — the only crate that depends on everything above,
                     including tiller_terminal, tiller_control, and tiller_activity, which
@@ -56,7 +58,7 @@ There is no single crate every other crate funnels through the way Swift's `Till
 
 ### Agent adapters (`tiller_agents`)
 
-Every supported CLI implements the `AgentAdapter` trait (`id`, `display_name`, `has_native_hooks`, `prepare`, `command`, `resume_command`). `tiller_agents::ALL` is the fixed list of 5 adapters, in display order. `prepare` writes only worktree-local hook config — **never** touches user-global config (`~/.claude/settings.json`, `~/.codex/config.toml`, etc.). Adapters that generate command-line overrides embedding JSON (Codex's `-c notify=[...]`, omp's hook file) share `json_string_literal` in `tiller_agents/src/shell_quote.rs` — it must build a JSON string literal without escaping slashes, because Codex's `-c key=value` override is parsed as **TOML**, and `\/` (JSON's optional slash-escaping) is not a valid TOML escape. Getting this wrong makes Codex fail silently at config load, before it ever reaches its TUI.
+Every supported CLI implements the `AgentAdapter` trait (`id`, `display_name`, `has_native_hooks`, `prepare`, `command`, `resume_command`). `tiller_agents::ALL` is the fixed list of 5 adapters, in display order. An adapter's ACP claim (`builtin_acp`) covers only its own binary's subcommand — verified, defaulting to `None`; everything reachable through a separate package resolves through `tiller_registry`. `prepare` writes only worktree-local hook config — **never** touches user-global config (`~/.claude/settings.json`, `~/.codex/config.toml`, etc.). Adapters that generate command-line overrides embedding JSON (Codex's `-c notify=[...]`, omp's hook file) share `json_string_literal` in `tiller_agents/src/shell_quote.rs` — it must build a JSON string literal without escaping slashes, because Codex's `-c key=value` override is parsed as **TOML**, and `\/` (JSON's optional slash-escaping) is not a valid TOML escape. Getting this wrong makes Codex fail silently at config load, before it ever reaches its TUI.
 
 ### Agent activity detection — layered evidence, not one signal (`tiller_activity`)
 

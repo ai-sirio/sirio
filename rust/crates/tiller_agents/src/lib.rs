@@ -46,25 +46,6 @@ impl AgentAvailability {
         self.executable.is_some()
     }
 
-    /// The ACP server program that would back a chat tab for this
-    /// provider, or `None` when the agent has no ACP server.
-    pub fn acp_program(&self) -> Option<AcpProgram> {
-        ALL.iter()
-            .find(|adapter| adapter.id() == self.id)
-            .and_then(|adapter| adapter.acp_program())
-    }
-
-    /// A user-facing label for the provider's ACP chat support. An
-    /// adapter without an ACP server is marked as such — never silently
-    /// offered another agent's server.
-    pub fn acp_status_label(&self) -> &'static str {
-        if self.acp_program().is_some() {
-            "ACP chat available"
-        } else {
-            "No ACP server"
-        }
-    }
-
     /// A user-facing status that distinguishes a missing binary from an
     /// adapter that merely exists in the application.
     pub fn status_label(&self) -> &'static str {
@@ -96,8 +77,9 @@ impl AgentAvailability {
 ///
 /// This is deliberately a static description, not a shell line: it is the
 /// ACP counterpart of [`AgentAdapter::command`], which remains the
-/// terminal/PTY command for launching the CLI in a pane. An adapter whose
-/// [`AgentAdapter::acp_program`] returns `None` cannot back a chat tab.
+/// terminal/PTY command for launching the CLI in a pane. Only an adapter
+/// whose own binary serves ACP answers with one of these; everything else
+/// resolves through `tiller_registry`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AcpProgram {
     /// Executable name or absolute path, resolved through `PATH` at spawn.
@@ -172,21 +154,12 @@ pub trait AgentAdapter {
         session_ref: &str,
     ) -> Option<String>;
 
-    /// The ACP server program that backs a chat tab for this adapter, or
-    /// `None` when the agent has no ACP server.
-    ///
-    /// `None` is an honest answer: inventing a program name would fail at
-    /// spawn. Consumers must mark the adapter as chat-unavailable rather
-    /// than fall back to another agent's server.
-    fn acp_program(&self) -> Option<AcpProgram>;
-
     /// The ACP server this adapter's own CLI serves, as a subcommand of a
     /// binary the user already installed — or `None`.
     ///
-    /// Narrower than [`AgentAdapter::acp_program`] on purpose: this claim
-    /// covers only what the local binary does, so it stays true without a
-    /// network round-trip. Anything reachable through a separate package is
-    /// the registry's business, not this trait's.
+    /// This claim covers only what the local binary does, so it stays true
+    /// without a network round-trip. Everything reachable through a
+    /// separate package resolves through `tiller_registry`, not here.
     ///
     /// The default is `None`: an adapter answers here only once its
     /// subcommand has been observed answering an ACP `initialize`.
@@ -360,8 +333,9 @@ pub fn find_executable_in_path_checked(
     // `Path::is_absolute` already recognizes — the extra backslash check
     // catches the relative-but-pathlike form (`foo\bar`) that would
     // otherwise be misread as a bare name and joined onto PATH directories.
-    let verbatim =
-        candidate.is_absolute() || program.contains('/') || (cfg!(windows) && program.contains('\\'));
+    let verbatim = candidate.is_absolute()
+        || program.contains('/')
+        || (cfg!(windows) && program.contains('\\'));
 
     // Every variant in probe order, dir-major when searching PATH. On
     // Windows those are the PATHEXT suffixes, mirroring how cmd.exe resolves
@@ -419,9 +393,15 @@ pub fn find_executable_in_path_checked(
 fn on_disk_spelling(candidate: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
-        let Some(parent) = candidate.parent() else { return candidate; };
-        let Some(wanted) = candidate.file_name() else { return candidate; };
-        let Ok(entries) = std::fs::read_dir(parent) else { return candidate; };
+        let Some(parent) = candidate.parent() else {
+            return candidate;
+        };
+        let Some(wanted) = candidate.file_name() else {
+            return candidate;
+        };
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return candidate;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
             if name.eq_ignore_ascii_case(wanted) {
@@ -648,52 +628,26 @@ mod tests {
     }
 
     #[test]
-    fn acp_program_differs_by_adapter_with_an_honest_none() {
-        // Claude and Codex ship ACP servers and their programs are exact
-        // and distinct. OpenCode, Pi and Oh-My-Pi have no ACP server — the
-        // honest answer is `None`, never another agent's program.
-        assert_eq!(
-            ClaudeCodeAdapter.acp_program(),
-            Some(AcpProgram::new(
-                "npx",
-                &["-y", "@agentclientprotocol/claude-agent-acp@latest"]
-            ))
-        );
-        assert_eq!(
-            CodexAdapter.acp_program(),
-            Some(AcpProgram::new(
-                "npx",
-                &["-y", "@agentclientprotocol/codex-acp@latest"]
-            ))
-        );
-        let terminal_only: [&dyn AgentAdapter; 3] = [&OpenCodeAdapter, &PiAdapter, &OhMyPiAdapter];
-        for adapter in terminal_only {
-            assert_eq!(
-                adapter.acp_program(),
-                None,
-                "{} has no ACP server; inventing a program name would fail at spawn",
-                adapter.id()
-            );
+    fn no_adapter_names_a_package_it_would_have_to_download() {
+        // The launch path must not contain a package name at all: pinning
+        // and installing are the registry's job, and a literal here is how
+        // the previous version ended up fetching from the network before a
+        // chat could say anything.
+        for adapter in ALL {
+            if let Some(program) = adapter.builtin_acp() {
+                assert_ne!(
+                    program.program,
+                    "npx",
+                    "{} still launches npx",
+                    adapter.id()
+                );
+                assert!(
+                    !program.args.iter().any(|arg| arg.contains('@')),
+                    "{} still names a package version",
+                    adapter.id()
+                );
+            }
         }
-    }
-
-    #[test]
-    fn availability_surface_reports_acp_support_without_a_fallback() {
-        // The picker consumes `AgentAvailability`; it must be able to tell
-        // an ACP-backed agent from a terminal-only one, and a `None`
-        // adapter must be labelled as such — never silently pointed at
-        // Claude's server.
-        let codex = CodexAdapter.availability();
-        assert!(codex.acp_program().is_some());
-        assert_eq!(codex.acp_status_label(), "ACP chat available");
-
-        let opencode = OpenCodeAdapter.availability();
-        assert_eq!(opencode.acp_program(), None);
-        assert_eq!(
-            opencode.acp_status_label(),
-            "No ACP server",
-            "the surface says there is no ACP server rather than falling back"
-        );
     }
 
     /// F-AGENT-OPENCODE-03: the noninteractive summarizer command is

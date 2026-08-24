@@ -158,11 +158,10 @@ pub fn round_trip(
     request: &ControlRequest,
     timeout: Duration,
 ) -> Result<ControlResponse, ClientError> {
-    let mut stream = crate::windows_pipe::open_client(socket_path).map_err(|error| {
-        ClientError::Connect {
+    let mut stream =
+        crate::windows_pipe::open_client(socket_path).map_err(|error| ClientError::Connect {
             detail: error.to_string(),
-        }
-    })?;
+        })?;
     stream
         .set_read_timeout(Some(timeout))
         .map_err(|error| ClientError::Io {

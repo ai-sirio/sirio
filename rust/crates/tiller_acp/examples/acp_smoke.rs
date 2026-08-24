@@ -19,12 +19,12 @@ fn run() -> anyhow::Result<()> {
     let cwd = std::env::temp_dir().join(format!("tiller-acp-smoke-{suffix}"));
     fs::create_dir_all(&cwd)?;
 
+    // The smoke drive needs a real agent; name it explicitly instead of
+    // defaulting to a network fetch.
     let command = std::env::var_os("TILLER_ACP_PROGRAM")
         .map(PathBuf::from)
         .map(AgentCommand::new)
-        .unwrap_or_else(|| {
-            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-        });
+        .expect("set TILLER_ACP_PROGRAM to run the ACP smoke example");
     println!("launching ACP agent: {command:?}");
 
     let (mut client, events) = AcpClient::launch(command, &cwd)?;

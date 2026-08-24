@@ -14,7 +14,7 @@
 //! `.mcp.json` in the project is broken. Four live drives against a broken
 //! `.mcp.json` produced no banner because of this — not because
 //! `looks_like_mcp_warning`'s vocabulary is too narrow. Confirmed against a
-//! real `npx @agentclientprotocol/claude-agent-acp@latest` process driven by
+//! real ACP agent process driven by hand (via `TILLER_ACP_PROGRAM`):
 //! hand: `session/new` with an explicit `mcpServers: []` (what this crate
 //! used to always send) started a session with no MCP-related output at
 //! all, while omitting the field outright is rejected by the agent with

@@ -887,17 +887,6 @@ impl IntoElement for TranscriptSelectableText {
     }
 }
 
-/// Converts an adapter's ACP program description into the concrete
-/// [`AgentCommand`] the chat spawns.
-///
-/// The conversion is mechanical on purpose: the per-adapter mapping lives
-/// in `tiller_agents` (each adapter answers its own ACP server), so a
-/// Codex tab launches Codex's server and a Claude tab Claude's — never a
-/// silently-downgraded default.
-pub fn acp_agent_command(program: tiller_agents::AcpProgram) -> AgentCommand {
-    AgentCommand::new(program.program).args(program.args.iter().copied())
-}
-
 /// A chat surface wired to one live [`AcpClient`] session.
 pub struct Chat {
     client: Option<AcpClient>,
@@ -1016,31 +1005,27 @@ pub struct Chat {
 impl EventEmitter<ChatEvent> for Chat {}
 
 impl Chat {
-    /// Launches a real ACP agent and returns a `Chat` wired to its event
-    /// stream. The command defaults to the same `npx` agent used by
-    /// `tiller_acp`'s own smoke test, overridable with `TILLER_ACP_PROGRAM`.
-    pub fn launch(cx: &mut Context<Self>) -> Self {
-        let cwd = default_agent_cwd();
-
+    /// Launches a real ACP agent from the command the caller resolved.
+    ///
+    /// There is deliberately no default: a hardcoded `npx …@latest` here
+    /// meant every chat tab could start a network fetch before it could say
+    /// anything, and silently connected a tab to Claude's server whatever
+    /// agent the user picked. `TILLER_ACP_PROGRAM` stays as a test escape
+    /// hatch, because integration tests need one.
+    pub fn launch_from_env(cx: &mut Context<Self>) -> Option<Self> {
         let command = std::env::var_os("TILLER_ACP_PROGRAM")
             .map(PathBuf::from)
-            .map(AgentCommand::new)
-            .unwrap_or_else(|| {
-                AgentCommand::new("npx")
-                    .args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-            });
-
-        Self::launch_with_command(command, cwd, cx)
+            .map(AgentCommand::new)?;
+        Some(Self::launch_with_command(command, default_agent_cwd(), cx))
     }
 
     /// Launches a real ACP agent from an explicit command and returns a
     /// `Chat` wired to its event stream.
     ///
     /// This is the picker's door: the caller resolves the chosen adapter's
-    /// [`tiller_agents::AcpProgram`] (via `AgentAdapter::acp_program` or
-    /// `AgentAvailability::acp_program`) and converts it with
-    /// [`acp_agent_command`], so the tab connects to the agent the user
-    /// picked rather than a hard-coded default.
+    /// launch source (Task 8) and converts it with `agent_command_for`, so
+    /// the tab connects to the source the user actually has rather than a
+    /// hard-coded default.
     pub fn launch_with_command(
         command: AgentCommand,
         cwd: PathBuf,
@@ -1073,31 +1058,27 @@ impl Chat {
         chat
     }
 
-    /// [`Self::launch`] with persistence: the same default-agent command,
-    /// but wired to save/restore its transcript and to browse the
-    /// worktree's Chat History (F-CHAT-34).
+    /// [`Self::launch_from_env`] with persistence: the same env-provided
+    /// command, wired to save/restore its transcript and to browse the
+    /// worktree's Chat History (F-CHAT-34). `None` when no command is set.
     pub fn launch_with_persistence(
         database_path: PathBuf,
         tab_id: String,
         worktree_id: String,
         cx: &mut Context<Self>,
-    ) -> Self {
+    ) -> Option<Self> {
         let cwd = default_agent_cwd();
         let command = std::env::var_os("TILLER_ACP_PROGRAM")
             .map(PathBuf::from)
-            .map(AgentCommand::new)
-            .unwrap_or_else(|| {
-                AgentCommand::new("npx")
-                    .args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-            });
-        Self::launch_with_command_and_persistence(
+            .map(AgentCommand::new)?;
+        Some(Self::launch_with_command_and_persistence(
             command,
             cwd,
             database_path,
             tab_id,
             worktree_id,
             cx,
-        )
+        ))
     }
 
     fn new(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
@@ -5683,8 +5664,7 @@ impl Chat {
             cx,
         );
         let caret_visible = focused && self.composer_blink.visible();
-        let caret_bar =
-            || caret::bar(typography.body_line_height, colors.accent, caret_visible);
+        let caret_bar = || caret::bar(typography.body_line_height, colors.accent, caret_visible);
         // Where the insertion caret sits in the draft: `(part index, char
         // offset inside that Text part)`, `part == parts.len()` at the end.
         let (caret_part, caret_offset) = self.composer.cursor();
@@ -6768,10 +6748,8 @@ impl Chat {
                         // rendered inline at the exact char offset, so the
                         // draft reads as one continuous line.
                         if index == caret_part {
-                            let before: String =
-                                text.chars().take(caret_offset).collect();
-                            let after: String =
-                                text.chars().skip(caret_offset).collect();
+                            let before: String = text.chars().take(caret_offset).collect();
+                            let after: String = text.chars().skip(caret_offset).collect();
                             let mut split = Vec::with_capacity(3);
                             if !before.is_empty() {
                                 split.push(
@@ -6792,10 +6770,12 @@ impl Chat {
                             }
                             return split;
                         }
-                        vec![div()
-                            .text_color(colors.primary_text_color)
-                            .child(text.clone())
-                            .into_any_element()]
+                        vec![
+                            div()
+                                .text_color(colors.primary_text_color)
+                                .child(text.clone())
+                                .into_any_element(),
+                        ]
                     }
                     ComposerPart::Chip(chip) => {
                         // On a chip part the caret always sits just before it.
@@ -10311,39 +10291,6 @@ mod tests {
         assert_eq!(tool_call_run_bounds(&entries, 1), Some((0, 1)));
         assert_eq!(tool_call_run_bounds(&entries, 3), Some((3, 4)));
         assert_eq!(tool_call_run_bounds(&entries, 4), Some((3, 4)));
-    }
-
-    #[test]
-    fn acp_program_converts_to_the_adapters_own_agent_command() {
-        // The picker contract: the chosen adapter's `AcpProgram` converts
-        // to the `AgentCommand` that launches THAT agent — never another's.
-        // This is the assertion the old acceptance test laundered:
-        // connecting successfully proves nothing; the command differing by
-        // adapter does.
-        use tiller_agents::AgentAdapter as _;
-
-        let codex = acp_agent_command(
-            tiller_agents::CodexAdapter
-                .acp_program()
-                .expect("codex ships an ACP server"),
-        );
-        assert_eq!(codex.program, PathBuf::from("npx"));
-        assert_eq!(
-            codex.args,
-            ["-y", "@agentclientprotocol/codex-acp@latest"],
-            "a Codex tab must launch Codex's ACP server, not Claude's"
-        );
-
-        let claude = acp_agent_command(
-            tiller_agents::ClaudeCodeAdapter
-                .acp_program()
-                .expect("claude ships an ACP server"),
-        );
-        assert_eq!(
-            claude.args,
-            ["-y", "@agentclientprotocol/claude-agent-acp@latest"]
-        );
-        assert_ne!(codex.args, claude.args, "the command differs by adapter");
     }
 
     #[gpui::test]

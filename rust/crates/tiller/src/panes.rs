@@ -1044,11 +1044,11 @@ mod tests {
                 1,
                 "the first real contradictory title arrived"
             );
-        assert_eq!(
-            state.0.status("pane-debounce-pty"),
-            Some(AgentStatus::Running),
-            "Layer A must suppress the first real OSC idle title"
-        );
+            assert_eq!(
+                state.0.status("pane-debounce-pty"),
+                Some(AgentStatus::Running),
+                "Layer A must suppress the first real OSC idle title"
+            );
         }
 
         // Release the fixture's second sentinel only after the first real

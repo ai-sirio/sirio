@@ -116,9 +116,7 @@ pub(super) fn render_search_row(
                 .debug_selector(|| "history-search-field".to_owned())
                 .track_focus(focus)
                 .on_key_down(move |event, _, cx| {
-                    key_entity.update(cx, |history, cx| {
-                        history.on_search_key(event, cx)
-                    });
+                    key_entity.update(cx, |history, cx| history.on_search_key(event, cx));
                 })
                 .flex_1()
                 .min_w(px(0.0))
@@ -143,24 +141,32 @@ pub(super) fn render_search_row(
                 // `caret::bar` and not a `|` appended to the string: the bar
                 // always occupies layout, so text does not shift as it
                 // blinks. It is this repo's one way to draw a caret.
-                .child(crate::caret::bar(
-                    px(14.0),
-                    theme.title,
-                    caret_visible,
-                )),
+                .child(crate::caret::bar(px(14.0), theme.title, caret_visible)),
         )
-        .child(toggle(".*", "history-search-regex", regex, theme, move |cx| {
-            regex_entity.update(cx, |history, cx| {
-                history.search_regex = !history.search_regex;
-                history.apply_search_now(cx);
-            });
-        }))
-        .child(toggle("Cc", "history-search-case", case_sensitive, theme, move |cx| {
-            case_entity.update(cx, |history, cx| {
-                history.search_case_sensitive = !history.search_case_sensitive;
-                history.apply_search_now(cx);
-            });
-        }))
+        .child(toggle(
+            ".*",
+            "history-search-regex",
+            regex,
+            theme,
+            move |cx| {
+                regex_entity.update(cx, |history, cx| {
+                    history.search_regex = !history.search_regex;
+                    history.apply_search_now(cx);
+                });
+            },
+        ))
+        .child(toggle(
+            "Cc",
+            "history-search-case",
+            case_sensitive,
+            theme,
+            move |cx| {
+                case_entity.update(cx, |history, cx| {
+                    history.search_case_sensitive = !history.search_case_sensitive;
+                    history.apply_search_now(cx);
+                });
+            },
+        ))
 }
 
 /// One of the two square toggles. They apply immediately rather than through
@@ -184,7 +190,11 @@ fn toggle(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if on { theme.title } else { theme.meta })
-        .bg(if on { theme.row_hover } else { theme.background })
+        .bg(if on {
+            theme.row_hover
+        } else {
+            theme.background
+        })
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| on_click(cx))
         .child(label)
@@ -218,7 +228,11 @@ pub(super) fn render_filter_chip(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if active > 0 { theme.title } else { theme.meta })
-        .bg(if open { theme.row_hover } else { theme.background })
+        .bg(if open {
+            theme.row_hover
+        } else {
+            theme.background
+        })
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |history, cx| {
@@ -315,7 +329,9 @@ pub(super) fn render_chip_popup(
         let row_entity = entity.clone();
         list = list.child(
             div()
-                .id(gpui::SharedString::from(format!("history-chip-option-{option}")))
+                .id(gpui::SharedString::from(format!(
+                    "history-chip-option-{option}"
+                )))
                 .w_full()
                 .px(px(6.0))
                 .py(px(4.0))
@@ -423,7 +439,11 @@ pub(super) fn render_collapsed_chips(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(if active > 0 { theme.title } else { theme.meta })
-        .bg(if open { theme.row_hover } else { theme.background })
+        .bg(if open {
+            theme.row_hover
+        } else {
+            theme.background
+        })
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| {
             // ponytail: the combined four-in-one popup is not drawn yet; the

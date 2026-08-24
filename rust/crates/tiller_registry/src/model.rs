@@ -41,9 +41,15 @@ pub struct RegistryAgent {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Distribution {
-    Npx { package: String, args: Vec<String> },
+    Npx {
+        package: String,
+        args: Vec<String>,
+    },
     Binary(BTreeMap<String, BinaryArtifact>),
-    Uvx { package: String, args: Vec<String> },
+    Uvx {
+        package: String,
+        args: Vec<String>,
+    },
     /// A kind this build does not implement — including one published after
     /// it was compiled.
     Unknown,
@@ -128,7 +134,11 @@ impl AcpRegistry {
                 }
             })
             .collect();
-        Ok(Self { version: wire.version, agents, warnings })
+        Ok(Self {
+            version: wire.version,
+            agents,
+            warnings,
+        })
     }
 
     pub fn agent(&self, id: &str) -> Option<&RegistryAgent> {
@@ -157,11 +167,16 @@ fn decode_distribution(
         match kind.as_str() {
             "npx" => {
                 if let Ok(package) = serde_json::from_value::<PackageWire>(value) {
-                    out.push(Distribution::Npx { package: package.package, args: package.args });
+                    out.push(Distribution::Npx {
+                        package: package.package,
+                        args: package.args,
+                    });
                 }
             }
             "binary" => {
-                let serde_json::Value::Object(platforms) = value else { continue };
+                let serde_json::Value::Object(platforms) = value else {
+                    continue;
+                };
                 let artifacts: BTreeMap<String, BinaryArtifact> = platforms
                     .into_iter()
                     .filter_map(|(platform, artifact)| {
@@ -197,7 +212,10 @@ fn decode_distribution(
             }
             "uvx" => {
                 if let Ok(package) = serde_json::from_value::<PackageWire>(value) {
-                    out.push(Distribution::Uvx { package: package.package, args: package.args });
+                    out.push(Distribution::Uvx {
+                        package: package.package,
+                        args: package.args,
+                    });
                 }
             }
             _ => {}
@@ -216,9 +234,8 @@ mod tests {
 
     #[test]
     fn decodes_the_published_registry() {
-        let registry =
-            AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json"))
-                .expect("decode the recorded registry");
+        let registry = AcpRegistry::from_json(include_str!("../tests/fixtures/registry-v1.json"))
+            .expect("decode the recorded registry");
 
         assert_eq!(registry.version, "1.0.0");
         assert_eq!(registry.agents.len(), 39);
@@ -232,7 +249,9 @@ mod tests {
                 _ => None,
             })
             .expect("opencode declares a binary distribution");
-        let linux = artifacts.get("linux-x86_64").expect("linux-x86_64 artifact");
+        let linux = artifacts
+            .get("linux-x86_64")
+            .expect("linux-x86_64 artifact");
         assert_eq!(linux.cmd, "./opencode");
         assert_eq!(linux.args, vec!["acp".to_string()]);
         assert!(
@@ -255,7 +274,10 @@ mod tests {
                 _ => false,
             })
         });
-        assert!(unhashed, "the recorded registry contains unhashed artifacts");
+        assert!(
+            unhashed,
+            "the recorded registry contains unhashed artifacts"
+        );
     }
 
     #[test]
@@ -287,7 +309,10 @@ mod tests {
             !artifacts.contains_key("linux-x86_64"),
             "the http:// artifact is removed before anything can fetch it"
         );
-        assert!(artifacts.contains_key("darwin-aarch64"), "the https one stays");
+        assert!(
+            artifacts.contains_key("darwin-aarch64"),
+            "the https one stays"
+        );
         assert_eq!(registry.warnings.len(), 1);
         assert!(registry.warnings[0].contains("downgrade-agent"));
     }
@@ -301,11 +326,16 @@ mod tests {
         ))
         .expect("one broken artifact must not sink the document");
 
-        let agent = registry.agent("broken-artifact-agent").expect("row survives");
+        let agent = registry
+            .agent("broken-artifact-agent")
+            .expect("row survives");
         let Distribution::Binary(artifacts) = &agent.distributions[0] else {
             panic!("expected a binary distribution");
         };
-        assert!(artifacts.contains_key("linux-x86_64"), "the valid platform stays");
+        assert!(
+            artifacts.contains_key("linux-x86_64"),
+            "the valid platform stays"
+        );
         assert!(
             !artifacts.contains_key("darwin-aarch64"),
             "the artifact missing `cmd` is dropped"
@@ -326,10 +356,16 @@ mod tests {
             let agent = registry.agent(id).unwrap_or_else(|| panic!("{id} row"));
             assert_eq!(agent.distributions.len(), 2, "{id} keeps both kinds");
             let Distribution::Binary(artifacts) = &agent.distributions[0] else {
-                panic!("{id}: first kind is binary, got {:?}", agent.distributions[0]);
+                panic!(
+                    "{id}: first kind is binary, got {:?}",
+                    agent.distributions[0]
+                );
             };
             assert_eq!(artifacts.len(), platforms, "{id} binary platforms");
-            assert!(matches!(&agent.distributions[1], Distribution::Npx { .. }), "{id} second kind is npx");
+            assert!(
+                matches!(&agent.distributions[1], Distribution::Npx { .. }),
+                "{id} second kind is npx"
+            );
         }
     }
 }

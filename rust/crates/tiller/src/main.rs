@@ -43,7 +43,7 @@ use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
+    chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::open_command as platform_open_command,
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
@@ -51,7 +51,7 @@ use tiller_ui::{
         ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
     row_reorder::{ReorderScope, RowDrag},
-    settings::{Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
+    settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
         AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
@@ -69,8 +69,8 @@ mod command_palette;
 /// Windows, where the platform picks itself.
 #[cfg(target_os = "linux")]
 mod display_backend;
-mod panes;
 mod panel_layout;
+mod panes;
 mod session;
 mod shell_chrome;
 mod tab_machinery;
@@ -176,9 +176,9 @@ use panes::{
     CloseOtherTabs, ClosePane, CloseTab, CloseTabsToRight, CycleTabBackward, CycleTabForward,
     FocusPaneAbove, FocusPaneBelow, FocusPaneLeft, FocusPaneRight, JumpToTab1, JumpToTab2,
     JumpToTab3, JumpToTab4, JumpToTab5, JumpToTab6, JumpToTab7, JumpToTab8, JumpToTab9,
-    MoveTabEarlier, MoveTabLater, MoveTabToOtherPane, OpenAllTabs,
-    OpenTabMenu, PaneContent as TabContent, PaneNode, ResumeChat, SplitDirection, SplitPaneDown,
-    SplitPaneRight, SplitPlacement, TabSelection,
+    MoveTabEarlier, MoveTabLater, MoveTabToOtherPane, OpenAllTabs, OpenTabMenu,
+    PaneContent as TabContent, PaneNode, ResumeChat, SplitDirection, SplitPaneDown, SplitPaneRight,
+    SplitPlacement, TabSelection,
 };
 use session::{
     CatalogProjectSettings, PaneEvent, ProjectCatalog, RestoredSession, SessionLayout,
@@ -346,8 +346,8 @@ fn tab_strip_available_width_for_shell(
     gap: f32,
 ) -> f32 {
     let fixed_panels = sidebar_width.unwrap_or(0.0) + right_panel_width.unwrap_or(0.0);
-    let visible_gaps = usize::from(sidebar_width.is_some())
-        + usize::from(right_panel_width.is_some());
+    let visible_gaps =
+        usize::from(sidebar_width.is_some()) + usize::from(right_panel_width.is_some());
 
     viewport_width - fixed_panels - (gap * visible_gaps as f32) - (2.0 * outer_inset)
 }
@@ -850,13 +850,6 @@ enum WorkspaceAction {
     NewTabForWorktree(PathBuf, NewTabAction),
     NewChatAgent(&'static str),
     InstallSkill(tiller_project::SkillInstallCommand),
-    /// F-SET-18: an agent row's Install button was clicked. `command` is
-    /// [`tiller_agents::AgentAvailability::install_command`]'s documented
-    /// shell line for `agent_id`.
-    InstallAgent {
-        agent_id: &'static str,
-        command: &'static str,
-    },
     OpenSettings,
     /// F-TAB-08: clicking the New Chat menu's "Other agents…" empty-state
     /// card (drawn when no supported agent is on PATH) opens Settings
@@ -1095,10 +1088,7 @@ impl ControlState {
             .iter()
             .find(|workspace| {
                 workspace.id == selector
-                    || paths_name_the_same_document(
-                        Path::new(&workspace.path),
-                        Path::new(selector),
-                    )
+                    || paths_name_the_same_document(Path::new(&workspace.path), Path::new(selector))
             })
             .map(|workspace| PathBuf::from(&workspace.path))
     }
@@ -1107,9 +1097,7 @@ impl ControlState {
         let Some(index) = self
             .workspaces
             .iter()
-            .position(|workspace| {
-                paths_name_the_same_document(Path::new(&workspace.path), path)
-            })
+            .position(|workspace| paths_name_the_same_document(Path::new(&workspace.path), path))
         else {
             return false;
         };
@@ -1126,9 +1114,7 @@ impl ControlState {
         let Some(index) = self
             .workspaces
             .iter()
-            .position(|workspace| {
-                paths_name_the_same_document(Path::new(&workspace.path), path)
-            })
+            .position(|workspace| paths_name_the_same_document(Path::new(&workspace.path), path))
         else {
             return false;
         };
@@ -2476,13 +2462,116 @@ fn parse_settings_category(value: &str) -> Result<SettingsCategory, String> {
     Ok(category)
 }
 
-fn default_chat_command() -> AgentCommand {
-    std::env::var_os("TILLER_ACP_PROGRAM")
-        .map(PathBuf::from)
-        .map(AgentCommand::new)
-        .unwrap_or_else(|| {
-            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-        })
+/// The `AgentCommand` a resolved source launches, or `None` when there is
+/// nothing honest to launch. `Installable` deliberately returns `None`: an
+/// agent that is not installed yet must offer an Install button, never a
+/// silent download at chat-open time.
+fn agent_command_for(source: &tiller_registry::LaunchSource) -> Option<AgentCommand> {
+    match source {
+        tiller_registry::LaunchSource::Builtin { program, args } => {
+            Some(AgentCommand::new(program).args(args.iter().cloned()))
+        }
+        tiller_registry::LaunchSource::Installed(agent) => {
+            Some(AgentCommand::new(&agent.executable).args(agent.args.iter().cloned()))
+        }
+        tiller_registry::LaunchSource::Installable { .. }
+        | tiller_registry::LaunchSource::Unavailable(_) => None,
+    }
+}
+
+/// Everything needed to answer "how does agent X launch". Refreshed when
+/// Settings -> Agents opens and when Refresh is pressed; never on the UI
+/// thread.
+struct AgentLaunchState {
+    registry: Option<tiller_registry::AcpRegistry>,
+    store: tiller_registry::InstallStore,
+    sources: std::collections::BTreeMap<String, tiller_registry::LaunchSource>,
+}
+
+impl AgentLaunchState {
+    /// Store at the XDG default root, no registry document yet, sources
+    /// already resolved against that empty state: builtin availability and
+    /// installed manifests are PATH/disk facts and hold fully offline.
+    fn for_startup() -> Self {
+        let environment: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        // Test-only redirect: fixtures seed manifests into a temp root
+        // instead of the user's data directory.
+        #[cfg(test)]
+        let override_root = TEST_AGENTS_ROOT.read().ok().and_then(|guard| guard.clone());
+        #[cfg(not(test))]
+        let override_root: Option<PathBuf> = None;
+        let mut state = Self {
+            registry: None,
+            store: tiller_registry::InstallStore::new(
+                override_root
+                    .unwrap_or_else(|| tiller_registry::InstallStore::default_root(&environment)),
+            ),
+            sources: std::collections::BTreeMap::new(),
+        };
+        state.sources = compute_launch_sources(state.registry.as_ref(), &state.store);
+        state
+    }
+}
+
+/// Test-only redirect for [`AgentLaunchState::for_startup`], so fixtures
+/// can seed manifests without touching the user's data directory.
+#[cfg(test)]
+static TEST_AGENTS_ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// One pass over the catalog answering each adapter's launch source from
+/// existence facts: is the CLI on PATH, is there a manifest whose
+/// executable still exists, and what does the cached registry document
+/// (`None` before the first fetch lands) offer.
+fn compute_launch_sources(
+    registry: Option<&tiller_registry::AcpRegistry>,
+    store: &tiller_registry::InstallStore,
+) -> std::collections::BTreeMap<String, tiller_registry::LaunchSource> {
+    let platform = tiller_registry::current_platform_key();
+    let mut sources = std::collections::BTreeMap::new();
+    for adapter in tiller_agents::ALL {
+        let availability = adapter.availability();
+        let installed = tiller_registry::registry_id(adapter.id())
+            .and_then(|id| store.manifest(id))
+            .map(|installed| {
+                let exists = installed.executable.exists();
+                (installed, exists)
+            });
+        let source = tiller_registry::resolve(tiller_registry::ResolveInput {
+            adapter_id: adapter.id(),
+            builtin: adapter
+                .builtin_acp()
+                .map(|program| tiller_registry::BuiltinAcp {
+                    program: program.program,
+                    args: program.args,
+                }),
+            builtin_on_path: availability.is_available(),
+            installed,
+            registry,
+            platform_key: platform,
+        });
+        sources.insert(adapter.id().to_string(), source);
+    }
+    sources
+}
+
+/// The lookup behind [`TillerWorkspace::launch_source_for`], shared with
+/// restore paths that run before a workspace exists.
+fn launch_source_in(launch: &AgentLaunchState, adapter_id: &str) -> tiller_registry::LaunchSource {
+    launch.sources.get(adapter_id).cloned().unwrap_or({
+        tiller_registry::LaunchSource::Unavailable(
+            tiller_registry::UnavailableReason::NotInRegistry,
+        )
+    })
+}
+
+/// Tiller's cached copy of the registry document lives beside the agents
+/// root, not inside it: the store owns per-agent directories.
+fn registry_cache_path(store: &tiller_registry::InstallStore) -> PathBuf {
+    store
+        .root()
+        .parent()
+        .map(|dir| dir.join("registry.json"))
+        .unwrap_or_else(|| PathBuf::from("registry.json"))
 }
 
 fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> TerminalShell {
@@ -2493,13 +2582,6 @@ fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> Terminal
 }
 
 /// Builds the shell that runs an agent row's Install command (F-SET-18) —
-/// the documented `install_command` string, executed through the user's
-/// shell exactly like [`skill_install_shell`] runs the skill provisioner.
-fn agent_install_shell(command: &str) -> TerminalShell {
-    let (program, args) = command_shell_invocation(command);
-    TerminalShell::WithArguments { program, args }
-}
-
 fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
 }
@@ -2556,11 +2638,7 @@ fn post_desktop_notification(payload: &NotificationPayload) {
             .spawn()
     };
 
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "linux",
-        target_os = "windows"
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let result: std::io::Result<std::process::Child> = Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "desktop notifications are unsupported on this platform",
@@ -2706,25 +2784,49 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
 }
 
 /// Resolves persisted chat identity into the command and tab metadata that
-/// can actually be restored. Legacy rows and adapters without an ACP server
-/// use the default chat command but do not retain a misleading agent id.
-fn restored_chat_spec(agent_id: Option<&str>) -> (AgentCommand, Option<Icon>, Option<String>) {
-    let Some(adapter) = agent_id.and_then(|id| {
+/// can actually be restored, or `None` when there is nothing honest to
+/// launch: a chat whose source cannot resolve must never connect to
+/// another agent's server, so its restoration is skipped entirely.
+fn restored_chat_spec(
+    launch: &AgentLaunchState,
+    agent_id: Option<&str>,
+) -> Option<(AgentCommand, Option<Icon>, Option<String>)> {
+    let adapter = agent_id.and_then(|id| {
         AGENT_CATALOG
             .iter()
             .find(|adapter| adapter.id() == id)
             .copied()
-    }) else {
-        return (default_chat_command(), None, None);
-    };
-    let Some(program) = adapter.acp_program() else {
-        return (default_chat_command(), None, None);
-    };
-    (
-        acp_agent_command(program),
+    })?;
+    let source = launch_source_in(launch, adapter.id());
+    let command = agent_command_for(&source)?;
+    Some((
+        command,
         Icon::for_agent_id(adapter.id()),
         Some(adapter.id().to_string()),
-    )
+    ))
+}
+
+/// The user-facing reason a resolved source cannot open a chat right now
+/// — the same truth the Agents screen renders as its pill.
+fn launch_refusal_reason(source: &tiller_registry::LaunchSource) -> String {
+    use tiller_registry::{LaunchSource, UnavailableReason};
+    match source {
+        LaunchSource::Installable { .. } => {
+            "it is not installed yet — install it from Settings → Agents".to_string()
+        }
+        LaunchSource::Unavailable(reason) => match reason {
+            UnavailableReason::NotInRegistry => "no ACP server is available for it".to_string(),
+            UnavailableReason::NoArtifactForPlatform => {
+                "nothing was published for this platform".to_string()
+            }
+            UnavailableReason::UnsupportedDistribution => {
+                "its install format is not supported here".to_string()
+            }
+        },
+        LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => {
+            unreachable!("only refused sources reach this helper")
+        }
+    }
 }
 
 fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
@@ -3515,6 +3617,7 @@ struct TillerWorkspace {
     worktree_label: String,
     terminal_breadcrumb: String,
     launch_snapshot: RestoredSession,
+    launch: AgentLaunchState,
     tab_machinery: TabMachinery,
     overflow_menu_open: bool,
     tab_menu_open: bool,
@@ -3663,6 +3766,40 @@ struct PendingPaneClose {
 }
 
 impl TillerWorkspace {
+    /// Recomputes every adapter's launch source from current facts and
+    /// pushes them to the surfaces that render them (Task 9).
+    fn recompute_launch_sources(&mut self, cx: &mut Context<Self>) {
+        self.launch.sources =
+            compute_launch_sources(self.launch.registry.as_ref(), &self.launch.store);
+        let sources: Vec<(String, tiller_registry::LaunchSource)> = self
+            .launch
+            .sources
+            .iter()
+            .map(|(id, source)| (id.clone(), source.clone()))
+            .collect();
+        let mut registry_versions = std::collections::BTreeMap::new();
+        if let Some(registry) = self.launch.registry.as_ref() {
+            for adapter in tiller_agents::ALL {
+                let Some(mapped) = tiller_registry::registry_id(adapter.id()) else {
+                    continue;
+                };
+                if let Some(agent) = registry.agent(mapped) {
+                    registry_versions.insert(adapter.id().to_string(), agent.version.clone());
+                }
+            }
+        }
+        self.tab_bar.update(cx, |tab_bar, _| {
+            tab_bar.apply_chat_launch_sources(sources.clone())
+        });
+        self.settings.update(cx, |settings, _| {
+            settings.apply_launch_sources(sources, registry_versions)
+        });
+    }
+
+    fn launch_source_for(&self, adapter_id: &str) -> tiller_registry::LaunchSource {
+        launch_source_in(&self.launch, adapter_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         titlebar: Entity<Titlebar>,
@@ -3771,14 +3908,6 @@ impl TillerWorkspace {
                                     workspace.add_terminal_tab_with_shell(
                                         "Install Skill",
                                         skill_install_shell(command),
-                                        None,
-                                        cx,
-                                    );
-                                }
-                                WorkspaceAction::InstallAgent { agent_id, command } => {
-                                    workspace.add_terminal_tab_with_shell(
-                                        format!("Install {agent_id}"),
-                                        agent_install_shell(command),
                                         None,
                                         cx,
                                     );
@@ -4133,6 +4262,9 @@ impl TillerWorkspace {
                 .update(cx, |bar, cx| bar.apply_preferences(prefs, cx));
         })
         .detach();
+        // Task 8: how every agent launches is resolved state, held here and
+        // refreshed off the UI thread.
+        let launch = AgentLaunchState::for_startup();
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -4172,6 +4304,7 @@ impl TillerWorkspace {
             worktree_label,
             terminal_breadcrumb,
             launch_snapshot,
+            launch,
             tab_machinery,
             overflow_menu_open: false,
             tab_menu_open: false,
@@ -4229,16 +4362,34 @@ impl TillerWorkspace {
         // reconciles the panel's selection state against
         // `has_current_worktree()` every time it runs, including this first
         // call, so construction needs no separate one-off check.
+        workspace.bind_settings(cx);
         workspace.sync_activity(cx);
+        workspace.recompute_launch_sources(cx);
+        // Sweep abandoned installs and fetch the registry off the UI
+        // thread; the foreground continuation recomputes every launch
+        // source with whatever the network added. Until then the sources
+        // computed at construction still answer — builtin availability and
+        // installed manifests are offline facts.
+        let _cache_path = registry_cache_path(&workspace.launch.store);
+        let sweep_store =
+            tiller_registry::InstallStore::new(workspace.launch.store.root().to_path_buf());
+        cx.spawn(async move |this, cx| {
+            let swept = cx
+                .background_executor()
+                .spawn(async move { tiller_registry::Installer::new(sweep_store).sweep_staging() })
+                .await;
+            if let Err(error) = swept {
+                eprintln!("[launch] staging sweep failed: {error}");
+            }
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.refresh_launch_sources_from_registry(cx)
+            });
+        })
+        .detach();
         workspace
     }
 
-    fn apply_translucency(
-        &mut self,
-        enabled: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_translucency(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.last_applied_translucency == Some(enabled) {
             return;
         }
@@ -4249,9 +4400,9 @@ impl TillerWorkspace {
         // spec's "visual consistency is preferable to an unblurred,
         // partially transparent frame" rule).
         let material = shell_chrome::current_platform_material(enabled);
-        cx.set_global(Theme::get(cx).with_translucency(
-            material == shell_chrome::ShellMaterial::Blurred,
-        ));
+        cx.set_global(
+            Theme::get(cx).with_translucency(material == shell_chrome::ShellMaterial::Blurred),
+        );
         self.apply_window_background(startup_window_background(enabled), window);
         self.last_applied_translucency = Some(enabled);
         cx.notify();
@@ -4414,9 +4565,7 @@ impl TillerWorkspace {
                 RightPanelActionEvent::ResolveInTerminal(path) => {
                     workspace.add_conflict_terminal_tab(path.clone(), cx)
                 }
-                RightPanelActionEvent::OpenCommit(sha) => {
-                    workspace.add_commit_tab(sha.clone(), cx)
-                }
+                RightPanelActionEvent::OpenCommit(sha) => workspace.add_commit_tab(sha.clone(), cx),
             },
         )
         .detach();
@@ -4439,55 +4588,161 @@ impl TillerWorkspace {
     /// Chat-local edit summaries emit only an intent to open a file; the
     /// workspace owns the editor tab and routes that intent through the same
     /// de-duplicating path used by the file tree and Changes surface.
-    fn bind_chat(chat: &Entity<Chat>, cx: &mut Context<Self>) {
-        cx.subscribe(chat, |workspace, chat_entity, event: &ChatEvent, cx| match event {
-            ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
-            // F-BRW-09: this subscription predates a Window-aware callback
-            // (see `bind_chat`'s two call sites, one of which has no
-            // Window), so queue the browser-tab creation for the
-            // update_in-based action loop the same way NewTab/OpenSettings
-            // already do.
-            ChatEvent::OpenLink(url) => {
-                if let Ok(mut actions) = workspace.pending_actions.lock() {
-                    actions.push(WorkspaceAction::OpenBrowserLink(url.clone()));
+    /// Subscribes the workspace to the Agents screen's requests (Task 9):
+    /// Install/Update buttons emit; this host runs the installer on the
+    /// background executor and recomputes when it settles.
+    fn bind_settings(&mut self, cx: &mut Context<Self>) {
+        cx.subscribe(
+            &self.settings,
+            |workspace, _, event: &tiller_ui::settings::SettingsEvent, cx| match event {
+                tiller_ui::settings::SettingsEvent::InstallAgent(id)
+                | tiller_ui::settings::SettingsEvent::UpdateAgent(id) => {
+                    workspace.start_agent_install(id, cx);
                 }
+                tiller_ui::settings::SettingsEvent::RefreshAgentSources => {
+                    workspace.refresh_launch_sources_from_registry(cx);
+                }
+            },
+        )
+        .detach();
+    }
+
+    /// Re-fetches the registry document off the UI thread — the 24 h cache
+    /// decides whether the network is touched at all — and recomputes every
+    /// launch source. This is what Settings → Agents opening and the
+    /// screen's ↻ Refresh both trigger.
+    fn refresh_launch_sources_from_registry(&mut self, cx: &mut Context<Self>) {
+        let cache_path = registry_cache_path(&self.launch.store);
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move {
+                    tiller_registry::RegistryClient::with_http(cache_path)
+                        .registry(tiller_registry::RegistryClient::DEFAULT_MAX_AGE, false)
+                })
+                .await;
+            let _ = this.update(cx, |workspace, _| match fetched {
+                Ok(registry) => workspace.launch.registry = Some(registry),
+                Err(error) => eprintln!("[launch] registry refresh failed: {error:#}"),
+            });
+            let _ = this.update(cx, |workspace, cx| workspace.recompute_launch_sources(cx));
+        })
+        .detach();
+    }
+
+    fn start_agent_install(&mut self, adapter_id: &str, cx: &mut Context<Self>) {
+        let store = tiller_registry::InstallStore::new(self.launch.store.root().to_path_buf());
+        let platform = tiller_registry::current_platform_key();
+        // An update re-runs the installer for the mapped registry entry; a
+        // fresh install uses the row's own source. Anything else has
+        // nothing honest to run.
+        let agent = match self.launch_source_for(adapter_id) {
+            tiller_registry::LaunchSource::Installable { agent } => agent,
+            tiller_registry::LaunchSource::Installed(_) => {
+                let mapped = tiller_registry::registry_id(adapter_id).and_then(|mapped| {
+                    self.launch
+                        .registry
+                        .as_ref()
+                        .and_then(|r| r.agent(mapped))
+                        .cloned()
+                });
+                let Some(agent) = mapped else {
+                    return;
+                };
+                agent
             }
-            // F-CORE-DOM-07: the only completion signal an ACP-hosted chat
-            // tab produces. `request_auto_rename`'s throttle and summarizer
-            // machinery were already ported and unit-tested, but nothing
-            // ever called it for a Chat pane -- `ChatEvent` had no
-            // completion variant, so a chat tab could never be auto-named.
-            // Resolve which pane this emitting entity lives in (a chat can
-            // be resumed/restored into any pane id, so this cannot be
-            // captured once at bind time) and synthesize the
-            // running->done `Transition` the existing, tested function
-            // expects.
-            ChatEvent::TurnEnded => {
-                let chat_id = chat_entity.entity_id();
-                let mut pane_id = None;
-                for tab in &workspace.tabs {
-                    if pane_id.is_some() {
-                        break;
-                    }
-                    tab.panes.for_each(&mut |leaf_id, content| {
-                        if pane_id.is_none()
-                            && let TabContent::Chat(candidate) = content
-                            && candidate.entity_id() == chat_id
-                        {
-                            pane_id = Some(leaf_id);
-                        }
+            _ => return,
+        };
+        // Visible immediately: the row stops being clickable while the
+        // installer holds its per-agent lock.
+        self.settings.update(cx, |settings, cx| {
+            settings.set_install_state(adapter_id, Some(InstallState::InFlight));
+            cx.notify();
+        });
+        let adapter_id = adapter_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(
+                    async move { tiller_registry::Installer::new(store).install(&agent, platform) },
+                )
+                .await;
+            let _ = this.update(cx, |workspace, cx| match result {
+                Ok(installed) => {
+                    eprintln!("[launch] installed {} v{}", installed.id, installed.version);
+                    workspace.settings.update(cx, |settings, cx| {
+                        settings.set_install_state(adapter_id.as_str(), None);
+                        cx.notify();
                     });
                 }
-                if let Some(pane_id) = pane_id {
-                    let transition = Transition {
-                        pane_id: format!("pane-{pane_id}"),
-                        old: Some(AgentStatus::Running),
-                        new: AgentStatus::Done,
-                    };
-                    workspace.request_auto_rename(&transition, cx);
+                Err(error) => {
+                    eprintln!("[launch] install failed: {error}");
+                    workspace.settings.update(cx, |settings, cx| {
+                        settings.set_install_state(
+                            adapter_id.as_str(),
+                            Some(InstallState::Failed(error.to_string())),
+                        );
+                        cx.notify();
+                    });
                 }
-            }
+            });
+            let _ = this.update(cx, |workspace, cx| workspace.recompute_launch_sources(cx));
         })
+        .detach();
+    }
+
+    fn bind_chat(chat: &Entity<Chat>, cx: &mut Context<Self>) {
+        cx.subscribe(
+            chat,
+            |workspace, chat_entity, event: &ChatEvent, cx| match event {
+                ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                // F-BRW-09: this subscription predates a Window-aware callback
+                // (see `bind_chat`'s two call sites, one of which has no
+                // Window), so queue the browser-tab creation for the
+                // update_in-based action loop the same way NewTab/OpenSettings
+                // already do.
+                ChatEvent::OpenLink(url) => {
+                    if let Ok(mut actions) = workspace.pending_actions.lock() {
+                        actions.push(WorkspaceAction::OpenBrowserLink(url.clone()));
+                    }
+                }
+                // F-CORE-DOM-07: the only completion signal an ACP-hosted chat
+                // tab produces. `request_auto_rename`'s throttle and summarizer
+                // machinery were already ported and unit-tested, but nothing
+                // ever called it for a Chat pane -- `ChatEvent` had no
+                // completion variant, so a chat tab could never be auto-named.
+                // Resolve which pane this emitting entity lives in (a chat can
+                // be resumed/restored into any pane id, so this cannot be
+                // captured once at bind time) and synthesize the
+                // running->done `Transition` the existing, tested function
+                // expects.
+                ChatEvent::TurnEnded => {
+                    let chat_id = chat_entity.entity_id();
+                    let mut pane_id = None;
+                    for tab in &workspace.tabs {
+                        if pane_id.is_some() {
+                            break;
+                        }
+                        tab.panes.for_each(&mut |leaf_id, content| {
+                            if pane_id.is_none()
+                                && let TabContent::Chat(candidate) = content
+                                && candidate.entity_id() == chat_id
+                            {
+                                pane_id = Some(leaf_id);
+                            }
+                        });
+                    }
+                    if let Some(pane_id) = pane_id {
+                        let transition = Transition {
+                            pane_id: format!("pane-{pane_id}"),
+                            old: Some(AgentStatus::Running),
+                            new: AgentStatus::Done,
+                        };
+                        workspace.request_auto_rename(&transition, cx);
+                    }
+                }
+            },
+        )
         .detach();
     }
 
@@ -6424,12 +6679,9 @@ impl TillerWorkspace {
             .projects()
             .iter()
             .find(|project| {
-                project
-                    .worktrees
-                    .iter()
-                    .any(|worktree| {
-                        paths_name_the_same_document(&worktree.path, &self.working_directory)
-                    })
+                project.worktrees.iter().any(|worktree| {
+                    paths_name_the_same_document(&worktree.path, &self.working_directory)
+                })
             })
             .map(|project| project.name.as_str());
         let Some(mut payload) = self.activity.build_payload(
@@ -6764,10 +7016,11 @@ impl TillerWorkspace {
         for (pane_id, view) in panes {
             let content_id = format!("terminal-{pane_id}");
             let placement = format!("group-{group_id}-pane-{pane_id}");
-            if !self
-                .terminal_pane_cache
-                .move_within_worktree(&content_id, &worktree_id, placement.clone())
-            {
+            if !self.terminal_pane_cache.move_within_worktree(
+                &content_id,
+                &worktree_id,
+                placement.clone(),
+            ) {
                 self.terminal_pane_cache
                     .insert(worktree_id.clone(), placement, content_id, view);
             }
@@ -6798,9 +7051,12 @@ impl TillerWorkspace {
                 continue;
             }
             let prompt = cx.new(TerminalView::empty_prompt);
-            cx.subscribe(&prompt, move |workspace, _, event: &TerminalPromptEvent, cx| {
-                workspace.handle_empty_pane_prompt(group_id, event.action, cx);
-            })
+            cx.subscribe(
+                &prompt,
+                move |workspace, _, event: &TerminalPromptEvent, cx| {
+                    workspace.handle_empty_pane_prompt(group_id, event.action, cx);
+                },
+            )
             .detach();
             self.empty_pane_prompts.insert(group_id, prompt);
         }
@@ -7046,7 +7302,12 @@ impl TillerWorkspace {
         machinery
     }
 
-    fn move_selected_tab(&mut self, target: MoveTarget, window: &mut Window, cx: &mut Context<Self>) {
+    fn move_selected_tab(
+        &mut self,
+        target: MoveTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab_id) = self
             .tab_menu_tab
             .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
@@ -7183,14 +7444,21 @@ impl TillerWorkspace {
         let worktree_id = session::persisted_worktree_id(&self.working_directory);
         let chat = match adapter {
             Some(adapter) => {
-                let Some(program) = adapter.acp_program() else {
-                    eprintln!(
-                        "[chat] {} has no ACP server; refusing a silent fallback",
-                        adapter.display_name()
+                let source = self.launch_source_for(adapter.id());
+                let Some(command) = agent_command_for(&source) else {
+                    // The user acted explicitly; a silent refusal would read
+                    // as a broken button. The toast is the smallest surface
+                    // that already exists for exactly this.
+                    self.show_toast(
+                        format!(
+                            "{} can't open a chat right now: {}.",
+                            adapter.display_name(),
+                            launch_refusal_reason(&source)
+                        ),
+                        cx,
                     );
                     return;
                 };
-                let command = acp_agent_command(program);
                 let cwd = self.working_directory.clone();
                 let tab_id = persistence_id.clone();
                 cx.new(|cx| {
@@ -7205,8 +7473,19 @@ impl TillerWorkspace {
                 })
             }
             None => {
+                if std::env::var_os("TILLER_ACP_PROGRAM").is_none() {
+                    self.show_toast(
+                        "No agent picked and TILLER_ACP_PROGRAM is unset, so there is no \
+                         chat to open.",
+                        cx,
+                    );
+                    return;
+                }
                 let tab_id = persistence_id.clone();
-                cx.new(|cx| Chat::launch_with_persistence(database_path, tab_id, worktree_id, cx))
+                cx.new(|cx| {
+                    Chat::launch_with_persistence(database_path, tab_id, worktree_id, cx)
+                        .expect("checked TILLER_ACP_PROGRAM above")
+                })
             }
         };
         let composer_focus = chat.focus_handle(cx);
@@ -7263,7 +7542,16 @@ impl TillerWorkspace {
         let retained = self.retained_chats.remove(index);
         let title = retained.title.clone();
         let transcript = retained.transcript;
-        let (command, agent_icon, agent_id) = restored_chat_spec(retained.agent_id.as_deref());
+        let Some((command, agent_icon, agent_id)) =
+            restored_chat_spec(&self.launch, retained.agent_id.as_deref())
+        else {
+            eprintln!(
+                "[chat] retained session for {:?} has no resolvable launch source; \
+                 not restoring it onto another agent's server",
+                retained.agent_id
+            );
+            return;
+        };
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
@@ -7521,8 +7809,7 @@ impl TillerWorkspace {
     /// entity is built in commit mode (see `ChangesTab::for_commit`); the
     /// remainder of the tab bookkeeping mirrors `add_changes_tab` exactly.
     fn add_commit_tab(&mut self, sha: String, cx: &mut Context<Self>) {
-        let changes =
-            cx.new(|cx| ChangesTab::for_commit(self.working_directory.clone(), sha, cx));
+        let changes = cx.new(|cx| ChangesTab::for_commit(self.working_directory.clone(), sha, cx));
         Self::subscribe_changes_tab(&changes, cx);
         let tab_id = self.next_tab_id;
         let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
@@ -7945,8 +8232,7 @@ impl TillerWorkspace {
                         );
                         for event in surface.take_events() {
                             if let BrowserEvent::OpenExternal(url) = event
-                                && let Err(error) =
-                                    platform_open_command(OsStr::new(&url)).spawn()
+                                && let Err(error) = platform_open_command(OsStr::new(&url)).spawn()
                             {
                                 eprintln!("[browser] could not open external link: {error}");
                             }
@@ -8576,11 +8862,8 @@ impl TillerWorkspace {
                 adapter.display_name()
             );
         }
-        let (program, args) = command_shell_invocation(&adapter.command(
-            &worktree_path,
-            &pane_name,
-            &tillerctl_path,
-        ));
+        let (program, args) =
+            command_shell_invocation(&adapter.command(&worktree_path, &pane_name, &tillerctl_path));
         let shell = TerminalShell::WithArguments { program, args };
         let terminal = cx.new(|cx| {
             TerminalView::with_shell(&worktree_path, shell, cx).expect("start split agent")
@@ -8742,9 +9025,9 @@ impl TillerWorkspace {
                 handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                    TabContent::File { .. }
-                    | TabContent::Changes(_)
-                    | TabContent::Browser(_) => None,
+                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
+                        None
+                    }
                 };
             }
         });
@@ -9078,12 +9361,15 @@ impl TillerWorkspace {
                         },
                     ),
                 ],
-                focus: Some(ModalFocus::new(pending.focus.clone(), move |event, window, cx| {
-                    cx.stop_propagation();
-                    key_entity.update(cx, |workspace, cx| {
-                        workspace.handle_pane_close_confirm_key(event, window, cx);
-                    });
-                })),
+                focus: Some(ModalFocus::new(
+                    pending.focus.clone(),
+                    move |event, window, cx| {
+                        cx.stop_propagation();
+                        key_entity.update(cx, |workspace, cx| {
+                            workspace.handle_pane_close_confirm_key(event, window, cx);
+                        });
+                    },
+                )),
             },
             theme,
         ))
@@ -9986,7 +10272,12 @@ impl TillerWorkspace {
     /// "Set Title" modal (`confirm_title_prompt`, F-TERM-05) so the rule
     /// lives in exactly one place rather than drifting between two copies.
     /// Returns whether it actually applied a title.
-    fn apply_manual_tab_title(&mut self, tab_id: usize, title: &str, cx: &mut Context<Self>) -> bool {
+    fn apply_manual_tab_title(
+        &mut self,
+        tab_id: usize,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let title = title.trim();
         if title.is_empty() {
             return false;
@@ -10393,8 +10684,7 @@ impl TillerWorkspace {
                     });
                 })
                 .child(
-                    IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                        .text_color(theme.meta),
+                    IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.meta),
                 );
             tabs = tabs.child(overflow_button);
             if self.overflow_menu_open {
@@ -10593,10 +10883,12 @@ impl TillerWorkspace {
                     .w(px(left_width.unwrap_or(0.0)))
                     .flex_none()
                     .child(self.sidebar.clone())
-                    .child(self.render_panel_resize_handle(
-                        panel_layout::PanelSide::Left,
-                        entity.clone(),
-                    )),
+                    .child(
+                        self.render_panel_resize_handle(
+                            panel_layout::PanelSide::Left,
+                            entity.clone(),
+                        ),
+                    ),
                 )
             })
             .child(
@@ -10621,10 +10913,12 @@ impl TillerWorkspace {
                     .w(px(right_width.unwrap_or(0.0)))
                     .flex_none()
                     .child(self.right_panel.clone())
-                    .child(self.render_panel_resize_handle(
-                        panel_layout::PanelSide::Right,
-                        entity.clone(),
-                    )),
+                    .child(
+                        self.render_panel_resize_handle(
+                            panel_layout::PanelSide::Right,
+                            entity.clone(),
+                        ),
+                    ),
                 )
             })
     }
@@ -10673,8 +10967,7 @@ impl TillerWorkspace {
                             panel_layout::PanelSide::Left => workspace.sidebar_width,
                             panel_layout::PanelSide::Right => workspace.right_panel_width,
                         };
-                        workspace.panel_drag_anchor =
-                            Some((f32::from(event.position.x), width));
+                        workspace.panel_drag_anchor = Some((f32::from(event.position.x), width));
                         workspace.refocus_focused_pane(active_tab, window, cx);
                     });
                 }
@@ -10755,8 +11048,7 @@ impl TillerWorkspace {
                 if this.panel_width_save_generation != generation {
                     return;
                 }
-                let mut settings =
-                    app_settings_from_snapshot(this.settings.read(cx).snapshot());
+                let mut settings = app_settings_from_snapshot(this.settings.read(cx).snapshot());
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
                 this.session.save_settings(&settings);
@@ -12459,6 +12751,9 @@ fn restore_tabs(
     saved_session_refs: &BTreeMap<String, String>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
+    // Chat launch sources resolve here from offline facts; the registry
+    // document joins once the startup fetch lands on the workspace.
+    let launch = AgentLaunchState::for_startup();
     let resumable = resumable_session_refs(
         restored,
         saved_session_refs,
@@ -12486,16 +12781,26 @@ fn restore_tabs(
             .cloned()
             .unwrap_or_default();
         let pane_id = tab_state.root_id.unwrap_or(id);
-        let (command, agent_icon, agent_id) = if tab.kind == "chat" {
-            let (command, icon, agent_id) = restored_chat_spec(tab.agent_id.as_deref());
-            (Some(command), icon, agent_id)
-        } else {
-            (
-                None,
-                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
-                tab.agent_id.clone(),
-            )
-        };
+        let (command, agent_icon, agent_id): (Option<AgentCommand>, Option<Icon>, Option<String>) =
+            if tab.kind == "chat" {
+                let Some((command, icon, agent_id)) =
+                    restored_chat_spec(&launch, tab.agent_id.as_deref())
+                else {
+                    eprintln!(
+                        "[chat] persisted {:?} chat has no resolvable launch source; \
+                     skipping its restoration",
+                        tab.agent_id
+                    );
+                    continue;
+                };
+                (Some(command), icon, agent_id)
+            } else {
+                (
+                    None,
+                    tab.agent_id.as_deref().and_then(Icon::for_agent_id),
+                    tab.agent_id.clone(),
+                )
+            };
         register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
@@ -12628,6 +12933,8 @@ fn restore_tabs_in_workspace(
     window: &mut Window,
     cx: &mut Context<TillerWorkspace>,
 ) -> (Vec<OpenTab>, usize) {
+    // Same offline resolution as `restore_tabs`; see its comment.
+    let launch = AgentLaunchState::for_startup();
     let resumable = resumable_session_refs(
         restored,
         saved_session_refs,
@@ -12650,16 +12957,26 @@ fn restore_tabs_in_workspace(
         let pane_id = tab_state
             .root_id
             .unwrap_or_else(|| pane_id_start + tabs.len());
-        let (command, agent_icon, agent_id) = if tab.kind == "chat" {
-            let (command, icon, agent_id) = restored_chat_spec(tab.agent_id.as_deref());
-            (Some(command), icon, agent_id)
-        } else {
-            (
-                None,
-                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
-                tab.agent_id.clone(),
-            )
-        };
+        let (command, agent_icon, agent_id): (Option<AgentCommand>, Option<Icon>, Option<String>) =
+            if tab.kind == "chat" {
+                let Some((command, icon, agent_id)) =
+                    restored_chat_spec(&launch, tab.agent_id.as_deref())
+                else {
+                    eprintln!(
+                        "[chat] persisted {:?} chat has no resolvable launch source; \
+                     skipping its restoration",
+                        tab.agent_id
+                    );
+                    continue;
+                };
+                (Some(command), icon, agent_id)
+            } else {
+                (
+                    None,
+                    tab.agent_id.as_deref().and_then(Icon::for_agent_id),
+                    tab.agent_id.clone(),
+                )
+            };
         register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
@@ -12835,7 +13152,9 @@ fn tillerctl_binary_name() -> &'static str {
 /// Install subpath of the control CLI under `XDG_DATA_HOME` (or its
 /// per-platform fallbacks).
 fn tillerctl_install_subpath() -> PathBuf {
-    Path::new("TillerRust").join("bin").join(tillerctl_binary_name())
+    Path::new("TillerRust")
+        .join("bin")
+        .join(tillerctl_binary_name())
 }
 
 /// Resolve the control CLI used by worktree-local agent hooks.
@@ -13425,15 +13744,6 @@ fn main() {
                                 }
                             }
                         })
-                        .on_install_agent({
-                            let pending_actions = pending_for_settings.clone();
-                            move |agent_id, command| {
-                                if let Ok(mut actions) = pending_actions.lock() {
-                                    actions
-                                        .push(WorkspaceAction::InstallAgent { agent_id, command });
-                                }
-                            }
-                        })
                         .on_change(move |snapshot| {
                             let translucency = snapshot.translucency;
                             control_socket_for_settings
@@ -13606,6 +13916,111 @@ mod tests {
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn a_chat_launches_the_resolved_source_not_a_hardcoded_default() {
+        // The two `npx …@latest` defaults in chat.rs were the last place a
+        // chat could start a network fetch before it could say anything.
+        let source = tiller_registry::LaunchSource::Builtin {
+            program: "opencode".into(),
+            args: vec!["acp".into()],
+        };
+        let command = agent_command_for(&source).expect("a builtin source launches");
+        // `AgentCommand`'s fields are public (`tiller_acp/src/lib.rs:141-146`);
+        // there are no accessor methods.
+        assert_eq!(command.program, std::path::PathBuf::from("opencode"));
+        assert_eq!(command.args, vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn an_unavailable_source_launches_nothing() {
+        let source = tiller_registry::LaunchSource::Unavailable(
+            tiller_registry::UnavailableReason::NotInRegistry,
+        );
+        assert!(
+            agent_command_for(&source).is_none(),
+            "no fallback to another agent's server, and no invented program name"
+        );
+    }
+
+    #[test]
+    fn an_installable_source_launches_nothing_until_it_is_installed() {
+        let agent = tiller_registry::RegistryAgent {
+            id: "codex-acp".into(),
+            name: "Codex".into(),
+            version: "1.6.2".into(),
+            description: None,
+            repository: None,
+            website: None,
+            license: None,
+            icon: None,
+            distributions: vec![tiller_registry::Distribution::Npx {
+                package: "@agentclientprotocol/codex-acp@1.6.2".into(),
+                args: vec![],
+            }],
+        };
+        assert!(agent_command_for(&tiller_registry::LaunchSource::Installable { agent }).is_none());
+    }
+
+    #[test]
+    fn every_adapter_in_the_catalog_is_a_known_registry_client() {
+        // The adapter-id table inside `tiller_registry` and
+        // `tiller_agents::ALL` are two lists kept in sync by hand; nothing
+        // else links them, and a leaf cannot depend on the catalog. So the
+        // join is pinned here, where both crates are visible: for EVERY
+        // adapter, resolve with a registry carrying an agent named exactly
+        // like the adapter must NOT find it via bare-name passthrough.
+        // Mapped adapters look their mapped id up instead; a known-but-
+        // unmapped one (omp) refuses; an adapter missing from the table
+        // entirely would silently pass through and fail here.
+        for adapter in tiller_agents::ALL {
+            let id = adapter.id();
+            let registry = tiller_registry::AcpRegistry {
+                version: "1.0.0".into(),
+                warnings: Vec::new(),
+                agents: vec![tiller_registry::RegistryAgent {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    version: "1.0.0".into(),
+                    description: None,
+                    repository: None,
+                    website: None,
+                    license: None,
+                    icon: None,
+                    distributions: vec![tiller_registry::Distribution::Npx {
+                        package: format!("{id}@1.0.0"),
+                        args: Vec::new(),
+                    }],
+                }],
+            };
+            let source = tiller_registry::resolve(tiller_registry::ResolveInput {
+                adapter_id: id,
+                builtin: adapter
+                    .builtin_acp()
+                    .map(|program| tiller_registry::BuiltinAcp {
+                        program: program.program,
+                        args: program.args,
+                    }),
+                builtin_on_path: false,
+                installed: None,
+                registry: Some(&registry),
+                platform_key: "linux-x86_64",
+            });
+            let self_mapped = tiller_registry::registry_id(id) == Some(id);
+            if self_mapped {
+                // opencode maps onto its own registry row by design.
+                continue;
+            }
+            assert_eq!(
+                source,
+                tiller_registry::LaunchSource::Unavailable(
+                    tiller_registry::UnavailableReason::NotInRegistry
+                ),
+                "{id}: tiller_registry does not know this catalog adapter; \
+                 it fell back to bare-name matching"
+            );
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -14868,9 +15283,7 @@ mod tests {
     /// fixture's real `sleep 60` child can save this tab.
     #[cfg(target_os = "linux")]
     #[gpui::test]
-    async fn switching_away_from_a_bare_running_command_leaves_it_mounted(
-        cx: &mut TestAppContext,
-    ) {
+    async fn switching_away_from_a_bare_running_command_leaves_it_mounted(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let (root, worktrees) = urgency_test_root("center01-bare-process");
         let root_for_window = root.clone();
@@ -15817,7 +16230,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             cx.run_until_parked();
-            cx.background_executor.advance_clock(Duration::from_millis(5));
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
             cx.run_until_parked();
             let seen = terminal.read_with(&cx.cx, |terminal, _| {
                 String::from_utf8_lossy(&terminal.snapshot().scrollback).contains(&needle)
@@ -15889,7 +16303,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             cx.run_until_parked();
-            cx.background_executor.advance_clock(Duration::from_millis(5));
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
             cx.run_until_parked();
             let seen = terminal.read_with(&cx.cx, |terminal, _| {
                 String::from_utf8_lossy(&terminal.snapshot().scrollback).contains(&preamble)
@@ -15941,7 +16356,8 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             cx.run_until_parked();
-            cx.background_executor.advance_clock(Duration::from_millis(5));
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
             cx.run_until_parked();
             let seen = terminal.read_with(&cx.cx, |terminal, _| {
                 String::from_utf8_lossy(&terminal.snapshot().scrollback).contains(&canary)
@@ -17073,7 +17489,6 @@ mod tests {
                  relying on F-SID-19's fallback is the defect, not the fix"
             );
         });
-
     }
 
     #[gpui::test]
@@ -17213,8 +17628,7 @@ mod tests {
             args: vec!["-c".into(), "sleep 30".into()],
         };
         let (terminal_a, cx) = cx.add_window_view(|_, cx| {
-            TerminalView::with_shell(&working_directory, shell, cx)
-                .expect("spawn terminal leaf a")
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal leaf a")
         });
         let (workspace, cx) = cx.add_window_view(|_, cx| {
             activity_test_workspace(terminal_a.clone(), working_directory.clone(), cx)
@@ -17409,6 +17823,16 @@ mod tests {
     #[gpui::test]
     async fn drawn_restored_chat_composer_stays_within_the_center_surface(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        // A chat tab is restored only when its launch source resolves; seed
+        // one for this fixture before the workspace (and its store root)
+        // are constructed.
+        let agents_root = std::env::temp_dir().join(format!(
+            "tiller-drawn-composer-agents-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let window = cx.add_window(|window, cx| {
             let mut workspace = palette_test_workspace(cx);
             let restored = RestoredSession {
@@ -17417,7 +17841,7 @@ mod tests {
                     id: "test-restored-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
-                    agent_id: None,
+                    agent_id: Some("codex".into()),
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -17804,10 +18228,7 @@ mod tests {
                 tabs_before + 1,
                 "dropping a diff onto a terminal must open exactly one new tab"
             );
-            let new_tab = workspace
-                .tabs
-                .last()
-                .expect("a tab was just pushed");
+            let new_tab = workspace.tabs.last().expect("a tab was just pushed");
             assert_eq!(
                 new_tab.kind,
                 TabKind::Diff,
@@ -18105,10 +18526,7 @@ mod tests {
                 .root::<TillerWorkspace>()
                 .flatten()
                 .expect("workspace root");
-            (
-                window.is_window_active(),
-                workspace.read(app).window_active,
-            )
+            (window.is_window_active(), workspace.read(app).window_active)
         });
 
         assert!(
@@ -18234,7 +18652,8 @@ mod tests {
                 let mut found = false;
                 tab.panes.for_each(&mut |_, content| {
                     if let TabContent::File { view } = content {
-                        found |= paths_name_the_same_document(view.read(app).path(), path.as_path());
+                        found |=
+                            paths_name_the_same_document(view.read(app).path(), path.as_path());
                     }
                 });
                 found
@@ -18247,6 +18666,13 @@ mod tests {
     #[gpui::test]
     async fn drawn_tab_context_resume_chat_reopens_the_retained_session(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        // A chat now opens only from a resolvable source: give the fixture's
+        // workspace an installed codex-acp manifest in a private store root.
+        let agents_root =
+            std::env::temp_dir().join(format!("tiller-resume-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         // ACP owns an OS worker, so this test must allow its event channel to
@@ -18850,7 +19276,8 @@ mod tests {
             .debug_bounds("appearance-translucency")
             .expect("translucency toggle");
         cx.simulate_click(toggle.center(), Modifiers::none());
-        cx.background_executor.advance_clock(Duration::from_millis(50));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(50));
         cx.run_until_parked();
 
         workspace.read_with(&cx.cx, |workspace, _| {
@@ -18889,9 +19316,7 @@ mod tests {
                 .expect("workspace root")
         });
 
-        assert!(workspace.read_with(&cx.cx, |workspace, _| {
-            workspace.translucency_enabled
-        }));
+        assert!(workspace.read_with(&cx.cx, |workspace, _| { workspace.translucency_enabled }));
     }
 
     #[gpui::test]
@@ -19376,11 +19801,8 @@ mod tests {
         std::fs::write(&current_exe, b"tiller").expect("write app fixture");
         // An extensionless twin is the Windows mistake in fixture form:
         // present, but not the artifact the resolver must find.
-        std::fs::write(
-            executable_dir.join("tillerctl"),
-            b"wrong artifact",
-        )
-        .expect("write extensionless decoy");
+        std::fs::write(executable_dir.join("tillerctl"), b"wrong artifact")
+            .expect("write extensionless decoy");
         std::fs::create_dir_all(root.join("empty-path")).expect("create empty PATH dir");
 
         let environment = BTreeMap::from([
@@ -19404,7 +19826,10 @@ mod tests {
             .expect("the .exe sibling must resolve");
         assert_eq!(
             resolved,
-            data_home.join("TillerRust").join("bin").join("tillerctl.exe")
+            data_home
+                .join("TillerRust")
+                .join("bin")
+                .join("tillerctl.exe")
         );
         assert_eq!(
             std::fs::canonicalize(&resolved).expect("installed tillerctl exists"),
@@ -19843,32 +20268,71 @@ mod tests {
     }
 
     #[test]
-    fn restored_codex_chat_uses_codex_command_and_identity() {
-        let (command, icon, agent_id) = restored_chat_spec(Some("codex"));
-        assert_eq!(command.program, PathBuf::from("npx"));
-        assert_eq!(
-            command.args,
-            ["-y", "@agentclientprotocol/codex-acp@latest"]
-        );
+    fn restored_chat_without_a_resolvable_source_is_not_launched_at_all() {
+        let mut launch = test_launch_state();
+        // Nothing installed and no registry document yet: there is no honest
+        // codex command, and connecting the persisted tab to ANOTHER
+        // agent's server is the exact rule this work exists to enforce.
+        assert!(restored_chat_spec(&launch, Some("codex")).is_none());
+        assert!(restored_chat_spec(&launch, None).is_none());
+        assert!(restored_chat_spec(&launch, Some("unknown-agent")).is_none());
+
+        // An installed manifest flips it back to identity-preserving even
+        // fully offline. The manifest's executable must really exist — the
+        // Installed rung checks.
+        let agents_root =
+            std::env::temp_dir().join(format!("tiller-launch-seeded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        let executable = seed_codex_acp_manifest(&agents_root);
+        launch.store = tiller_registry::InstallStore::new(agents_root);
+        launch.sources = compute_launch_sources(None, &launch.store);
+        let (command, icon, agent_id) =
+            restored_chat_spec(&launch, Some("codex")).expect("installed source launches");
+        assert_eq!(command.program, executable);
         assert_eq!(icon, Some(Icon::Codex));
         assert_eq!(agent_id.as_deref(), Some("codex"));
-
-        let (claude_command, _, _) = restored_chat_spec(Some("claude"));
-        assert_ne!(
-            command.args, claude_command.args,
-            "restoration must preserve the selected adapter's ACP command"
-        );
     }
 
-    #[test]
-    fn restored_unknown_or_absent_chat_identity_falls_back_without_claiming_an_agent() {
-        let (default_command, default_icon, default_id) = restored_chat_spec(None);
-        let (unknown_command, unknown_icon, unknown_id) = restored_chat_spec(Some("unknown-agent"));
-        assert_eq!(unknown_command, default_command);
-        assert_eq!(unknown_icon, None);
-        assert_eq!(unknown_id, None);
-        assert_eq!(default_icon, None);
-        assert_eq!(default_id, None);
+    fn test_launch_state() -> AgentLaunchState {
+        let mut launch = AgentLaunchState {
+            registry: None,
+            store: tiller_registry::InstallStore::new(
+                std::env::temp_dir().join(format!("tiller-launch-test-{}", std::process::id())),
+            ),
+            sources: std::collections::BTreeMap::new(),
+        };
+        launch.sources = compute_launch_sources(None, &launch.store);
+        launch
+    }
+
+    /// Writes a codex-acp manifest whose executable really exists (the
+    /// Installed rung checks `executable.exists()`). Returns the stub path.
+    fn seed_codex_acp_manifest(root: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(root).unwrap();
+        let executable = root.join(format!("codex-acp-stub-{}", std::process::id()));
+        std::fs::write(&executable, b"stub").unwrap();
+        tiller_registry::InstallStore::new(root.to_path_buf())
+            .write(&tiller_registry::InstalledAgent {
+                id: "codex-acp".into(),
+                version: "1.6.2".into(),
+                executable: executable.clone(),
+                args: vec![],
+                integrity: tiller_registry::Integrity::Sha256,
+            })
+            .unwrap();
+        executable
+    }
+
+    /// Points `TILLER_ACP_PROGRAM` at a stub file so adapter-less chat-tab
+    /// fixtures exercise tab machinery instead of the (correct) refusal.
+    /// Set once, process-lifetime; nothing asserts it stays unset.
+    fn ensure_stub_acp_program() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let stub = std::env::temp_dir().join(format!("tiller-stub-acp-{}", std::process::id()));
+            std::fs::write(&stub, b"stub").unwrap();
+            unsafe { std::env::set_var("TILLER_ACP_PROGRAM", &stub) };
+        });
     }
 
     #[test]
@@ -19927,10 +20391,8 @@ mod tests {
 
     #[test]
     fn control_state_matches_worktree_paths_across_symlink_aliases() {
-        let raw_root = std::env::temp_dir().join(format!(
-            "tiller-control-path-alias-{}",
-            std::process::id()
-        ));
+        let raw_root =
+            std::env::temp_dir().join(format!("tiller-control-path-alias-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&raw_root);
         std::fs::create_dir_all(&raw_root).expect("create control path alias fixture");
         let canonical_root = raw_root.canonicalize().expect("canonicalize fixture root");
@@ -20665,9 +21127,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn workspace_draws_three_inset_panels_with_compact_gaps(
-        cx: &mut TestAppContext,
-    ) {
+    async fn workspace_draws_three_inset_panels_with_compact_gaps(cx: &mut TestAppContext) {
         cx.set_global(Theme::dark());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -20837,9 +21297,15 @@ mod tests {
         cx.run_until_parked();
 
         let before = cx.debug_bounds("shell-right-panel").expect("right panel");
-        let handle = cx.debug_bounds("panel-resize-right").expect("resize handle");
+        let handle = cx
+            .debug_bounds("panel-resize-right")
+            .expect("resize handle");
         let centre = cx.debug_bounds("shell-center-panel").expect("centre panel");
-        assert_eq!(before.size.width, px(300.0), "baseline: nothing is clamped yet");
+        assert_eq!(
+            before.size.width,
+            px(300.0),
+            "baseline: nothing is clamped yet"
+        );
 
         // Hover first, as a real pointer would, then press.
         cx.simulate_event(MouseMoveEvent {
@@ -20930,10 +21396,15 @@ mod tests {
         cx.update(|window, app| focus.focus(window, app));
         cx.run_until_parked();
         cx.update(|window, _| {
-            assert!(focus.is_focused(window), "baseline: the pane starts focused");
+            assert!(
+                focus.is_focused(window),
+                "baseline: the pane starts focused"
+            );
         });
 
-        let handle = cx.debug_bounds("panel-resize-right").expect("resize handle");
+        let handle = cx
+            .debug_bounds("panel-resize-right")
+            .expect("resize handle");
         let start = handle.center();
 
         cx.simulate_event(MouseMoveEvent {
@@ -21018,15 +21489,18 @@ mod tests {
 
         let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
         assert_eq!(
-            session.load_settings().right_panel_width, 405,
+            session.load_settings().right_panel_width,
+            405,
             "nothing is written while the drag is still moving"
         );
 
-        cx.background_executor.advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
+        cx.background_executor
+            .advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
         cx.run_until_parked();
 
         assert_eq!(
-            session.load_settings().right_panel_width, 460,
+            session.load_settings().right_panel_width,
+            460,
             "the last width wins, and only it is written"
         );
     }
@@ -21044,8 +21518,8 @@ mod tests {
                 .expect("workspace root")
         });
         let both_visible_center = cx.debug_bounds("shell-center-panel").expect("center panel");
-        let (workspace_sidebar_width, workspace_right_panel_width) =
-            workspace.read_with(&cx.cx, |workspace, _| {
+        let (workspace_sidebar_width, workspace_right_panel_width) = workspace
+            .read_with(&cx.cx, |workspace, _| {
                 (workspace.sidebar_width, workspace.right_panel_width)
             });
 
@@ -21104,19 +21578,31 @@ mod tests {
 
         assert_eq!(
             tab_strip_available_width_for_shell(
-                viewport_width, Some(sidebar), Some(right), outer_inset, gap
+                viewport_width,
+                Some(sidebar),
+                Some(right),
+                outer_inset,
+                gap
             ),
             viewport_width - sidebar - right - (2.0 * gap) - (2.0 * outer_inset),
         );
         assert_eq!(
             tab_strip_available_width_for_shell(
-                viewport_width, Some(sidebar), None, outer_inset, gap
+                viewport_width,
+                Some(sidebar),
+                None,
+                outer_inset,
+                gap
             ),
             viewport_width - sidebar - gap - (2.0 * outer_inset),
         );
         assert_eq!(
             tab_strip_available_width_for_shell(
-                viewport_width, None, Some(right), outer_inset, gap
+                viewport_width,
+                None,
+                Some(right),
+                outer_inset,
+                gap
             ),
             viewport_width - right - gap - (2.0 * outer_inset),
         );
@@ -21787,6 +22273,13 @@ mod tests {
     async fn restore_survives_a_terminal_tab_in_a_missing_directory(cx: &mut TestAppContext) {
         // A session saved while a worktree existed; the worktree is gone now.
         let working_directory = missing_directory("layout");
+        // A chat tab is restored only when its launch source resolves; seed
+        // one for this fixture instead of pointing it at another agent.
+        let agents_root =
+            std::env::temp_dir().join(format!("tiller-missing-dir-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let restored = session::RestoredSession {
             working_directory: working_directory.clone(),
             tabs: vec![
@@ -21794,7 +22287,7 @@ mod tests {
                     id: "test-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
-                    agent_id: None,
+                    agent_id: Some("codex".into()),
                     active: false,
                 },
                 session::SessionTab {
@@ -22036,6 +22529,14 @@ mod tests {
         store.flush_now();
         drop(store);
         let restored = session::restore(&database_path, &working_directory);
+
+        // The identity round-trip requires codex to be resolvable at
+        // restore time: seed an installed manifest in a private store root.
+        let agents_root =
+            std::env::temp_dir().join(format!("tiller-p73-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
 
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -22299,8 +22800,7 @@ mod tests {
     #[gpui::test]
     async fn drawn_detached_pane_group_offers_the_real_empty_prompt(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
-        let window =
-            cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -22716,13 +23216,22 @@ mod tests {
     async fn restore_tabs_seeds_the_composer_with_the_persisted_draft(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let working_directory = std::env::current_dir().expect("current directory");
+        // A chat tab is restored only when its launch source resolves; seed
+        // one for this fixture instead of pointing it at another agent.
+        let agents_root = std::env::temp_dir().join(format!(
+            "tiller-composer-seed-agents-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let restored = session::RestoredSession {
             working_directory: working_directory.clone(),
             tabs: vec![session::SessionTab {
                 id: "restored-chat".into(),
                 title: "Chat".into(),
                 kind: "chat".into(),
-                agent_id: None,
+                agent_id: Some("codex".into()),
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {
@@ -23432,10 +23941,8 @@ mod tests {
         let path_b = workspace.update_in(&mut cx, |workspace, window, cx| {
             let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
             let path_a = workspace.working_directory.clone();
-            let path_b = std::env::temp_dir().join(format!(
-                "tiller-sid14-b-{}-{unique}",
-                std::process::id()
-            ));
+            let path_b = std::env::temp_dir()
+                .join(format!("tiller-sid14-b-{}-{unique}", std::process::id()));
             std::fs::create_dir_all(&path_b).expect("create second fixture worktree");
 
             let project = workspace.project_catalog.projects()[0].clone();
@@ -23759,6 +24266,10 @@ mod tests {
     /// triggers cannot reach a real network call.
     #[gpui::test]
     async fn chat_turn_ended_wires_into_auto_rename(cx: &mut TestAppContext) {
+        // An adapter-less chat tab now opens only through the documented
+        // escape hatch; this test exercises tab/auto-rename machinery, not
+        // launch resolution.
+        ensure_stub_acp_program();
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -23795,10 +24306,7 @@ mod tests {
                     chat = Some(view.clone());
                 }
             });
-            (
-                chat.expect("the new tab's pane holds a Chat"),
-                tab.id,
-            )
+            (chat.expect("the new tab's pane holds a Chat"), tab.id)
         });
 
         chat.update(&mut cx, |chat, cx| {
