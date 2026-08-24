@@ -12,39 +12,50 @@ had already closed them.
 
 ## Behaviour change (for the release note)
 
-**Restored chats whose agent cannot be launched no longer reappear.**
+**Restored chats whose agent cannot be launched no longer connect to anything.**
 
 Before, a persisted chat tab was restored and pointed at whatever ACP
 bridge the hardcoded `npx …@latest` default named. That default is gone:
-a chat is restored only if its recorded agent still resolves to something
+a chat only connects if its recorded agent still resolves to something
 real — a built-in ACP server, or an installed one.
 
-Two kinds of tab therefore vanish on upgrade:
+Two kinds of chat therefore cannot be launched after an upgrade:
 
 - a chat for an agent that resolves to nothing on this machine (not
   installed, nothing published for this platform, not in the registry);
 - a chat persisted by an older Tiller with **no recorded agent identity at
   all**. There is no honest way to guess which agent it belonged to.
 
-This is deliberate, and it is the conservative half of the fix that
-motivated the whole effort: a chat whose source cannot be resolved must
-never silently connect to a *different* agent's server. Dropping the tab
-is the safe failure.
+This is the conservative half of the fix that motivated the whole effort:
+a chat whose source cannot be resolved must never silently connect to a
+*different* agent's server.
 
-It is, today, a **silent** drop. The reason is written with `eprintln!`
-(`main.rs`, the restore loop), which a desktop user never sees — the tab
-is simply not there any more. See the first follow-up.
+**They do not disappear, though — they come back disarmed.** The tab is
+restored with no command and no connection, and its transcript holds one
+box stating the reason in the same words the Agents screen uses, with an
+"Open Settings" action that lands on Settings → Agents. The composer is
+disabled without needing to be told: `can_send` already consults
+`is_offline`, and a chat that never connected is offline.
+
+The box is `ErrorKind::Unavailable`, in the amber the auth-required banner
+uses rather than the red of a failure, because nothing failed — there is a
+source to acquire, not a fault to fix. Alone among the error kinds it
+withholds "OK to dismiss": that box is the tab's whole content, so
+dismissing it would leave a chat that neither explains itself nor does
+anything.
+
+This covers all three paths that resolve a persisted chat: both session
+restore loops and reopening from Chat History. The last one previously did
+nothing visible at all — a click, no tab, no message.
 
 ## Follow-ups worth doing
 
-**Tell the user why a restored chat disappeared.** The machinery already
-exists and is already user-facing prose: `launch_refusal_reason`
-(`main.rs`) turns a refused `LaunchSource` into "it is not installed yet —
-install it from Settings → Agents" and its siblings. The restore loop and
-the chat-open refusal path both still log instead of calling it. Deciding
-*where* that text should surface — a startup notification, or the tab
-restored in a disabled state carrying an Install action — is a design
-choice, not a defect fix, which is why it is here and not in the branch.
+**A reopened chat could show its old transcript above the box.** The
+retained-chat path holds the transcript and `restore_transcript` appends,
+so the ordering already works; it is skipped today because a conversation
+displayed above an explanation of why it cannot continue invites typing
+into a composer that is already disabled. Worth revisiting with the
+composer's disabled state made visible.
 
 **Give `answers_initialize` a read timeout**
 (`tiller_agents/tests/acp_conformance.rs`). It launches a real CLI and
