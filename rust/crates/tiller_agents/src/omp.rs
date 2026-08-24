@@ -109,13 +109,6 @@ impl super::AgentAdapter for OhMyPiAdapter {
         ))
     }
 
-    fn acp_program(&self) -> Option<crate::AcpProgram> {
-        // Oh-My-Pi is a pi fork running as a TUI; it has no ACP server.
-        // `None` is the honest answer: a chat tab must not be offered
-        // for it.
-        None
-    }
-
     fn builtin_acp(&self) -> Option<crate::AcpProgram> {
         // The retired Swift app launched `omp acp`
         // (AgentLaunchSpec.swift:73-75 at 5430d7bf), so this is very

@@ -2672,10 +2672,10 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
     #[ignore = "needs a real agent over the network; flakes the gate under load"]
     fn real_agent_completes_startup_before_deadline() {
         let started = std::time::Instant::now();
-        let result = AcpClient::launch(
-            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"]),
-            std::env::temp_dir(),
+        let program = std::env::var_os("TILLER_ACP_PROGRAM").expect(
+            "set TILLER_ACP_PROGRAM to run this ignored test against a real agent",
         );
+        let result = AcpClient::launch(AgentCommand::new(program), std::env::temp_dir());
         let elapsed = started.elapsed();
         let (mut client, _events) = result.expect("real ACP agent should initialize");
         assert!(
@@ -2741,8 +2741,11 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         )
         .expect("write .mcp.json");
 
+        let program = std::env::var_os("TILLER_ACP_PROGRAM").expect(
+            "set TILLER_ACP_PROGRAM to run this ignored test against a real agent",
+        );
         let (mut client, _events) = AcpClient::launch(
-            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"]),
+            AgentCommand::new(program),
             &scratch,
         )
         .expect("real ACP agent should initialize even with a broken .mcp.json");

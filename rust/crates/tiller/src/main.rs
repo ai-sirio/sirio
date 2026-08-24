@@ -2580,15 +2580,6 @@ fn registry_cache_path(store: &tiller_registry::InstallStore) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("registry.json"))
 }
 
-fn default_chat_command() -> AgentCommand {
-    std::env::var_os("TILLER_ACP_PROGRAM")
-        .map(PathBuf::from)
-        .map(AgentCommand::new)
-        .unwrap_or_else(|| {
-            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-        })
-}
-
 fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> TerminalShell {
     TerminalShell::WithArguments {
         program: command.program,
@@ -2803,35 +2794,26 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
 }
 
 /// Resolves persisted chat identity into the command and tab metadata that
-/// can actually be restored. Legacy rows and adapters whose source cannot
-/// launch yet use the default chat command but do not retain a misleading
-/// agent id.
+/// can actually be restored, or `None` when there is nothing honest to
+/// launch: a chat whose source cannot resolve must never connect to
+/// another agent's server, so its restoration is skipped entirely.
 fn restored_chat_spec(
     launch: &AgentLaunchState,
     agent_id: Option<&str>,
-) -> (AgentCommand, Option<Icon>, Option<String>) {
-    let Some(adapter) = agent_id.and_then(|id| {
+) -> Option<(AgentCommand, Option<Icon>, Option<String>)> {
+    let adapter = agent_id.and_then(|id| {
         AGENT_CATALOG
             .iter()
             .find(|adapter| adapter.id() == id)
             .copied()
-    }) else {
-        return (default_chat_command(), None, None);
-    };
+    })?;
     let source = launch_source_in(launch, adapter.id());
-    let Some(command) = agent_command_for(&source) else {
-        // Nothing honest to launch (not installed; no registry document
-        // fetched yet): restore on the legacy default rather than dropping
-        // the user's persisted tab, but do not keep a misleading agent id —
-        // a codex-labelled tab silently connected to another agent's server
-        // was the original defect's shape.
-        return (default_chat_command(), None, None);
-    };
-    (
+    let command = agent_command_for(&source)?;
+    Some((
         command,
         Icon::for_agent_id(adapter.id()),
         Some(adapter.id().to_string()),
-    )
+    ))
 }
 
 fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
@@ -7515,8 +7497,16 @@ impl TillerWorkspace {
         let retained = self.retained_chats.remove(index);
         let title = retained.title.clone();
         let transcript = retained.transcript;
-        let (command, agent_icon, agent_id) =
-            restored_chat_spec(&self.launch, retained.agent_id.as_deref());
+        let Some((command, agent_icon, agent_id)) =
+            restored_chat_spec(&self.launch, retained.agent_id.as_deref())
+        else {
+            eprintln!(
+                "[chat] retained session for {:?} has no resolvable launch source; \
+                 not restoring it onto another agent's server",
+                retained.agent_id
+            );
+            return;
+        };
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
@@ -12728,8 +12718,17 @@ fn restore_tabs(
             .cloned()
             .unwrap_or_default();
         let pane_id = tab_state.root_id.unwrap_or(id);
-        let (command, agent_icon, agent_id) = if tab.kind == "chat" {
-            let (command, icon, agent_id) = restored_chat_spec(&launch, tab.agent_id.as_deref());
+        let (command, agent_icon, agent_id): (Option<AgentCommand>, Option<Icon>, Option<String>) = if tab.kind == "chat" {
+            let Some((command, icon, agent_id)) =
+                restored_chat_spec(&launch, tab.agent_id.as_deref())
+            else {
+                eprintln!(
+                    "[chat] persisted {:?} chat has no resolvable launch source; \
+                     skipping its restoration",
+                    tab.agent_id
+                );
+                continue;
+            };
             (Some(command), icon, agent_id)
         } else {
             (
@@ -12894,8 +12893,17 @@ fn restore_tabs_in_workspace(
         let pane_id = tab_state
             .root_id
             .unwrap_or_else(|| pane_id_start + tabs.len());
-        let (command, agent_icon, agent_id) = if tab.kind == "chat" {
-            let (command, icon, agent_id) = restored_chat_spec(&launch, tab.agent_id.as_deref());
+        let (command, agent_icon, agent_id): (Option<AgentCommand>, Option<Icon>, Option<String>) = if tab.kind == "chat" {
+            let Some((command, icon, agent_id)) =
+                restored_chat_spec(&launch, tab.agent_id.as_deref())
+            else {
+                eprintln!(
+                    "[chat] persisted {:?} chat has no resolvable launch source; \
+                     skipping its restoration",
+                    tab.agent_id
+                );
+                continue;
+            };
             (Some(command), icon, agent_id)
         } else {
             (
@@ -17748,6 +17756,14 @@ mod tests {
     #[gpui::test]
     async fn drawn_restored_chat_composer_stays_within_the_center_surface(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        // A chat tab is restored only when its launch source resolves; seed
+        // one for this fixture before the workspace (and its store root)
+        // are constructed.
+        let agents_root = std::env::temp_dir()
+            .join(format!("tiller-drawn-composer-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let window = cx.add_window(|window, cx| {
             let mut workspace = palette_test_workspace(cx);
             let restored = RestoredSession {
@@ -17756,7 +17772,7 @@ mod tests {
                     id: "test-restored-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
-                    agent_id: None,
+                    agent_id: Some("codex".into()),
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -20140,15 +20156,14 @@ mod tests {
     }
 
     #[test]
-    fn restored_codex_chat_falls_back_without_identity_until_launchable() {
+    fn restored_chat_without_a_resolvable_source_is_not_launched_at_all() {
         let mut launch = test_launch_state();
-        let (command, icon, agent_id) = restored_chat_spec(&launch, Some("codex"));
         // Nothing installed and no registry document yet: there is no honest
-        // codex command, so restoration uses the legacy default WITHOUT
-        // claiming codex identity.
-        assert_eq!(command, default_chat_command());
-        assert_eq!(icon, None);
-        assert_eq!(agent_id, None);
+        // codex command, and connecting the persisted tab to ANOTHER
+        // agent's server is the exact rule this work exists to enforce.
+        assert!(restored_chat_spec(&launch, Some("codex")).is_none());
+        assert!(restored_chat_spec(&launch, None).is_none());
+        assert!(restored_chat_spec(&launch, Some("unknown-agent")).is_none());
 
         // An installed manifest flips it back to identity-preserving even
         // fully offline. The manifest's executable must really exist — the
@@ -20159,23 +20174,11 @@ mod tests {
         let executable = seed_codex_acp_manifest(&agents_root);
         launch.store = tiller_registry::InstallStore::new(agents_root);
         launch.sources = compute_launch_sources(None, &launch.store);
-        let (command, icon, agent_id) = restored_chat_spec(&launch, Some("codex"));
+        let (command, icon, agent_id) =
+            restored_chat_spec(&launch, Some("codex")).expect("installed source launches");
         assert_eq!(command.program, executable);
         assert_eq!(icon, Some(Icon::Codex));
         assert_eq!(agent_id.as_deref(), Some("codex"));
-    }
-
-    #[test]
-    fn restored_unknown_or_absent_chat_identity_falls_back_without_claiming_an_agent() {
-        let launch = test_launch_state();
-        let (default_command, default_icon, default_id) = restored_chat_spec(&launch, None);
-        let (unknown_command, unknown_icon, unknown_id) =
-            restored_chat_spec(&launch, Some("unknown-agent"));
-        assert_eq!(unknown_command, default_command);
-        assert_eq!(unknown_icon, None);
-        assert_eq!(unknown_id, None);
-        assert_eq!(default_icon, None);
-        assert_eq!(default_id, None);
     }
 
     fn test_launch_state() -> AgentLaunchState {
@@ -20193,8 +20196,6 @@ mod tests {
     /// Writes a codex-acp manifest whose executable really exists (the
     /// Installed rung checks `executable.exists()`). Returns the stub path.
     fn seed_codex_acp_manifest(root: &std::path::Path) -> std::path::PathBuf {
-        std::fs::create_dir_all(root).unwrap();
-        let executable = root.join(format!("codex-acp-stub-{}", std::process::id()));
         std::fs::create_dir_all(root).unwrap();
         let executable = root.join(format!("codex-acp-stub-{}", std::process::id()));
         std::fs::write(&executable, b"stub").unwrap();
@@ -22139,6 +22140,13 @@ mod tests {
     async fn restore_survives_a_terminal_tab_in_a_missing_directory(cx: &mut TestAppContext) {
         // A session saved while a worktree existed; the worktree is gone now.
         let working_directory = missing_directory("layout");
+        // A chat tab is restored only when its launch source resolves; seed
+        // one for this fixture instead of pointing it at another agent.
+        let agents_root = std::env::temp_dir()
+            .join(format!("tiller-missing-dir-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let restored = session::RestoredSession {
             working_directory: working_directory.clone(),
             tabs: vec![
@@ -22146,7 +22154,7 @@ mod tests {
                     id: "test-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
-                    agent_id: None,
+                    agent_id: Some("codex".into()),
                     active: false,
                 },
                 session::SessionTab {
@@ -23076,13 +23084,20 @@ mod tests {
     async fn restore_tabs_seeds_the_composer_with_the_persisted_draft(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let working_directory = std::env::current_dir().expect("current directory");
+        // A chat tab is restored only when its launch source resolves; seed
+        // one for this fixture instead of pointing it at another agent.
+        let agents_root = std::env::temp_dir()
+            .join(format!("tiller-composer-seed-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&agents_root);
+        seed_codex_acp_manifest(&agents_root);
+        *TEST_AGENTS_ROOT.write().unwrap() = Some(agents_root);
         let restored = session::RestoredSession {
             working_directory: working_directory.clone(),
             tabs: vec![session::SessionTab {
                 id: "restored-chat".into(),
                 title: "Chat".into(),
                 kind: "chat".into(),
-                agent_id: None,
+                agent_id: Some("codex".into()),
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {

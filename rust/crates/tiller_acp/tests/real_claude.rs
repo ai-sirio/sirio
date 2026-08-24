@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
@@ -34,12 +33,11 @@ fn real_claude_streams_tool_permission_and_writes_nonce() -> Result<()> {
     fs::create_dir_all(&cwd)?;
     let nonce_file = cwd.join(format!("{nonce}.txt"));
 
-    let command = std::env::var_os("TILLER_ACP_PROGRAM")
-        .map(PathBuf::from)
-        .map(AgentCommand::new)
-        .unwrap_or_else(|| {
-            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
-        });
+    // This ignored drive needs a real agent; name it explicitly instead
+    // of defaulting to a network fetch.
+    let program = std::env::var_os("TILLER_ACP_PROGRAM")
+        .expect("set TILLER_ACP_PROGRAM to run this gated test against a real agent");
+    let command = AgentCommand::new(program);
     let launch = AcpClient::launch(command, &cwd);
     let (mut client, events) = match launch {
         Ok(connection) => connection,
