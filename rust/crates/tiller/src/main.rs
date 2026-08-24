@@ -2786,7 +2786,10 @@ fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration)
 /// Resolves persisted chat identity into the command and tab metadata that
 /// can actually be restored, or `None` when there is nothing honest to
 /// launch: a chat whose source cannot resolve must never connect to
-/// another agent's server, so its restoration is skipped entirely.
+/// another agent's server, so its restoration is skipped entirely. A row
+/// persisted before chats recorded their agent carries no identity at
+/// all, and is skipped for the same reason — there is nothing to guess
+/// from.
 fn restored_chat_spec(
     launch: &AgentLaunchState,
     agent_id: Option<&str>,

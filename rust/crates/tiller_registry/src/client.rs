@@ -60,8 +60,14 @@ impl RegistryClient {
             Ok(body) => match AcpRegistry::from_json(&body) {
                 Ok(registry) => {
                     // Validated first: a bad payload never clobbers a good
-                    // cache.
-                    self.write_cache(&body)?;
+                    // cache. A cache that will not take the write is a
+                    // stale cache next time, not a failed fetch: the
+                    // payload in hand is already validated, and discarding
+                    // it would make an unwritable cache directory
+                    // indistinguishable from being offline.
+                    if let Err(error) = self.write_cache(&body) {
+                        eprintln!("tiller: registry fetched but not cached: {error}");
+                    }
                     Ok(registry)
                 }
                 Err(_) => self
@@ -84,19 +90,15 @@ impl RegistryClient {
         AcpRegistry::from_json(&body).ok()
     }
 
-    /// Temp + rename: this file is read every time the Agents screen opens,
-    /// so a process killed mid-write must not leave a truncated document
-    /// behind.
+    /// This file is read every time the Agents screen opens, so a process
+    /// killed mid-write must not leave a truncated document behind, and a
+    /// second writer must not be able to take this one's scratch file away
+    /// before it lands. Both guarantees live in `crate::atomic`.
     fn write_cache(&self, body: &str) -> anyhow::Result<()> {
-        if let Some(parent) = self.cache_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = self.cache_path.with_extension("json.tmp");
-        std::fs::write(&temp, body)?;
-        std::fs::rename(&temp, &self.cache_path)?;
-        Ok(())
+        crate::atomic::write_atomically(&self.cache_path, body.as_bytes())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,8 +174,8 @@ mod tests {
         assert_eq!(registry.version, "2.0.0");
         assert_eq!(std::fs::read_to_string(&cache).unwrap(), OTHER);
         assert!(
-            !cache.with_extension("json.tmp").exists(),
-            "the temp file used for the atomic write is gone"
+            scratch_files(&cache).is_empty(),
+            "the scratch file used for the atomic write is gone"
         );
     }
 
@@ -198,5 +200,45 @@ mod tests {
             SystemTime::now,
         );
         assert!(client.registry(Duration::ZERO, true).is_err());
+    }
+
+    /// Any leftover scratch file, whatever this writer happened to name
+    /// its own — asserting on one fixed name would pass vacuously the
+    /// moment the naming changes.
+    fn scratch_files(cache: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(cache.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_validated_registry_survives_a_cache_that_cannot_be_written() {
+        // An unwritable cache directory is a persistence problem. Letting
+        // it fail the call would report "no registry" to a caller holding
+        // a registry that fetched and decoded perfectly.
+        let dir =
+            std::env::temp_dir().join(format!("tiller-registry-blocked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(
+            &blocker,
+            "this is a file, so nothing can be created inside it",
+        )
+        .unwrap();
+
+        let client = RegistryClient::new(
+            blocker.join("registry.json"),
+            || Ok(GOOD.to_string()),
+            SystemTime::now,
+        );
+
+        let registry = client
+            .registry(Duration::ZERO, true)
+            .expect("a fetched, validated registry is returned even when it cannot be cached");
+        assert_eq!(registry.version, "1.0.0");
     }
 }
