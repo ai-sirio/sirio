@@ -23,6 +23,12 @@ use crate::store::InstallStore;
 /// megabytes.
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
+/// npm puts its resolution error at the top of stderr and its
+/// `npm ERR!` summary at the bottom; keeping both ends and eliding the
+/// middle preserves what an operator needs without letting a chatty or
+/// pathological run accumulate unbounded memory.
+const STDERR_HEAD_CAP: usize = 2 * 1024;
+const STDERR_TAIL_CAP: usize = 2 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// Same ceiling family as the download above: `Command::output()` would
 /// otherwise wait forever, leaving the row in flight and its per-agent
@@ -62,6 +68,10 @@ pub enum UnpackKind {
 
 pub struct Installer {
     store: InstallStore,
+    /// The npm invocation (program plus leading arguments), injectable so
+    /// tests can point the npx path at a fake; `npm_install_argv`'s
+    /// arguments are appended after it.
+    npm_argv: Vec<String>,
 }
 
 pub fn unpack_kind(url: &str) -> UnpackKind {
@@ -125,7 +135,17 @@ pub(crate) fn staging_dir(root: &Path, id: &str, version: &str) -> PathBuf {
 
 impl Installer {
     pub fn new(store: InstallStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            npm_argv: vec![npm_binary().to_string()],
+        }
+    }
+
+    /// Points the installer at a stand-in npm. Test-only seam: it exists so
+    /// the npx path can be exercised without a live npm on PATH.
+    fn with_npm(mut self, argv: Vec<String>) -> Self {
+        self.npm_argv = argv;
+        self
     }
 
     /// Removes staging left by a process that is gone. Called once at
@@ -210,7 +230,14 @@ impl Installer {
 
         std::fs::create_dir_all(&staging).map_err(|error| fail(error.to_string()))?;
 
-        let mut child = std::process::Command::new(npm_binary())
+        // `npm_argv` always names a program; keep the empty-vec mistake
+        // from becoming an index panic.
+        debug_assert!(
+            !self.npm_argv.is_empty(),
+            "the npm argv must name a program"
+        );
+        let mut child = std::process::Command::new(&self.npm_argv[0])
+            .args(&self.npm_argv[1..])
             .args(npm_install_argv(&staging.to_string_lossy(), package, false))
             .current_dir(&staging)
             .stdout(std::process::Stdio::null())
@@ -225,13 +252,7 @@ impl Installer {
         // stall while the deadline below is being polled.
         let stderr_drain = {
             let pipe = child.stderr.take();
-            std::thread::spawn(move || {
-                let mut text = String::new();
-                if let Some(mut pipe) = pipe {
-                    let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
-                }
-                text
-            })
+            std::thread::spawn(move || pipe.map(drain_capped).unwrap_or_default())
         };
         if matches!(
             wait_up_to(&mut child, NPM_INSTALL_TIMEOUT),
@@ -250,11 +271,18 @@ impl Installer {
         }
 
         let bin_dir = staging.join("node_modules/.bin");
-        let entries: Vec<String> = std::fs::read_dir(&bin_dir)
-            .map_err(|error| fail(error.to_string()))?
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
+        // A package whose install produced no `.bin` directory exposes no
+        // executable — that is the "no bin" case below, not an fs failure.
+        // Any other read error is real (permissions, ...) and keeps failing
+        // loudly rather than blaming the package.
+        let entries: Vec<String> = match std::fs::read_dir(&bin_dir) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(fail(error.to_string())),
+        };
         let bin = resolve_bin_name(&entries, package)
             .ok_or_else(|| fail("the installed package exposes no executable".to_string()))?;
 
@@ -435,7 +463,74 @@ pub(crate) fn npm_install_argv(prefix: &str, package: &str, allow_scripts: bool)
 }
 
 fn npm_binary() -> &'static str {
-    if cfg!(windows) { "npm.cmd" } else { "npm" }
+    if cfg!(windows) {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
+}
+
+/// Drains `reader` to the end — npm must never be left writing into a full
+/// pipe — while retaining at most [`STDERR_HEAD_CAP`] leading and
+/// [`STDERR_TAIL_CAP`] trailing bytes; everything between is counted and
+/// elided behind a marker naming how much was dropped.
+///
+/// When anything was dropped, both cut points snap to line boundaries so
+/// the marker never sits mid-line — npm diagnostics only read line-wise.
+fn drain_capped<R: std::io::Read>(mut reader: R) -> String {
+    let mut head: Vec<u8> = Vec::with_capacity(STDERR_HEAD_CAP);
+    let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    let mut total: usize = 0;
+    let mut chunk = [0u8; 4096];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                for &byte in &chunk[..n] {
+                    if total < STDERR_HEAD_CAP {
+                        head.push(byte);
+                    } else {
+                        if tail.len() == STDERR_TAIL_CAP {
+                            tail.pop_front();
+                        }
+                        tail.push_back(byte);
+                    }
+                    total += 1;
+                }
+            }
+            // A broken or vanished pipe still yields whatever was read.
+            Err(_) => break,
+        }
+    }
+    if head.len() + tail.len() == total {
+        // Nothing evicted, but the bytes may still be split across both
+        // buffers (any total past HEAD_CAP) — rejoin them before returning.
+        let mut bytes = std::mem::take(&mut head);
+        bytes.extend(tail);
+        return String::from_utf8_lossy(&bytes).into_owned();
+    }
+    if let Some(cut) = head.iter().rposition(|&byte| byte == b'\n') {
+        head.truncate(cut + 1);
+    }
+    // Shave the tail's leading partial line only when a later complete
+    // line survives to snap to. When the only newline is the final byte,
+    // the "fragment" is the summary line itself and shaving would erase it.
+    if let Some(cut) = tail
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .filter(|&cut| cut + 1 < tail.len())
+    {
+        tail.drain(..=cut);
+    }
+    let elided = total - head.len() - tail.len();
+    // The caps cut on raw byte boundaries, which can split a multi-byte
+    // UTF-8 character in half; lossy replacement keeps that from panicking.
+    format!(
+        "{}\n\n  [ {} bytes elided ]\n\n{}",
+        String::from_utf8_lossy(&head),
+        elided,
+        String::from_utf8_lossy(tail.make_contiguous())
+    )
 }
 
 enum WaitOutcome {
@@ -1079,6 +1174,170 @@ mod tests {
             child.try_wait().unwrap().is_some(),
             "the killed child was reaped"
         );
+    }
+
+    // ---- Task 1: the capped stderr drain.
+
+    #[test]
+    fn output_under_the_cap_passes_through_untouched() {
+        let text = "npm warn deprecated something\nnpm ERR! summary\n";
+        assert_eq!(drain_capped(text.as_bytes()), text);
+    }
+
+    #[test]
+    fn an_input_between_the_caps_keeps_both_its_first_and_last_line() {
+        // 3,000 bytes sits in the gap that once silently truncated: past
+        // STDERR_HEAD_CAP, yet too small to evict anything from the tail.
+        let mut input = String::new();
+        input.push_str("FIRST-LINE-MARKER\n");
+        input.push_str(&"filler ".repeat(600 - "FIRST-LINE-MARKER\n".len() / 7));
+        while input.len() < 3_000 {
+            input.push_str("filler ");
+        }
+        input.push_str("LAST-LINE-MARKER\n");
+
+        let output = drain_capped(input.as_bytes());
+
+        assert!(output.contains("FIRST-LINE-MARKER"), "head lost: {output}");
+        assert!(output.contains("LAST-LINE-MARKER"), "tail lost: {output}");
+    }
+
+    #[test]
+    fn an_input_exactly_at_the_head_cap_passes_through_whole() {
+        let input: Vec<u8> = (0..STDERR_HEAD_CAP)
+            .map(|i| b'a' + (i % 26) as u8)
+            .collect();
+        assert_eq!(drain_capped(&input[..]), String::from_utf8(input).unwrap());
+    }
+
+    #[test]
+    fn an_input_exactly_at_both_caps_passes_through_whole() {
+        let input: Vec<u8> = (0..STDERR_HEAD_CAP + STDERR_TAIL_CAP)
+            .map(|i| b'a' + (i % 26) as u8)
+            .collect();
+        assert_eq!(drain_capped(&input[..]), String::from_utf8(input).unwrap());
+    }
+
+    #[test]
+    fn output_over_the_cap_keeps_a_recognisable_head_and_a_recognisable_tail() {
+        let mut input = String::new();
+        input.push_str("HEAD-MARKER: could not resolve dependency\n");
+        input.push_str(&"progress noise ".repeat(400));
+        input.push('\n');
+        input.push_str("TAIL-MARKER: npm ERR! summary\n");
+
+        let output = drain_capped(input.as_bytes());
+
+        assert!(
+            output.starts_with("HEAD-MARKER: could not resolve dependency\n"),
+            "the head is gone: {output}"
+        );
+        assert!(
+            output.ends_with("TAIL-MARKER: npm ERR! summary\n"),
+            "the tail is gone: {output}"
+        );
+        assert!(!output.contains("progress noise"), "the middle must go");
+        assert!(output.contains("bytes elided"), "got: {output}");
+    }
+
+    #[test]
+    fn the_elision_marker_reports_a_plausible_byte_count() {
+        let total = 10_000usize;
+        let output = drain_capped(std::io::Cursor::new(vec![b'x'; total]));
+        let start = output.find("[ ").unwrap();
+        let digits = &output[start + 2..];
+        let end = digits.find(" ").unwrap();
+        let reported: usize = digits[..end].parse().unwrap();
+
+        assert!(
+            reported >= total - STDERR_HEAD_CAP - STDERR_TAIL_CAP,
+            "reported {reported}, ceiling allows as few as {}",
+            total - STDERR_HEAD_CAP - STDERR_TAIL_CAP
+        );
+        assert!(reported < total, "reported {reported} of {total}");
+        assert_eq!(
+            reported,
+            total - output.len() + format!("\n\n  [ {reported} bytes elided ]\n\n").len(),
+            "head + marker + tail must account for every byte"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_panic_and_still_drains() {
+        let mut input = b"before \xff\xfe after\nlater line\n".to_vec();
+        input.extend([0xff, 0xfe]);
+
+        let output = drain_capped(&input[..]);
+
+        assert!(output.contains("later line"), "got: {output:?}");
+    }
+
+    // ---- Task 2: the npx install path with an injectable npm.
+
+    fn npx_agent(id: &str) -> RegistryAgent {
+        RegistryAgent {
+            id: id.into(),
+            name: id.into(),
+            version: "1.0.0".into(),
+            description: None,
+            repository: None,
+            website: None,
+            license: None,
+            icon: None,
+            distributions: vec![Distribution::Npx {
+                package: format!("{id}-pkg"),
+                args: Vec::new(),
+            }],
+        }
+    }
+
+    /// A stand-in npm spelled for this host, mirroring `quick_child`.
+    /// Trailing tokens (`npm_install_argv`'s arguments) are harmless:
+    /// `cmd`'s and `sh`'s exit builtin ignores them.
+    fn fake_npm_argv(script: &str) -> Vec<String> {
+        #[cfg(windows)]
+        {
+            vec!["cmd".into(), "/C".into(), script.to_string()]
+        }
+        #[cfg(not(windows))]
+        {
+            vec!["sh".into(), "-c".into(), script.to_string()]
+        }
+    }
+
+    #[test]
+    fn a_failing_fake_npm_fails_the_install_and_carries_its_stderr() {
+        let store = InstallStore::new(staging_for("npx-fail"));
+        let agent = npx_agent("npx-fail-agent");
+        // Verified on this host: the message lands on stderr, the trailing
+        // appended argv does not disturb the exit code.
+        #[cfg(windows)]
+        let script = "echo simulated-npm-boom 1>&2 & exit 1";
+        #[cfg(not(windows))]
+        let script = "echo simulated-npm-boom 1>&2; exit 1";
+
+        let error = Installer::new(store)
+            .with_npm(fake_npm_argv(script))
+            .install(&agent, "linux-x86_64")
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("simulated-npm-boom"),
+            "stderr was lost: {error}"
+        );
+    }
+
+    #[test]
+    fn a_fake_npm_that_leaves_no_bin_says_the_package_exposes_no_executable() {
+        let store = InstallStore::new(staging_for("npx-nobin"));
+        let agent = npx_agent("npx-nobin-agent");
+
+        let error = Installer::new(store)
+            .with_npm(fake_npm_argv("exit 0"))
+            .install(&agent, "linux-x86_64")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no executable"), "got: {error}");
     }
 
     /// A command that exits immediately (`succeed`) or hangs for a long
