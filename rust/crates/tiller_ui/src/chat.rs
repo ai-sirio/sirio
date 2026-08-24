@@ -887,17 +887,6 @@ impl IntoElement for TranscriptSelectableText {
     }
 }
 
-/// Converts an adapter's ACP program description into the concrete
-/// [`AgentCommand`] the chat spawns.
-///
-/// The conversion is mechanical on purpose: the per-adapter mapping lives
-/// in `tiller_agents` (each adapter answers its own ACP server), so a
-/// Codex tab launches Codex's server and a Claude tab Claude's — never a
-/// silently-downgraded default.
-pub fn acp_agent_command(program: tiller_agents::AcpProgram) -> AgentCommand {
-    AgentCommand::new(program.program).args(program.args.iter().copied())
-}
-
 /// A chat surface wired to one live [`AcpClient`] session.
 pub struct Chat {
     client: Option<AcpClient>,
@@ -1034,10 +1023,9 @@ impl Chat {
     /// `Chat` wired to its event stream.
     ///
     /// This is the picker's door: the caller resolves the chosen adapter's
-    /// [`tiller_agents::AcpProgram`] (via `AgentAdapter::acp_program` or
-    /// `AgentAvailability::acp_program`) and converts it with
-    /// [`acp_agent_command`], so the tab connects to the agent the user
-    /// picked rather than a hard-coded default.
+    /// launch source (Task 8) and converts it with `agent_command_for`, so
+    /// the tab connects to the source the user actually has rather than a
+    /// hard-coded default.
     pub fn launch_with_command(
         command: AgentCommand,
         cwd: PathBuf,
@@ -10304,39 +10292,6 @@ mod tests {
         assert_eq!(tool_call_run_bounds(&entries, 1), Some((0, 1)));
         assert_eq!(tool_call_run_bounds(&entries, 3), Some((3, 4)));
         assert_eq!(tool_call_run_bounds(&entries, 4), Some((3, 4)));
-    }
-
-    #[test]
-    fn acp_program_converts_to_the_adapters_own_agent_command() {
-        // The picker contract: the chosen adapter's `AcpProgram` converts
-        // to the `AgentCommand` that launches THAT agent — never another's.
-        // This is the assertion the old acceptance test laundered:
-        // connecting successfully proves nothing; the command differing by
-        // adapter does.
-        use tiller_agents::AgentAdapter as _;
-
-        let codex = acp_agent_command(
-            tiller_agents::CodexAdapter
-                .acp_program()
-                .expect("codex ships an ACP server"),
-        );
-        assert_eq!(codex.program, PathBuf::from("npx"));
-        assert_eq!(
-            codex.args,
-            ["-y", "@agentclientprotocol/codex-acp@latest"],
-            "a Codex tab must launch Codex's ACP server, not Claude's"
-        );
-
-        let claude = acp_agent_command(
-            tiller_agents::ClaudeCodeAdapter
-                .acp_program()
-                .expect("claude ships an ACP server"),
-        );
-        assert_eq!(
-            claude.args,
-            ["-y", "@agentclientprotocol/claude-agent-acp@latest"]
-        );
-        assert_ne!(codex.args, claude.args, "the command differs by adapter");
     }
 
     #[gpui::test]
