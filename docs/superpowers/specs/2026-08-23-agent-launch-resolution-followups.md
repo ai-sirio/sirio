@@ -57,12 +57,6 @@ displayed above an explanation of why it cannot continue invites typing
 into a composer that is already disabled. Worth revisiting with the
 composer's disabled state made visible.
 
-**Give `answers_initialize` a read timeout**
-(`tiller_agents/tests/acp_conformance.rs`). It launches a real CLI and
-blocks on `read_line`; `kill()` only runs after that returns. A future
-release that starts up but never answers `initialize` would hang the test
-suite rather than fail it.
-
 **Cap the captured stderr in the npx installer**
 (`tiller_registry/src/installer.rs`). `npm` output is accumulated whole in
 memory with no ceiling.
