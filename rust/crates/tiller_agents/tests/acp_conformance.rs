@@ -110,6 +110,9 @@ fn answers_initialize_within(program: &str, args: &[&str], timeout: Duration) ->
         Handshake::Silent
     };
     let _ = child.kill();
+    // Reap it too: `kill` only signals, and a test binary that leaves a
+    // zombie behind for every CLI it probes is a slow leak in the suite.
+    let _ = child.wait();
     result
 }
 

@@ -57,14 +57,32 @@ displayed above an explanation of why it cannot continue invites typing
 into a composer that is already disabled. Worth revisiting with the
 composer's disabled state made visible.
 
-**Cap the captured stderr in the npx installer**
-(`tiller_registry/src/installer.rs`). `npm` output is accumulated whole in
-memory with no ceiling.
+## Closed since
 
-**Make `install_npx` unit-testable.** It invokes `npm` directly rather
-than through an injected runner, so the npx install path has no unit
-coverage at all — its only real exercise is a live install. The same scope
-choice was made for the archive installer.
+**Give `answers_initialize` a read timeout** — done in
+`test(agents): harden ACP handshake tests`. It reads under a deadline and
+reports four outcomes instead of one `Option`: answered, silent, never
+launched, timed out. The distinction is the point — collapsing a timeout
+into "answered nothing" made `oh_my_pi_is_only_claimed_once_it_answers`
+agree with the withheld claim and go green, a hang disguised as a
+confirmation.
+
+The killed child is reaped as well, which closes the separate "not reaped"
+note this document used to carry. That half arrived from
+`worktree/silver-forest-e51f`, which had solved the same follow-up
+independently; the merge kept this branch's richer outcome enum and took
+only the `wait()` from the other.
+
+**Cap the captured stderr in the npx installer** — done in
+`fix(registry): bound npm's stderr and open the npx path to tests`.
+`drain_capped` retains 2 KiB from each end and elides the middle behind a
+marker, still draining the pipe to the end so npm cannot stall. Both ends,
+because npm's resolution error is at the top and its summary at the bottom.
+
+**Make `install_npx` unit-testable** — done in the same commit. The npm
+program is an `Installer` field with a test-only builder, following
+`quick_child`'s precedent of a trivial real child over a mock. The same
+change told a missing `node_modules/.bin` apart from a real read failure.
 
 ## Follow-ups deliberately parked
 
@@ -83,14 +101,17 @@ a scheme this version does not know would therefore be reported as
 unverified — conservative, but inaccurate. Distinguishing "none" from
 "unknown" needs a third enum variant and is not worth it for a note.
 
+**The archive installer keeps the same scope choice** — it spawns its own
+work directly and has no injected runner, so it has no unit coverage of the
+spawn either.
+
 **Documentary gaps, no behaviour at stake:** `uvx` is never exercised by a
 test (it shares the `UnsupportedDistribution` branch with `Unknown`);
 `current_platform_key` returns `"unsupported"` for an OS/arch outside its
 table and nothing downstream names that case, though it resolves correctly
 to `NoArtifactForPlatform`; there is no test with `XDG_DATA_HOME` and
 `HOME` both set and valid; the OpenCode SKIP branch of the conformance
-test asserts nothing while the omp one does; the killed child in
-`answers_initialize` is not reaped.
+test asserts nothing while the omp one does.
 
 ## Open verification debt
 
