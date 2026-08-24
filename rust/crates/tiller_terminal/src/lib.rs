@@ -742,30 +742,7 @@ impl TerminalHandle {
     /// would have found by scrolling up.
     fn capture_scrollback(&self) -> Vec<u8> {
         let term = self.term.lock();
-        let grid = term.grid();
-        let history_size = grid.history_size();
-        let mut lines = Vec::with_capacity(grid.total_lines());
-
-        for line in -(history_size as i32)..(grid.screen_lines() as i32) {
-            let mut text = String::with_capacity(grid.columns());
-            for column in 0..grid.columns() {
-                let cell = &grid[Line(line)][Column(column)];
-                text.push(if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    ' '
-                } else {
-                    cell.c
-                });
-            }
-            while text.ends_with(' ') {
-                text.pop();
-            }
-            lines.push(text);
-        }
-
-        while lines.last().is_some_and(String::is_empty) {
-            lines.pop();
-        }
-        lines.join("\n").into_bytes()
+        capture_scrollback_text(&term).into_bytes()
     }
 
     /// Replays captured output directly into the emulator. It does not write
@@ -783,6 +760,37 @@ impl TerminalHandle {
 
 const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// Plain-text capture of a terminal's complete retained grid (history +
+/// viewport), newline-delimited, trailing blank rows dropped. The one place
+/// grid cells become bytes; shared by `capture_scrollback` and the headless
+/// boundary tests, so both always see identical extraction behaviour.
+fn capture_scrollback_text(term: &Term<TermEventProxy>) -> String {
+    let grid = term.grid();
+    let history_size = grid.history_size();
+    let mut lines = Vec::with_capacity(grid.total_lines());
+
+    for line in -(history_size as i32)..(grid.screen_lines() as i32) {
+        let mut text = String::with_capacity(grid.columns());
+        for column in 0..grid.columns() {
+            let cell = &grid[Line(line)][Column(column)];
+            text.push(if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ' '
+            } else {
+                cell.c
+            });
+        }
+        while text.ends_with(' ') {
+            text.pop();
+        }
+        lines.push(text);
+    }
+
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
 
 #[cfg(unix)]
 fn terminate_process_group(process_group: u32) {
@@ -2413,6 +2421,136 @@ mod tests {
             "tiller-terminal-test-{name}-{}-{serial}",
             std::process::id()
         ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Headless boundary harness (#40 invariant half).
+    //
+    // A `TerminalHandle` cannot exist without a spawned PTY (`EventLoopSender`
+    // has no public constructor outside a live `EventLoop`), and spawning is
+    // exactly what makes the existing pty tests fail on Windows. These tests
+    // therefore feed known byte streams straight into a bare emulator through
+    // the same parser path `replay_scrollback` uses, and read back through
+    // `capture_scrollback_text` — plain text only, never alacritty types.
+    // These pin behaviour that must NOT change across the #31 migration;
+    // grapheme/wide-char/spacer rendering belongs to the other half.
+    // -----------------------------------------------------------------------
+
+    fn headless_term(columns: u16, lines: u16) -> Arc<FairMutex<Term<TermEventProxy>>> {
+        let (wakeup_tx, _wakeup_rx) = futures::channel::mpsc::unbounded::<Event>();
+        let term = Term::new(
+            Config::default(),
+            &TerminalDimensions {
+                columns: columns as usize,
+                screen_lines: lines as usize,
+            },
+            TermEventProxy { wakeup: wakeup_tx },
+        );
+        Arc::new(FairMutex::new(term))
+    }
+
+    fn advance_headless(term: &FairMutex<Term<TermEventProxy>>, bytes: &[u8]) {
+        let mut locked = term.lock();
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        processor.advance(&mut *locked, bytes);
+    }
+
+    fn resize_headless(term: &FairMutex<Term<TermEventProxy>>, columns: u16, lines: u16) {
+        term.lock().resize(TerminalDimensions {
+            columns: columns as usize,
+            screen_lines: lines as usize,
+        });
+    }
+
+    /// Which sentinels of `B40_LINE_000..NNN` are missing from the text.
+    fn missing_lines(text: &str, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("B40_LINE_{i:03}"))
+            .filter(|sentinel| !text.contains(sentinel.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn reflow_narrowing_preserves_content() {
+        const LINES: usize = 10;
+        let term = headless_term(80, 24);
+        let feed: String = (0..LINES)
+            .map(|i| format!("B40_LINE_{i:03}\r\n"))
+            .collect();
+        advance_headless(&term, feed.as_bytes());
+
+        resize_headless(&term, 40, 24);
+        let text = capture_scrollback_text(&term.lock());
+        let lost = missing_lines(&text, LINES);
+        assert!(
+            lost.is_empty(),
+            "after narrowing 80→40 columns these numbered lines were lost from the recovered text: {lost:?}"
+        );
+    }
+
+    #[test]
+    fn reflow_widening_preserves_content() {
+        const LINES: usize = 10;
+        let term = headless_term(40, 24);
+        // One line longer than 40 columns forces a wrap that widening must
+        // rejoin; the rest are short numbered markers.
+        let mut feed = format!("B40_LINE_000 {}\r\n", "x".repeat(60));
+        feed.push_str(
+            &(1..LINES)
+                .map(|i| format!("B40_LINE_{i:03}\r\n"))
+                .collect::<String>(),
+        );
+        advance_headless(&term, feed.as_bytes());
+
+        resize_headless(&term, 80, 24);
+        let text = capture_scrollback_text(&term.lock());
+        assert!(
+            text.contains("B40_LINE_000 xxxxx"),
+            "after widening 40→80 columns the wrapped long line did not rejoin; it reads as separate rows instead"
+        );
+        let lost = missing_lines(&text, LINES);
+        assert!(
+            lost.is_empty(),
+            "after widening 40→80 columns these numbered lines were lost from the recovered text: {lost:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_longer_than_the_width_wraps_and_stays_recoverable() {
+        const START: &str = "B40_WRAP_START";
+        const END: &str = "B40_WRAP_END";
+        let term = headless_term(80, 24);
+        advance_headless(&term, format!("{START}{}{END}\r\n", "-".repeat(200)).as_bytes());
+
+        let text = capture_scrollback_text(&term.lock());
+        assert!(
+            text.contains(START) && text.contains(END),
+            "a {START}…{END} line longer than 80 columns lost one of its ends when wrapped"
+        );
+
+        resize_headless(&term, 40, 24);
+        let text = capture_scrollback_text(&term.lock());
+        assert!(
+            text.contains(START) && text.contains(END),
+            "after wrapping at 80 columns then narrowing to 40, the long line lost one of its ends"
+        );
+    }
+
+    #[test]
+    fn scrollback_retains_oldest_and_newest_beyond_the_viewport() {
+        const LINES: usize = 100;
+        let term = headless_term(80, 24); // viewport holds 24 rows
+        let feed: String = (0..LINES)
+            .map(|i| format!("B40_LINE_{i:03}\r\n"))
+            .collect();
+        advance_headless(&term, feed.as_bytes());
+
+        let text = capture_scrollback_text(&term.lock());
+        let lost = missing_lines(&text, LINES);
+        assert!(
+            lost.is_empty(),
+            "100 lines pushed through a 24-row viewport lost these from scrollback: {lost:?}"
+        );
     }
 
     #[test]
