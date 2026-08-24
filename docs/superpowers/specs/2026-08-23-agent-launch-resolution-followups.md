@@ -57,20 +57,24 @@ displayed above an explanation of why it cannot continue invites typing
 into a composer that is already disabled. Worth revisiting with the
 composer's disabled state made visible.
 
-**Give `answers_initialize` a read timeout**
-(`tiller_agents/tests/acp_conformance.rs`). It launches a real CLI and
-blocks on `read_line`; `kill()` only runs after that returns. A future
-release that starts up but never answers `initialize` would hang the test
-suite rather than fail it.
+## Closed since
 
-**Cap the captured stderr in the npx installer**
-(`tiller_registry/src/installer.rs`). `npm` output is accumulated whole in
-memory with no ceiling.
+**Give `answers_initialize` a read timeout** — done in
+`test(agents): stop a mute cli from hanging the conformance suite`. The
+read moved onto a thread behind `recv_timeout` with a 30 s deadline, and
+the killed child is reaped on every exit path, which also closed the
+separate "not reaped" gap this document used to list.
 
-**Make `install_npx` unit-testable.** It invokes `npm` directly rather
-than through an injected runner, so the npx install path has no unit
-coverage at all — its only real exercise is a live install. The same scope
-choice was made for the archive installer.
+**Cap the captured stderr in the npx installer** — done in
+`fix(registry): bound npm's stderr and open the npx path to tests`.
+`drain_capped` retains 2 KiB from each end and elides the middle behind a
+marker, still draining the pipe to the end so npm cannot stall. Both ends,
+because npm's resolution error is at the top and its summary at the bottom.
+
+**Make `install_npx` unit-testable** — done in the same commit. The npm
+program is an `Installer` field with a test-only builder, following
+`quick_child`'s precedent of a trivial real child over a mock. The same
+change told a missing `node_modules/.bin` apart from a real read failure.
 
 ## Follow-ups deliberately parked
 
@@ -88,6 +92,10 @@ fails hard on a mismatch. A manifest written by a future Tiller recording
 a scheme this version does not know would therefore be reported as
 unverified — conservative, but inaccurate. Distinguishing "none" from
 "unknown" needs a third enum variant and is not worth it for a note.
+
+**The archive installer keeps the same scope choice** — it spawns its own
+work directly and has no injected runner, so it has no unit coverage of the
+spawn either.
 
 **Documentary gaps, no behaviour at stake:** `uvx` is never exercised by a
 test (it shares the `UnsupportedDistribution` branch with `Unknown`);
