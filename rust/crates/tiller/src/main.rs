@@ -51,7 +51,7 @@ use tiller_ui::{
         ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
     row_reorder::{ReorderScope, RowDrag},
-    settings::{Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
+    settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
         AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
@@ -4643,6 +4643,13 @@ impl TillerWorkspace {
             }
             _ => return,
         };
+        // Visible immediately: the row stops being clickable while the
+        // installer holds its per-agent lock.
+        self.settings.update(cx, |settings, cx| {
+            settings.set_install_state(adapter_id, Some(InstallState::InFlight));
+            cx.notify();
+        });
+        let adapter_id = adapter_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -4650,11 +4657,24 @@ impl TillerWorkspace {
                     tiller_registry::Installer::new(store).install(&agent, platform)
                 })
                 .await;
-            let _ = this.update(cx, |_workspace, _| match result {
+            let _ = this.update(cx, |workspace, cx| match result {
                 Ok(installed) => {
-                    eprintln!("[launch] installed {} v{}", installed.id, installed.version)
+                    eprintln!("[launch] installed {} v{}", installed.id, installed.version);
+                    workspace.settings.update(cx, |settings, cx| {
+                        settings.set_install_state(adapter_id.as_str(), None);
+                        cx.notify();
+                    });
                 }
-                Err(error) => eprintln!("[launch] install failed: {error}"),
+                Err(error) => {
+                    eprintln!("[launch] install failed: {error}");
+                    workspace.settings.update(cx, |settings, cx| {
+                        settings.set_install_state(
+                            adapter_id.as_str(),
+                            Some(InstallState::Failed(error.to_string())),
+                        );
+                        cx.notify();
+                    });
+                }
             });
             let _ = this.update(cx, |workspace, cx| workspace.recompute_launch_sources(cx));
         })

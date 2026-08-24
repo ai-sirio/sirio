@@ -920,6 +920,16 @@ pub enum SettingsEvent {
 
 impl EventEmitter<SettingsEvent> for Settings {}
 
+/// Where one row's install stands right now. Owned by the host (`tiller`
+/// runs the installer), rendered here; success clears the entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallState {
+    InFlight,
+    /// The installer's own error text — it names the format, the package
+    /// or the remedy.
+    Failed(String),
+}
+
 pub struct Settings {
     category: SettingsCategory,
     on_back: Option<Rc<dyn Fn()>>,
@@ -1010,6 +1020,10 @@ pub struct Settings {
     /// installed version behind it offers an update; equal or absent means
     /// nothing to offer.
     registry_versions: BTreeMap<String, String>,
+    /// Live install state per adapter id (Task 9 fix round). `InFlight`
+    /// hides the row's action; `Failed` shows the installer's own message
+    /// and offers the action again; success removes the entry.
+    install_states: BTreeMap<String, InstallState>,
     /// Optional host override for a provider card's Add Account button
     /// (F-SET-14). The payload is the provider's stable id (`"claude"`,
     /// `"codex"`, `"opencode"` — [`UsageProvider::id`]'s own convention),
@@ -1205,6 +1219,7 @@ impl Settings {
             skill_install_launched: false,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
+            install_states: BTreeMap::new(),
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
@@ -1486,6 +1501,19 @@ impl Settings {
     ) {
         self.launch_sources = sources;
         self.registry_versions = registry_versions;
+    }
+
+    /// Sets (or clears, on `None`) one row's live install state. Callers
+    /// notify afterwards.
+    pub fn set_install_state(&mut self, id: &str, state: Option<InstallState>) {
+        match state {
+            Some(state) => {
+                self.install_states.insert(id.to_string(), state);
+            }
+            None => {
+                self.install_states.remove(id);
+            }
+        }
     }
 
     /// Installs a host override for a provider card's Add Account button
@@ -3328,8 +3356,15 @@ impl Settings {
             // the spawned install finish.
             // F-SET-18 (closed): Install/Update are renderings of the row's
             // resolved source. The button emits only — `tiller` owns the
-            // installer, and this crate never runs installs itself.
-            let action = match &source {
+            // installer, and this crate never runs installs itself. While
+            // this row's install is in flight the action disappears: the
+            // per-agent lock would refuse a second click anyway, and a
+            // dead-looking button invites exactly that click.
+            let install_state = self.install_states.get(availability.id);
+            let action = if matches!(install_state, Some(InstallState::InFlight)) {
+                None
+            } else {
+                match &source {
                 tiller_registry::LaunchSource::Installable { .. } => Some((
                     SettingsEvent::InstallAgent(availability.id.to_string()),
                     "Install",
@@ -3345,6 +3380,7 @@ impl Settings {
                         )
                     }),
                 _ => None,
+                }
             };
             let install_button = action.map(|(event, label)| {
                 let install_entity = entity.clone();
@@ -3406,6 +3442,32 @@ impl Settings {
                         .text_size(theme.typography.footnote)
                         .text_color(theme.subtitle)
                         .child(text!(note)),
+                );
+            }
+            if let Some(state) = install_state {
+                let (kind, label): (&'static str, String) = match state {
+                    InstallState::InFlight => (
+                        "status",
+                        "Installing… this can take up to ten minutes.".to_string(),
+                    ),
+                    InstallState::Failed(message) => ("reason", message.clone()),
+                };
+                let failed = matches!(state, InstallState::Failed(_));
+                row_container = row_container.child(
+                    div()
+                        .id((kind, index))
+                        .debug_selector(move || {
+                            format!("settings-agent-install-{kind}-{index}")
+                        })
+                        .px(px(theme.cosmic.spacing.xs as f32))
+                        .text_size(theme.typography.footnote)
+                        .font_weight(if failed {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(theme.subtitle)
+                        .child(text!(label)),
                 );
             }
             agent_rows = agent_rows.child(row_container);
@@ -4767,6 +4829,139 @@ mod tests {
             events.borrow().as_slice(),
             ["opencode".to_string()],
             "the click emits InstallAgent for the row's adapter id"
+        );
+    }
+
+    /// An Installable opencode row, for the install-state tests below.
+    fn install_state_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::WindowHandle<Settings>, gpui::Entity<Settings>) {
+        use tiller_registry::{Distribution, LaunchSource};
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "opencode",
+            display_name: "OpenCode",
+            executable: None,
+        }];
+        let sources = vec![(
+            "opencode".to_string(),
+            LaunchSource::Installable {
+                agent: tiller_registry::RegistryAgent {
+                    id: "opencode".into(),
+                    name: "OpenCode".into(),
+                    version: "1.18.21".into(),
+                    description: None,
+                    repository: None,
+                    website: None,
+                    license: None,
+                    icon: None,
+                    distributions: vec![Distribution::Binary(Default::default())],
+                },
+            },
+        )];
+        let window = cx.add_window(move |_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let entity = window.entity(cx).expect("settings entity");
+        (window, entity)
+    }
+
+    fn open_agents_category(
+        window: &gpui::WindowHandle<Settings>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        let _ = window;
+        if let Some(bounds) = cx.debug_bounds("settings-category-Agents") {
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    async fn an_in_flight_install_hides_the_action_and_shows_progress(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, settings) = install_state_window(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state("opencode", Some(InstallState::InFlight));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_none(),
+            "the action is not clickable while the install is in flight"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-status-0").is_some(),
+            "progress replaces the action"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_failed_install_shows_the_reason_and_allows_retry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, settings) = install_state_window(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state(
+                "opencode",
+                Some(InstallState::Failed(
+                    "opencode: checksum did not match; nothing was installed".into(),
+                )),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_some(),
+            "a failed install offers the action again"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-reason-0").is_some(),
+            "the failure names its reason instead of disappearing"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_settled_install_returns_to_the_normal_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, settings) = install_state_window(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state("opencode", Some(InstallState::InFlight));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state("opencode", None);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_some(),
+            "success returns the normal action"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-status-0").is_none()
+                && cx.debug_bounds("settings-agent-install-reason-0").is_none(),
+            "no progress or failure line survives a settled install"
         );
     }
 
