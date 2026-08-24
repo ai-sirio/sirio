@@ -12795,9 +12795,24 @@ mod tests {
             cx.debug_bounds("chat-unavailable-banner").is_some(),
             "the reason is stated in the transcript, not on stderr"
         );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        let button = cx
+            .debug_bounds("chat-open-settings")
+            .expect("the box carries the way to fix it");
+        cx.simulate_click(button.center(), Modifiers::none());
+        cx.run_until_parked();
         assert!(
-            cx.debug_bounds("chat-open-settings").is_some(),
-            "the box carries the way to fix it"
+            matches!(events.borrow().as_slice(), [ChatEvent::OpenSettings]),
+            "the button asks the workspace to open Settings, rather than \
+             merely existing: {:?}",
+            events.borrow()
         );
         assert!(
             cx.debug_bounds("chat-retry").is_none(),
