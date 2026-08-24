@@ -3,6 +3,7 @@
 //!
 //! This crate is a leaf by design — see `Cargo.toml`.
 
+mod atomic;
 mod client;
 mod installer;
 mod model;

@@ -659,6 +659,7 @@ fn set_executable(path: &Path) -> std::io::Result<()> {
     let _ = path;
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
