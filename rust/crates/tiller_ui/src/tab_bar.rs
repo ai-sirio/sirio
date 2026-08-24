@@ -243,7 +243,10 @@ impl TabBar {
     }
 
     /// Pins the launch sources the New Chat picker filters on (Task 9).
-    pub fn with_chat_launch_sources(mut self, sources: Vec<(String, LaunchSource)>) -> Self {
+    pub fn with_chat_launch_sources(
+        mut self,
+        sources: Vec<(String, LaunchSource)>,
+    ) -> Self {
         self.chat_launch_sources = sources.into_iter().collect();
         self
     }
@@ -788,10 +791,7 @@ mod tests {
                 .with_chat_agents(vec![available_agent("codex", "Codex")])
                 .with_chat_launch_sources(vec![(
                     "codex".to_string(),
-                    LaunchSource::Builtin {
-                        program: "codex-acp".into(),
-                        args: vec![],
-                    },
+                    LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
                 )])
                 .on_new_tab(move |action| collected.borrow_mut().push(action))
         });
@@ -1017,10 +1017,7 @@ mod tests {
                 .with_chat_launch_sources(vec![
                     (
                         "codex".to_string(),
-                        LaunchSource::Builtin {
-                            program: "codex-acp".into(),
-                            args: vec![],
-                        },
+                        LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
                     ),
                     (
                         "pi".to_string(),

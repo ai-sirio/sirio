@@ -1063,7 +1063,11 @@ pub mod fs_actions {
             command
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
         {
             let mut command = Command::new("__tiller_unsupported_platform_open__");
             command.arg(target);
@@ -1128,7 +1132,11 @@ pub mod fs_actions {
             Some(command)
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
         {
             None
         }

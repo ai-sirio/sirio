@@ -616,13 +616,12 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|entry| entry.label == "Move Tab to Other Pane" && entry.is_enabled()),
+                .any(|entry| entry.label == "Move Tab to Other Pane"
+                    && entry.is_enabled()),
             "the genuinely meaningful move command is still offered"
         );
         assert!(
-            commands
-                .iter()
-                .any(|entry| entry.label == "Move Tab Earlier"),
+            commands.iter().any(|entry| entry.label == "Move Tab Earlier"),
             "tab reordering is still offered"
         );
     }

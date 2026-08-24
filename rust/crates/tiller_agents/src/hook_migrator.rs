@@ -178,10 +178,7 @@ mod tests {
         );
 
         // Not ours, and already current: both left alone.
-        assert_eq!(
-            rewrite_command("C:\\Windows\\System32\\cmd.exe /C echo", current),
-            None
-        );
+        assert_eq!(rewrite_command("C:\\Windows\\System32\\cmd.exe /C echo", current), None);
         assert_eq!(
             rewrite_command(&format!("\"{current}\" notify"), current),
             None

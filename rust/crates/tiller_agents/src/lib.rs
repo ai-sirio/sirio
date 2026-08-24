@@ -333,9 +333,8 @@ pub fn find_executable_in_path_checked(
     // `Path::is_absolute` already recognizes — the extra backslash check
     // catches the relative-but-pathlike form (`foo\bar`) that would
     // otherwise be misread as a bare name and joined onto PATH directories.
-    let verbatim = candidate.is_absolute()
-        || program.contains('/')
-        || (cfg!(windows) && program.contains('\\'));
+    let verbatim =
+        candidate.is_absolute() || program.contains('/') || (cfg!(windows) && program.contains('\\'));
 
     // Every variant in probe order, dir-major when searching PATH. On
     // Windows those are the PATHEXT suffixes, mirroring how cmd.exe resolves
@@ -393,15 +392,9 @@ pub fn find_executable_in_path_checked(
 fn on_disk_spelling(candidate: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
-        let Some(parent) = candidate.parent() else {
-            return candidate;
-        };
-        let Some(wanted) = candidate.file_name() else {
-            return candidate;
-        };
-        let Ok(entries) = std::fs::read_dir(parent) else {
-            return candidate;
-        };
+        let Some(parent) = candidate.parent() else { return candidate; };
+        let Some(wanted) = candidate.file_name() else { return candidate; };
+        let Ok(entries) = std::fs::read_dir(parent) else { return candidate; };
         for entry in entries.flatten() {
             let name = entry.file_name();
             if name.eq_ignore_ascii_case(wanted) {
@@ -635,12 +628,7 @@ mod tests {
         // chat could say anything.
         for adapter in ALL {
             if let Some(program) = adapter.builtin_acp() {
-                assert_ne!(
-                    program.program,
-                    "npx",
-                    "{} still launches npx",
-                    adapter.id()
-                );
+                assert_ne!(program.program, "npx", "{} still launches npx", adapter.id());
                 assert!(
                     !program.args.iter().any(|arg| arg.contains('@')),
                     "{} still names a package version",

@@ -39,9 +39,9 @@
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::GitError;
@@ -930,8 +930,7 @@ mod tests {
     fn missing_git_binary_reports_spawn_failure() {
         let scratch = scratch_dir();
         let missing = scratch.join("this-binary-does-not-exist-git");
-        let result =
-            GitRunner::run_streaming_with_binary(&missing, &["--version"], Path::new("/"), |_| {});
+        let result = GitRunner::run_streaming_with_binary(&missing, &["--version"], Path::new("/"), |_| {});
         assert!(
             matches!(result, Err(GitError::Spawn { .. })),
             "expected Spawn for a missing binary, got {result:?}"

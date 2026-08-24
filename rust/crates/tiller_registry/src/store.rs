@@ -119,7 +119,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("tiller-store-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir()
+            .join(format!("tiller-store-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -152,10 +153,7 @@ mod tests {
     fn writing_twice_replaces_rather_than_appends() {
         let store = InstallStore::new(temp_root("replace"));
         store.write(&agent()).unwrap();
-        let newer = InstalledAgent {
-            version: "1.7.0".into(),
-            ..agent()
-        };
+        let newer = InstalledAgent { version: "1.7.0".into(), ..agent() };
         store.write(&newer).unwrap();
         assert_eq!(store.manifest("codex-acp").unwrap().version, "1.7.0");
     }

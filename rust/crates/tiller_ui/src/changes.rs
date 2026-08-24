@@ -4015,7 +4015,9 @@ mod tests {
     /// refuses every mutation: the commit is immutable, so there is nothing
     /// to stage, unstage or discard.
     #[gpui::test]
-    async fn a_commit_view_lists_that_commit_s_files_and_forbids_staging(cx: &mut TestAppContext) {
+    async fn a_commit_view_lists_that_commit_s_files_and_forbids_staging(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(Theme::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);

@@ -119,7 +119,9 @@ impl RightPanel {
                     .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
             )
     }
+
 }
+
 
 fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
     match status {
@@ -140,6 +142,8 @@ fn activity_status_glyph(status: ActivityStatus) -> &'static str {
         ActivityStatus::Error => "!",
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -239,3 +243,4 @@ mod tests {
         );
     }
 }
+

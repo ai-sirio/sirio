@@ -22,11 +22,7 @@ fn answers_initialize(program: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child
-        .stdin
-        .as_mut()?
-        .write_all(format!("{INITIALIZE}\n").as_bytes())
-        .ok()?;
+    child.stdin.as_mut()?.write_all(format!("{INITIALIZE}\n").as_bytes()).ok()?;
     let stdout = child.stdout.take()?;
     let mut line = String::new();
     let read = BufReader::new(stdout).read_line(&mut line).ok()?;
@@ -40,19 +36,14 @@ fn opencode_answers_the_acp_handshake_it_claims() {
         eprintln!("SKIP: opencode is not on PATH");
         return;
     };
-    let claim = OpenCodeAdapter
-        .builtin_acp()
-        .expect("opencode claims an in-binary ACP server");
+    let claim = OpenCodeAdapter.builtin_acp().expect("opencode claims an in-binary ACP server");
     let response = answers_initialize(&program.to_string_lossy(), claim.args)
         .expect("opencode acp answered nothing on stdout");
     assert!(
         response.contains("\"protocolVersion\""),
         "expected an ACP initialize result, got: {response}"
     );
-    assert!(
-        response.contains("OpenCode"),
-        "expected agentInfo naming OpenCode: {response}"
-    );
+    assert!(response.contains("OpenCode"), "expected agentInfo naming OpenCode: {response}");
 }
 
 #[test]

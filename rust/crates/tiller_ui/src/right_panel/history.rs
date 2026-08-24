@@ -6,10 +6,9 @@ use std::time::Duration;
 
 use chrono::TimeZone;
 use gpui::{
-    AnyElement, AppContext as _, Context, Corners, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Path, Render,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, canvas, div, fill, point,
-    prelude::FluentBuilder as _, px, uniform_list,
+    AnyElement, AppContext as _, Context, Corners, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Path, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
+    canvas, div, fill, point, prelude::FluentBuilder as _, px, uniform_list,
 };
 use tiller_git::{CommitRecord, GitLog, GraphRow, LogFilter, layout};
 use tiller_theme::Theme;
@@ -143,7 +142,9 @@ impl GitHistory {
                             // Order matters: on a repository with commits *and*
                             // a filter, both arms could fire, and the filter is
                             // the one that explains the emptiness.
-                            (true, _) if this.filter.is_filtering() => Some(EmptyReason::NoMatches),
+                            (true, _) if this.filter.is_filtering() => {
+                                Some(EmptyReason::NoMatches)
+                            }
                             (true, Some(false)) => Some(EmptyReason::NoCommits),
                             _ => None,
                         };
@@ -865,10 +866,7 @@ mod tests {
         };
 
         assert!(!node_is_drawable(&beyond));
-        assert!(
-            node_is_drawable(&inside),
-            "the last lane inside the cap still draws"
-        );
+        assert!(node_is_drawable(&inside), "the last lane inside the cap still draws");
     }
 
     #[test]
@@ -903,9 +901,7 @@ mod tests {
             );
         });
         pump_until(cx, || {
-            history.read_with(cx, |history, _| {
-                history.settled && history.commits.is_empty()
-            })
+            history.read_with(cx, |history, _| history.settled && history.commits.is_empty())
         });
 
         assert_eq!(
@@ -938,9 +934,7 @@ mod tests {
             );
         });
         pump_until(cx, || {
-            history.read_with(cx, |history, _| {
-                history.settled && history.commits.len() == 1
-            })
+            history.read_with(cx, |history, _| history.settled && history.commits.len() == 1)
         });
 
         history.read_with(cx, |history, _| {
@@ -965,8 +959,9 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let history =
-            cx.update(|window, _| window.root::<GitHistory>().flatten().expect("history root"));
+        let history = cx.update(|window, _| {
+            window.root::<GitHistory>().flatten().expect("history root")
+        });
         pump_until(&cx.cx, || {
             history.read_with(&cx.cx, |history, _| history.commits.len() == 2)
         });
