@@ -9,12 +9,29 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tiller_agents::{AgentAdapter, OhMyPiAdapter, OpenCodeAdapter};
+
+/// How long `answers_initialize` will wait for a reply. 30 s is generous on
+/// purpose: Node/Bun-hosted CLIs cold-start slowly, so the deadline must not
+/// be tight.
+const ANSWERS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false}}}}"#;
 
 fn answers_initialize(program: &str, args: &[&str]) -> Option<String> {
+    answers_initialize_within(program, args, ANSWERS_TIMEOUT)
+}
+
+/// Spawn `program` with `args`, send it an ACP `initialize` request, and
+/// return the first reply line — but never block longer than `timeout`.
+/// On timeout the child is killed AND reaped before `None` is returned; the
+/// kill+wait also runs on every earlier exit path, closing the un-reaped
+/// child gap this helper used to leave.
+fn answers_initialize_within(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -22,16 +39,53 @@ fn answers_initialize(program: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    child
+    let mut answer = None;
+    // Only read if the request actually went in; any failure skips straight
+    // to the kill+wait below.
+    if child
         .stdin
-        .as_mut()?
-        .write_all(format!("{INITIALIZE}\n").as_bytes())
-        .ok()?;
-    let stdout = child.stdout.take()?;
-    let mut line = String::new();
-    let read = BufReader::new(stdout).read_line(&mut line).ok()?;
+        .as_mut()
+        .is_some_and(|stdin| stdin.write_all(format!("{INITIALIZE}\n").as_bytes()).is_ok())
+        && let Some(stdout) = child.stdout.take()
+    {
+        // `child.stdout.take()` hands the pipe to the reader thread while the
+        // parent keeps the `Child`, so it can still kill it on timeout.
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            if let Ok(read) = BufReader::new(stdout).read_line(&mut line) {
+                let _ = tx.send((read > 0).then_some(line));
+            }
+        });
+        // recv_timeout bounds the block; a timed-out or disconnected channel
+        // both mean no answer within the deadline.
+        answer = match rx.recv_timeout(timeout) {
+            Ok(reply) => reply,
+            Err(_) => None,
+        };
+    }
     let _ = child.kill();
-    (read > 0).then_some(line)
+    let _ = child.wait();
+    answer
+}
+
+#[test]
+fn answers_initialize_within_times_out_on_a_silent_child() {
+    // A child that starts and never speaks: the same never-exits spelling
+    // used elsewhere in this repo.
+    let (program, args) = if cfg!(windows) {
+        ("cmd", vec!["/C", "ping -n 30 127.0.0.1 > nul"])
+    } else {
+        ("sh", vec!["-c", "sleep 30"])
+    };
+    let start = Instant::now();
+    let answer = answers_initialize_within(program, &args, Duration::from_millis(500));
+    let elapsed = start.elapsed();
+    assert!(answer.is_none(), "a silent child must time out, not answer");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "returned after {elapsed:?}; expected it to return at the deadline, not wait the child out"
+    );
 }
 
 #[test]
