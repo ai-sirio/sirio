@@ -389,8 +389,7 @@ mod windows_process {
                 FileTime,
                 FileTime,
             ) = std::mem::zeroed();
-            let ok =
-                GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+            let ok = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
             CloseHandle(process);
             if ok == 0 {
                 return None;
@@ -483,7 +482,10 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut name_of: HashMap<u32, String> = HashMap::new();
     for entry in entries {
-        children_of.entry(entry.parent_pid).or_default().push(entry.pid);
+        children_of
+            .entry(entry.parent_pid)
+            .or_default()
+            .push(entry.pid);
         name_of.insert(entry.pid, entry.name);
     }
 
@@ -507,10 +509,11 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     // GetProcessTimes round trip on the caller's thread, so every pid pays it
     // at most once per walk.
     let mut creation_times: HashMap<u32, Option<u64>> = HashMap::new();
-    let resolve_creation_time =
-        |cache: &mut HashMap<u32, Option<u64>>, pid: u32| -> Option<u64> {
-            *cache.entry(pid).or_insert_with(|| windows_process::creation_time(pid))
-        };
+    let resolve_creation_time = |cache: &mut HashMap<u32, Option<u64>>, pid: u32| -> Option<u64> {
+        *cache
+            .entry(pid)
+            .or_insert_with(|| windows_process::creation_time(pid))
+    };
     // The floor of last resort for the pid-reuse guard below. Resolving it
     // once here rather than per-node matters for how much the guard actually
     // defends: `OpenProcess` is denied for a large share of processes on a
@@ -628,12 +631,9 @@ mod windows_tests {
     /// thread.
     #[test]
     fn resolves_creation_times_only_for_the_walked_subtree() {
-        let comspec =
-            std::env::var("ComSpec").expect("ComSpec is set on every Windows install");
-        let root = std::env::temp_dir().join(format!(
-            "tiller-activity-cost-{}",
-            std::process::id()
-        ));
+        let comspec = std::env::var("ComSpec").expect("ComSpec is set on every Windows install");
+        let root =
+            std::env::temp_dir().join(format!("tiller-activity-cost-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create cost fixture directory");
         let agent = root.join("codex.exe");
@@ -650,9 +650,14 @@ mod windows_tests {
         let queries = (after - before) as usize;
         // Taken after the walk; snapshot size wobbles between calls, but by
         // far less than the margin asserted against.
-        let snapshot_size = windows_process::entries().expect("count snapshot rows").len();
+        let snapshot_size = windows_process::entries()
+            .expect("count snapshot rows")
+            .len();
 
-        assert!(names.contains("codex"), "fixture must be found, got {names:?}");
+        assert!(
+            names.contains("codex"),
+            "fixture must be found, got {names:?}"
+        );
         assert!(
             snapshot_size > 50,
             "expected a realistically populated system, got {snapshot_size} rows"

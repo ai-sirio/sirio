@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use gpui::{px, Context, Pixels, Rgba, IntoElement, Styled};
+use gpui::{Context, IntoElement, Pixels, Rgba, Styled, px};
 
 /// Blink cadence. 530ms matches the conventional text-caret cycle closely
 /// enough that nobody perceives the difference from a native field.
