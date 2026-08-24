@@ -472,7 +472,9 @@ fn parse_notifications(
     let mut offset = 0usize;
     while buffer.len().saturating_sub(offset) >= HEADER_BYTES {
         let next = u32::from_ne_bytes(
-            buffer[offset..offset + 4].try_into().expect("slice is four bytes"),
+            buffer[offset..offset + 4]
+                .try_into()
+                .expect("slice is four bytes"),
         ) as usize;
         let action = u32::from_ne_bytes(
             buffer[offset + 4..offset + 8]

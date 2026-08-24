@@ -90,9 +90,7 @@ pub(super) struct FileContextMenu {
     position: Point<Pixels>,
 }
 
-
 impl RightPanel {
-
     /// Refreshes the changed-paths set and the directory tree off the
     /// render thread. Single-flight on the walk task.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -474,12 +472,7 @@ impl RightPanel {
             .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                 cx.stop_propagation();
                 context_entity.update(cx, |panel, cx| {
-                    panel.open_file_context_menu(
-                        context_path.clone(),
-                        is_dir,
-                        event.position,
-                        cx,
-                    );
+                    panel.open_file_context_menu(context_path.clone(), is_dir, event.position, cx);
                 });
             })
             // F-CORE-FILE-03: give every non-directory row a real drag source
@@ -523,7 +516,9 @@ impl RightPanel {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(IconElement::new(glyph, IconSize::Medium).text_color(theme.subtitle)),
+                        .child(
+                            IconElement::new(glyph, IconSize::Medium).text_color(theme.subtitle),
+                        ),
                 )
             })
             .child(
@@ -619,12 +614,9 @@ impl RightPanel {
             _ => {}
         }
     }
-
 }
 
-
 impl RightPanel {
-
     pub(super) fn render_files(
         &self,
         entity: gpui::Entity<Self>,
@@ -729,9 +721,7 @@ impl RightPanel {
             .child(body)
             .into_any_element()
     }
-
 }
-
 
 fn files_action_button(
     label: &'static str,
@@ -957,8 +947,6 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
 fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
     crate::git_status_style::status_color(status, theme)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1901,8 +1889,6 @@ mod tests {
         );
     }
 
-
-
     /// F-CHG-13: a modified file row exposes an Open diff action and sends
     /// the exact repo-relative path to the shell boundary.
     #[gpui::test]
@@ -2379,9 +2365,7 @@ mod tests {
     /// row with no menu at all. `Open` is the one entry a directory must
     /// not carry — it emits `OpenFile` for a path no editor opens.
     #[gpui::test]
-    async fn right_clicking_a_folder_offers_refresh_but_not_open(
-        cx: &mut TestAppContext,
-    ) {
+    async fn right_clicking_a_folder_offers_refresh_but_not_open(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         std::fs::create_dir(dir.0.join("nested")).expect("create folder");
 
@@ -2575,6 +2559,4 @@ mod tests {
             "Retry stays exactly where the user was about to click it"
         );
     }
-
 }
-

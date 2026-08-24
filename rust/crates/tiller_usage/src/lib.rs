@@ -77,8 +77,7 @@ pub(crate) fn user_home_dir() -> Option<std::path::PathBuf> {
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
             .or_else(|| {
-                let drive =
-                    std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
+                let drive = std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty())?;
                 let path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty())?;
                 Some(std::path::PathBuf::from(drive).join(path))
             })

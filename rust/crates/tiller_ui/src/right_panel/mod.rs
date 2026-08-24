@@ -14,8 +14,7 @@ mod history;
 mod history_toolbar;
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*,
-    px,
+    App, Context, EventEmitter, FocusHandle, MouseButton, Render, Task, Window, div, prelude::*, px,
 };
 use std::path::PathBuf;
 use tiller_theme::Theme;
@@ -211,9 +210,7 @@ pub struct RightPanel {
     history_subscription: Option<gpui::Subscription>,
 }
 
-
 impl RightPanel {
-
     /// Creates the panel for one checkout.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -313,10 +310,7 @@ impl RightPanel {
         self.walk_generation += 1;
         cx.notify();
     }
-
 }
-
-
 
 impl RightPanel {
     /// The colour of the Activity rail badge, or `None` when nothing wants
@@ -379,13 +373,13 @@ impl RightPanel {
                     .rounded(px(4.0))
                     .when(is_active, |this| this.bg(theme.row_hover))
                     .hover(|style| style.bg(theme.row_hover))
-                    .child(
-                        IconElement::new(view.icon(), IconSize::Small).text_color(if is_active {
+                    .child(IconElement::new(view.icon(), IconSize::Small).text_color(
+                        if is_active {
                             theme.title
                         } else {
                             theme.subtitle
-                        }),
-                    )
+                        },
+                    ))
                     .when_some(badge_color, |this, color| {
                         this.child(
                             div()
@@ -451,28 +445,26 @@ impl RightPanel {
         let changes = cx.new(|cx| crate::changes::ChangesTab::new(repo_root, cx));
         self.changes_subscriptions = vec![
             cx.subscribe(&changes, |_, _, event: &ChangesTabEvent, cx| match event {
-                ChangesTabEvent::OpenFile(path) => {
-                    cx.emit(RightPanelEvent::OpenFile(path.clone()))
-                }
+                ChangesTabEvent::OpenFile(path) => cx.emit(RightPanelEvent::OpenFile(path.clone())),
             }),
-            cx.subscribe(&changes, |_, _, event: &ChangesTabActionEvent, cx| match event {
-                ChangesTabActionEvent::OpenDiff(path) => {
-                    cx.emit(RightPanelActionEvent::OpenDiff(path.clone()))
-                }
-                ChangesTabActionEvent::ResolveInTerminal(path) => {
-                    cx.emit(RightPanelActionEvent::ResolveInTerminal(path.clone()))
-                }
-            }),
+            cx.subscribe(
+                &changes,
+                |_, _, event: &ChangesTabActionEvent, cx| match event {
+                    ChangesTabActionEvent::OpenDiff(path) => {
+                        cx.emit(RightPanelActionEvent::OpenDiff(path.clone()))
+                    }
+                    ChangesTabActionEvent::ResolveInTerminal(path) => {
+                        cx.emit(RightPanelActionEvent::ResolveInTerminal(path.clone()))
+                    }
+                },
+            ),
         ];
         self.changes = Some(changes.clone());
         changes
     }
 
     fn render_diff(&mut self, _theme: Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex_1()
-            .min_h(px(0.0))
-            .child(self.ensure_changes(cx))
+        div().flex_1().min_h(px(0.0)).child(self.ensure_changes(cx))
     }
 
     fn ensure_history(&mut self, cx: &mut Context<Self>) -> gpui::Entity<GitHistory> {
@@ -502,13 +494,10 @@ impl RightPanel {
     }
 }
 
-
 impl EventEmitter<RightPanelEvent> for RightPanel {}
 impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 
-
 impl Render for RightPanel {
-
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         if self.worktree_selected {
@@ -534,9 +523,9 @@ impl Render for RightPanel {
                     PanelView::Files => self
                         .render_files(entity.clone(), theme, cx)
                         .into_any_element(),
-                    PanelView::Activity => {
-                        self.render_activity(entity.clone(), theme).into_any_element()
-                    }
+                    PanelView::Activity => self
+                        .render_activity(entity.clone(), theme)
+                        .into_any_element(),
                     PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
                     PanelView::History => self.render_history(theme, cx).into_any_element(),
                 }
@@ -547,9 +536,7 @@ impl Render for RightPanel {
                 })
             })
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -728,12 +715,8 @@ mod tests {
         git(&dir.0, &["commit", "-q", "-m", "initial"]);
         let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let panel = cx.update(|window, _cx| {
-            window
-                .root::<RightPanel>()
-                .flatten()
-                .expect("panel root")
-        });
+        let panel =
+            cx.update(|window, _cx| window.root::<RightPanel>().flatten().expect("panel root"));
         panel.update(&mut cx, |panel, cx| {
             panel.bind_worktree(dir.0.clone(), cx);
         });
@@ -789,18 +772,9 @@ mod tests {
         let dir = TempDir::new();
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
 
-        let idle = ActivitySurface::new(
-            Icon::SquareTerminal,
-            "one",
-            "",
-            ActivityStatus::Idle,
-        );
-        let waiting = ActivitySurface::new(
-            Icon::SquareTerminal,
-            "two",
-            "",
-            ActivityStatus::NeedsInput,
-        );
+        let idle = ActivitySurface::new(Icon::SquareTerminal, "one", "", ActivityStatus::Idle);
+        let waiting =
+            ActivitySurface::new(Icon::SquareTerminal, "two", "", ActivityStatus::NeedsInput);
 
         panel.update(cx, |panel, cx| {
             panel.set_activity(vec![idle.clone()], cx);

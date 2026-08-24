@@ -1085,7 +1085,9 @@ pub fn code_family() -> &'static str {
 /// The resolved terminal font family, resolving the system's generic
 /// monospace answer if nothing has been resolved yet.
 pub fn terminal_family() -> &'static str {
-    TERMINAL_FAMILY.get_or_init(system_monospace_family).as_str()
+    TERMINAL_FAMILY
+        .get_or_init(system_monospace_family)
+        .as_str()
 }
 
 /// The resolved Tiller theme stored as a GPUI global.
@@ -1599,7 +1601,11 @@ mod tests {
                     assert_ne!(first, second, "lane colours must be distinguishable");
                 }
             }
-            assert_eq!(theme.graph_lane(6), theme.graph_lane(0), "the palette cycles");
+            assert_eq!(
+                theme.graph_lane(6),
+                theme.graph_lane(0),
+                "the palette cycles"
+            );
         }
     }
 
@@ -2671,11 +2677,10 @@ mod tests {
             "JetBrainsMono Nerd Font"
         );
 
-        let without_jetbrains_nerd: HashSet<String> =
-            ["MesloLGS Nerd Font Mono", "JetBrains Mono"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+        let without_jetbrains_nerd: HashSet<String> = ["MesloLGS Nerd Font Mono", "JetBrains Mono"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(
             resolve_terminal_family(&without_jetbrains_nerd),
             "MesloLGS Nerd Font Mono"
