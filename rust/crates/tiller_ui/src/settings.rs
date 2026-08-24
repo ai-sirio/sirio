@@ -916,6 +916,10 @@ struct PermissionBadge {
 pub enum SettingsEvent {
     InstallAgent(String),
     UpdateAgent(String),
+    /// The Agents screen opened or its Refresh was pressed: the host
+    /// re-fetches the registry document (24 h cache respected) and
+    /// recomputes every launch source.
+    RefreshAgentSources,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -1636,7 +1640,14 @@ impl Settings {
     /// Selects the category shown in the detail column. Both the sidebar
     /// click and the control socket call this function.
     pub fn select_category(&mut self, category: SettingsCategory, cx: &mut Context<Self>) {
+        // Entering the Agents screen asks the host to re-check the launch
+        // sources (registry fetch respecting its cache + recompute).
+        let entering_agents =
+            category == SettingsCategory::Agents && self.category != SettingsCategory::Agents;
         self.category = category;
+        if entering_agents {
+            cx.emit(SettingsEvent::RefreshAgentSources);
+        }
         cx.notify();
     }
 
@@ -1949,6 +1960,10 @@ impl Settings {
     fn refresh_agent_availability(&mut self, cx: &mut Context<Self>) {
         self.apply_agent_discovery(try_discover_availability());
         self.agent_last_refreshed = Some(Self::format_refreshed_stamp());
+        // The PATH sweep above is local; the registry document itself is
+        // the host's to re-fetch (24 h cache respected) — Task 9's promise,
+        // wired here.
+        cx.emit(SettingsEvent::RefreshAgentSources);
         cx.notify();
     }
 
@@ -4778,7 +4793,7 @@ mod tests {
                         SettingsEvent::InstallAgent(id) => {
                             recorder.borrow_mut().push(id.clone())
                         }
-                        SettingsEvent::UpdateAgent(_) => {}
+                        SettingsEvent::UpdateAgent(_) | SettingsEvent::RefreshAgentSources => {}
                     }
                 });
             // The subscription must outlive this update scope for the whole
@@ -4962,6 +4977,108 @@ mod tests {
             cx.debug_bounds("settings-agent-install-status-0").is_none()
                 && cx.debug_bounds("settings-agent-install-reason-0").is_none(),
             "no progress or failure line survives a settled install"
+        );
+    }
+
+    #[gpui::test]
+    async fn opening_the_agents_screen_asks_the_host_to_recheck_launch_sources(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use tiller_registry::LaunchSource;
+        cx.update(Theme::init);
+        let sources = vec![(
+            "codex".to_string(),
+            LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_launch_sources(sources)
+        });
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let recorder = events.clone();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let settings = cx.update(|window, app| {
+            let settings_entity = window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root");
+            let subscription =
+                app.subscribe(&settings_entity, move |_entity, event: &SettingsEvent, _app| {
+                    if let SettingsEvent::RefreshAgentSources = event {
+                        recorder.borrow_mut().push("recheck".to_string());
+                    }
+                });
+            // The subscription must outlive this update scope for the whole
+            // test; forgetting it pins it to the entities' lifetimes.
+            std::mem::forget(subscription);
+            settings_entity
+        });
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.select_category(SettingsCategory::Agents, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["recheck".to_string()],
+            "entering the Agents screen asks the host to recheck the registry"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_refresh_button_asks_the_host_to_recheck_launch_sources(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use tiller_registry::LaunchSource;
+        cx.update(Theme::init);
+        let sources = vec![(
+            "codex".to_string(),
+            LaunchSource::Builtin { program: "codex-acp".into(), args: vec![] },
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_launch_sources(sources)
+        });
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let recorder = events.clone();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let settings = cx.update(|window, app| {
+            let settings_entity = window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root");
+            let subscription =
+                app.subscribe(&settings_entity, move |_entity, event: &SettingsEvent, _app| {
+                    if let SettingsEvent::RefreshAgentSources = event {
+                        recorder.borrow_mut().push("recheck".to_string());
+                    }
+                });
+            // The subscription must outlive this update scope for the whole
+            // test; forgetting it pins it to the entities' lifetimes.
+            std::mem::forget(subscription);
+            settings_entity
+        });
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.select_category(SettingsCategory::Agents, cx);
+        });
+        cx.run_until_parked();
+        let opened = events.borrow().len();
+        assert_eq!(opened, 1, "entering Agents emits exactly one recheck");
+
+        let refresh = cx
+            .debug_bounds("refresh-agents")
+            .expect("the Refresh button is drawn");
+        cx.simulate_click(refresh.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().len(),
+            2,
+            "pressing ↻ Refresh asks the host to recheck again"
         );
     }
 
