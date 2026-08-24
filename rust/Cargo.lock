@@ -6978,9 +6978,11 @@ name = "tiller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "gpui",
  "gpui_platform",
  "gtk",
+ "image",
  "ksni",
  "rusqlite",
  "serde",
