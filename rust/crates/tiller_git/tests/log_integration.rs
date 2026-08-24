@@ -156,9 +156,15 @@ fn reads_commits_newest_first_with_parents() {
     let commits = GitLog::commits(dir.path(), 0, 100, &LogFilter::default()).expect("log");
 
     assert_eq!(commits[0].subject, "merge side");
-    assert_eq!(commits[0].parents.len(), 2, "a --no-ff merge has two parents");
-    assert!(commits.iter().any(|c| c.subject == "c2 on side"),
-        "--branches must include commits reachable only from other local branches");
+    assert_eq!(
+        commits[0].parents.len(),
+        2,
+        "a --no-ff merge has two parents"
+    );
+    assert!(
+        commits.iter().any(|c| c.subject == "c2 on side"),
+        "--branches must include commits reachable only from other local branches"
+    );
 }
 
 #[test]
@@ -179,9 +185,11 @@ fn a_repository_without_commits_reports_no_commits_rather_than_an_error() {
     git(dir.path(), &["init", "-q", "-b", "main"]);
 
     assert!(!GitLog::has_commits(dir.path()));
-    assert!(GitLog::commits(dir.path(), 0, 10, &LogFilter::default())
-        .expect("log")
-        .is_empty());
+    assert!(
+        GitLog::commits(dir.path(), 0, 10, &LogFilter::default())
+            .expect("log")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -207,12 +215,13 @@ fn commit_files_and_diff_support_merge_commits() {
     let sha = head_sha(dir.path(), "HEAD");
 
     let files = tiller_git::commit_files(dir.path(), &sha).expect("files");
-    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, Path::new("b.txt"))
-        .expect("diff");
+    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, Path::new("b.txt")).expect("diff");
 
-    assert!(files.iter().any(|(status, path)| {
-        *status == 'A' && path == Path::new("b.txt")
-    }));
+    assert!(
+        files
+            .iter()
+            .any(|(status, path)| { *status == 'A' && path == Path::new("b.txt") })
+    );
     assert!(!diff.hunks.is_empty());
 }
 
@@ -247,8 +256,8 @@ fn commit_diff_entry_ignores_forced_git_colors() {
     git(dir.path(), &["config", "color.ui", "always"]);
     let sha = head_sha(dir.path(), "HEAD");
 
-    let diff = tiller_git::commit_diff_entry(dir.path(), &sha, Path::new("café.txt"))
-        .expect("diff");
+    let diff =
+        tiller_git::commit_diff_entry(dir.path(), &sha, Path::new("café.txt")).expect("diff");
 
     assert!(!diff.hunks.is_empty());
 }

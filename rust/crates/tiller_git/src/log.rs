@@ -248,10 +248,7 @@ pub fn parse_log(output: &str) -> Vec<CommitRecord> {
             let subject = fields[5];
             Some(CommitRecord {
                 sha: sha.to_owned(),
-                parents: parents
-                    .split_whitespace()
-                    .map(ToOwned::to_owned)
-                    .collect(),
+                parents: parents.split_whitespace().map(ToOwned::to_owned).collect(),
                 refs: refs
                     .split(',')
                     .map(str::trim)
@@ -283,7 +280,9 @@ mod tests {
 
     #[test]
     fn parses_a_single_commit() {
-        let output = fixture(&["0123456789abcdef0123456789abcdef01234567\u{1f}\u{1f}HEAD -> main\u{1f}Ada\u{1f}1700000000\u{1f}initial commit"]);
+        let output = fixture(&[
+            "0123456789abcdef0123456789abcdef01234567\u{1f}\u{1f}HEAD -> main\u{1f}Ada\u{1f}1700000000\u{1f}initial commit",
+        ]);
 
         let commits = parse_log(&output);
 
@@ -298,7 +297,9 @@ mod tests {
 
     #[test]
     fn parses_multiple_parents_of_a_merge() {
-        let output = fixture(&["1111111111111111111111111111111111111111\u{1f}p1 p2\u{1f}\u{1f}Ada\u{1f}1700000001\u{1f}merge branch 'x'"]);
+        let output = fixture(&[
+            "1111111111111111111111111111111111111111\u{1f}p1 p2\u{1f}\u{1f}Ada\u{1f}1700000001\u{1f}merge branch 'x'",
+        ]);
 
         let commits = parse_log(&output);
 
@@ -307,7 +308,9 @@ mod tests {
 
     #[test]
     fn an_empty_ref_field_yields_no_refs() {
-        let output = fixture(&["2222222222222222222222222222222222222222\u{1f}p1\u{1f}\u{1f}Ada\u{1f}1700000002\u{1f}fix: thing"]);
+        let output = fixture(&[
+            "2222222222222222222222222222222222222222\u{1f}p1\u{1f}\u{1f}Ada\u{1f}1700000002\u{1f}fix: thing",
+        ]);
 
         let commits = parse_log(&output);
 
@@ -316,7 +319,9 @@ mod tests {
 
     #[test]
     fn splits_multiple_refs_on_comma() {
-        let output = fixture(&["3333333333333333333333333333333333333333\u{1f}p1\u{1f}HEAD -> main, origin/main, tag: v1\u{1f}Ada\u{1f}1\u{1f}s"]);
+        let output = fixture(&[
+            "3333333333333333333333333333333333333333\u{1f}p1\u{1f}HEAD -> main, origin/main, tag: v1\u{1f}Ada\u{1f}1\u{1f}s",
+        ]);
 
         let commits = parse_log(&output);
 
@@ -332,12 +337,17 @@ mod tests {
 
     #[test]
     fn keeps_spaces_and_unicode_in_a_subject() {
-        let output = fixture(&["4444444444444444444444444444444444444444\u{1f}p1\u{1f}\u{1f}Ada Lovelace\u{1f}3\u{1f}feat: aggiunge il pannello — con trattino"]);
+        let output = fixture(&[
+            "4444444444444444444444444444444444444444\u{1f}p1\u{1f}\u{1f}Ada Lovelace\u{1f}3\u{1f}feat: aggiunge il pannello — con trattino",
+        ]);
 
         let commits = parse_log(&output);
 
         assert_eq!(commits[0].author, "Ada Lovelace");
-        assert_eq!(commits[0].subject, "feat: aggiunge il pannello — con trattino");
+        assert_eq!(
+            commits[0].subject,
+            "feat: aggiunge il pannello — con trattino"
+        );
     }
 
     #[test]

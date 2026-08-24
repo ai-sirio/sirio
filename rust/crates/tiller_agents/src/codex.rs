@@ -52,17 +52,6 @@ impl super::AgentAdapter for CodexAdapter {
         ))
     }
 
-    fn acp_program(&self) -> Option<crate::AcpProgram> {
-        // OpenAI's official ACP adapter (published under the Agent Client
-        // Protocol org, `@agentclientprotocol/codex-acp`). `@latest`
-        // matches the tree's convention; the ACP registry pins versions
-        // for reproducible installs.
-        Some(crate::AcpProgram::new(
-            "npx",
-            &["-y", "@agentclientprotocol/codex-acp@latest"],
-        ))
-    }
-
     fn summarizer_command(&self, prompt: &str) -> Option<String> {
         Some(format!(
             "codex exec --output-last-message /dev/stdout {}",

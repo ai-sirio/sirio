@@ -128,17 +128,6 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
         Some(format!("claude --resume {}", shell_quote(session_ref)))
     }
 
-    fn acp_program(&self) -> Option<crate::AcpProgram> {
-        // Anthropic's official ACP wrapper, the same package the chat
-        // default already launches. `@latest` matches the tree's
-        // convention; the ACP registry pins versions for reproducible
-        // installs.
-        Some(crate::AcpProgram::new(
-            "npx",
-            &["-y", "@agentclientprotocol/claude-agent-acp@latest"],
-        ))
-    }
-
     fn summarizer_command(&self, prompt: &str) -> Option<String> {
         Some(format!("claude -p {}", shell_quote(prompt)))
     }

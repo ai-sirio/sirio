@@ -44,13 +44,6 @@ impl super::AgentAdapter for PiAdapter {
         Some(format!("pi --session {}", shell_quote(session_ref)))
     }
 
-    fn acp_program(&self) -> Option<crate::AcpProgram> {
-        // Pi runs inside a Node/Bun TUI with no ACP server of its own.
-        // `None` is the honest answer: a chat tab must not be offered
-        // for it.
-        None
-    }
-
     fn summarizer_command(&self, prompt: &str) -> Option<String> {
         Some(format!("pi --print --no-tools {}", shell_quote(prompt)))
     }
