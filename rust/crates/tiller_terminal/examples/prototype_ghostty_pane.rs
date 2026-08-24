@@ -185,6 +185,33 @@ mod pane {
             self.terminal.vt_write(bytes);
         }
 
+        /// Test-only: like `frame`, but keeps the raw per-cell `Style`, so
+        /// measurements can see attributes `Run` flattens away (faint,
+        /// invisible, the five underline styles, colour kinds).
+        pub fn raw_cells(
+            &mut self,
+        ) -> anyhow::Result<Vec<Vec<(String, libghostty_vt::style::Style)>>> {
+            let snapshot = self.render.begin_update(&self.terminal)?.end()?;
+            let mut out: Vec<Vec<(String, libghostty_vt::style::Style)>> = Vec::new();
+            let mut row_iteration = self.rows.update(&snapshot)?;
+            while let Some(row) = row_iteration.next() {
+                let mut line: Vec<(String, libghostty_vt::style::Style)> = Vec::new();
+                let mut cell_iteration = self.cells.update(row)?;
+                while let Some(cell) = cell_iteration.next() {
+                    let graphemes = cell.graphemes().unwrap_or_default();
+                    let text: String = if graphemes.is_empty() {
+                        " ".to_string()
+                    } else {
+                        graphemes.into_iter().collect()
+                    };
+                    let style = cell.style().unwrap_or_default();
+                    line.push((text, style));
+                }
+                out.push(line);
+            }
+            Ok(out)
+        }
+
         /// Drain whatever the PTY produced and feed it to the parser.
         ///
         /// Polls rather than awaits, for the reason `lib.rs:1444` records about
@@ -922,6 +949,101 @@ mod tests {
         assert!(
             tiller_mangled,
             "expected CommandBuilder to escape the pre-wrapped quotes (\\\"echo …); got: {tiller}"
+        );
+    }
+
+    /// Measurement for #31: which SGR attributes does libghostty-vt hand the
+    /// embedder for free through the ordinary render path?
+    ///
+    /// Each attribute is wrapped around its own marker character and reset;
+    /// the markers are then looked up in the raw cell grid. Read straight off
+    /// `cell.style()` — deliberately NOT off `Run`, which flattens underline
+    /// to bool and drops faint/invisible entirely.
+    #[test]
+    fn sgr_attributes_survive_the_render_path() {
+        use libghostty_vt::style::{StyleColor, Underline};
+
+        // (marker char, SGR introducing it, attribute label)
+        let cases: &[(&str, &str, &str)] = &[
+            ("1", "1", "bold"),
+            ("2", "2", "dim/faint"),
+            ("3", "3", "italic"),
+            ("4", "4", "underline single"),
+            ("5", "21", "underline double"),
+            ("6", "4:3", "underline curly"),
+            ("7", "4:4", "underline dotted"),
+            ("8", "4:5", "underline dashed"),
+            ("9", "7", "inverse"),
+            ("h", "8", "hidden/invisible"),
+            ("k", "9", "strikethrough"),
+            ("p", "38;5;196", "fg 8-bit palette 196"),
+            ("t", "38;2;255;128;0", "fg truecolour"),
+        ];
+
+        let mut seq = String::new();
+        for (marker, sgr, _) in cases {
+            seq.push_str(&format!("\x1b[{sgr}m{marker}\x1b[0m"));
+        }
+
+        let mut pane = GhosttyPane::new(80, 24).expect("open a pty and a terminal");
+        pane.feed_vt(seq.as_bytes());
+
+        let grid = pane.raw_cells().expect("raw cells build");
+        let flat: Vec<&(String, _)> = grid.iter().flatten().collect();
+
+        println!(
+            "\n{:<22} {:<14} {:<34} {}",
+            "attribute", "SGR", "observed on cell.style()", "exposed?"
+        );
+        println!("{}", "-".repeat(90));
+        for (marker, sgr, label) in cases {
+            let (_, style) = flat
+                .iter()
+                .find(|(text, _)| text == *marker)
+                .unwrap_or_else(|| panic!("marker {marker:?} ({label}) not found in grid"));
+            let observed = format!(
+                "bold={} italic={} faint={} inverse={} invisible={} strike={} overline={} blink={} underline={:?} fg={:?}",
+                style.bold,
+                style.italic,
+                style.faint,
+                style.inverse,
+                style.invisible,
+                style.strikethrough,
+                style.overline,
+                style.blink,
+                style.underline,
+                match style.fg_color {
+                    StyleColor::None => "none".to_string(),
+                    StyleColor::Palette(i) => format!("palette({})", i.0),
+                    StyleColor::Rgb(c) => format!("rgb({}, {}, {})", c.r, c.g, c.b),
+                },
+            );
+            println!("{label:<22} {sgr:<14} {observed:<34}");
+        }
+
+        // Assert what was measured, not what was hoped. These document the
+        // observed state; if libghostty-vt changes, this test flags it.
+        let style_of = |m: &str| {
+            &flat
+                .iter()
+                .find(|(text, _)| text == m)
+                .expect("marker present")
+                .1
+        };
+        assert!(style_of("1").bold);
+        assert!(style_of("2").faint);
+        assert!(style_of("3").italic);
+        assert_eq!(style_of("4").underline, Underline::Single);
+        assert_eq!(style_of("5").underline, Underline::Double);
+        assert_eq!(style_of("6").underline, Underline::Curly);
+        assert_eq!(style_of("7").underline, Underline::Dotted);
+        assert_eq!(style_of("8").underline, Underline::Dashed);
+        assert!(style_of("9").inverse);
+        assert!(style_of("h").invisible);
+        assert!(style_of("k").strikethrough);
+        assert!(matches!(style_of("p").fg_color, StyleColor::Palette(i) if i.0 == 196));
+        assert!(
+            matches!(style_of("t").fg_color, StyleColor::Rgb(c) if (c.r, c.g, c.b) == (255, 128, 0))
         );
     }
 
