@@ -4370,7 +4370,7 @@ impl TillerWorkspace {
         // source with whatever the network added. Until then the sources
         // computed at construction still answer — builtin availability and
         // installed manifests are offline facts.
-        let cache_path = registry_cache_path(&workspace.launch.store);
+        let _cache_path = registry_cache_path(&workspace.launch.store);
         let sweep_store =
             tiller_registry::InstallStore::new(workspace.launch.store.root().to_path_buf());
         cx.spawn(async move |this, cx| {
