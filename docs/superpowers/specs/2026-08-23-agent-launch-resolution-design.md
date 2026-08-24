@@ -2,6 +2,7 @@
 
 Date: 2026-08-23
 Branch: `worktree/silver-forest-e51f`
+Follow-ups and the behaviour change this shipped: `2026-08-23-agent-launch-resolution-followups.md`
 
 ## Goal
 
