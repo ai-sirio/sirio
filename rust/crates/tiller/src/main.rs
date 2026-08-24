@@ -13573,6 +13573,22 @@ fn startup_window_background(translucency_enabled: bool) -> gpui::WindowBackgrou
     shell_chrome::current_platform_material(translucency_enabled).window_background()
 }
 
+/// The window icon passed to `WindowOptions`. X11 writes it into
+/// `_NET_WM_ICON`; the other platforms ignore it, because their icons have
+/// their own homes — the `.ico` resource on Windows (see `build.rs`) and
+/// the .app bundle's AppIcon on macOS — so one embed serves every platform.
+///
+/// The 1024px master: the WM scales it down, and its four hundred or so
+/// pixels of PNG payload are nothing next to the icon set's other costs.
+/// Decoding at startup is cheap and needs no filesystem lookup.
+fn app_icon() -> Arc<image::RgbaImage> {
+    let png = include_bytes!("../../../assets/app-icon/icon_1024.png");
+    let image = image::load_from_memory(png)
+        .expect("the embedded app icon decodes")
+        .to_rgba8();
+    Arc::new(image)
+}
+
 fn main() {
     // First statement in the process, and it has to stay first. `gpui`
     // decides X11 vs Wayland by reading the environment
@@ -13747,6 +13763,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_background: startup_window_background(initial_translucency),
+                icon: Some(app_icon()),
                 titlebar: Some(TitlebarOptions {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.), px(12.))),
@@ -14046,6 +14063,17 @@ mod tests {
         // there are no accessor methods.
         assert_eq!(command.program, std::path::PathBuf::from("opencode"));
         assert_eq!(command.args, vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn the_app_icon_asset_decodes_to_a_1024_square() {
+        // `WindowOptions.icon` hands X11 an RGBA image; if the embedded
+        // asset ever stops being a decodable 1024px master, the WM shows a
+        // generic window icon and no test complains. This one does.
+        let icon = app_icon();
+        assert_eq!((icon.width(), icon.height()), (1024, 1024));
+        // RGBA, not RGB: alpha is what lets the icon float on any panel.
+        assert_eq!(icon.sample_layout().channels, 4);
     }
 
     #[test]
