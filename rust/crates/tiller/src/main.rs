@@ -2816,6 +2816,29 @@ fn restored_chat_spec(
     ))
 }
 
+/// The user-facing reason a resolved source cannot open a chat right now
+/// — the same truth the Agents screen renders as its pill.
+fn launch_refusal_reason(source: &tiller_registry::LaunchSource) -> String {
+    use tiller_registry::{LaunchSource, UnavailableReason};
+    match source {
+        LaunchSource::Installable { .. } => {
+            "it is not installed yet — install it from Settings → Agents".to_string()
+        }
+        LaunchSource::Unavailable(reason) => match reason {
+            UnavailableReason::NotInRegistry => "no ACP server is available for it".to_string(),
+            UnavailableReason::NoArtifactForPlatform => {
+                "nothing was published for this platform".to_string()
+            }
+            UnavailableReason::UnsupportedDistribution => {
+                "its install format is not supported here".to_string()
+            }
+        },
+        LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => {
+            unreachable!("only refused sources reach this helper")
+        }
+    }
+}
+
 fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
     let mut pairs = vec![
         (
@@ -4359,26 +4382,17 @@ impl TillerWorkspace {
         let sweep_store =
             tiller_registry::InstallStore::new(workspace.launch.store.root().to_path_buf());
         cx.spawn(async move |this, cx| {
-            let fetched = cx
+            let swept = cx
                 .background_executor()
                 .spawn(async move {
-                    if let Err(error) =
-                        tiller_registry::Installer::new(sweep_store).sweep_staging()
-                    {
-                        eprintln!("[launch] staging sweep failed: {error}");
-                    }
-                    tiller_registry::RegistryClient::with_http(cache_path).registry(
-                        tiller_registry::RegistryClient::DEFAULT_MAX_AGE,
-                        false,
-                    )
+                    tiller_registry::Installer::new(sweep_store).sweep_staging()
                 })
                 .await;
+            if let Err(error) = swept {
+                eprintln!("[launch] staging sweep failed: {error}");
+            }
             let _ = this.update(cx, |workspace, cx| {
-                match fetched {
-                    Ok(registry) => workspace.launch.registry = Some(registry),
-                    Err(error) => eprintln!("[launch] registry fetch failed: {error:#}"),
-                }
-                workspace.recompute_launch_sources(cx);
+                workspace.refresh_launch_sources_from_registry(cx)
             });
         })
         .detach();
@@ -4602,8 +4616,34 @@ impl TillerWorkspace {
                 | tiller_ui::settings::SettingsEvent::UpdateAgent(id) => {
                     workspace.start_agent_install(id, cx);
                 }
+                tiller_ui::settings::SettingsEvent::RefreshAgentSources => {
+                    workspace.refresh_launch_sources_from_registry(cx);
+                }
             },
         )
+        .detach();
+    }
+
+    /// Re-fetches the registry document off the UI thread — the 24 h cache
+    /// decides whether the network is touched at all — and recomputes every
+    /// launch source. This is what Settings → Agents opening and the
+    /// screen's ↻ Refresh both trigger.
+    fn refresh_launch_sources_from_registry(&mut self, cx: &mut Context<Self>) {
+        let cache_path = registry_cache_path(&self.launch.store);
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move {
+                    tiller_registry::RegistryClient::with_http(cache_path)
+                        .registry(tiller_registry::RegistryClient::DEFAULT_MAX_AGE, false)
+                })
+                .await;
+            let _ = this.update(cx, |workspace, _| match fetched {
+                Ok(registry) => workspace.launch.registry = Some(registry),
+                Err(error) => eprintln!("[launch] registry refresh failed: {error:#}"),
+            });
+            let _ = this.update(cx, |workspace, cx| workspace.recompute_launch_sources(cx));
+        })
         .detach();
     }
 
@@ -7409,9 +7449,16 @@ impl TillerWorkspace {
             Some(adapter) => {
                 let source = self.launch_source_for(adapter.id());
                 let Some(command) = agent_command_for(&source) else {
-                    eprintln!(
-                        "[chat] {} cannot launch right now ({source:?}); refusing a silent fallback",
-                        adapter.display_name()
+                    // The user acted explicitly; a silent refusal would read
+                    // as a broken button. The toast is the smallest surface
+                    // that already exists for exactly this.
+                    self.show_toast(
+                        format!(
+                            "{} can't open a chat right now: {}.",
+                            adapter.display_name(),
+                            launch_refusal_reason(&source)
+                        ),
+                        cx,
                     );
                     return;
                 };
@@ -7430,9 +7477,10 @@ impl TillerWorkspace {
             }
             None => {
                 if std::env::var_os("TILLER_ACP_PROGRAM").is_none() {
-                    eprintln!(
-                        "[chat] no adapter picked and TILLER_ACP_PROGRAM unset; \
-                         not opening an unresolvable chat"
+                    self.show_toast(
+                        "No agent picked and TILLER_ACP_PROGRAM is unset, so there is no \
+                         chat to open.",
+                        cx,
                     );
                     return;
                 }
