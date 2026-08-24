@@ -57,31 +57,31 @@ use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-    LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    SE_KERNEL_OBJECT, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, GetSecurityDescriptorDacl,
-    GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+    GetKernelObjectSecurity, GetSecurityDescriptorDacl, GetTokenInformation, RevertToSelf, ACL,
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID, PSECURITY_DESCRIPTOR,
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
-    PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+    CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, ImpersonateNamedPipeClient,
-    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
+    WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows_sys::Win32::System::Threading::{
@@ -216,10 +216,7 @@ pub(crate) fn pipe_name_for_path(path: &Path) -> Result<String, String> {
 }
 
 fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
 /// The current process token's user SID, rendered as an SDDL string
@@ -342,9 +339,7 @@ fn ensure_owner_is(actual: &str, expected: &str) -> Result<(), String> {
     if actual == expected {
         Ok(())
     } else {
-        Err(format!(
-            "owner is {actual}, expected {expected} (created by another user)"
-        ))
+        Err(format!("owner is {actual}, expected {expected} (created by another user)"))
     }
 }
 
@@ -369,8 +364,9 @@ fn verify_pipe_owner(handle: HANDLE) -> Result<(), String> {
 /// `P` marks the DACL protected, so inheritable ACEs from parent objects
 /// cannot widen it (the analogue of refusing permissive group/other bits).
 fn restricted_security_attributes() -> Result<(SECURITY_ATTRIBUTES, isize), String> {
-    let user = current_user_sid_string()
-        .map_err(|error| format!("could not determine the current user's SID: {error}"))?;
+    let user = current_user_sid_string().map_err(|error| {
+        format!("could not determine the current user's SID: {error}")
+    })?;
     // SY is LOCAL_SYSTEM (which launches services that may legitimately
     // administer the session); nobody else gets even READ_CONTROL.
     let sddl = format!("D:P(A;;GA;;;{user})(A;;GA;;;SY)");
@@ -474,10 +470,12 @@ pub(crate) fn post_bind_sanity_check(pipe: HANDLE) -> Result<(), String> {
 /// `trusted_trustees`. A free function so tests can exercise the parser.
 fn walk_dacl(acl: &ACL, trusted_trustees: &[&str]) -> Result<(), String> {
     let header_size = 4; // ACE_HEADER: type, flags, size
-    let mut ace = unsafe { (acl as *const ACL as *const u8).add(std::mem::size_of::<ACL>()) };
+    let mut ace =
+        unsafe { (acl as *const ACL as *const u8).add(std::mem::size_of::<ACL>()) };
     for _ in 0..acl.AceCount {
         let ace_type = unsafe { *ace };
-        let ace_size = unsafe { *ace.add(2) as usize } | ((unsafe { *ace.add(3) } as usize) << 8);
+        let ace_size =
+            unsafe { *ace.add(2) as usize } | ((unsafe { *ace.add(3) } as usize) << 8);
         if ace_size < header_size + 4 + 4 {
             // Smaller than header + mask + a minimal SID: malformed.
             return Err("malformed ACE (too small)".to_string());
@@ -713,7 +711,12 @@ impl PipeListener {
                         unsafe { CancelIoEx(self.instance, &overlapped) };
                         let mut transferred = 0u32;
                         unsafe {
-                            GetOverlappedResult(self.instance, &overlapped, &mut transferred, 1);
+                            GetOverlappedResult(
+                                self.instance,
+                                &overlapped,
+                                &mut transferred,
+                                1,
+                            );
                             ResetEvent(event);
                         }
                         unsafe { CloseHandle(event) };
@@ -852,8 +855,8 @@ unsafe fn verify_impersonated_identity() -> bool {
 // detail of this transport. `client.rs` is the only caller and it flattens
 // that distinction into `io::Error` for the outside world.
 pub(crate) fn open_client(path: &Path) -> Result<PipeStream, ClientConnectError> {
-    let name = pipe_name_for_path(path)
-        .map_err(|error| ClientConnectError::Io(io::Error::other(error)))?;
+    let name =
+        pipe_name_for_path(path).map_err(|error| ClientConnectError::Io(io::Error::other(error)))?;
     let name_wide = wide(&name);
 
     // Bounded retry: a busy pipe means the server's spare instance is
@@ -991,12 +994,7 @@ impl PipeStream {
 
         let mut pending = false;
         if initiated == 0 {
-            match last_error(if read_direction {
-                "ReadFile"
-            } else {
-                "WriteFile"
-            })
-            .raw_os_error()
+            match last_error(if read_direction { "ReadFile" } else { "WriteFile" }).raw_os_error()
             {
                 Some(code) if code == ERROR_IO_PENDING => pending = true,
                 // The peer is gone. For reads this *is* EOF (Ok(0)), the
@@ -1005,7 +1003,7 @@ impl PipeStream {
                     if read_direction
                         && (code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED) =>
                 {
-                    return Ok(0);
+                    return Ok(0)
                 }
                 Some(code) => return Err(io::Error::from_raw_os_error(code)),
                 None => return Err(last_error("overlapped init")),
@@ -1036,20 +1034,23 @@ impl PipeStream {
                 status => {
                     return Err(io::Error::other(format!(
                         "WaitForSingleObject returned {status:#x}"
-                    )));
+                    )))
                 }
             }
         }
 
         let mut transferred = 0u32;
-        if unsafe { GetOverlappedResult(self.handle, &overlapped, &mut transferred, 0) } == 0 {
+        if unsafe { GetOverlappedResult(self.handle, &overlapped, &mut transferred, 0) } == 0
+        {
             let error = last_error("GetOverlappedResult");
             if read_direction {
                 match error.raw_os_error() {
                     // Broken pipe surfacing at completion time is a clean
                     // EOF, not a fault.
-                    Some(code) if code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED => {
-                        return Ok(0);
+                    Some(code)
+                        if code == ERROR_BROKEN_PIPE || code == ERROR_PIPE_NOT_CONNECTED =>
+                    {
+                        return Ok(0)
                     }
                     _ => {}
                 }
@@ -1081,11 +1082,7 @@ impl PipeStream {
 
 impl Read for PipeStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.transfer(
-            buf,
-            true,
-            self.read_timeout.get().map(|t| Instant::now() + t),
-        )
+        self.transfer(buf, true, self.read_timeout.get().map(|t| Instant::now() + t))
     }
 }
 
@@ -1119,10 +1116,11 @@ mod tests {
     struct TempDir(std::path::PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static COUNTER: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("tcw{}-{unique}-{tag}", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("tcw{}-{unique}-{tag}", std::process::id()));
             std::fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }

@@ -1346,7 +1346,12 @@ impl TerminalView {
         }
         match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
             Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(terminal.clone(), wakeup_rx, self.host.generation(), cx);
+                Self::pump_terminal_events(
+                    terminal.clone(),
+                    wakeup_rx,
+                    self.host.generation(),
+                    cx,
+                );
                 self.terminal = TerminalState::Running(terminal);
             }
             Err(error) => {
@@ -1369,7 +1374,12 @@ impl TerminalView {
         self.host.relaunch();
         match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
             Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(terminal.clone(), wakeup_rx, self.host.generation(), cx);
+                Self::pump_terminal_events(
+                    terminal.clone(),
+                    wakeup_rx,
+                    self.host.generation(),
+                    cx,
+                );
                 self.terminal = TerminalState::Running(terminal);
                 self.exit_status = None;
             }
@@ -3000,7 +3010,9 @@ mod tests {
             program: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                format!("trap '' HUP; {detached_process} & wait"),
+                format!(
+                    "trap '' HUP; {detached_process} & wait"
+                ),
             ],
         };
         let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
@@ -3818,15 +3830,14 @@ mod view_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.set_global(Theme::light());
-        let working_directory =
-            std::env::temp_dir().join(format!("tiller-terminal-restart-{}", std::process::id()));
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-restart-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
         let shell = TerminalShell::WithArguments {
             program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'gen1\\n'; exec sleep 5".to_string(),
-            ],
+            args: vec!["-c".to_string(), "printf 'gen1\\n'; exec sleep 5".to_string()],
         };
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn first PTY")
@@ -3862,10 +3873,7 @@ mod view_tests {
         terminal.update(&mut cx.cx, |terminal, cx| {
             terminal.spawn.shell = TerminalShell::WithArguments {
                 program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "printf 'gen2\\n'; exec sleep 5".to_string(),
-                ],
+                args: vec!["-c".to_string(), "printf 'gen2\\n'; exec sleep 5".to_string()],
             };
             terminal.restart(cx);
         });
@@ -4010,7 +4018,9 @@ mod view_tests {
             cx.background_executor
                 .advance_clock(Duration::from_millis(5));
             cx.run_until_parked();
-            if let Some(status) = terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status()) {
+            if let Some(status) =
+                terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status())
+            {
                 observed_exit = Some(status);
                 break;
             }

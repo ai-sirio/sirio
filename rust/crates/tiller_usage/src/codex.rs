@@ -605,7 +605,11 @@ mod tests {
     /// -> `fetch_usage` (via `usage_url()`) -> `parse_usage`.
     #[test]
     fn a_real_200_response_completes_a_full_fetch_through_codexusagefetcher_fetch() {
-        let url = one_shot_http_fixture_at("/backend-api/wham/usage", "200 OK", REAL_RESPONSE);
+        let url = one_shot_http_fixture_at(
+            "/backend-api/wham/usage",
+            "200 OK",
+            REAL_RESPONSE,
+        );
 
         let dir = std::env::temp_dir().join(format!(
             "tiller-codex-usg07-usage-success-{}",

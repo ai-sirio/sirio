@@ -114,7 +114,11 @@ pub fn create_worktree(
 /// than silently discarding their work.
 pub fn remove_worktree(repo: &Path, path: &Path) -> Result<(), WorktreeError> {
     let path = git::path_arg(path);
-    git::run_accepting(&["worktree", "remove", path.as_str()], repo, &[0])?;
+    git::run_accepting(
+        &["worktree", "remove", path.as_str()],
+        repo,
+        &[0],
+    )?;
     Ok(())
 }
 

@@ -264,7 +264,11 @@ fn mutated_args<const N: usize>(prefix: [&str; N], paths: Vec<std::path::PathBuf
     prefix
         .into_iter()
         .map(str::to_owned)
-        .chain(paths.into_iter().map(|path| git::path_arg(&path)))
+        .chain(
+            paths
+                .into_iter()
+                .map(|path| git::path_arg(&path)),
+        )
         .collect()
 }
 

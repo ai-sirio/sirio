@@ -12,10 +12,7 @@ use tiller_agents::{
     install_skill, json_string_literal, shell_quote,
 };
 #[cfg(not(windows))]
-use tiller_agents::{
-    AgentAvailability, DiscoveryError, find_executable_in_path_checked,
-    try_discover_availability_in,
-};
+use tiller_agents::{AgentAvailability, DiscoveryError, find_executable_in_path_checked, try_discover_availability_in};
 
 const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
 const TILLERCTL: &str = "/usr/local/bin/tillerctl";
@@ -527,7 +524,9 @@ fn pi_resume_command() {
 fn omp_resume_command() {
     assert_eq!(
         OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
-        Some("omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'".to_string(),)
+        Some(
+            "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'".to_string(),
+        )
     );
 }
 
@@ -540,18 +539,11 @@ fn omp_resume_command() {
 fn omp_resume_command() {
     assert_eq!(
         OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
-        Some(
-            "omp --hook \"/Users/me/tiller/.tiller/omp-hook.ts\" --resume=\"sess-abc\"".to_string()
-        )
+        Some("omp --hook \"/Users/me/tiller/.tiller/omp-hook.ts\" --resume=\"sess-abc\"".to_string())
     );
 
     let spaced = OhMyPiAdapter
-        .resume_command(
-            "C:\\Users\\me\\my worktree\\tiller",
-            PANE_ID,
-            TILLERCTL,
-            "sess-abc",
-        )
+        .resume_command("C:\\Users\\me\\my worktree\\tiller", PANE_ID, TILLERCTL, "sess-abc")
         .expect("omp resumes");
     assert_eq!(
         spaced,

@@ -1028,10 +1028,7 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
 /// [`restore_catalog`]). Unlike [`catalog_project`], this never shells out
 /// to git -- it is exactly the durable state the user last saw, not a
 /// rediscovery.
-fn degraded_catalog_project(
-    record: &ProjectRecord,
-    worktrees: Vec<WorktreeRecord>,
-) -> CatalogProject {
+fn degraded_catalog_project(record: &ProjectRecord, worktrees: Vec<WorktreeRecord>) -> CatalogProject {
     let root_path = PathBuf::from(&record.root_path);
     let mut worktrees: Vec<CatalogWorktree> = worktrees
         .into_iter()
@@ -1983,8 +1980,7 @@ mod tests {
         // *before* `chat_draft` existed -- not today's own `encode()` output
         // with a field stripped out -- so it genuinely exercises "an old
         // blob still decodes under new code", not a tautology.
-        let old_blob =
-            r#"{"root_id":3,"pane_events":[{"Close":{"id":7}}],"scrollback":{"2":[104,105]}}"#;
+        let old_blob = r#"{"root_id":3,"pane_events":[{"Close":{"id":7}}],"scrollback":{"2":[104,105]}}"#;
         let decoded = SessionTabState::decode(old_blob).expect("old blob must still decode");
         assert_eq!(decoded.root_id, Some(3));
         assert_eq!(decoded.pane_events, vec![PaneEvent::Close { id: 7 }]);
@@ -2654,19 +2650,7 @@ mod tests {
         let root = checkout(&dir.0, "flaky");
         std::fs::write(root.join("a.txt"), "hi").expect("write file");
         run_git(&root, &["add", "a.txt"]);
-        run_git(
-            &root,
-            &[
-                "-c",
-                "user.email=a@b.c",
-                "-c",
-                "user.name=a",
-                "commit",
-                "-q",
-                "-m",
-                "init",
-            ],
-        );
+        run_git(&root, &["-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-q", "-m", "init"]);
         let db_path = dir.db_path("flaky-git");
         let store = SessionStore::open(&db_path);
         let mut catalog = ProjectCatalog::default();

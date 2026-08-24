@@ -21,7 +21,7 @@
 //! for that icon alone.
 
 use gpui::{
-    App, AssetSource, Bounds, IntoElement, Pixels, Refineable as _, RenderImage, RenderOnce, Rgba,
+    App, AssetSource, Bounds, IntoElement, Pixels, Rgba, Refineable as _, RenderImage, RenderOnce,
     SharedString, StyleRefinement, Styled, Window, canvas, px, svg,
 };
 use std::borrow::Cow;
@@ -131,9 +131,7 @@ impl IconSize {
 
 impl Icon {
     /// Constructs a full-colour Material file-type icon.
-    pub const fn file_type(name: &'static str) -> Self {
-        Self::FileType(name)
-    }
+    pub const fn file_type(name: &'static str) -> Self { Self::FileType(name) }
 
     /// The asset path (also the file name inside `rust/assets/icons`).
     pub fn path(self) -> &'static str {
@@ -168,44 +166,25 @@ impl Icon {
             Icon::Diff => "icons/zed/diff.svg",
             Icon::GitGraph => "icons/zed/git_graph.svg",
             Icon::FileType(name) => match name {
-                "audio" => "icons/file-types/audio.svg",
-                "c" => "icons/file-types/c.svg",
-                "console" => "icons/file-types/console.svg",
-                "cpp" => "icons/file-types/cpp.svg",
-                "csharp" => "icons/file-types/csharp.svg",
-                "css" => "icons/file-types/css.svg",
-                "database" => "icons/file-types/database.svg",
-                "docker" => "icons/file-types/docker.svg",
-                "document" => "icons/file-types/document.svg",
-                "font" => "icons/file-types/font.svg",
-                "git" => "icons/file-types/git.svg",
-                "go" => "icons/file-types/go.svg",
-                "html" => "icons/file-types/html.svg",
-                "image" => "icons/file-types/image.svg",
-                "java" => "icons/file-types/java.svg",
-                "javascript" => "icons/file-types/javascript.svg",
-                "json" => "icons/file-types/json.svg",
-                "kotlin" => "icons/file-types/kotlin.svg",
-                "lock" => "icons/file-types/lock.svg",
-                "log" => "icons/file-types/log.svg",
-                "makefile" => "icons/file-types/makefile.svg",
-                "markdown" => "icons/file-types/markdown.svg",
-                "pdf" => "icons/file-types/pdf.svg",
-                "python" => "icons/file-types/python.svg",
-                "react" => "icons/file-types/react.svg",
-                "ruby" => "icons/file-types/ruby.svg",
-                "rust" => "icons/file-types/rust.svg",
-                "sass" => "icons/file-types/sass.svg",
-                "settings" => "icons/file-types/settings.svg",
-                "swift" => "icons/file-types/swift.svg",
-                "toml" => "icons/file-types/toml.svg",
-                "typescript" => "icons/file-types/typescript.svg",
-                "video" => "icons/file-types/video.svg",
-                "vue" => "icons/file-types/vue.svg",
-                "xml" => "icons/file-types/xml.svg",
-                "yaml" => "icons/file-types/yaml.svg",
-                "zip" => "icons/file-types/zip.svg",
-                _ => "icons/file-types/document.svg",
+                "audio" => "icons/file-types/audio.svg", "c" => "icons/file-types/c.svg",
+                "console" => "icons/file-types/console.svg", "cpp" => "icons/file-types/cpp.svg",
+                "csharp" => "icons/file-types/csharp.svg", "css" => "icons/file-types/css.svg",
+                "database" => "icons/file-types/database.svg", "docker" => "icons/file-types/docker.svg",
+                "document" => "icons/file-types/document.svg", "font" => "icons/file-types/font.svg",
+                "git" => "icons/file-types/git.svg", "go" => "icons/file-types/go.svg",
+                "html" => "icons/file-types/html.svg", "image" => "icons/file-types/image.svg",
+                "java" => "icons/file-types/java.svg", "javascript" => "icons/file-types/javascript.svg",
+                "json" => "icons/file-types/json.svg", "kotlin" => "icons/file-types/kotlin.svg",
+                "lock" => "icons/file-types/lock.svg", "log" => "icons/file-types/log.svg",
+                "makefile" => "icons/file-types/makefile.svg", "markdown" => "icons/file-types/markdown.svg",
+                "pdf" => "icons/file-types/pdf.svg", "python" => "icons/file-types/python.svg",
+                "react" => "icons/file-types/react.svg", "ruby" => "icons/file-types/ruby.svg",
+                "rust" => "icons/file-types/rust.svg", "sass" => "icons/file-types/sass.svg",
+                "settings" => "icons/file-types/settings.svg", "swift" => "icons/file-types/swift.svg",
+                "toml" => "icons/file-types/toml.svg", "typescript" => "icons/file-types/typescript.svg",
+                "video" => "icons/file-types/video.svg", "vue" => "icons/file-types/vue.svg",
+                "xml" => "icons/file-types/xml.svg", "yaml" => "icons/file-types/yaml.svg",
+                "zip" => "icons/file-types/zip.svg", _ => "icons/file-types/document.svg",
             },
         }
     }
@@ -247,44 +226,25 @@ impl Icon {
             Icon::Diff => include_bytes!("../../../assets/icons/zed/diff.svg"),
             Icon::GitGraph => include_bytes!("../../../assets/icons/zed/git_graph.svg"),
             Icon::FileType(name) => match name {
-                "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
-                "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
-                "console" => include_bytes!("../../../assets/icons/file-types/console.svg"),
-                "cpp" => include_bytes!("../../../assets/icons/file-types/cpp.svg"),
-                "csharp" => include_bytes!("../../../assets/icons/file-types/csharp.svg"),
-                "css" => include_bytes!("../../../assets/icons/file-types/css.svg"),
-                "database" => include_bytes!("../../../assets/icons/file-types/database.svg"),
-                "docker" => include_bytes!("../../../assets/icons/file-types/docker.svg"),
-                "document" => include_bytes!("../../../assets/icons/file-types/document.svg"),
-                "font" => include_bytes!("../../../assets/icons/file-types/font.svg"),
-                "git" => include_bytes!("../../../assets/icons/file-types/git.svg"),
-                "go" => include_bytes!("../../../assets/icons/file-types/go.svg"),
-                "html" => include_bytes!("../../../assets/icons/file-types/html.svg"),
-                "image" => include_bytes!("../../../assets/icons/file-types/image.svg"),
-                "java" => include_bytes!("../../../assets/icons/file-types/java.svg"),
-                "javascript" => include_bytes!("../../../assets/icons/file-types/javascript.svg"),
-                "json" => include_bytes!("../../../assets/icons/file-types/json.svg"),
-                "kotlin" => include_bytes!("../../../assets/icons/file-types/kotlin.svg"),
-                "lock" => include_bytes!("../../../assets/icons/file-types/lock.svg"),
-                "log" => include_bytes!("../../../assets/icons/file-types/log.svg"),
-                "makefile" => include_bytes!("../../../assets/icons/file-types/makefile.svg"),
-                "markdown" => include_bytes!("../../../assets/icons/file-types/markdown.svg"),
-                "pdf" => include_bytes!("../../../assets/icons/file-types/pdf.svg"),
-                "python" => include_bytes!("../../../assets/icons/file-types/python.svg"),
-                "react" => include_bytes!("../../../assets/icons/file-types/react.svg"),
-                "ruby" => include_bytes!("../../../assets/icons/file-types/ruby.svg"),
-                "rust" => include_bytes!("../../../assets/icons/file-types/rust.svg"),
-                "sass" => include_bytes!("../../../assets/icons/file-types/sass.svg"),
-                "settings" => include_bytes!("../../../assets/icons/file-types/settings.svg"),
-                "swift" => include_bytes!("../../../assets/icons/file-types/swift.svg"),
-                "toml" => include_bytes!("../../../assets/icons/file-types/toml.svg"),
-                "typescript" => include_bytes!("../../../assets/icons/file-types/typescript.svg"),
-                "video" => include_bytes!("../../../assets/icons/file-types/video.svg"),
-                "vue" => include_bytes!("../../../assets/icons/file-types/vue.svg"),
-                "xml" => include_bytes!("../../../assets/icons/file-types/xml.svg"),
-                "yaml" => include_bytes!("../../../assets/icons/file-types/yaml.svg"),
-                "zip" => include_bytes!("../../../assets/icons/file-types/zip.svg"),
-                _ => include_bytes!("../../../assets/icons/file-types/document.svg"),
+                "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"), "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
+                "console" => include_bytes!("../../../assets/icons/file-types/console.svg"), "cpp" => include_bytes!("../../../assets/icons/file-types/cpp.svg"),
+                "csharp" => include_bytes!("../../../assets/icons/file-types/csharp.svg"), "css" => include_bytes!("../../../assets/icons/file-types/css.svg"),
+                "database" => include_bytes!("../../../assets/icons/file-types/database.svg"), "docker" => include_bytes!("../../../assets/icons/file-types/docker.svg"),
+                "document" => include_bytes!("../../../assets/icons/file-types/document.svg"), "font" => include_bytes!("../../../assets/icons/file-types/font.svg"),
+                "git" => include_bytes!("../../../assets/icons/file-types/git.svg"), "go" => include_bytes!("../../../assets/icons/file-types/go.svg"),
+                "html" => include_bytes!("../../../assets/icons/file-types/html.svg"), "image" => include_bytes!("../../../assets/icons/file-types/image.svg"),
+                "java" => include_bytes!("../../../assets/icons/file-types/java.svg"), "javascript" => include_bytes!("../../../assets/icons/file-types/javascript.svg"),
+                "json" => include_bytes!("../../../assets/icons/file-types/json.svg"), "kotlin" => include_bytes!("../../../assets/icons/file-types/kotlin.svg"),
+                "lock" => include_bytes!("../../../assets/icons/file-types/lock.svg"), "log" => include_bytes!("../../../assets/icons/file-types/log.svg"),
+                "makefile" => include_bytes!("../../../assets/icons/file-types/makefile.svg"), "markdown" => include_bytes!("../../../assets/icons/file-types/markdown.svg"),
+                "pdf" => include_bytes!("../../../assets/icons/file-types/pdf.svg"), "python" => include_bytes!("../../../assets/icons/file-types/python.svg"),
+                "react" => include_bytes!("../../../assets/icons/file-types/react.svg"), "ruby" => include_bytes!("../../../assets/icons/file-types/ruby.svg"),
+                "rust" => include_bytes!("../../../assets/icons/file-types/rust.svg"), "sass" => include_bytes!("../../../assets/icons/file-types/sass.svg"),
+                "settings" => include_bytes!("../../../assets/icons/file-types/settings.svg"), "swift" => include_bytes!("../../../assets/icons/file-types/swift.svg"),
+                "toml" => include_bytes!("../../../assets/icons/file-types/toml.svg"), "typescript" => include_bytes!("../../../assets/icons/file-types/typescript.svg"),
+                "video" => include_bytes!("../../../assets/icons/file-types/video.svg"), "vue" => include_bytes!("../../../assets/icons/file-types/vue.svg"),
+                "xml" => include_bytes!("../../../assets/icons/file-types/xml.svg"), "yaml" => include_bytes!("../../../assets/icons/file-types/yaml.svg"),
+                "zip" => include_bytes!("../../../assets/icons/file-types/zip.svg"), _ => include_bytes!("../../../assets/icons/file-types/document.svg"),
             },
         }
     }
@@ -563,11 +523,7 @@ mod tests {
 
     #[test]
     fn representative_material_file_icons_are_embedded() {
-        for icon in [
-            Icon::file_type("java"),
-            Icon::file_type("python"),
-            Icon::file_type("rust"),
-        ] {
+        for icon in [Icon::file_type("java"), Icon::file_type("python"), Icon::file_type("rust")] {
             let bytes = icon.svg();
             assert!(!bytes.is_empty());
             assert_eq!(bytes[0], b'<');
@@ -793,10 +749,7 @@ mod tests {
     #[test]
     fn the_panel_rail_icons_resolve_to_embedded_zed_assets() {
         for icon in [Icon::FileTree, Icon::Thread, Icon::Diff, Icon::GitGraph] {
-            assert!(
-                icon.path().starts_with("icons/zed/"),
-                "{icon:?} must come from the Zed catalog"
-            );
+            assert!(icon.path().starts_with("icons/zed/"), "{icon:?} must come from the Zed catalog");
             assert!(!icon.svg().is_empty(), "{icon:?} must embed its bytes");
             assert!(
                 icon.svg().starts_with(b"<svg"),

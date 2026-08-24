@@ -196,11 +196,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .child(field.value)
                 // End-of-text insertion caret; laid out even when invisible
                 // so the bar never shifts the value while blinking.
-                .child(crate::caret::bar(
-                    px(14.0),
-                    theme.accent,
-                    field.caret_visible,
-                )),
+                .child(crate::caret::bar(px(14.0), theme.accent, field.caret_visible)),
         );
     }
 
@@ -323,12 +319,7 @@ mod tests {
                     id: "set-title-test",
                     title: "Set Title".into(),
                     body: "Enter the new title for \"Terminal\":".into(),
-                    text_field: Some(ModalTextField::new(
-                        focus.clone(),
-                        "Terminal",
-                        false,
-                        |_, _, _| {},
-                    )),
+                    text_field: Some(ModalTextField::new(focus.clone(), "Terminal", false, |_, _, _| {})),
                     buttons: vec![
                         ModalButton::new("ok", "OK", ModalButtonTone::Accent, |_, _, _| {}),
                         ModalButton::new("cancel", "Cancel", ModalButtonTone::Plain, |_, _, _| {}),

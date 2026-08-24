@@ -7,15 +7,15 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tiller_control::client::RawStream;
+#[cfg(windows)]
+use tiller_control::client::connect_raw;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(windows)]
-use tiller_control::client::RawStream;
-#[cfg(windows)]
-use tiller_control::client::connect_raw;
 
 use tiller_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot};
 use tiller_control::protocol::rows;
@@ -56,7 +56,8 @@ impl TempDir {
             // pushed bind() past the limit once the test counter reached two
             // digits, so it passed alone and failed in the suite.
             let _ = tag;
-            let path = std::path::PathBuf::from(format!("/tmp/tc{}-{unique}", std::process::id()));
+            let path =
+                std::path::PathBuf::from(format!("/tmp/tc{}-{unique}", std::process::id()));
             std::fs::create_dir_all(&path).expect("create temp dir");
             Self(std::fs::canonicalize(&path).expect("canonicalize"))
         }
@@ -64,8 +65,7 @@ impl TempDir {
         {
             // No sun_path-style cap on the pipe namespace; the standard
             // temp directory is fine.
-            let path =
-                std::env::temp_dir().join(format!("tc{}-{unique}-{tag}", std::process::id()));
+            let path = std::env::temp_dir().join(format!("tc{}-{unique}-{tag}", std::process::id()));
             std::fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }

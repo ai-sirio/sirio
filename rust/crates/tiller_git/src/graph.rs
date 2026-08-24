@@ -52,7 +52,10 @@ pub fn layout(commits: &[CommitRecord]) -> Vec<GraphRow> {
         let waiting: Vec<usize> = lanes
             .iter()
             .enumerate()
-            .filter(|(_, lane)| lane.as_ref().is_some_and(|lane| lane.expects == commit.sha))
+            .filter(|(_, lane)| {
+                lane.as_ref()
+                    .is_some_and(|lane| lane.expects == commit.sha)
+            })
             .map(|(column, _)| column)
             .collect();
 
@@ -100,10 +103,9 @@ pub fn layout(commits: &[CommitRecord]) -> Vec<GraphRow> {
 
         let mut edges_out = Vec::new();
         for parent in commit.parents.iter().skip(1) {
-            if let Some(column) = lanes
-                .iter()
-                .position(|lane| lane.as_ref().is_some_and(|lane| &lane.expects == parent))
-            {
+            if let Some(column) = lanes.iter().position(|lane| {
+                lane.as_ref().is_some_and(|lane| &lane.expects == parent)
+            }) {
                 let color = lanes[column]
                     .as_ref()
                     .expect("a matched column holds a lane")
@@ -182,11 +184,7 @@ mod tests {
 
     #[test]
     fn a_linear_history_uses_one_lane() {
-        let commits = [
-            commit("c3", &["c2"]),
-            commit("c2", &["c1"]),
-            commit("c1", &[]),
-        ];
+        let commits = [commit("c3", &["c2"]), commit("c2", &["c1"]), commit("c1", &[])];
 
         let rows = layout(&commits);
 
@@ -217,11 +215,7 @@ mod tests {
         let rows = layout(&commits);
 
         assert_eq!(rows[0].lane, 0, "the merge sits on the lane it inherited");
-        assert_eq!(
-            rows[0].edges_out.len(),
-            1,
-            "the second parent leaves for its own lane"
-        );
+        assert_eq!(rows[0].edges_out.len(), 1, "the second parent leaves for its own lane");
         assert_eq!(rows[0].edges_out[0].0, 1, "leftmost free column");
         assert_eq!(rows[2].lane, 1, "`side` is drawn on the lane opened for it");
     }
@@ -288,10 +282,7 @@ mod tests {
         let rows = layout(&commits);
 
         let opened_colour = rows[0].edges_out[0].1;
-        assert_ne!(
-            opened_colour, rows[0].color,
-            "two live lanes must not share a colour"
-        );
+        assert_ne!(opened_colour, rows[0].color, "two live lanes must not share a colour");
     }
 
     #[test]
