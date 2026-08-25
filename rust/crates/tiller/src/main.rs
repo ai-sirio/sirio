@@ -30,7 +30,7 @@ use tiller_git::{
 };
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
-    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository,
+    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_path, is_git_repository,
     numeric_tab_selection,
 };
 use tiller_terminal::{
@@ -3437,21 +3437,6 @@ fn short_head(path: &Path) -> Option<String> {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|commit| !commit.is_empty())
-}
-
-fn display_path(path: &Path) -> String {
-    let Some(home) = user_home_dir() else {
-        return path.to_string_lossy().into_owned();
-    };
-    path.strip_prefix(&home)
-        .map(|relative| {
-            if relative.as_os_str().is_empty() {
-                "~".to_string()
-            } else {
-                format!("~/{}", relative.to_string_lossy())
-            }
-        })
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
 }
 
 fn shell_breadcrumb() -> String {

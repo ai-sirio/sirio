@@ -44,6 +44,70 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Renders a filesystem path as user-facing text. On Windows the verbatim
+/// `\\?\` prefix that `std::fs::canonicalize` always produces is stripped —
+/// from the *string only* (the `Path` itself is never rewritten, so fs calls
+/// keep the long-path capability; same constraint as `tiller_git::path_arg`) —
+/// and then the home directory collapses to `~` with a single platform
+/// separator (`~\` on Windows, `~/` elsewhere).
+pub fn display_path(path: &Path) -> String {
+    display_path_against(path, home_dir().as_deref())
+}
+
+/// [`display_path`] minus the tilde collapsing: an absolute, unambiguous
+/// string for places where the reader will paste or resolve the path again
+/// (clipboard "copy path", command lines). The verbatim prefix is still
+/// stripped from the string only.
+pub fn display_absolute_path(path: &Path) -> String {
+    let mut string = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    if let Some(stripped) = strip_verbatim_prefix(&string) {
+        string = stripped;
+    }
+    string
+}
+
+/// [`display_path`] with the home directory injected, so tests can prove the
+/// tilde collapsing without mutating process-global environment variables.
+pub(crate) fn display_path_against(path: &Path, home: Option<&Path>) -> String {
+    let string = display_absolute_path(path);
+    let Some(home) = home else {
+        return string;
+    };
+    // After stripping, a verbatim-disk path compares component-for-component
+    // against the plain (non-verbatim) home directory.
+    Path::new(&string)
+        .strip_prefix(home)
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!(
+                    "~{}{}",
+                    std::path::MAIN_SEPARATOR,
+                    relative.to_string_lossy()
+                )
+            }
+        })
+        .unwrap_or_else(|_| string)
+}
+
+/// Strips the Windows `\\?\` verbatim prefix from a path string:
+/// `\\?\C:\...` becomes `C:\...` and `\\?\UNC\server\share\...` becomes
+/// `\\server\share\...`. Returns `None` when the path is not
+/// verbatim-prefixed. Display-side twin of the argv-specific copy in
+/// `tiller_git`; duplicated deliberately so this dependency-free leaf crate
+/// does not depend on `tiller_git`.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(r"\\?\")?;
+    if let Some(unc) = rest.strip_prefix("UNC\\") {
+        Some(format!(r"\\{unc}"))
+    } else {
+        Some(rest.to_string())
+    }
+}
+
 /// Chooses the branch base and parent directory for a new worktree.
 pub fn resolve_worktree_defaults(
     project_root: &Path,
@@ -234,5 +298,86 @@ mod tests {
         assert!(gate.fire(|| calls += 1));
         assert!(!gate.fire(|| calls += 1));
         assert_eq!(calls, 1);
+    }
+
+    #[cfg(windows)]
+    mod windows_display_paths {
+        use super::*;
+
+        #[test]
+        fn verbatim_disk_prefix_is_stripped_from_the_string() {
+            assert_eq!(display_path_against(Path::new(r"\\?\D:\x"), None), r"D:\x");
+        }
+
+        #[test]
+        fn verbatim_unc_prefix_keeps_the_unc_authority() {
+            assert_eq!(
+                display_path_against(Path::new(r"\\?\UNC\srv\share\x"), None),
+                r"\\srv\share\x"
+            );
+        }
+
+        #[test]
+        fn plain_non_prefixed_path_is_unchanged() {
+            assert_eq!(
+                display_path_against(Path::new(r"D:\Progetti\tiller"), None),
+                r"D:\Progetti\tiller"
+            );
+        }
+
+        #[test]
+        fn verbatim_home_path_collapses_to_tilde_with_a_backslash() {
+            let home = Path::new(r"C:\Users\me");
+            assert_eq!(
+                display_path_against(Path::new(r"\\?\C:\Users\me\Progetti\tiller"), Some(home)),
+                r"~\Progetti\tiller"
+            );
+            // Exactly the home directory itself collapses to bare "~".
+            assert_eq!(
+                display_path_against(Path::new(r"\\?\C:\Users\me"), Some(home)),
+                "~"
+            );
+        }
+
+        #[test]
+        fn verbatim_path_outside_home_stays_absolute() {
+            let home = Path::new(r"C:\Users\me");
+            assert_eq!(
+                display_path_against(Path::new(r"\\?\D:\elsewhere"), Some(home)),
+                r"D:\elsewhere"
+            );
+        }
+    }
+
+    /// Non-Windows output must stay byte-for-byte identical to the old
+    /// `display_path`: no prefix stripping exists there, and `~` keeps the
+    /// forward slash it has always used.
+    #[cfg(not(windows))]
+    mod unix_display_paths {
+        use super::*;
+
+        #[test]
+        fn paths_render_unchanged() {
+            assert_eq!(
+                display_path_against(Path::new("/opt/tooling"), None),
+                "/opt/tooling"
+            );
+            assert_eq!(
+                display_path_against(Path::new("/home/other"), Some(Path::new("/home/me"))),
+                "/home/other"
+            );
+        }
+
+        #[test]
+        fn home_relative_paths_collapse_with_a_forward_slash() {
+            assert_eq!(
+                display_path_against(Path::new("/home/me/proj"), Some(Path::new("/home/me"))),
+                "~/proj"
+            );
+            assert_eq!(
+                display_path_against(Path::new("/home/me"), Some(Path::new("/home/me"))),
+                "~"
+            );
+        }
     }
 }

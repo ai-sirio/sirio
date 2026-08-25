@@ -1140,11 +1140,11 @@ pub mod fs_actions {
     /// itself needs an X11/Wayland display and is not exercised.
     pub fn copy_path_text(path: &Path) -> String {
         if path.is_absolute() {
-            path.to_string_lossy().into_owned()
+            tiller_project::display_absolute_path(path)
         } else {
             std::env::current_dir()
-                .map(|dir| dir.join(path).to_string_lossy().into_owned())
-                .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+                .map(|dir| tiller_project::display_absolute_path(&dir.join(path)))
+                .unwrap_or_else(|_| tiller_project::display_absolute_path(path))
         }
     }
 }
