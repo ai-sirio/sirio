@@ -10772,8 +10772,6 @@ impl TillerWorkspace {
     ) -> impl IntoElement {
         let left_focus_visible =
             shell_chrome::focus_is_keyboard_visible(&self.left_panel_focus, window, cx);
-        let center_focus_visible =
-            shell_chrome::focus_is_keyboard_visible(&self.center_panel_focus, window, cx);
         let right_focus_visible =
             shell_chrome::focus_is_keyboard_visible(&self.right_panel_focus, window, cx);
 
@@ -10956,7 +10954,7 @@ impl TillerWorkspace {
                 shell_chrome::panel(
                     "shell-center-panel",
                     &self.center_panel_focus,
-                    center_focus_visible,
+                    false, // #58: The center pane deliberately never shows the shell focus ring.
                     theme,
                 )
                 .flex_1()
@@ -21356,6 +21354,30 @@ mod tests {
         );
         assert!(cx.debug_bounds("shell-left-panel-focus-ring").is_none());
         assert!(cx.debug_bounds("shell-left-panel").is_some());
+    }
+
+    #[gpui::test]
+    async fn center_panel_never_shows_the_keyboard_focus_ring(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        cx.simulate_keystrokes("tab");
+        let center_focus = workspace.update(&mut cx, |workspace, _| {
+            workspace.center_panel_focus.clone()
+        });
+        cx.update(|window, app| center_focus.focus(window, app));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("shell-center-panel-focus-ring").is_none());
+        assert!(cx.debug_bounds("shell-center-panel").is_some());
     }
 
     #[gpui::test]
