@@ -33,8 +33,7 @@ type TestStream = RawStream;
 fn connect_test_stream(path: &Path) -> std::io::Result<TestStream> {
     #[cfg(unix)]
     {
-        let _ = &connect_raw as fn(&Path) -> std::io::Result<RawStream>; // symmetry with windows
-        connect_test_stream(path)
+        UnixStream::connect(path)
     }
     #[cfg(windows)]
     {
