@@ -41,6 +41,7 @@
 //! one bad tab does not erase its siblings. All writes run in transactions,
 //! so a crash mid-save cannot leave a half-written layout.
 
+mod agent_ref;
 mod db;
 mod error;
 mod migrations;
@@ -49,6 +50,7 @@ mod model;
 /// Maximum logical SQLite database size enforced by the package.
 pub const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 
+pub use agent_ref::AgentRef;
 pub use db::AppDatabase;
 pub use error::PersistenceError;
 pub use migrations::{CURRENT_SCHEMA_VERSION, migrate_up_to};
