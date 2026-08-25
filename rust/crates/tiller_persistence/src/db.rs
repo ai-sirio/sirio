@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
+use crate::agent_ref::AgentRef;
 use crate::MAX_DATABASE_BYTES;
 use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
@@ -371,6 +372,9 @@ impl AppDatabase {
                 params![tab.worktree_id, tab.id],
             )?;
         }
+        // agent_id is stored in its qualified `adapter:<id>`/`registry:<id>`
+        // form; encode once here at the write boundary.
+        let agent_id = tab.agent_id.as_ref().map(AgentRef::to_db_string);
         transaction.execute(
             "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -386,7 +390,7 @@ impl AppDatabase {
                 tab.worktree_id,
                 tab.title,
                 tab.kind,
-                tab.agent_id,
+                agent_id,
                 tab.order_idx,
                 tab.is_active,
             ],
@@ -599,10 +603,14 @@ impl AppDatabase {
         )?;
         let rows = statement.query_map([worktree_id], |row| {
             let turn_count = row.get::<_, i64>(3)?;
+            // The column holds the qualified `adapter:<id>`/`registry:<id>`
+            // form; the single decode point is AgentRef::from_db, applied
+            // here at the DB boundary so no higher layer re-parses it.
+            let agent_id = row.get::<_, Option<String>>(2)?.map(|s| AgentRef::from_db(&s));
             Ok(ChatSessionSummary {
                 tab_id: row.get(0)?,
                 title: row.get(1)?,
-                agent_id: row.get(2)?,
+                agent_id,
                 turn_count: usize::try_from(turn_count).unwrap_or(0),
                 last_activity: row.get(4)?,
             })
@@ -1436,12 +1444,16 @@ fn map_worktree(row: &rusqlite::Row) -> rusqlite::Result<WorktreeRecord> {
 }
 
 fn map_tab(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<TabRecord> {
+    // The column holds the qualified `adapter:<id>`/`registry:<id>` form;
+    // the single decode point is AgentRef::from_db, applied here at the DB
+    // boundary so no higher layer re-parses it.
+    let agent_id = row.get::<_, Option<String>>(offset + 4)?.map(|s| AgentRef::from_db(&s));
     Ok(TabRecord {
         id: row.get(offset)?,
         worktree_id: row.get(offset + 1)?,
         title: row.get(offset + 2)?,
         kind: row.get(offset + 3)?,
-        agent_id: row.get(offset + 4)?,
+        agent_id,
         order_idx: row.get(offset + 5)?,
         is_active: row.get(offset + 6)?,
     })
@@ -1596,6 +1608,9 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
 /// even within the same transaction — cascades away `chat_turn` rows via
 /// `ON DELETE CASCADE`, silently wiping persisted chat transcripts.
 fn upsert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<()> {
+    // agent_id is stored in its qualified `adapter:<id>`/`registry:<id>`
+    // form; encode once here at the write boundary.
+    let agent_id = tab.agent_id.as_ref().map(AgentRef::to_db_string);
     tx.execute(
         "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -1611,7 +1626,7 @@ fn upsert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<(
             tab.worktree_id,
             tab.title,
             tab.kind,
-            tab.agent_id,
+            agent_id,
             tab.order_idx,
             tab.is_active,
         ],

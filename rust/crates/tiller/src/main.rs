@@ -28,7 +28,7 @@ use tiller_control::{
 use tiller_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
-use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
+use tiller_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
     OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_path, is_git_repository,
     numeric_tab_selection,
@@ -4466,7 +4466,10 @@ impl TillerWorkspace {
                         TabKind::Diff => "diff",
                     }
                     .to_string(),
-                    agent_id: tab.agent_id.clone(),
+                    // The live tab holds the bare adapter id it was opened
+                    // with; the persisted form is qualified, so wrap it at
+                    // the persistence boundary.
+                    agent_id: tab.agent_id.clone().map(AgentRef::adapter),
                     active: index == self.active_tab,
                 })
                 .collect(),
@@ -12729,9 +12732,11 @@ fn resumable_session_refs(
             .and_then(|state| state.root_id)
             .unwrap_or(tab_index);
         let pane_key = format!("pane-{root_id}");
-        if let (Some(agent_id), Some(session_ref)) =
-            (tab.agent_id.as_deref(), saved_refs.get(&pane_key))
-        {
+        // A persisted identity is qualified; the resume plan keys natively
+        // on the bare adapter id, so extract it (None for a value that does
+        // not resolve to a known adapter — the same skip as before).
+        let adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
+        if let (Some(agent_id), Some(session_ref)) = (adapter_id, saved_refs.get(&pane_key)) {
             refs.push(AgentSessionRef::new(
                 TerminalContentId::new(pane_key.clone()),
                 agent_id,
@@ -12844,26 +12849,30 @@ fn restore_tabs(
         // than dropped: it used to vanish with its reason on stderr, which a
         // desktop user never sees. The safety rule is unchanged -- no command
         // means nothing is launched -- but the tab now says so itself.
+        // A persisted identity is qualified; the adapter-only launch/restore
+        // helpers below key on the bare adapter id, so extract it once
+        // (None for a `Registry` ref or a value that does not resolve).
+        let stored_adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
         let (command, agent_icon, agent_id, unavailable): (
             Option<AgentCommand>,
             Option<Icon>,
             Option<String>,
             Option<String>,
         ) = if tab.kind == "chat" {
-            match restored_chat_spec(&launch, tab.agent_id.as_deref()) {
+            match restored_chat_spec(&launch, stored_adapter_id) {
                 Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
                 None => (
                     None,
-                    tab.agent_id.as_deref().and_then(Icon::for_agent_id),
-                    tab.agent_id.clone(),
-                    Some(restored_chat_refusal(&launch, tab.agent_id.as_deref())),
+                    stored_adapter_id.and_then(Icon::for_agent_id),
+                    stored_adapter_id.map(str::to_owned),
+                    Some(restored_chat_refusal(&launch, stored_adapter_id)),
                 ),
             }
         } else {
             (
                 None,
-                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
-                tab.agent_id.clone(),
+                stored_adapter_id.and_then(Icon::for_agent_id),
+                stored_adapter_id.map(str::to_owned),
                 None,
             )
         };
@@ -12900,7 +12909,7 @@ fn restore_tabs(
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
-                let agent_id = tab.agent_id.clone();
+                let agent_id = stored_adapter_id.map(str::to_owned);
                 let view = cx.new(|cx| {
                     match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable) {
                         Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
@@ -13040,26 +13049,30 @@ fn restore_tabs_in_workspace(
         // than dropped: it used to vanish with its reason on stderr, which a
         // desktop user never sees. The safety rule is unchanged -- no command
         // means nothing is launched -- but the tab now says so itself.
+        // A persisted identity is qualified; the adapter-only launch/restore
+        // helpers below key on the bare adapter id, so extract it once
+        // (None for a `Registry` ref or a value that does not resolve).
+        let stored_adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
         let (command, agent_icon, agent_id, unavailable): (
             Option<AgentCommand>,
             Option<Icon>,
             Option<String>,
             Option<String>,
         ) = if tab.kind == "chat" {
-            match restored_chat_spec(&launch, tab.agent_id.as_deref()) {
+            match restored_chat_spec(&launch, stored_adapter_id) {
                 Some((command, icon, agent_id)) => (Some(command), icon, agent_id, None),
                 None => (
                     None,
-                    tab.agent_id.as_deref().and_then(Icon::for_agent_id),
-                    tab.agent_id.clone(),
-                    Some(restored_chat_refusal(&launch, tab.agent_id.as_deref())),
+                    stored_adapter_id.and_then(Icon::for_agent_id),
+                    stored_adapter_id.map(str::to_owned),
+                    Some(restored_chat_refusal(&launch, stored_adapter_id)),
                 ),
             }
         } else {
             (
                 None,
-                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
-                tab.agent_id.clone(),
+                stored_adapter_id.and_then(Icon::for_agent_id),
+                stored_adapter_id.map(str::to_owned),
                 None,
             )
         };
@@ -13096,7 +13109,7 @@ fn restore_tabs_in_workspace(
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
-                let agent_id = tab.agent_id.clone();
+                let agent_id = stored_adapter_id.map(str::to_owned);
                 let view = cx.new(|cx| {
                     match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable) {
                         Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
@@ -17968,7 +17981,7 @@ mod tests {
                     id: "test-restored-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
-                    agent_id: Some("codex".into()),
+                    agent_id: Some(AgentRef::adapter("codex")),
                     active: true,
                 }],
                 tab_states: vec![SessionTabState::default()],
@@ -22447,7 +22460,7 @@ mod tests {
                     id: "test-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
-                    agent_id: Some("codex".into()),
+                    agent_id: Some(AgentRef::adapter("codex")),
                     active: false,
                 },
                 session::SessionTab {
@@ -22571,7 +22584,7 @@ mod tests {
                 id: "restored-codex".into(),
                 title: "Codex".into(),
                 kind: "terminal".into(),
-                agent_id: Some("codex".into()),
+                agent_id: Some(AgentRef::adapter("codex")),
                 active: true,
             }],
             tab_states: vec![session::SessionTabState::with_root(7)],
@@ -22651,7 +22664,7 @@ mod tests {
             .find(|tab| tab.title == adapter_display_name)
             .expect("the persisted layout must include the freshly-added agent tab");
         assert_eq!(
-            agent_tab.agent_id.as_deref(),
+            agent_tab.agent_id.as_ref().and_then(AgentRef::adapter_id),
             Some("opencode"),
             "the first save after add_agent_tab must already carry the agent id, \
              or a restart before any later save relaunches the pane as plain shell"
@@ -22681,7 +22694,7 @@ mod tests {
                 id: "codex-chat".into(),
                 title: "Codex".into(),
                 kind: "chat".into(),
-                agent_id: Some("codex".into()),
+                agent_id: Some(AgentRef::adapter("codex")),
                 active: true,
             }],
             tab_states: vec![SessionTabState::default()],
@@ -23391,7 +23404,7 @@ mod tests {
                 id: "restored-chat".into(),
                 title: "Chat".into(),
                 kind: "chat".into(),
-                agent_id: Some("codex".into()),
+                agent_id: Some(AgentRef::adapter("codex")),
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {

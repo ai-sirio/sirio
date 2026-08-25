@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use tiller_persistence::{
-    AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
+    AgentRef, AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord,
 };
 use tiller_project::{DiscoveredProject, discover_project};
@@ -323,8 +323,12 @@ pub struct SessionTab {
     pub title: String,
     /// Surface kind: "chat", "terminal", or "diff" (the shell's `TabKind`).
     pub kind: String,
-    /// Stable adapter identity for an agent-backed tab.
-    pub agent_id: Option<String>,
+    /// Stable agent identity for an agent-backed tab, qualified as
+    /// `adapter:<id>`/`registry:<id>` (see [`AgentRef`]) since v15 of the
+    /// schema. Restore resolves it against the adapter catalog via
+    /// [`AgentRef::adapter_id`]; a value that does not resolve restores as
+    /// unresolvable, the same path as `None`.
+    pub agent_id: Option<AgentRef>,
     /// Whether this tab is the active one.
     pub active: bool,
 }
@@ -1748,7 +1752,7 @@ mod tests {
             title: "Codex".into(),
             kind: "chat".into(),
             active: true,
-            agent_id: Some("codex".into()),
+            agent_id: Some(AgentRef::adapter("codex")),
         }];
 
         let store = SessionStore::open(&db_path);
@@ -1756,7 +1760,7 @@ mod tests {
         store.flush_now();
 
         let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
-        assert_eq!(restored.tabs[0].agent_id, Some("codex".into()));
+        assert_eq!(restored.tabs[0].agent_id, Some(AgentRef::adapter("codex")));
     }
 
     #[test]

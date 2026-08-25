@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tiller_persistence::{
-    AppDatabase, AppSettings, AppearanceMode, CURRENT_SCHEMA_VERSION, ChatEntry,
+    AgentRef, AppDatabase, AppSettings, AppearanceMode, CURRENT_SCHEMA_VERSION, ChatEntry,
     ChatPermissionOption, ChatPermissionOutcome, ChatTranscript, ChatTurn, FileIconTheme,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord, TabStateRecord,
     WorktreeRecord, migrate_up_to,
@@ -230,14 +230,14 @@ fn tab_agent_identity_round_trips_through_a_real_database_file() {
             .expect("project");
         db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
             .expect("worktree");
-        let tab = TabRecord::new("tab-1", "wt-1", "Codex chat", "chat").with_agent_id("codex");
+        let tab = TabRecord::new("tab-1", "wt-1", "Codex chat", "chat").with_agent_id(AgentRef::adapter("codex"));
         db.save_tab(&tab).expect("tab");
     }
 
     let db = AppDatabase::open(&path).expect("reopen");
     let tabs = db.tabs_of_worktree("wt-1").expect("tabs");
     assert_eq!(tabs.len(), 1);
-    assert_eq!(tabs[0].agent_id.as_deref(), Some("codex"));
+    assert_eq!(tabs[0].agent_id.as_ref().and_then(AgentRef::adapter_id), Some("codex"));
 }
 
 #[test]
@@ -633,7 +633,7 @@ fn chat_sessions_list_saved_tabs_by_activity_and_delete_only_transcript() {
     db.save_worktree(&sample_worktree("worktree", "project", "main"))
         .expect("worktree");
     let mut first = sample_tab("chat-1", "worktree", "First chat", "chat");
-    first.agent_id = Some("codex".into());
+    first.agent_id = Some(AgentRef::adapter("codex"));
     let second = sample_tab("chat-2", "worktree", "Second chat", "chat");
     db.save_tabs("worktree", &[first, second]).expect("tabs");
     db.save_chat_transcript(&ChatTranscript {
@@ -658,7 +658,7 @@ fn chat_sessions_list_saved_tabs_by_activity_and_delete_only_transcript() {
     );
     assert_eq!(sessions[0].title, "Second chat");
     assert_eq!(sessions[0].turn_count, 2);
-    assert_eq!(sessions[1].agent_id.as_deref(), Some("codex"));
+    assert_eq!(sessions[1].agent_id.as_ref().and_then(AgentRef::adapter_id), Some("codex"));
     assert!(sessions[0].last_activity >= sessions[1].last_activity);
 
     assert!(db.delete_chat_session("chat-2").expect("delete"));
