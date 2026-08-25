@@ -661,7 +661,7 @@ impl ChangesTab {
         if self.git_task.is_some() {
             return;
         }
-        let display_path = path.display().to_string();
+        let display_path = tiller_project::display_path(&path);
         let detail = format!(
             "This will throw away the worktree changes to {display_path}. This cannot be undone."
         );

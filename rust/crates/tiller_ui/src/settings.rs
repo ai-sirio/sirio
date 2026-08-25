@@ -3270,7 +3270,7 @@ impl Settings {
                 .text_size(theme.typography.caption2)
                 .text_color(theme.subtitle)
                 .bg(theme.primary_pill_bg)
-                .child(text!(path.to_string_lossy().into_owned())),
+                .child(text!(tiller_project::display_path(path))),
             None => div()
                 .id(status_id.clone())
                 .debug_selector(move || status_id)
