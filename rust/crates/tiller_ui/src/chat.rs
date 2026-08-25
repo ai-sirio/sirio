@@ -6,14 +6,13 @@
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context,
-    CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
-    InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
-    ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
-    canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad, rgb,
-    transparent_black,
+    CursorStyle, DispatchPhase, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle,
+    Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId,
+    ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window,
+    actions, canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad,
+    rgb, transparent_black,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +52,11 @@ pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 
+/// The composer's animated-border sweep, in gradient degrees. gpui has no
+/// conic gradient, so the Swift app's rotating ring is approximated by a
+/// linear gradient whose angle turns once per animation cycle. `fract` keeps
+/// the end of a cycle from landing on a full 360°, which would flip back to
+/// the same frame the next cycle opens with and read as a stutter.
 fn streaming_border_angle(delta: f32) -> f32 {
     delta.fract() * 360.0
 }
@@ -8295,9 +8299,61 @@ mod tests {
         assert_eq!(streaming_border_angle(0.5), 180.0);
         assert!(streaming_border_angle(1.0) < 360.0);
 
-        let angles = [0.0, 0.25, 0.5, 0.75, 0.999]
-            .map(streaming_border_angle);
+        let angles = [0.0, 0.25, 0.5, 0.75, 0.999].map(streaming_border_angle);
         assert!(angles.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[gpui::test]
+    async fn the_rotating_border_wraps_the_composer_only_while_streaming(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &[]);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-streaming-border").is_none(),
+            "an idle composer keeps its static border"
+        );
+        // The static border lives on the card itself, the animated one on a
+        // wrapper the card sits inside — so the card's own width legitimately
+        // differs by the wrapper's inset. What must not move is the card's
+        // outer footprint and the text the user is typing inside it.
+        let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
+        let idle_input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let wrapper = cx
+            .debug_bounds("composer-streaming-border")
+            .expect("a working agent wraps the composer in the animated border");
+        let streaming_input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+        assert_eq!(
+            idle_card.size, wrapper.size,
+            "the animated border must occupy exactly the footprint the static one did"
+        );
+        assert_eq!(
+            idle_input, streaming_input,
+            "the draft text must not shift when the animated border takes over"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = false;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-streaming-border").is_none(),
+            "the static border returns the moment streaming ends"
+        );
     }
 
     #[test]
