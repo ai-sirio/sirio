@@ -147,7 +147,6 @@ impl gpui::Global for DiffViewModeSetting {}
 impl DiffViewMode {
     /// Display order; index into this is the segmented control's index.
     const ORDER: [DiffViewMode; 2] = [DiffViewMode::Unified, DiffViewMode::Split];
-    const LABELS: &'static [&'static str] = &["Unified", "Split"];
 
     fn index(self) -> usize {
         match self {
@@ -1153,6 +1152,10 @@ impl ChangesTab {
         let entity_for_toggle = entity.clone();
         let entity_for_action = entity.clone();
         let action_label = section.batch_action_label();
+        let action_icon = match section {
+            ChangeSection::Staged => Icon::SquareMinus,
+            ChangeSection::Changed | ChangeSection::Untracked => Icon::SquarePlus,
+        };
         let action_id = format!("changes-section-{}-all", section.slug());
         div()
             .id(format!("changes-section-{}", section.slug()))
@@ -1196,6 +1199,7 @@ impl ChangesTab {
             // the header keeps its collapse toggle but not the mutation.
             .when(allows_staging, |this| {
                 this.child(section_action_button(
+                    action_icon,
                     action_label,
                     action_id,
                     theme,
@@ -1556,9 +1560,12 @@ impl ChangesTab {
             // picks the diff's *scope* (whole file vs hunks), because that
             // build had only one renderer and so never needed a view-mode
             // choice at all. Do not read this control as a port of that one.
-            .child(controls::segmented(
+            .child(controls::segmented_icons(
                 "changes-view-mode",
-                DiffViewMode::LABELS,
+                &[
+                    (Icon::DiffUnified, "Unified"),
+                    (Icon::DiffSplit, "Split"),
+                ],
                 mode.index(),
                 theme,
                 move |index, cx| {
@@ -1567,16 +1574,20 @@ impl ChangesTab {
                     });
                 },
             ))
-            .child(action_text_button(
+            .child(action_icon_button(
+                Icon::ExpandVertical,
                 "Expand All",
+                "changes-expand-all",
                 "expand-all".to_owned(),
                 theme,
                 move |cx| {
                     expand_entity.update(cx, |tab, cx| tab.expand_all(cx));
                 },
             ))
-            .child(action_text_button(
+            .child(action_icon_button(
+                Icon::FoldVertical,
                 "Collapse All",
+                "changes-collapse-all",
                 "collapse-all".to_owned(),
                 theme,
                 move |cx| {
@@ -1586,8 +1597,10 @@ impl ChangesTab {
             // The git mutations only exist for a mutable checkout: a commit
             // view renders no Stage/Discard controls at all.
             .when(self.allows_staging(), |this| {
-                this.child(action_text_button(
+                this.child(action_icon_button(
+                    Icon::SquarePlus,
                     "Stage all",
+                    "changes-stage-all",
                     "stage-all".to_owned(),
                     theme,
                     move |cx| {
@@ -1596,8 +1609,10 @@ impl ChangesTab {
                         });
                     },
                 ))
-                .child(destructive_action_text_button(
+                .child(destructive_action_icon_button(
+                    Icon::Undo,
                     "Discard all",
+                    "changes-discard-all",
                     "discard-all".to_owned(),
                     theme,
                     move |window, cx| {
@@ -2046,7 +2061,33 @@ fn action_text_button(
         .child(label)
 }
 
+fn action_icon_button(
+    icon: Icon,
+    tooltip: &'static str,
+    selector: &'static str,
+    id: String,
+    theme: Theme,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_owned())
+        .px(theme.spacing.titlebar_control_spacing)
+        .py(theme.spacing.titlebar_control_spacing)
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.caption2)
+        .text_color(theme.title)
+        .hover(|style| style.bg(theme.row_hover))
+        .tooltip(controls::text_tooltip(tooltip, theme))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            on_click(cx);
+        })
+        .child(IconElement::new(icon, IconSize::Small))
+}
+
 fn section_action_button(
+    icon: Icon,
     label: &'static str,
     id: String,
     theme: Theme,
@@ -2063,11 +2104,40 @@ fn section_action_button(
         .text_size(theme.typography.caption2)
         .text_color(theme.subtitle)
         .hover(|style| style.bg(theme.row_hover).text_color(theme.title))
+        .tooltip(controls::text_tooltip(label, theme))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
         })
-        .child(label)
+        .child(IconElement::new(icon, IconSize::XSmall))
+}
+
+fn destructive_action_icon_button<F>(
+    icon: Icon,
+    tooltip: &'static str,
+    selector: &'static str,
+    id: String,
+    theme: Theme,
+    on_click: F,
+) -> impl IntoElement
+where
+    F: Fn(&mut Window, &mut App) + 'static,
+{
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_owned())
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .text_size(px(12.5))
+        .text_color(theme.subtitle)
+        .hover(|style| style.text_color(theme.git_conflict))
+        .tooltip(controls::text_tooltip(tooltip, theme))
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(IconElement::new(icon, IconSize::Small))
 }
 
 fn destructive_action_text_button<F>(
@@ -3053,6 +3123,52 @@ mod tests {
                 .is_empty(),
             "the confirmed Discard click restores the real checkout"
         );
+    }
+
+    /// The Changes toolbar keeps all six controls reachable by their stable
+    /// selectors after replacing their text chrome with icons. GPUI's visual
+    /// test context exposes bounds but not rendered text content, so the
+    /// permitted fallback is used here; the action controls' compact bounds
+    /// also distinguish them from the replaced labels.
+    #[gpui::test]
+    async fn drawn_changes_toolbar_uses_icon_controls(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+
+        for selector in [
+            "changes-view-mode-0",
+            "changes-view-mode-1",
+            "changes-expand-all",
+            "changes-collapse-all",
+            "changes-stage-all",
+            "changes-discard-all",
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("toolbar control is drawn");
+            assert!(
+                bounds.size.width > px(0.0) && bounds.size.height > px(0.0),
+                "{selector} has a non-empty clickable bounds"
+            );
+        }
+
+        for selector in [
+            "changes-expand-all",
+            "changes-collapse-all",
+            "changes-stage-all",
+            "changes-discard-all",
+        ] {
+            let width = cx.debug_bounds(selector).expect("action is drawn").size.width;
+            assert!(
+                f32::from(width) < 40.0,
+                "{selector} keeps icon-sized chrome, got {width}"
+            );
+        }
     }
 
     /// F-CHG-11: the section-level Stage all control is also a real drawn
