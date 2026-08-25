@@ -3381,17 +3381,27 @@ impl Settings {
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .min_w_0()
                         .gap(px(2.0))
                         .child(
                             div()
+                                .debug_selector(move || format!("settings-agent-name-{index}"))
                                 .text_size(theme.typography.headline)
                                 .text_color(theme.title)
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(text!(id = ("settings-agent-name", index), row.name)),
                         )
                         .child(
                             div()
+                                .debug_selector(move || {
+                                    format!("settings-agent-description-{index}")
+                                })
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.subtitle)
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(text!(
                                     id = ("settings-agent-description", index),
                                     row.description
@@ -4758,6 +4768,38 @@ mod tests {
         assert_eq!(
             rendered, expected,
             "the surface renders exactly what discovery returned"
+        );
+    }
+
+    #[gpui::test]
+    async fn agent_description_stays_within_its_row(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex agent with a deliberately long display name that exceeds the available row width",
+            executable: None,
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Codex row renders");
+        let description = cx
+            .debug_bounds("settings-agent-description-0")
+            .expect("the Codex description renders");
+        assert!(
+            description.origin.x + description.size.width <= row.origin.x + row.size.width,
+            "agent description must stay inside its row: description={description:?} row={row:?}"
         );
     }
 
