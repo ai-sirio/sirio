@@ -38,6 +38,20 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 # it has no per-window icon API, so this is the whole Windows story.
 embed-resource = "3"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Shell_NotifyIcon and its private message-only window for the native Windows
+# tray roster. Same windows-sys version already used by tiller_control and
+# present in the workspace lockfile, so this adds no external dependency.
+# Win32_Graphics_Gdi is required because windows-sys gates WNDCLASSW behind
+# the HBRUSH field in that feature, although the tray does not draw with GDI.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # F-CTRL-BROWSER-05: browser.wait pumps the same process-global GTK main
 # loop tiller_ui's BrowserSurface drives from its 16ms timer, so a bounded
