@@ -684,7 +684,7 @@ pub(crate) fn launch_badge_label(source: &tiller_registry::LaunchSource) -> &'st
     use tiller_registry::{LaunchSource, UnavailableReason};
     match source {
         LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => "ACP chat available",
-        LaunchSource::Installable { .. } => "Install",
+        LaunchSource::Installable { .. } => "Available to install",
         LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform) => {
             "Not available for this platform"
         }
@@ -5454,7 +5454,30 @@ mod tests {
             distributions: vec![Distribution::Binary(Default::default())],
         };
         let source = LaunchSource::Installable { agent };
-        assert_eq!(launch_badge_label(&source), "Install");
+        assert_eq!(launch_badge_label(&source), "Available to install");
+    }
+
+    #[test]
+    fn the_state_pill_never_repeats_the_action_button_label() {
+        use tiller_registry::{LaunchSource, RegistryAgent};
+
+        let source = LaunchSource::Installable {
+            agent: RegistryAgent {
+                id: "cursor".into(),
+                name: "Cursor".into(),
+                version: "1.0.0".into(),
+                description: None,
+                repository: None,
+                website: None,
+                license: None,
+                icon: None,
+                distributions: vec![],
+            },
+        };
+        let action_label = "Install";
+
+        assert_ne!(launch_badge_label(&source), "Install");
+        assert_ne!(launch_badge_label(&source), action_label);
     }
 
     #[test]
