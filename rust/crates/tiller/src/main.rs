@@ -10772,8 +10772,6 @@ impl TillerWorkspace {
     ) -> impl IntoElement {
         let left_focus_visible =
             shell_chrome::focus_is_keyboard_visible(&self.left_panel_focus, window, cx);
-        let center_focus_visible =
-            shell_chrome::focus_is_keyboard_visible(&self.center_panel_focus, window, cx);
         let right_focus_visible =
             shell_chrome::focus_is_keyboard_visible(&self.right_panel_focus, window, cx);
 
@@ -10956,7 +10954,7 @@ impl TillerWorkspace {
                 shell_chrome::panel(
                     "shell-center-panel",
                     &self.center_panel_focus,
-                    center_focus_visible,
+                    false,
                     theme,
                 )
                 .flex_1()
@@ -21338,6 +21336,10 @@ mod tests {
         assert!(
             cx.debug_bounds("shell-left-panel-focus-ring").is_some(),
             "keyboard focus inside the sidebar must make the enclosing shell panel visible"
+        );
+        assert!(
+            cx.debug_bounds("shell-center-panel-focus-ring").is_none(),
+            "the center terminal panel must never render a focus ring"
         );
 
         // Click a live sidebar row rather than changing the input-mode flag
