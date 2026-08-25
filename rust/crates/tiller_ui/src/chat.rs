@@ -11,13 +11,15 @@ use gpui::{
     InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
     ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
-    canvas, div, list, point, prelude::*, px, quad, rgb, transparent_black,
+    canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad, rgb,
+    transparent_black,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use tiller_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
     ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
@@ -53,6 +55,25 @@ pub(crate) const CARD_V_PADDING: f32 = 10.0;
 /// The user turn's pill: rounded, right-aligned, capped at waku's bubble
 /// width. The assistant reply has no container at all.
 pub(crate) const USER_PILL_MAX_WIDTH: f32 = 540.0;
+
+/// F-CHAT-59: the composer's streaming border completes one revolution
+/// every two seconds, continuous and un-eased — matches the retired Swift
+/// reference's `withAnimation(.linear(duration: 2).repeatForever(autoreverses:
+/// false))` (`docs/superpowers/plans/2026-08-09-composer-agent-colors.md`).
+const STREAMING_BORDER_REVOLUTION: Duration = Duration::from_secs(2);
+/// Repaint cadence while the streaming border rotates — the same 16ms/60fps
+/// interval `BrowserView` already uses for its own frame-driven redraw.
+const STREAMING_BORDER_TICK: Duration = Duration::from_millis(16);
+/// Thickness of the rotating ring drawn around the composer card while
+/// streaming, outside its normal 1px border.
+const STREAMING_BORDER_WIDTH: Pixels = px(2.5);
+
+/// Degrees of rotation for a streaming-border revolution `progress`
+/// (`0.0` = start of a revolution, `1.0` = one full turn) — continuous
+/// linear rotation, no easing.
+fn streaming_border_angle(progress: f64) -> f64 {
+    progress * 360.0
+}
 
 actions!(
     chat_composer,
@@ -917,6 +938,14 @@ pub struct Chat {
     /// F-CHAT-25: the question answer field (focus, draft, owner request).
     question_answer: QuestionAnswerState,
     streaming: bool,
+    /// Wall-clock origin of the current streaming-border revolution, read
+    /// through `cx.background_executor().now()` so it stays fakeable under
+    /// tests. `None` whenever `streaming` is false — the next turn always
+    /// starts the rotation fresh rather than resuming a stale phase.
+    streaming_border_started_at: Option<Instant>,
+    /// Whether a streaming-border repaint timer is already in flight — same
+    /// one-timer-per-surface discipline as `composer_blink`/`caret::schedule`.
+    streaming_border_timer_pending: bool,
     /// D-CHAT-03: the draft committed (Enter) while a turn streams, to be
     /// sent as the next user turn when the turn ends — one slot, latest
     /// commit wins. `None` when nothing is queued.
@@ -1145,6 +1174,8 @@ impl Chat {
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
+            streaming_border_started_at: None,
+            streaming_border_timer_pending: false,
             queued_item: None,
             connecting: false,
             has_completed_turn: false,
@@ -5712,13 +5743,46 @@ impl Chat {
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
         let focused = self.composer_focus.is_focused(window);
         let can_send = self.can_send();
         let entity = cx.entity();
         let entity_for_focus = entity.clone();
+
+        // F-CHAT-59: while streaming, the ring's rotation angle is derived
+        // from wall-clock elapsed time (not accumulated per-tick) so it's
+        // always frame-accurate regardless of render cadence; a repaint
+        // timer just wakes the view often enough to sample it, the same
+        // one-timer-per-surface discipline `caret::schedule` uses for the
+        // composer's own blink.
+        let streaming_border_deg = if self.streaming {
+            let started_at = *self
+                .streaming_border_started_at
+                .get_or_insert_with(|| cx.background_executor().now());
+            if !self.streaming_border_timer_pending {
+                self.streaming_border_timer_pending = true;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(STREAMING_BORDER_TICK).await;
+                    let _ = this.update(cx, |chat, cx| {
+                        chat.streaming_border_timer_pending = false;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            let elapsed = cx
+                .background_executor()
+                .now()
+                .saturating_duration_since(started_at);
+            let progress = elapsed.as_secs_f64() / STREAMING_BORDER_REVOLUTION.as_secs_f64() % 1.0;
+            Some(streaming_border_angle(progress))
+        } else {
+            self.streaming_border_started_at = None;
+            self.streaming_border_timer_pending = false;
+            None
+        };
 
         // The composer's insertion caret. A cursor move or edit since the
         // last frame wakes the blink (the bar must be solid right after the
@@ -6932,7 +6996,7 @@ impl Chat {
         // ending in the circular send control. The card is waku's: max
         // 720px, 13px radius, `composer` fill, a hairline border that turns
         // coral while focused.
-        div()
+        let composer_card = div()
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
@@ -7110,7 +7174,32 @@ impl Chat {
             .children(chat_history_menu)
             .children(model_picker)
             .children(mode_picker)
-            .children(context_popover)
+            .children(context_popover);
+
+        // F-CHAT-59: while streaming, an outer ring adds the rotating
+        // orange highlight around the otherwise-unchanged card above —
+        // `linear_gradient`'s angle sweeping continuously is what reads as
+        // rotation; the card's own opaque `colors.composer` fill covers
+        // everything inside the ring's `STREAMING_BORDER_WIDTH` padding, so
+        // nothing needs punching out by hand.
+        match streaming_border_deg {
+            Some(angle) => {
+                let streaming_orange = rgb(0xf5a623);
+                div()
+                    .id("composer-streaming-ring")
+                    .debug_selector(|| "composer-streaming-ring".into())
+                    .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
+                    .p(STREAMING_BORDER_WIDTH)
+                    .bg(linear_gradient(
+                        angle as f32,
+                        linear_color_stop(streaming_orange.opacity(0.15), 0.0),
+                        linear_color_stop(streaming_orange, 1.0),
+                    ))
+                    .child(composer_card)
+                    .into_any_element()
+            }
+            None => composer_card.into_any_element(),
+        }
     }
 }
 
@@ -8157,6 +8246,13 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    #[test]
+    fn streaming_border_angle_completes_one_linear_revolution() {
+        assert_eq!(streaming_border_angle(0.0), 0.0);
+        assert_eq!(streaming_border_angle(0.5), 180.0);
+        assert_eq!(streaming_border_angle(1.0), 360.0);
+    }
 
     const CHAT_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
