@@ -27,9 +27,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Element, ElementId, EventEmitter, Font, FontStyle,
     FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, PaintQuad, ParentElement, Pixels, Point, ShapedLine,
-    StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle,
-    Window, anchored, deferred, div, fill, font, point, px, relative, rgba, size,
+    MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement, Pixels, Point,
+    ShapedLine, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun,
+    UnderlineStyle, Window, anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
 use parking_lot::Mutex;
 use tiller_theme::Theme;
@@ -234,7 +234,7 @@ const GRAPHEME_INLINE: usize = 8;
 /// style attribute the emulator tracks. `inverse` and `invisible` are
 /// resolved here (fg/bg swapped; cluster cleared), so the renderer only ever
 /// sees final values (#45).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SnapshotCell {
     cluster: [char; GRAPHEME_INLINE],
     cluster_len: usize,
@@ -247,6 +247,10 @@ struct SnapshotCell {
     faint: bool,
     fg: TillerColor,
     bg: TillerColor,
+    /// The cell's OSC 8 hyperlink target when the emulator state carries one
+    /// (#41). Interned per snapshot by `build_snapshot` — every cell of a link
+    /// run shares one `Arc<str>` rather than cloning a String each.
+    hyperlink: Option<Arc<str>>,
 }
 
 impl SnapshotCell {
@@ -680,9 +684,59 @@ fn build_snapshot(
                 faint: style.faint,
                 fg,
                 bg,
+                hyperlink: None,
             });
         }
         rows_out.push(line);
+    }
+
+    // OSC 8 hyperlinks (#41): the render-state cell iterator exposes no
+    // hyperlink accessor, so read them straight off the grid — only possible
+    // here on the owner thread where the GridRef exists.
+    let mut uri_buf: Vec<u8> = Vec::with_capacity(256);
+    let mut interned: Vec<Arc<str>> = Vec::new();
+    for (row_index, line) in rows_out.iter_mut().enumerate() {
+        // Row-level has_hyperlink is a cheap prefilter with FALSE POSITIVES
+        // allowed — it may claim links that no cell of the row carries, but
+        // never misses a row that does. Skip whole rows; per-cell truth is
+        // Cell::has_hyperlink below.
+        let row_may_have_links = terminal
+            .grid_ref(viewport_point(0, row_index as u32))
+            .ok()
+            .and_then(|grid_ref| grid_ref.row().ok())
+            .and_then(|row| row.has_hyperlink().ok())
+            .unwrap_or(false);
+        if !row_may_have_links {
+            continue;
+        }
+        for (column, cell) in line.iter_mut().enumerate() {
+            let uri = terminal
+                .grid_ref(viewport_point(column as u16, row_index as u32))
+                .ok()
+                .and_then(|grid_ref|
+                    grid_ref.cell().ok().and_then(|cell_ref|
+                        cell_ref
+                            .has_hyperlink()
+                            .map(|has| if has { Some(grid_ref) } else { None })
+                            .unwrap_or(None)
+                    )
+                )
+                .and_then(|grid_ref| grid_ref_hyperlink_uri(grid_ref, &mut uri_buf));
+            let Some(uri) = uri else {
+                continue;
+            };
+            // Intern per snapshot: one Arc<str> per distinct URI per frame;
+            // link runs are short and URIs per frame are few, so linear scan.
+            let shared = match interned.iter().find(|existing| existing.as_ref() == uri) {
+                Some(existing) => existing.clone(),
+                None => {
+                    let arc: Arc<str> = Arc::from(uri.as_str());
+                    interned.push(arc.clone());
+                    arc
+                }
+            };
+            cell.hyperlink = Some(shared);
+        }
     }
 
     // Hide the cursor when the viewport is scrolled away from the active
@@ -981,24 +1035,14 @@ impl TerminalHandle {
         reply_rx.recv().unwrap_or((Vec::new(), (usize::MAX, 0)))
     }
 
-    /// Resolves the link under a viewport cell: OSC 8 hyperlinks when the
-    /// emulator state carries one, else the shared regex router over the
-    /// row's plain text (unchanged behaviour — link_router never read OSC 8
-    /// under alacritty either).
+    /// Resolves the link under a viewport cell: the cell's OSC 8 hyperlink
+    /// target when the emulator state carries one (#41), else the shared regex
+    /// router over the row's plain text — bare URLs stay clickable, common in
+    /// agent output that emits no OSC 8. An OSC 8 region whose display text
+    /// also regex-matches prefers its target.
     fn link_at(&self, row: usize, column: usize) -> Option<String> {
         let (cells, _) = self.snapshot();
-        if row >= cells.len() || cells.is_empty() || column >= cells[0].len() {
-            return None;
-        }
-        let line: String = cells[row]
-            .iter()
-            .flat_map(|cell| cell.chars())
-            .collect();
-        let byte_column = line
-            .char_indices()
-            .nth(column)
-            .map_or(line.len(), |(index, _)| index);
-        url_at_column(&line, byte_column)
+        resolve_link(&cells, row, column)
     }
 
     /// Captures the grid as newline-delimited plain text. This intentionally
@@ -1098,6 +1142,48 @@ fn grid_ref_cluster(grid_ref: GridRef<'_>) -> String {
         out.push(' ');
     }
     out
+}
+
+/// A point in viewport coordinates — row 0 is the top of the visible
+/// viewport, matching the order the render-state RowIterator yields rows.
+fn viewport_point(column: u16, row: u32) -> GhosttyPoint {
+    GhosttyPoint::Viewport(PointCoordinate { x: column, y: row })
+}
+
+/// One cell's OSC 8 hyperlink URI, or None when the cell carries no link.
+/// `Ok(0)` means no hyperlink; retries with a bigger buffer on OutOfSpace —
+/// same pattern as [`grid_ref_cluster`]. Reuses the caller's buffer across
+/// cells so a frame allocates once, not per linked cell.
+fn grid_ref_hyperlink_uri(grid_ref: GridRef<'_>, buf: &mut Vec<u8>) -> Option<String> {
+    if buf.len() < 64 {
+        buf.resize(64, 0);
+    }
+    let len = loop {
+        match grid_ref.hyperlink_uri(buf) {
+            Ok(len) => break len,
+            Err(Error::OutOfSpace { required }) => buf.resize(required, 0),
+            Err(_) => return None,
+        }
+    };
+    (len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+/// Link resolution over a paint-frame snapshot (#41): the cell's OSC 8 target
+/// when it carries one, else the regex router over the row's plain text. A
+/// free function so headless boundary tests exercise the exact path
+/// `TerminalHandle::link_at` serves clicks from.
+fn resolve_link(cells: &[Vec<SnapshotCell>], row: usize, column: usize) -> Option<String> {
+    let line = cells.get(row)?;
+    let cell = line.get(column)?;
+    if let Some(uri) = &cell.hyperlink {
+        return Some(uri.to_string());
+    }
+    let text: String = line.iter().flat_map(|c| c.chars()).collect();
+    let byte_column = text
+        .char_indices()
+        .nth(column)
+        .map_or(text.len(), |(index, _)| index);
+    url_at_column(&text, byte_column)
 }
 
 #[cfg(unix)]
@@ -1298,6 +1384,11 @@ pub struct TerminalView {
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
     context_menu: Option<Point<Pixels>>,
+    /// Live link-hover tooltip (#41): the pointer position plus the resolved
+    /// target URI of the cell under the pointer. Set only while the platform
+    /// modifier is held over a linked cell; cleared on modifier release or
+    /// when the pointer moves off links.
+    link_hover: Option<LinkHover>,
     last_dropped_diff: Option<(PathBuf, String)>,
     last_dropped_files: Option<Vec<PathBuf>>,
     /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): whether this
@@ -1325,6 +1416,14 @@ pub struct TerminalView {
 const OUTPUT_SETTLE_DEBOUNCE: Duration = Duration::from_millis(200);
 pub const CONTENT_MATCH_BYTE_LIMIT: usize = 10 * 1024;
 pub const CONTENT_MATCH_LINE_LIMIT: usize = 40;
+
+/// A live link-hover tooltip's state (#41). Dumb by design: window-absolute
+/// anchor plus the URI string; no interaction.
+#[derive(Clone)]
+struct LinkHover {
+    position: Point<Pixels>,
+    uri: String,
+}
 /// Poll interval for the PTY event channel. The GPUI task owns this timer and
 /// polls the channel with `try_recv`; the alacritty reader thread therefore
 /// never wakes the deterministic test scheduler directly.
@@ -1400,6 +1499,7 @@ impl TerminalView {
             exit_status: None,
             identity,
             context_menu: None,
+            link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
@@ -1425,6 +1525,7 @@ impl TerminalView {
             exit_status: None,
             identity,
             context_menu: None,
+            link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
@@ -1472,6 +1573,7 @@ impl TerminalView {
             exit_status: None,
             identity,
             context_menu: None,
+            link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
@@ -1928,6 +2030,60 @@ impl TerminalView {
                 target: self.identity.clone(),
                 url,
             });
+        }
+    }
+
+    /// #41: with the platform modifier held, hovering a linked cell shows its
+    /// target URI near the pointer — an OSC 8 region's display text may not
+    /// reveal the target, so the hover must. Cleared on modifier release or
+    /// whenever the pointer moves off a linked cell.
+    fn on_link_hover_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if !opens_terminal_link(event.modifiers.platform) {
+            if self.link_hover.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let Some(terminal) = self.running_terminal() else {
+            return;
+        };
+        // Same hit-test math as `on_left_mouse_down` (F-TERM-UI-02).
+        let origin = terminal
+            .last_bounds
+            .lock()
+            .map(|bounds| bounds.origin)
+            .unwrap_or_default();
+        let cell_width = terminal
+            .last_cell_width
+            .lock()
+            .map(f32::from)
+            .unwrap_or(8.0);
+        let (row, column) = link_router::resolve_click_cell(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            f32::from(origin.x),
+            f32::from(origin.y),
+            cell_width,
+            f32::from(LINE_HEIGHT),
+        );
+        let uri = terminal.link_at(row, column);
+        let next = uri.map(|uri| LinkHover {
+            position: event.position,
+            uri,
+        });
+        let changed = match (&self.link_hover, &next) {
+            (Some(old), Some(new)) => old.uri != new.uri || old.position != new.position,
+            (None, None) => false,
+            _ => true,
+        };
+        self.link_hover = next;
+        if changed {
+            cx.notify();
         }
     }
 
@@ -2439,6 +2595,7 @@ impl gpui::Render for TerminalView {
                 .track_focus(&self.focus_handle)
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_mouse_down))
                 .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+                .on_mouse_move(cx.listener(Self::on_link_hover_move))
                 .on_key_down(cx.listener(Self::on_key_down))
                 .on_drop::<(PathBuf, String)>(move |payload: &(PathBuf, String), _, cx| {
                     terminal_entity.update(cx, |terminal, cx| {
@@ -2520,6 +2677,32 @@ impl gpui::Render for TerminalView {
                     } else {
                         this
                     }
+                })
+                // #41: the link-hover tooltip — dumb monospace text of the
+                // target URI near the pointer, theme colors, no interaction.
+                .when_some(self.link_hover.clone(), |this, hover| {
+                    this.child(
+                        deferred(
+                            anchored()
+                                .position(hover.position)
+                                .snap_to_window()
+                                .child(
+                                    div()
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .max_w(px(560.0))
+                                        .rounded(theme.radii.control)
+                                        .bg(theme.card_fill)
+                                        .border_1()
+                                        .border_color(theme.hairline)
+                                        .font_family(tiller_theme::terminal_family())
+                                        .text_size(theme.typography.caption2)
+                                        .text_color(theme.title)
+                                        .child(hover.uri),
+                                ),
+                        )
+                        .priority(1),
+                    )
                 })
                 .when_some(context_menu, |this, menu| this.child(menu))
                 .into_any_element(),
@@ -2847,6 +3030,87 @@ mod tests {
     /// One row's rendered text through SnapshotCell::chars — what gpui shapes.
     fn frame_row_text(row: &[SnapshotCell]) -> String {
         row.iter().flat_map(|cell| cell.chars()).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // OSC 8 hyperlink boundary tests (#41): same headless shape as the #40
+    // boundary tests above — bytes straight through vt_write, read back
+    // through build_snapshot + the free `resolve_link` that serves clicks.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn osc8_display_text_resolves_to_target_uri_not_the_display_text() {
+        let mut term = headless_term(80, 24);
+        advance_headless(
+            &mut term,
+            b"\x1b]8;;https://real.test/issue\x07click\x1b]8;;\x07 plain\r\n",
+        );
+        let frame = paint_frame(&mut term);
+        assert_eq!(frame_row_text(&frame[0]).trim_end(), "click plain");
+        // Every cell of the display run carries the TARGET; a cell outside
+        // the run carries nothing.
+        assert_eq!(
+            frame[0][0].hyperlink.as_deref(),
+            Some("https://real.test/issue"),
+            "the linked cell's hyperlink must be the OSC 8 target"
+        );
+        assert_eq!(
+            resolve_link(&frame, 0, 0),
+            Some("https://real.test/issue".to_string()),
+            "display text 'click' must not leak out as the resolved link"
+        );
+        assert_eq!(resolve_link(&frame, 0, 7), None);
+    }
+
+    #[test]
+    fn cells_after_the_osc8_terminator_do_not_carry_the_link() {
+        let mut term = headless_term(80, 24);
+        advance_headless(
+            &mut term,
+            b"\x1b]8;;https://real.test/x\x1b\\linked\x1b]8;;\x1b\\after\r\n",
+        );
+        let frame = paint_frame(&mut term);
+        assert_eq!(frame_row_text(&frame[0]).trim_end(), "linkedafter");
+        assert_eq!(resolve_link(&frame, 0, 3), Some("https://real.test/x".to_string()));
+        for column in 6..11 {
+            assert!(
+                frame[0][column].hyperlink.is_none(),
+                "column {column} is past the OSC 8 terminator and must not carry the link"
+            );
+            assert_eq!(resolve_link(&frame, 0, column), None);
+        }
+    }
+
+    #[test]
+    fn bare_https_url_without_osc8_still_resolves_via_regex_fallback() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"see https://example.test/docs end\r\n");
+        let frame = paint_frame(&mut term);
+        assert!(
+            frame.iter().all(|row| row.iter().all(|c| c.hyperlink.is_none())),
+            "no cell may carry an OSC 8 link when none was emitted"
+        );
+        assert_eq!(
+            resolve_link(&frame, 0, 6),
+            Some("https://example.test/docs".to_string()),
+            "a bare URL must stay clickable through the regex fallback"
+        );
+        assert_eq!(resolve_link(&frame, 0, 2), None);
+    }
+
+    #[test]
+    fn osc8_target_wins_when_display_text_also_regex_matches_a_url() {
+        let mut term = headless_term(80, 24);
+        advance_headless(
+            &mut term,
+            b"\x1b]8;;https://target.test/a\x07https://display.test/b\x1b]8;;\x07\r\n",
+        );
+        let frame = paint_frame(&mut term);
+        assert_eq!(
+            resolve_link(&frame, 0, 4),
+            Some("https://target.test/a".to_string()),
+            "when both signals fire on one cell the OSC 8 target must win"
+        );
     }
 
     /// Which sentinels of `B40_LINE_000..NNN` are missing from the text.
