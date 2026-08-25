@@ -19,6 +19,22 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
+# libghostty-vt-sys (a tiller_terminal dependency since #27) shells out to
+# `zig build`, and upstream pins Zig at EXACTLY 0.15.2 -- a newer Zig fails
+# too, so the upgrade reflex makes it worse; 0.15.2 must be installed
+# alongside and found first on PATH. Without this preflight the failure
+# surfaces as an inscrutable build-script panic from a crates.io crate (#63).
+ZIG_REQUIRED="0.15.2"
+if ! command -v zig >/dev/null 2>&1; then
+    echo "zig not found: libghostty-vt-sys needs Zig exactly ${ZIG_REQUIRED} on PATH (#63)"
+    exit 1
+fi
+ZIG_VERSION="$(zig version 2>/dev/null || true)"
+if [[ "$ZIG_VERSION" != "$ZIG_REQUIRED" ]]; then
+    echo "zig ${ZIG_VERSION:-unknown} found, but libghostty-vt-sys builds only with exactly ${ZIG_REQUIRED} (newer fails too); install ${ZIG_REQUIRED} alongside and put it first on PATH (#63)"
+    exit 1
+fi
+
 # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"`, which is right when it works:
 # it serves the 408 dependency crates to every parallel worktree instead of rebuilding them.
 # But sccache has to spawn a daemon and bind a socket, and the sandboxed agent panes cannot,
