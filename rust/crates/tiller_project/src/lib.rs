@@ -100,8 +100,8 @@ pub use discovery::{
     is_git_repository, parse_worktree_list,
 };
 pub use domain::{
-    AutoNamingThrottle, OnceGate, default_project_base, move_item, move_tab, numeric_tab_selection,
-    resolve_worktree_defaults,
+    AutoNamingThrottle, OnceGate, default_project_base, display_absolute_path, display_path,
+    move_item, move_tab, numeric_tab_selection, resolve_worktree_defaults,
 };
 pub use error::GitError;
 pub use file::{
