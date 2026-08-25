@@ -1,8 +1,11 @@
-//! A small GPUI terminal backed by alacritty's terminal emulator and PTY loop.
+//! A small GPUI terminal backed by libghostty-vt (VT state) and portable-pty
+//! (PTY). Stage 2 of #45: the paint loop consumes grapheme clusters per cell
+//! and every SGR attribute gpui can express — bold, italic, underline (+
+//! color, styles degraded to gpui's ceiling per #31), strikethrough, inverse,
+//! faint, invisible.
 
 use std::{
-    borrow::Cow,
-    collections::HashMap,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,24 +14,22 @@ use std::{
 
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 
-use alacritty_terminal::{
-    event::{Event, EventListener, WindowSize},
-    event_loop::{EventLoop, EventLoopSender, Msg},
-    grid::{Dimensions, Scroll},
-    index::{Column, Line},
-    sync::FairMutex,
-    term::{Config, Term, cell::Cell, cell::Flags},
-    tty::{self, Shell},
-    vte::ansi::{Color, NamedColor, Processor},
+use libghostty_vt::{
+    Error, RenderState, Terminal, TerminalOptions,
+    render::{CellIteration, CellIterator, Colors, RowIterator},
+    screen::{CellWide, GridRef},
+    style::{StyleColor, Underline},
+    terminal::{Mode, Point as GhosttyPoint, PointCoordinate, ScrollViewport},
 };
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use anyhow::{Context as _, Result};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Element, ElementId, EventEmitter, Font, FontStyle,
     FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent, LayoutId,
     MouseButton, MouseDownEvent, PaintQuad, ParentElement, Pixels, Point, ShapedLine,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window, anchored, deferred, div, fill,
-    font, point, px, relative, rgba, size,
+    StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle,
+    Window, anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
 use parking_lot::Mutex;
 use tiller_theme::Theme;
@@ -172,21 +173,9 @@ impl TerminalExitStatus {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // exercised by the exit-status unit test
     fn from_signal(signal: i32) -> Self {
         Self::Signal(signal)
-    }
-
-    fn from_process_status(status: &std::process::ExitStatus) -> Self {
-        if let Some(code) = status.code() {
-            return Self::from_exit_code(code);
-        }
-
-        #[cfg(unix)]
-        if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(status) {
-            return Self::from_signal(signal);
-        }
-
-        Self::Unknown
     }
 
     fn label(self) -> String {
@@ -224,47 +213,100 @@ struct SpawnParams {
     shell: TerminalShell,
 }
 
-type SharedTerm = Arc<FairMutex<Term<TermEventProxy>>>;
-
-struct TerminalDimensions {
-    columns: usize,
-    screen_lines: usize,
+/// Events a terminal's owner thread emits to the view's pump. Tiller's own
+/// enum — libghostty-vt has no event system of its own; state (title, exit)
+/// is read off the `Terminal` and diffed into these.
+#[derive(Clone, Debug)]
+enum TerminalEvent {
+    /// PTY output was fed into the emulator.
+    Wakeup,
+    /// The OSC title changed. An empty string is an OSC title reset.
+    Title(String),
+    /// The PTY child exited after its final output was drained.
+    ChildExit(TerminalExitStatus),
 }
 
-impl Dimensions for TerminalDimensions {
-    fn total_lines(&self) -> usize {
-        self.screen_lines
+/// Codepoints kept inline in one [`SnapshotCell`] before truncation. Flags
+/// are 2, ZWJ emoji families reach ~7; anything longer is a curiosity.
+const GRAPHEME_INLINE: usize = 8;
+
+/// One cell of the paint-loop snapshot: its full grapheme cluster plus every
+/// style attribute the emulator tracks. `inverse` and `invisible` are
+/// resolved here (fg/bg swapped; cluster cleared), so the renderer only ever
+/// sees final values (#45).
+#[derive(Clone, Copy)]
+struct SnapshotCell {
+    cluster: [char; GRAPHEME_INLINE],
+    cluster_len: usize,
+    bold: bool,
+    italic: bool,
+    underline: Underline,
+    /// Resolved RGB for SGR 58; None paints with the cell's foreground.
+    underline_color: Option<TillerColor>,
+    strikethrough: bool,
+    faint: bool,
+    fg: TillerColor,
+    bg: TillerColor,
+}
+
+impl SnapshotCell {
+    /// The characters this column renders: the full cluster, or a single
+    /// space when the cell holds none (blank, or the continuation half of a
+    /// wide character).
+    ///
+    /// SpacerTail pin: libghostty-vt documents SpacerTail as "Do not
+    /// render." Tiller pushes a SPACE instead — gpui shapes whole lines, and
+    /// only the placeholder keeps following columns aligned. Pinned by
+    /// `spacer_tail_renders_as_a_space_so_columns_stay_aligned`.
+    fn chars(&self) -> impl Iterator<Item = char> + '_ {
+        let cluster = self.cluster;
+        let len = self.cluster_len;
+        (0..len.max(1)).map(move |i| if i < len { cluster[i] } else { ' ' })
     }
 
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-
-    fn columns(&self) -> usize {
-        self.columns
+    /// UTF-8 byte length of [`SnapshotCell::chars`] — what a TextRun.len counts.
+    fn byte_len(&self) -> usize {
+        self.chars().map(char::len_utf8).sum()
     }
 }
 
-/// Bridges the alacritty event-loop thread to the view's event pump.
+/// Commands sent to a terminal's dedicated owner thread.
 ///
-/// The grid is already mutated by the event-loop thread before an event is
-/// delivered. The pump below translates title, output, and child-exit events
-/// into the typed [`TerminalActivityEvent`] surface after coalescing a burst.
-#[derive(Clone)]
-struct TermEventProxy {
-    wakeup: futures::channel::mpsc::UnboundedSender<Event>,
+/// libghostty-vt types are all `!Send`/`!Sync`, so unlike alacritty's
+/// `FairMutex<Term>` there is no shared terminal object at all: each terminal
+/// lives on exactly one thread, and every other caller reaches it through
+/// this channel. Blocking round-trips (Snapshot/Text) wait on a oneshot-ish
+/// reply channel; the owner loop polls with a small sleep so worst-case
+/// command latency is bounded by [`EVENT_POLL_INTERVAL`].
+enum TerminalCommand {
+    /// Write bytes to the PTY (user input: keystrokes, paste).
+    Input(Vec<u8>),
+    /// Feed bytes straight into the VT parser without touching the PTY
+    /// (`replay_scrollback`, `clear_screen`).
+    Feed(Vec<u8>),
+    Resize(u16, u16, u16, u16),
+    Scroll(TillerScroll),
+    Snapshot(std::sync::mpsc::Sender<(Vec<Vec<SnapshotCell>>, (usize, usize))>),
+    Text(std::sync::mpsc::Sender<String>),
+    Shutdown,
 }
 
-impl EventListener for TermEventProxy {
-    fn send_event(&self, event: Event) {
-        let _ = self.wakeup.unbounded_send(event);
-    }
+/// Viewport scroll requests, mirroring the subset of alacritty's `grid::Scroll`
+/// the crate used.
+#[cfg_attr(not(test), allow(dead_code))] // Top/Bottom constructed from tests
+#[derive(Clone, Copy, Debug)]
+enum TillerScroll {
+    Top,
+    Bottom,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Clone)]
 struct TerminalHandle {
-    term: SharedTerm,
-    sender: EventLoopSender,
+    /// The terminal's dedicated owner thread. All emulator access funnels
+    /// through it (see [`TerminalCommand`]).
+    commands: std::sync::mpsc::Sender<TerminalCommand>,
     last_size: Arc<Mutex<Option<(u16, u16)>>>,
     shell_pid: u32,
     shutdown_started: Arc<AtomicBool>,
@@ -294,19 +336,18 @@ struct TerminalHandle {
     /// even though the origin-subtraction half of the same hit-test was
     /// already correct and unit-tested.
     last_cell_width: Arc<Mutex<Option<Pixels>>>,
-    /// F-TERM-03: the PTY master's raw fd, captured once at spawn time
-    /// before `pty` is moved into `EventLoop::new` (the event loop owns the
-    /// `File` from then on, but the fd *number* stays valid for the
-    /// process's lifetime, so holding just the number — not the `File` — is
-    /// enough to query it without contending with the reader/writer thread).
+    /// F-TERM-03: the PTY master's raw fd number, captured once at spawn
+    /// time before the master itself moves to the terminal owner thread (the
+    /// fd *number* stays valid for as long as the master is open, so holding
+    /// just the number — not the handle — is enough to query it without
+    /// contending with that thread's reads/writes).
     /// `tcgetpgrp` on this fd is a read-only terminal-driver ioctl
-    /// (`TIOCGPGRP`) and is safe to call concurrently with the event loop's
-    /// `read`/`write` on the same fd; it does not consume PTY data.
+    /// (`TIOCGPGRP`) and does not consume PTY data.
     ///
-    /// Unix-only: on non-unix targets [`Self::foreground_command_running`]
-    /// always reports `false` (see that method) and no fd is captured.
+    /// Unix-only; `None` when portable-pty could not expose the fd, in which
+    /// case [`Self::foreground_command_running`] reports `false`.
     #[cfg(unix)]
-    pty_master_fd: std::os::unix::io::RawFd,
+    pty_master_fd: Option<std::os::unix::io::RawFd>,
 }
 
 /// The shell a `TerminalShell::System` pane falls back to when `$SHELL` is unset,
@@ -387,87 +428,311 @@ fn user_shell_program() -> String {
 /// See the POSIX arm. `$SHELL` is not a Windows notion, so the interpreter
 /// comes from `COMSPEC` and the command flag is `/C`.
 ///
-/// The command comes back wrapped in an outer pair of quotes. This is
-/// DEFENSIVE, not load-bearing today, and the distinction is worth stating
-/// so nobody removes it as noise or trusts it further than it goes.
-///
-/// `cmd /C` has a quote rule with no POSIX counterpart: when the first
-/// character after `/C` is a quote, cmd strips the FIRST and LAST quote of
-/// the whole tail unless narrow conditions hold — exactly two quotes, no
-/// metacharacters between them, and the text between them naming a real
-/// executable. A tail carrying a quoted program AND a quoted argument has
-/// four quotes, so the rule fires and what survives is `program" "argument`,
-/// which is not a command. Measured here rather than inferred:
-///
-/// ```text
-/// cmd /C  "prog" "arg"     -> exit 1, "'prog" "arg' is not recognized"
-/// cmd /C ""prog" "arg""    -> exit 0, argument delivered intact
-/// ```
-///
-/// No caller reaches that shape yet: every `AgentAdapter::command` starts
-/// with a BARE program name (`claude`, `claude --resume "<ref>"`), because
-/// [`tiller_agents::shell_quote`] is applied to arguments and not to the
-/// program, and a tail beginning with a letter never triggers the rule. The
-/// pair is here because that is one refactor away from changing — the moment
-/// a command is built from a discovered absolute path, which on Windows
-/// routinely contains spaces and therefore needs quoting, the tail starts
-/// with a quote and every such command breaks in a way that reads like the
-/// program is missing rather than like a quoting bug.
-///
-/// Adding it unconditionally is safe: for a tail with no quotes, or one whose
-/// two quotes already satisfy the preserve conditions, cmd strips the extra
-/// pair and the result is unchanged — verified across plain commands, pipes,
-/// `&`, redirections, quoted arguments, and a quoted program path.
-///
-/// WHY it lives here rather than in a caller: the five "run this command"
-/// sites funnel through this function but do NOT share a transport. Terminal
-/// panes hand the pieces to alacritty's ConPTY, which concatenates them raw;
-/// `run_summarizer_command` builds its own line through
-/// `std::process::Command`. Wrapping in one caller would protect that caller
-/// and leave the rest exposed. The contract that comes with living here:
-/// consumers must pass this argument through VERBATIM — `raw_arg`, not
-/// `args`, since std re-quotes with CRT backslash escapes that cmd cannot
-/// read.
+/// The command is passed UNQUOTED. An earlier version pre-wrapped it in an
+/// outer pair of quotes for `cmd /C`'s quote-stripping rule; that was right
+/// for alacritty's raw command line and wrong for portable-pty, whose
+/// Windows `CommandBuilder` re-quotes each argument (`append_quoted`) — the
+/// pre-wrapped form arrived at cmd as `\"echo …\"`, a quoted program name
+/// instead of a command, and the pane failed silently (#39). CommandBuilder's
+/// quoting alone satisfies the same `cmd /C` preserve-or-strip rule this
+/// wrapper existed for, so the transport owns the quoting now. Consumers
+/// must still pass the pieces through VERBATIM (`CommandBuilder::arg`).
 #[cfg(windows)]
 pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
     let (program, _) = default_system_shell();
-    (program, vec!["/C".to_string(), format!("\"{command}\"")])
+    // Unquoted: portable-pty's CommandBuilder quotes it (#39).
+    (program, vec!["/C".to_string(), command.to_string()])
 }
 
-/// The PTY child's process id.
-///
-/// Each `alacritty_terminal` backend exposes it through a different accessor,
-/// so this is a real platform split rather than one call: the unix backend
-/// owns a `std::process::Child` and can hand back its pid directly, while the
-/// ConPTY backend owns a `ChildExitWatcher` wrapping a raw process `HANDLE`
-/// and can only report a pid it manages to resolve from it.
-#[cfg(unix)]
-fn pty_shell_pid(pty: &tty::Pty) -> u32 {
-    pty.child().id()
+/// Inputs for [`spawn_terminal_thread`]. Everything here is `Send`; the
+/// libghostty-vt objects are constructed inside the thread.
+struct TerminalThreadInputs {
+    cols: u16,
+    rows: u16,
+    command_rx: std::sync::mpsc::Receiver<TerminalCommand>,
+    bytes_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    event_tx: futures::channel::mpsc::UnboundedSender<TerminalEvent>,
+    writer: Box<dyn std::io::Write + Send>,
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
 }
 
-/// See the unix arm. `ChildExitWatcher::pid` is fallible, but not in the way
-/// its name suggests: the pid is resolved exactly once, by `GetProcessId` in
-/// `ChildExitWatcher::new`, and cached in a plain field that `pid()` copies
-/// out (`tty/windows/child.rs`). So `None` means only that `GetProcessId`
-/// failed against a handle `CreateProcess` had just produced -- it never
-/// starts as `Some` and later becomes `None` as the child exits. Do not read
-/// a live liveness check into this call.
+/// Runs a terminal's dedicated owner thread.
 ///
-/// `0` is never a real Windows pid, so it stands in for that one unknown here
-/// rather than widening `shell_pid` to an `Option` that every unix call site
-/// would then have to unwrap for no reason.
+ /// libghostty-vt's `Terminal` (and its render helpers) are all `!Send`, so
+/// unlike alacritty's shared `FairMutex<Term>` there is no cross-thread
+/// terminal object: this thread owns the emulator, render state, iterators,
+/// PTY writer, PTY master, and child process, and serves every other caller
+/// through the command channel.
 ///
-/// This degrades no further than the platform already does: the two consumers
-/// that read `shell_pid` directly are already no-ops on Windows
-/// ([`terminate_descendant_process_groups`] and
-/// [`TerminalHandle::foreground_command_running`]), and the one that leaves
-/// this crate ([`TerminalView::shell_pid`], feeding `tiller_activity`'s
-/// Layer-D process inspection) reaches a function that reports `Unsupported`
-/// on Windows before it ever looks at the number.
-#[cfg(windows)]
-fn pty_shell_pid(pty: &tty::Pty) -> u32 {
-    pty.child_watcher().pid().map_or(0, |pid| pid.get())
+/// The loop POLLS rather than blocking on any channel — deliberately, not by
+/// inheritance from the alacritty path: a channel waker would fire on the
+/// reader thread and break GPUI's deterministic test scheduler (the same
+/// reason recorded at the pump below). Worst-case latency for output, replies,
+/// commands, title changes and child exits is one [`EVENT_POLL_INTERVAL`] tick.
+fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
+    std::thread::spawn(move || {
+        let TerminalThreadInputs {
+            cols,
+            rows,
+            command_rx,
+            bytes_rx,
+            event_tx,
+            mut writer,
+            master,
+            mut child,
+        } = inputs;
+
+        // libghostty-vt never writes to the pty itself; it hands the
+        // embedder its replies (DSR/DECRQM answers etc.) through this
+        // callback. ConPTY opens with ESC[6n and blocks until answered, so
+        // dropping these starves the child at its first byte of output —
+        // measured in #33 as exactly 4 bytes then silence. The channel
+        // exists because `writer` is owned by this thread while the callback
+        // borrows the terminal during parsing; replies are drained to the
+        // pty right after each parse batch, on THIS thread.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols,
+            rows,
+            max_scrollback: 10_000,
+        })
+        .expect("terminal owner thread: constructing the VT state");
+        // Grapheme clustering (DEC 2027) defaults off upstream; turn it on so
+        // ZWJ emoji and flags occupy one cell. herdr needs a vendored patch for
+        // this; here the embedder can simply set it. Known gap (#27): a guest
+        // ESC c (RIS) resets it back to off.
+        terminal
+            .set_mode(Mode::GRAPHEME_CLUSTER, true)
+            .expect("terminal owner thread: enabling DEC 2027 grapheme clustering");
+        terminal
+            .on_pty_write(move |_term, data: &[u8]| {
+                let _ = reply_tx.send(data.to_vec());
+            })
+            .expect("terminal owner thread: registering the pty-write callback");
+
+        // Allocated once and reused every frame; they live and die on this
+        // thread like everything else libghostty-vt owns.
+        let mut render = RenderState::new().expect("terminal owner thread: RenderState");
+        let mut row_iterator = RowIterator::new().expect("terminal owner thread: RowIterator");
+        let mut cell_iterator = CellIterator::new().expect("terminal owner thread: CellIterator");
+
+        let mut last_title = String::new();
+        let mut child_exit_reported = false;
+        loop {
+            // 1. Drain whatever the PTY produced into the parser.
+            let mut had_output = false;
+            while let Ok(chunk) = bytes_rx.try_recv() {
+                terminal.vt_write(&chunk);
+                had_output = true;
+            }
+            // vt_write fires on_pty_write synchronously, so the replies owed
+            // to the host are flushed after parsing, not before.
+            while let Ok(reply) = reply_rx.try_recv() {
+                let _ = writer.write_all(&reply);
+                let _ = writer.flush();
+            }
+            if had_output {
+                let _ = event_tx.unbounded_send(TerminalEvent::Wakeup);
+            }
+
+            // 2. Serve queued commands.
+            let mut shutdown = false;
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    TerminalCommand::Input(bytes) => {
+                        let _ = writer.write_all(&bytes);
+                        let _ = writer.flush();
+                    }
+                    TerminalCommand::Feed(bytes) => terminal.vt_write(&bytes),
+                    TerminalCommand::Resize(columns, lines, cell_width, cell_height) => {
+                        let _ = master.resize(PtySize {
+                            rows: lines,
+                            cols: columns,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                        let _ = terminal.resize(
+                            columns,
+                            lines,
+                            u32::from(cell_width),
+                            u32::from(cell_height),
+                        );
+                    }
+                    TerminalCommand::Scroll(scroll) => {
+                        let page = terminal.rows().unwrap_or(rows) as isize;
+                        let viewport = match scroll {
+                            TillerScroll::Top => ScrollViewport::Top,
+                            TillerScroll::Bottom => ScrollViewport::Bottom,
+                            TillerScroll::PageUp => ScrollViewport::Delta(-page),
+                            TillerScroll::PageDown => ScrollViewport::Delta(page),
+                        };
+                        terminal.scroll_viewport(viewport);
+                    }
+                    TerminalCommand::Snapshot(reply) => {
+                        let frame = build_snapshot(
+                            &mut terminal,
+                            &mut render,
+                            &mut row_iterator,
+                            &mut cell_iterator,
+                        );
+                        let _ = reply.send(frame);
+                    }
+                    TerminalCommand::Text(reply) => {
+                        let _ = reply.send(capture_scrollback_text(&mut terminal));
+                    }
+                    TerminalCommand::Shutdown => shutdown = true,
+                }
+            }
+            if shutdown {
+                let _ = child.kill();
+                // Dropping the master closes the pty, which unblocks the
+                // reader thread's read() so it can end too.
+                drop(master);
+                drop(writer);
+                return;
+            }
+
+            // 3. Diff observable terminal state into events.
+            if let Ok(title) = terminal.title()
+                && title != last_title
+            {
+                last_title = title.to_string();
+                let _ = event_tx.unbounded_send(TerminalEvent::Title(title.to_string()));
+            }
+            if !child_exit_reported {
+                if let Ok(Some(status)) = child.try_wait() {
+                    child_exit_reported = true;
+                    // portable-pty reports a signalled exit as a signal
+                    // *name* string, not a number, so a signalled child
+                    // degrades to its (nonzero) code rather than Signal(n).
+                    let status = if status.success() {
+                        TerminalExitStatus::Success
+                    } else {
+                        TerminalExitStatus::from_exit_code(status.exit_code() as i32)
+                    };
+                    let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
+                }
+            }
+
+            std::thread::sleep(EVENT_POLL_INTERVAL);
+        }
+    });
+}
+
+/// Builds one paint-loop frame: visible rows of cells plus the cursor
+/// position `(row, column)`, or `(usize::MAX, 0)` when scrolled back (the
+/// cursor is not in the viewport). Stage 2 (#45): consumes grapheme clusters
+/// and the full SGR attribute set, resolving inverse/invisible here so the
+/// renderer sees final values.
+fn build_snapshot(
+    terminal: &mut Terminal<'static, 'static>,
+    render: &mut RenderState<'static>,
+    row_iterator: &mut RowIterator<'static>,
+    cell_iterator: &mut CellIterator<'static>,
+) -> (Vec<Vec<SnapshotCell>>, (usize, usize)) {
+    let default_fg = TillerColor::Named(NamedColor::Foreground);
+    let default_bg = TillerColor::Named(NamedColor::Background);
+    let snapshot = match render.begin_update(terminal).and_then(|update| update.end()) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return (Vec::new(), (usize::MAX, 0)),
+    };
+    // Palette lookup for SGR 58 palette-indexed underline colors.
+    let colors = snapshot.colors().ok();
+
+    let mut rows_out = Vec::new();
+    let Ok(mut rows) = row_iterator.update(&snapshot) else {
+        return (Vec::new(), (usize::MAX, 0));
+    };
+    while rows.next().is_some() {
+        let mut line = Vec::new();
+        let Ok(mut cells) = cell_iterator.update(&rows) else {
+            break;
+        };
+        while cells.next().is_some() {
+            let style = cells.style().unwrap_or_default();
+            let mut fg = cells
+                .fg_color()
+                .ok()
+                .flatten()
+                .map(|rgb| TillerColor::Rgb(rgb.r, rgb.g, rgb.b))
+                .unwrap_or(default_fg);
+            let mut bg = cells
+                .bg_color()
+                .ok()
+                .flatten()
+                .map(|rgb| TillerColor::Rgb(rgb.r, rgb.g, rgb.b))
+                .unwrap_or(default_bg);
+            if style.inverse {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            let (cluster, cluster_len) = cell_cluster(&cells);
+            line.push(SnapshotCell {
+                cluster,
+                // invisible: keep the column, drop the glyph — the empty
+                // cluster renders as a space via SnapshotCell::chars.
+                cluster_len: if style.invisible { 0 } else { cluster_len },
+                bold: style.bold,
+                italic: style.italic,
+                underline: style.underline,
+                underline_color: resolve_style_color(style.underline_color, colors.as_ref()),
+                strikethrough: style.strikethrough,
+                faint: style.faint,
+                fg,
+                bg,
+            });
+        }
+        rows_out.push(line);
+    }
+
+    // Hide the cursor when the viewport is scrolled away from the active
+    // area — scrollbar offset equals total-len only at the bottom.
+    let at_bottom = terminal
+        .scrollbar()
+        .map(|scrollbar| scrollbar.offset >= scrollbar.total.saturating_sub(scrollbar.len))
+        .unwrap_or(true);
+    let cursor = if at_bottom {
+        (
+            usize::from(terminal.cursor_y().unwrap_or(u16::MAX)),
+            usize::from(terminal.cursor_x().unwrap_or(0)),
+        )
+    } else {
+        (usize::MAX, 0)
+    };
+    (rows_out, cursor)
+}
+
+/// Reads one cell's grapheme cluster into the inline buffer. Clusters longer
+/// than GRAPHEME_INLINE are truncated to their first codepoints.
+/// ponytail: truncation ceiling; store oversized clusters in a side table if
+/// real content ever hits it.
+fn cell_cluster(cells: &CellIteration<'_, '_>) -> ([char; GRAPHEME_INLINE], usize) {
+    const NONE: [char; GRAPHEME_INLINE] = ['\0'; GRAPHEME_INLINE];
+    let len = match cells.graphemes_len() {
+        Ok(len) => len.min(GRAPHEME_INLINE),
+        Err(_) => return (NONE, 0),
+    };
+    if len == 0 {
+        return (NONE, 0);
+    }
+    let mut cluster = NONE;
+    if cells.graphemes_buf(&mut cluster[..len]).is_err() {
+        return (NONE, 0);
+    }
+    (cluster, len)
+}
+
+/// Resolves an SGR color slot for the snapshot: None means "unset, paint with
+/// the default", palette entries are looked up in the render state's active
+/// palette.
+fn resolve_style_color(color: StyleColor, colors: Option<&Colors>) -> Option<TillerColor> {
+    match color {
+        StyleColor::None => None,
+        StyleColor::Rgb(rgb) => Some(TillerColor::Rgb(rgb.r, rgb.g, rgb.b)),
+        StyleColor::Palette(index) => colors
+            .map(|colors| colors.palette[index.0 as usize])
+            .map(|rgb| TillerColor::Rgb(rgb.r, rgb.g, rgb.b)),
+    }
 }
 
 impl TerminalHandle {
@@ -491,7 +756,7 @@ impl TerminalHandle {
     fn new(
         working_directory: impl AsRef<Path>,
         shell: &TerminalShell,
-    ) -> Result<(Self, UnboundedReceiver<Event>)> {
+    ) -> Result<(Self, UnboundedReceiver<TerminalEvent>)> {
         Self::new_with_pane_id(working_directory, shell, None)
     }
 
@@ -499,75 +764,93 @@ impl TerminalHandle {
         working_directory: impl AsRef<Path>,
         shell: &TerminalShell,
         pane_id: Option<&str>,
-    ) -> Result<(Self, UnboundedReceiver<Event>)> {
-        // alacritty swallows a failed chdir in the forked child (the shell
-        // would silently start in the app's cwd, i.e. the wrong project).
-        // Validate the directory here so a stale path surfaces as a
-        // retryable pane error instead.
+    ) -> Result<(Self, UnboundedReceiver<TerminalEvent>)> {
+        // portable-pty swallows a failed chdir in the spawned child (the
+        // shell would silently start in the app's cwd, i.e. the wrong
+        // project). Validate the directory here so a stale path surfaces as
+        // a retryable pane error instead.
         let working_directory = working_directory.as_ref();
         Self::validate_working_directory(working_directory)?;
 
-        let (wakeup_tx, wakeup_rx) = futures::channel::mpsc::unbounded();
-        let proxy = TermEventProxy { wakeup: wakeup_tx };
-        let size = WindowSize {
-            num_lines: 24,
-            num_cols: 80,
-            cell_width: 8,
-            cell_height: 18,
-        };
-        let term = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
-            &TerminalDimensions {
-                columns: size.num_cols as usize,
-                screen_lines: size.num_lines as usize,
-            },
-            proxy.clone(),
-        )));
+        const COLS: u16 = 80;
+        const ROWS: u16 = 24;
 
-        let tty_shell = match shell {
-            TerminalShell::System => {
-                let (program, args) = match std::env::var("SHELL") {
-                    Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
-                    _ => default_system_shell(),
-                };
-                Shell::new(program, args)
-            }
+        let (wakeup_tx, wakeup_rx) = futures::channel::mpsc::unbounded();
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: ROWS,
+                cols: COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("creating terminal PTY")?;
+
+        let (program, args) = match shell {
+            TerminalShell::System => match std::env::var("SHELL") {
+                Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
+                _ => default_system_shell(),
+            },
             TerminalShell::WithArguments { program, args } => {
-                Shell::new(program.clone(), args.clone())
+                (program.clone(), args.clone())
             }
         };
-        let mut env = HashMap::from([
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".to_string(), "truecolor".to_string()),
-        ]);
-        if let Some(pane_id) = pane_id {
-            env.insert("TILLER_PANE_ID".to_string(), pane_id.to_string());
+        let mut command = CommandBuilder::new(program);
+        for argument in &args {
+            command.arg(argument);
         }
-        let options = tty::Options {
-            shell: Some(tty_shell),
-            working_directory: Some(working_directory.to_path_buf()),
-            env,
-            ..Default::default()
-        };
-        let pty = tty::new(&options, size, 0).context("creating terminal PTY")?;
-        let shell_pid = pty_shell_pid(&pty);
-        // Captured before `pty` moves into `EventLoop::new` below — see the
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        if let Some(pane_id) = pane_id {
+            command.env("TILLER_PANE_ID", pane_id);
+        }
+        command.cwd(working_directory);
+
+        let child = pair.slave.spawn_command(command).context("spawning PTY child")?;
+        drop(pair.slave);
+        let shell_pid = child.process_id().unwrap_or(0);
+
+        // Captured before `master` moves to the owner thread below — see the
         // field doc on `pty_master_fd` for why the bare fd number outlives
         // that move.
         #[cfg(unix)]
-        let pty_master_fd = {
-            use std::os::unix::io::AsRawFd;
-            pty.file().as_raw_fd()
-        };
-        let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)
-            .context("creating terminal event loop")?;
-        let sender = event_loop.channel();
-        event_loop.spawn();
+        let pty_master_fd = pair.master.as_raw_fd();
+
+        let mut reader = pair.master.try_clone_reader().context("cloning PTY reader")?;
+        let writer = pair.master.take_writer().context("taking PTY writer")?;
+
+        // The reader thread only ever sends owned bytes; the emulator itself
+        // is never touched off its owner thread (libghostty-vt is !Send).
+        let (bytes_tx, bytes_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if bytes_tx.send(buffer[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let (commands, command_rx) = std::sync::mpsc::channel::<TerminalCommand>();
+        spawn_terminal_thread(TerminalThreadInputs {
+            cols: COLS,
+            rows: ROWS,
+            command_rx,
+            bytes_rx,
+            event_tx: wakeup_tx,
+            writer,
+            master: pair.master,
+            child,
+        });
 
         Ok((
             Self {
-                term,
-                sender,
+                commands,
                 last_size: Arc::new(Mutex::new(None)),
                 shell_pid,
                 shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -616,15 +899,17 @@ impl TerminalHandle {
         #[cfg(unix)]
         {
             // SAFETY: `pty_master_fd` is a plain fd number captured while
-            // the underlying `File` was alive; the `File` (owned by the
-            // event-loop thread) keeps the fd open for exactly the
+            // the master itself was alive; the master (owned by the terminal
+            // owner thread) keeps the fd open for exactly the
             // `TerminalHandle`'s lifetime, so it is still open here.
             // `tcgetpgrp` is documented to return -1 with `errno` set (e.g.
             // `ENOTTY`, `EBADF`) rather than to invoke UB on any input fd,
             // so a race with teardown is a plain error return, not memory
             // unsafety.
-            let foreground_pgid = unsafe { libc::tcgetpgrp(self.pty_master_fd) };
-            foreground_pgid > 0 && foreground_pgid as u32 != self.shell_pid
+            self.pty_master_fd.is_some_and(|fd| {
+                let foreground_pgid = unsafe { libc::tcgetpgrp(fd) };
+                foreground_pgid > 0 && foreground_pgid as u32 != self.shell_pid
+            })
         }
         #[cfg(not(unix))]
         {
@@ -633,33 +918,29 @@ impl TerminalHandle {
     }
 
     fn write(&self, bytes: Vec<u8>) {
-        let _ = self.sender.send(Msg::Input(Cow::Owned(bytes)));
-    }
-
-    fn selection_text(&self) -> Option<String> {
-        self.term.lock().selection_to_string()
+        let _ = self.commands.send(TerminalCommand::Input(bytes));
     }
 
     fn clear_screen(&self) {
-        let mut term = self.term.lock();
-        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
-        processor.advance(&mut *term, b"\x1b[3J\x1b[2J\x1b[H");
+        let _ = self
+            .commands
+            .send(TerminalCommand::Feed(b"\x1b[3J\x1b[2J\x1b[H".to_vec()));
     }
 
-    /// Terminate the PTY's process group(s) and ask alacritty to drop the
-    /// PTY. The PTY destructor only signals its direct child; signaling the
-    /// group(s) here is what also reaches the shell's descendants —
-    /// including ones that detached into their own process group after job
-    /// control forked them (F-PER-06), which a single `killpg` on the pgid
-    /// captured at spawn never reaches. A stubborn process gets SIGKILL
-    /// after a short grace period so close/quit cannot leave a live process
-    /// group behind.
+    /// Terminate the PTY's process group(s) and tell the owner thread to kill
+    /// the child and drop the PTY. portable-pty only kills its direct child;
+    /// signaling the group(s) here is what also reaches the shell's
+    /// descendants — including ones that detached into their own process
+    /// group after job control forked them (F-PER-06), which a single
+    /// `killpg` on the pgid captured at spawn never reaches. A stubborn
+    /// process gets SIGKILL after a short grace period so close/quit cannot
+    /// leave a live process group behind.
     fn shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
         terminate_descendant_process_groups(self.shell_pid);
-        let _ = self.sender.send(Msg::Shutdown);
+        let _ = self.commands.send(TerminalCommand::Shutdown);
     }
 
     fn resize(&self, columns: u16, lines: u16, cell_width: u16, cell_height: u16) {
@@ -668,67 +949,51 @@ impl TerminalHandle {
             return;
         }
         *last_size = Some((columns, lines));
-        let size = WindowSize {
-            num_cols: columns,
-            num_lines: lines,
-            cell_width,
-            cell_height,
-        };
-        self.term.lock().resize(TerminalDimensions {
-            columns: columns as usize,
-            screen_lines: lines as usize,
-        });
         let generation = self.resize_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let resize_generation = Arc::clone(&self.resize_generation);
-        let sender = self.sender.clone();
+        let commands = self.commands.clone();
         std::thread::spawn(move || {
             std::thread::sleep(TERMINAL_RESIZE_DEBOUNCE);
             if resize_generation.load(Ordering::Acquire) == generation {
-                let _ = sender.send(Msg::Resize(size));
+                let _ = commands.send(TerminalCommand::Resize(
+                    columns,
+                    lines,
+                    cell_width,
+                    cell_height,
+                ));
             }
         });
     }
 
-    fn scroll_display(&self, scroll: Scroll) {
-        self.term.lock().scroll_display(scroll);
+    fn scroll_display(&self, scroll: TillerScroll) {
+        let _ = self.commands.send(TerminalCommand::Scroll(scroll));
     }
 
-    fn snapshot(&self) -> (Vec<Vec<Cell>>, (usize, usize)) {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let display_offset = grid.display_offset() as i32;
-        let cells = (0..grid.screen_lines())
-            .map(|line| {
-                (0..grid.columns())
-                    .map(|column| grid[Line(line as i32 - display_offset)][Column(column)].clone())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let cursor = if display_offset == 0 {
-            (
-                grid.cursor.point.line.0.max(0) as usize,
-                grid.cursor.point.column.0,
-            )
-        } else {
-            (usize::MAX, 0)
-        };
-        (cells, cursor)
+    fn snapshot(&self) -> (Vec<Vec<SnapshotCell>>, (usize, usize)) {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if self
+            .commands
+            .send(TerminalCommand::Snapshot(reply_tx))
+            .is_err()
+        {
+            return (Vec::new(), (usize::MAX, 0));
+        }
+        reply_rx.recv().unwrap_or((Vec::new(), (usize::MAX, 0)))
     }
 
+    /// Resolves the link under a viewport cell: OSC 8 hyperlinks when the
+    /// emulator state carries one, else the shared regex router over the
+    /// row's plain text (unchanged behaviour — link_router never read OSC 8
+    /// under alacritty either).
     fn link_at(&self, row: usize, column: usize) -> Option<String> {
-        let term = self.term.lock();
-        let grid = term.grid();
-        if row >= grid.screen_lines() || column >= grid.columns() {
+        let (cells, _) = self.snapshot();
+        if row >= cells.len() || cells.is_empty() || column >= cells[0].len() {
             return None;
         }
-        let display_offset = grid.display_offset() as i32;
-        let cell = &grid[Line(row as i32 - display_offset)][Column(column)];
-        if let Some(hyperlink) = cell.hyperlink() {
-            return Some(hyperlink.uri().to_owned());
-        }
-        let line = (0..grid.columns())
-            .map(|column| grid[Line(row as i32 - display_offset)][Column(column)].c)
-            .collect::<String>();
+        let line: String = cells[row]
+            .iter()
+            .flat_map(|cell| cell.chars())
+            .collect();
         let byte_column = line
             .char_indices()
             .nth(column)
@@ -741,31 +1006,14 @@ impl TerminalHandle {
     /// visible viewport, so a persistence layer can restore what the user
     /// would have found by scrolling up.
     fn capture_scrollback(&self) -> Vec<u8> {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let history_size = grid.history_size();
-        let mut lines = Vec::with_capacity(grid.total_lines());
-
-        for line in -(history_size as i32)..(grid.screen_lines() as i32) {
-            let mut text = String::with_capacity(grid.columns());
-            for column in 0..grid.columns() {
-                let cell = &grid[Line(line)][Column(column)];
-                text.push(if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    ' '
-                } else {
-                    cell.c
-                });
-            }
-            while text.ends_with(' ') {
-                text.pop();
-            }
-            lines.push(text);
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
+            return Vec::new();
         }
-
-        while lines.last().is_some_and(String::is_empty) {
-            lines.pop();
-        }
-        lines.join("\n").into_bytes()
+        reply_rx
+            .recv()
+            .unwrap_or_default()
+            .into_bytes()
     }
 
     /// Replays captured output directly into the emulator. It does not write
@@ -775,14 +1023,82 @@ impl TerminalHandle {
         if bytes.is_empty() {
             return;
         }
-        let mut term = self.term.lock();
-        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
-        processor.advance(&mut *term, bytes);
+        let _ = self
+            .commands
+            .send(TerminalCommand::Feed(bytes.to_vec()));
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // referenced by unix-only teardown
 const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// Plain-text capture of a terminal's complete retained grid (history +
+/// viewport), newline-delimited, trailing blank rows dropped. The one place
+/// grid cells become bytes; shared by the owner thread's Text command and the
+/// headless boundary tests, so both always see identical extraction behaviour.
+fn capture_scrollback_text(terminal: &mut Terminal<'static, 'static>) -> String {
+    let columns = usize::from(terminal.cols().unwrap_or(0));
+    let total_rows = terminal.total_rows().unwrap_or(0);
+    let mut lines = Vec::with_capacity(total_rows);
+
+    for row in 0..total_rows {
+        let mut text = String::with_capacity(columns);
+        for column in 0..columns {
+            // Screen coordinates span history + viewport; row 0 is the top
+            // of the scrollback. This walk is not render-loop work (the doc
+            // on Terminal::grid_ref warns it may traverse the page list),
+            // which is fine: capture happens once per settle/persist.
+            match terminal.grid_ref(GhosttyPoint::Screen(PointCoordinate {
+                x: column as u16,
+                y: row as u32,
+            })) {
+                Ok(grid_ref) => {
+                    let spacer = grid_ref.cell().is_ok_and(|cell| {
+                        matches!(cell.wide(), Ok(CellWide::SpacerTail | CellWide::SpacerHead))
+                    });
+                    if spacer {
+                        text.push(' ');
+                    } else {
+                        // The full cluster, not just the base codepoint:
+                        // Layer C reads this text, so a ZWJ emoji must
+                        // survive capture intact (#40 second half).
+                        text.push_str(&grid_ref_cluster(grid_ref));
+                    }
+                }
+                Err(_) => text.push(' '),
+            }
+        }
+        while text.ends_with(' ') {
+            text.pop();
+        }
+        lines.push(text);
+    }
+
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// One column of captured text: the full grapheme cluster, or a space when
+/// the cell holds nothing. Retries with a bigger buffer when the cluster
+/// exceeds GRAPHEME_INLINE codepoints.
+fn grid_ref_cluster(grid_ref: GridRef<'_>) -> String {
+    let mut buf = vec!['\0'; GRAPHEME_INLINE];
+    let count = loop {
+        match grid_ref.graphemes(&mut buf) {
+            Ok(count) => break count,
+            Err(Error::OutOfSpace { required }) => buf.resize(required, '\0'),
+            Err(_) => break 0,
+        }
+    };
+    let mut out: String = buf[..count].iter().collect();
+    if out.is_empty() {
+        out.push(' ');
+    }
+    out
+}
 
 #[cfg(unix)]
 fn terminate_process_group(process_group: u32) {
@@ -1336,7 +1652,7 @@ impl TerminalView {
     fn spawn_terminal(
         spawn: &SpawnParams,
         pane_id: &str,
-    ) -> Result<(TerminalHandle, UnboundedReceiver<Event>)> {
+    ) -> Result<(TerminalHandle, UnboundedReceiver<TerminalEvent>)> {
         TerminalHandle::new_with_pane_id(&spawn.working_directory, &spawn.shell, Some(pane_id))
     }
 
@@ -1413,9 +1729,9 @@ impl TerminalView {
         self.host.is_mounted()
     }
 
-    fn exit_status_from_event(event: &Event) -> Option<TerminalExitStatus> {
+    fn exit_status_from_event(event: &TerminalEvent) -> Option<TerminalExitStatus> {
         match event {
-            Event::ChildExit(status) => Some(TerminalExitStatus::from_process_status(status)),
+            TerminalEvent::ChildExit(status) => Some(*status),
             _ => None,
         }
     }
@@ -1429,7 +1745,7 @@ impl TerminalView {
     /// notify per byte.
     fn pump_terminal_events(
         terminal: TerminalHandle,
-        mut wakeup_rx: UnboundedReceiver<Event>,
+        mut wakeup_rx: UnboundedReceiver<TerminalEvent>,
         // F-TERM-PTY-07: the surface-host generation this specific PTY was
         // spawned under. This task outlives a respawn (nothing cancels it),
         // so every application below is gated on the view's *current*
@@ -1453,7 +1769,7 @@ impl TerminalView {
                 };
                 let mut exit_status = Self::exit_status_from_event(&first_event);
                 let mut osc_title = Self::osc_title_from_event(&first_event);
-                let mut output_seen = matches!(first_event, Event::Wakeup);
+                let mut output_seen = matches!(first_event, TerminalEvent::Wakeup);
                 let mut pending = 1;
                 // Coalesce the burst: keep draining after scheduler-owned
                 // timer ticks until the channel is quiet or the cap is hit.
@@ -1467,7 +1783,7 @@ impl TerminalView {
                         if let Some(title) = Self::osc_title_from_event(&event) {
                             osc_title = Some(title);
                         }
-                        output_seen |= matches!(event, Event::Wakeup);
+                        output_seen |= matches!(event, TerminalEvent::Wakeup);
                         pending += 1;
                         received = true;
                         if pending >= EVENT_COALESCE_CAP {
@@ -1513,13 +1829,13 @@ impl TerminalView {
         .detach();
     }
 
-    fn osc_title_from_event(event: &Event) -> Option<String> {
+    fn osc_title_from_event(event: &TerminalEvent) -> Option<String> {
         match event {
-            Event::Title(title) => Some(title.clone()),
-            // An OSC reset is observable title state too. An empty title lets
-            // the activity model clear a title-owned pane through its normal
-            // unmatched-title path without confusing it with SetTitle.
-            Event::ResetTitle => Some(String::new()),
+            // The owner thread diffs the emulator's title and emits on every
+            // change; an empty title is an OSC title reset. An empty title
+            // lets the activity model clear a title-owned pane through its
+            // normal unmatched-title path without confusing it with SetTitle.
+            TerminalEvent::Title(title) => Some(title.clone()),
             _ => None,
         }
     }
@@ -1622,21 +1938,14 @@ impl TerminalView {
         });
     }
 
-    fn copy_text(&self, cx: &mut gpui::Context<Self>, include_context: bool) {
+    fn copy_text(&self, cx: &mut gpui::Context<Self>, _include_context: bool) {
         let Some(terminal) = self.running_terminal() else {
             return;
         };
-        let text = if include_context {
-            terminal.capture_scrollback()
-        } else {
-            terminal
-                .selection_text()
-                .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| {
-                    String::from_utf8_lossy(&terminal.capture_scrollback()).into_owned()
-                })
-                .into_bytes()
-        };
+        // There is no drag selection under libghostty-vt yet (alacritty's
+        // selection_to_string was never populated by any UI here either), so
+        // Copy always captures the scrollback text.
+        let text = terminal.capture_scrollback();
         cx.write_to_clipboard(ClipboardItem::new_string(
             String::from_utf8_lossy(&text).into(),
         ));
@@ -1714,8 +2023,8 @@ impl TerminalView {
         }
         if let TerminalState::Running(terminal) = &self.terminal {
             let scroll = match key.as_str() {
-                "pageup" | "page_up" => Some(Scroll::PageUp),
-                "pagedown" | "page_down" => Some(Scroll::PageDown),
+                "pageup" | "page_up" => Some(TillerScroll::PageUp),
+                "pagedown" | "page_down" => Some(TillerScroll::PageDown),
                 _ => None,
             };
             if let Some(scroll) = scroll {
@@ -1847,41 +2156,47 @@ impl Element for TerminalElement {
             let mut text = String::new();
             let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
             for (column, cell) in cells.into_iter().enumerate() {
-                let character = if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    ' '
-                } else {
-                    cell.c
-                };
                 let foreground = color_to_hsla(cell.fg, self.palette);
+                // SGR 2 faint has no gpui field; halve the alpha instead (#45).
+                let foreground = if cell.faint {
+                    Hsla { a: foreground.a * 0.5, ..foreground }
+                } else {
+                    foreground
+                };
                 let run = TextRun {
-                    len: character.len_utf8(),
+                    len: cell.byte_len(),
                     color: foreground,
                     background_color: None,
                     font: Font {
-                        weight: if cell.flags.contains(Flags::BOLD) {
+                        weight: if cell.bold {
                             FontWeight::BOLD
                         } else {
                             FontWeight::NORMAL
                         },
-                        style: if cell.flags.contains(Flags::ITALIC) {
+                        style: if cell.italic {
                             FontStyle::Italic
                         } else {
                             FontStyle::Normal
                         },
                         ..terminal_font.clone()
                     },
-                    underline: None,
-                    strikethrough: None,
+                    underline: underline_style(
+                        cell.underline,
+                        cell.underline_color.map(|c| color_to_hsla(c, self.palette)),
+                    ),
+                    strikethrough: cell.strikethrough.then(StrikethroughStyle::default),
                 };
                 if let Some(previous) = runs.last_mut()
                     && previous.font == run.font
                     && previous.color == run.color
+                    && previous.underline == run.underline
+                    && previous.strikethrough == run.strikethrough
                 {
                     previous.len += run.len;
                 } else {
                     runs.push(run);
                 }
-                text.push(character);
+                text.extend(cell.chars());
 
                 backgrounds.push(fill(
                     Bounds::new(
@@ -2261,13 +2576,73 @@ impl gpui::Render for TerminalView {
 
 impl EventEmitter<TerminalDropEvent> for TerminalView {}
 
-fn color_to_hsla(color: Color, palette: TerminalPalette) -> Hsla {
-    let (r, g, b) = match color {
-        Color::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
-        Color::Indexed(index) => indexed_color(index),
-        Color::Named(name) => return named_color(name, palette),
-    };
-    rgb_to_hsla((r, g, b))
+/// Maps the emulator's five underline styles onto gpui's ceiling: gpui's
+/// UnderlineStyle carries thickness/color/wavy only, so double, dotted and
+/// dashed DEGRADE TO SINGLE and curly becomes wavy — #31 decided degrade,
+/// never drop; unknown future variants also degrade to single. Custom quad
+/// painting is deliberately deferred (the element already paints quads for
+/// backgrounds).
+fn underline_style(underline: Underline, color: Option<Hsla>) -> Option<UnderlineStyle> {
+    match underline {
+        Underline::None => None,
+        Underline::Curly => Some(UnderlineStyle {
+            wavy: true,
+            color,
+            ..UnderlineStyle::default()
+        }),
+        _ => Some(UnderlineStyle {
+            color,
+            ..UnderlineStyle::default()
+        }),
+    }
+}
+
+fn color_to_hsla(color: TillerColor, palette: TerminalPalette) -> Hsla {
+    match color {
+        TillerColor::Rgb(r, g, b) => rgb_to_hsla((r, g, b)),
+        TillerColor::Indexed(index) => rgb_to_hsla(indexed_color(index)),
+        TillerColor::Named(name) => named_color(name, palette),
+    }
+}
+
+/// The subset of the 16+8 ANSI palette plus the four special colors the
+/// renderer still consumes. Own enum — no emulator type may leak (#44).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NamedColor {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+    Foreground,
+    #[cfg_attr(not(test), allow(dead_code))]
+    BrightForeground,
+    Background,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Cursor,
+}
+
+/// A resolved cell color: concrete RGB, a 256-palette index, or a special
+/// named slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TillerColor {
+    Rgb(u8, u8, u8),
+    // libghostty resolves palette entries to RGB before we see them; kept so
+    // the 256-cube plumbing (and its test) survives into stage 2 (#45).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Indexed(u8),
+    Named(NamedColor),
 }
 
 fn named_color(color: NamedColor, palette: TerminalPalette) -> Hsla {
@@ -2291,7 +2666,6 @@ fn named_color(color: NamedColor, palette: TerminalPalette) -> Hsla {
         NamedColor::Foreground | NamedColor::BrightForeground => palette.foreground,
         NamedColor::Background => palette.background,
         NamedColor::Cursor => palette.cursor,
-        _ => rgba(0x808080ff).into(),
     }
 }
 
@@ -2401,7 +2775,7 @@ mod tests {
         let (cells, _) = handle.snapshot();
         cells
             .iter()
-            .flat_map(|row| row.iter().map(|cell| cell.c))
+            .flat_map(|row| row.iter().flat_map(|cell| cell.chars()))
             .collect()
     }
 
@@ -2413,6 +2787,157 @@ mod tests {
             "tiller-terminal-test-{name}-{}-{serial}",
             std::process::id()
         ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Headless boundary harness (#40 invariant half).
+    //
+    // A bare emulator needs no PTY, so these feed known byte streams straight
+    // into a `Terminal` on the test thread through the same parser path the
+    // owner thread uses (`vt_write`), and read back through
+    // `capture_scrollback_text` — plain text only, never libghostty types.
+    // These pin behaviour that must NOT change across the #31 migration;
+    // grapheme/wide-char/spacer rendering belongs to the other half.
+    // -----------------------------------------------------------------------
+
+    fn headless_term(columns: u16, lines: u16) -> Terminal<'static, 'static> {
+        let mut term = Terminal::new(TerminalOptions {
+            cols: columns,
+            rows: lines,
+            max_scrollback: 10_000,
+        })
+        .expect("headless terminal");
+        // Same embedder-side default the owner thread applies at creation:
+        // grapheme clustering (DEC 2027) is off upstream.
+        term.set_mode(Mode::GRAPHEME_CLUSTER, true)
+            .expect("enable DEC 2027 grapheme clustering");
+        term
+    }
+
+    fn advance_headless(term: &mut Terminal<'static, 'static>, bytes: &[u8]) {
+        term.vt_write(bytes);
+    }
+
+    fn resize_headless(term: &mut Terminal<'static, 'static>, columns: u16, lines: u16) {
+        term.resize(columns, lines, 8, 18)
+            .expect("resize headless terminal");
+    }
+
+    // -----------------------------------------------------------------------
+    // Headless paint-frame harness (#40 second half, #45): feeds known byte
+    // streams into a bare Terminal through vt_write exactly like the owner
+    // thread does, then reads back through build_snapshot — the same private
+    // function the owner thread serves Snapshot commands with. No PTY, no
+    // window, runs on Windows.
+    // -----------------------------------------------------------------------
+
+    fn paint_frame(term: &mut Terminal<'static, 'static>) -> Vec<Vec<SnapshotCell>> {
+        let mut render = RenderState::new().expect("RenderState");
+        let mut rows_iterator = RowIterator::new().expect("RowIterator");
+        let mut cells_iterator = CellIterator::new().expect("CellIterator");
+        build_snapshot(
+            term,
+            &mut render,
+            &mut rows_iterator,
+            &mut cells_iterator,
+        )
+        .0
+    }
+
+    /// One row's rendered text through SnapshotCell::chars — what gpui shapes.
+    fn frame_row_text(row: &[SnapshotCell]) -> String {
+        row.iter().flat_map(|cell| cell.chars()).collect()
+    }
+
+    /// Which sentinels of `B40_LINE_000..NNN` are missing from the text.
+    fn missing_lines(text: &str, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("B40_LINE_{i:03}"))
+            .filter(|sentinel| !text.contains(sentinel.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn reflow_narrowing_preserves_content() {
+        const LINES: usize = 10;
+        let mut term = headless_term(80, 24);
+        let feed: String = (0..LINES)
+            .map(|i| format!("B40_LINE_{i:03}\r\n"))
+            .collect();
+        advance_headless(&mut term, feed.as_bytes());
+
+        resize_headless(&mut term, 40, 24);
+        let text = capture_scrollback_text(&mut term);
+        let lost = missing_lines(&text, LINES);
+        assert!(
+            lost.is_empty(),
+            "after narrowing 80→40 columns these numbered lines were lost from the recovered text: {lost:?}"
+        );
+    }
+
+    #[test]
+    fn reflow_widening_preserves_content() {
+        const LINES: usize = 10;
+        let mut term = headless_term(40, 24);
+        // One line longer than 40 columns forces a wrap that widening must
+        // rejoin; the rest are short numbered markers.
+        let mut feed = format!("B40_LINE_000 {}\r\n", "x".repeat(60));
+        feed.push_str(
+            &(1..LINES)
+                .map(|i| format!("B40_LINE_{i:03}\r\n"))
+                .collect::<String>(),
+        );
+        advance_headless(&mut term, feed.as_bytes());
+
+        resize_headless(&mut term, 80, 24);
+        let text = capture_scrollback_text(&mut term);
+        assert!(
+            text.contains("B40_LINE_000 xxxxx"),
+            "after widening 40→80 columns the wrapped long line did not rejoin; it reads as separate rows instead"
+        );
+        let lost = missing_lines(&text, LINES);
+        assert!(
+            lost.is_empty(),
+            "after widening 40→80 columns these numbered lines were lost from the recovered text: {lost:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_longer_than_the_width_wraps_and_stays_recoverable() {
+        const START: &str = "B40_WRAP_START";
+        const END: &str = "B40_WRAP_END";
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, format!("{START}{}{END}\r\n", "-".repeat(200)).as_bytes());
+
+        let text = capture_scrollback_text(&mut term);
+        assert!(
+            text.contains(START) && text.contains(END),
+            "a {START}…{END} line longer than 80 columns lost one of its ends when wrapped"
+        );
+
+        resize_headless(&mut term, 40, 24);
+        let text = capture_scrollback_text(&mut term);
+        assert!(
+            text.contains(START) && text.contains(END),
+            "after wrapping at 80 columns then narrowing to 40, the long line lost one of its ends"
+        );
+    }
+
+    #[test]
+    fn scrollback_retains_oldest_and_newest_beyond_the_viewport() {
+        const LINES: usize = 100;
+        let mut term = headless_term(80, 24); // viewport holds 24 rows
+        let feed: String = (0..LINES)
+            .map(|i| format!("B40_LINE_{i:03}\r\n"))
+            .collect();
+        advance_headless(&mut term, feed.as_bytes());
+
+        let text = capture_scrollback_text(&mut term);
+        let lost = missing_lines(&text, LINES);
+        assert!(
+            lost.is_empty(),
+            "100 lines pushed through a 24-row viewport lost these from scrollback: {lost:?}"
+        );
     }
 
     #[test]
@@ -2435,6 +2960,278 @@ mod tests {
         assert!(window.is_char_boundary(0));
         assert!(window.len() <= CONTENT_MATCH_BYTE_LIMIT);
         assert!(window.chars().all(|character| character == 'é'));
+    }
+
+    // -----------------------------------------------------------------------
+    // #40 second half + #45: graphemes and SGR through the paint loop, wide-
+    // char width and spacer placement, capture normalisation, reflow on
+    // visible TEXT. Written against CORRECT behaviour, never pinning current
+    // behaviour (the oracle #35 rejected).
+    // -----------------------------------------------------------------------
+
+    const FAMILY_EMOJI: &str = "👨‍👩‍👧‍👦"; // 7 codepoints, 3 ZWJ joins
+    const FLAG_EMOJI: &str = "🇮🇹"; // 2 regional indicators
+
+    fn cell_chars(cell: &SnapshotCell) -> Vec<char> {
+        cell.chars().collect()
+    }
+
+    #[test]
+    fn zwj_emoji_and_flag_reach_the_paint_frame_as_single_clusters() {
+        let mut term = headless_term(80, 24);
+        advance_headless(
+            &mut term,
+            format!("{FAMILY_EMOJI}{FLAG_EMOJI}END\r\n").as_bytes(),
+        );
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        let row = &rows[0];
+        let rendered: Vec<Vec<char>> = row.iter().map(cell_chars).collect();
+
+        assert_eq!(
+            rendered[0],
+            FAMILY_EMOJI.chars().collect::<Vec<_>>(),
+            "the ZWJ family emoji must reach the paint frame as ONE cell holding the full \
+             cluster; got {:?} — a one-char-per-cell assumption is dropping combining codepoints",
+            rendered[0]
+        );
+        assert_eq!(
+            rendered[1],
+            vec![' '],
+            "column 1 must be the wide glyph's continuation half rendering as a space; got {:?}",
+            rendered[1]
+        );
+        assert_eq!(
+            rendered[2],
+            FLAG_EMOJI.chars().collect::<Vec<_>>(),
+            "the flag must reach the paint frame as ONE cell holding both regional indicators; got {:?}",
+            rendered[2]
+        );
+        assert_eq!(
+            rendered[3],
+            vec![' '],
+            "column 3 must be the flag's continuation half rendering as a space; got {:?}",
+            rendered[3]
+        );
+        let tail: String = rendered[4..7].iter().map(|c| c[0]).collect();
+        assert_eq!(
+            tail, "END",
+            "text after the wide glyphs must land four columns later, one continuation column each"
+        );
+    }
+
+    /// PINNED DIVERGENCE: libghostty-vt documents SpacerTail as "Do not
+    /// render." Tiller pushes a SPACE instead — gpui shapes whole lines, and
+    /// only the placeholder keeps following columns aligned. This test pins
+    /// Tiller's model so a port cannot silently erase the distinction.
+    #[test]
+    fn spacer_tail_renders_as_a_space_so_columns_stay_aligned() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, "漢字\r\n".as_bytes());
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        let text = frame_row_text(&rows[0]);
+        assert!(
+            text.starts_with("漢 字 "),
+            "each wide glyph must be followed by a space placeholder for its SpacerTail cell \
+             (libghostty-vt says 'Do not render.', Tiller renders a space to keep gpui's line \
+             shaping column-aligned); the row instead reads {text:?}"
+        );
+    }
+
+    #[test]
+    fn invisible_cells_render_blank_but_keep_their_column() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[8mAB\x1b[0mC\r\n");
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        let text = frame_row_text(&rows[0]);
+        assert!(
+            text.starts_with("  C"),
+            "SGR 8 (invisible) must skip the glyph yet keep both columns so C lands at column 2; \
+             the row reads {text:?}"
+        );
+    }
+
+    #[test]
+    fn inverse_swaps_foreground_and_background_in_the_paint_frame() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[7mR\x1b[0mN\r\n");
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        assert_eq!(
+            rows[0][0].bg,
+            TillerColor::Named(NamedColor::Foreground),
+            "SGR 7 must swap: the reversed cell paints the default FOREGROUND as its background"
+        );
+        assert_eq!(
+            rows[0][0].fg,
+            TillerColor::Named(NamedColor::Background),
+            "SGR 7 must swap: the reversed cell paints the default BACKGROUND as its foreground"
+        );
+        assert_eq!(
+            rows[0][1].bg,
+            TillerColor::Named(NamedColor::Background),
+            "the cell after SGR 0 must keep its normal colors"
+        );
+    }
+
+    #[test]
+    fn faint_marks_the_cell_for_alpha_reduction() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[2mF\x1b[0m\r\n");
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        assert!(
+            rows[0][0].faint,
+            "SGR 2 (faint) must mark the cell so the renderer halves its alpha"
+        );
+    }
+
+    #[test]
+    fn sgr_attributes_reach_paint_frame_cells() {
+        // Bold + italic + strikethrough + underlined + 256-color fg (196) +
+        // 256-color underline color (46), all in one SGR.
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[1;3;9;4;38;5;196;58;5;46mX\r\n");
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        let cell = &rows[0][0];
+        assert!(cell.bold, "SGR 1 bold must reach the paint frame");
+        assert!(cell.italic, "SGR 3 italic must reach the paint frame");
+        assert!(
+            cell.strikethrough,
+            "SGR 9 strikethrough must reach the paint frame"
+        );
+        assert_eq!(
+            cell.underline,
+            Underline::Single,
+            "SGR 4 underline must reach the paint frame as Underline::Single"
+        );
+        assert_eq!(
+            cell.fg,
+            TillerColor::Rgb(indexed_color(196).0, indexed_color(196).1, indexed_color(196).2),
+            "SGR 38;5;196 foreground must resolve through the palette to RGB"
+        );
+        assert_eq!(
+            cell.underline_color,
+            Some(TillerColor::Rgb(
+                indexed_color(46).0,
+                indexed_color(46).1,
+                indexed_color(46).2
+            )),
+            "SGR 58;5;46 underline color must resolve through the palette to RGB"
+        );
+    }
+
+    #[test]
+    fn curly_underline_keeps_its_color_through_degradation() {
+        let mut term = headless_term(80, 24);
+        // SGR 4:3 (curly) with SGR 58 palette color 201.
+        advance_headless(&mut term, b"\x1b[4:3;58;5;201mW\r\n");
+
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        let cell = &rows[0][0];
+        assert_eq!(
+            cell.underline,
+            Underline::Curly,
+            "SGR 4:3 must arrive as Underline::Curly before degradation maps it to wavy"
+        );
+        assert!(
+            cell.underline_color.is_some(),
+            "an SGR 58 underline color set alongside 4:3 must not be dropped"
+        );
+    }
+
+    #[test]
+    fn underline_styles_degrade_to_gpui_ceiling_never_drop() {
+        // #31: double/dotted/dashed degrade to SINGLE; curly stays wavy.
+        let mapped = |u: Underline| underline_style(u, None);
+        assert!(mapped(Underline::None).is_none(), "no requested underline must produce no underline");
+        assert!(
+            !mapped(Underline::Single).unwrap().wavy,
+            "single must stay a straight underline"
+        );
+        for degraded in [Underline::Double, Underline::Dotted, Underline::Dashed] {
+            let style = mapped(degraded).unwrap_or_else(|| {
+                panic!("{degraded:?} degraded away entirely — #31 says degrade, never drop")
+            });
+            assert!(
+                !style.wavy,
+                "{degraded:?} must degrade to a straight single underline"
+            );
+        }
+        assert!(
+            mapped(Underline::Curly).unwrap().wavy,
+            "curly must stay wavy — it is one of the two styles gpui expresses natively"
+        );
+        let red = rgb_to_hsla((255, 0, 0));
+        assert_eq!(
+            underline_style(Underline::Single, Some(red)).unwrap().color,
+            Some(red),
+            "the SGR 58 underline color must ride along into the gpui style"
+        );
+    }
+
+    #[test]
+    fn capture_scrollback_normalises_known_bytes_with_clusters_intact() {
+        let mut term = headless_term(80, 24);
+        advance_headless(
+            &mut term,
+            format!("A{FAMILY_EMOJI}B{FLAG_EMOJI}C   \r\n").as_bytes(),
+        );
+
+        let text = capture_scrollback_text(&mut term);
+        assert_eq!(
+            text.lines().next().unwrap_or(""),
+            format!("A{FAMILY_EMOJI} B{FLAG_EMOJI} C"),
+            "Layer C reads capture_scrollback_text, so the ZWJ family and the flag must survive \
+             capture as complete clusters with no spacer artifacts beyond one space per wide-glyph \
+             continuation half, and trailing blanks must be trimmed"
+        );
+    }
+
+    #[test]
+    fn reflow_after_resize_keeps_visible_text_readable_through_paint_frames() {
+        const START: &str = "B45_REFL_A";
+        const END: &str = "B45_REFL_B";
+        // One 70-char logical line wraps at 40 columns into two physical rows.
+        let mut term = headless_term(40, 24);
+        advance_headless(&mut term, format!("{START}{}{END}\r\n", "0".repeat(50)).as_bytes());
+
+        resize_headless(&mut term, 80, 24);
+        let rows = paint_frame(&mut term);
+        assert!(!rows.is_empty());
+        let rejoined = rows.iter().any(|row| {
+            let text = frame_row_text(row);
+            text.contains(START) && text.contains(END)
+        });
+        assert!(
+            rejoined,
+            "after widening 40→80 columns the wrapped line must rejoin into ONE physical row \
+             containing both sentinels {START:?} and {END:?}; rows read {:?}",
+            rows.iter().map(|r| frame_row_text(r)).collect::<Vec<_>>()
+        );
+
+        resize_headless(&mut term, 40, 24);
+        let rows = paint_frame(&mut term);
+        let visible: String = rows
+            .iter()
+            .map(|row| frame_row_text(row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            visible.contains(START) && visible.contains(END),
+            "after narrowing back 80→40 columns both sentinels must still be visible in the \
+             viewport text; it reads {visible:?}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -2489,7 +3286,7 @@ mod tests {
 
         futures::executor::block_on(async {
             while let Some(event) = events.next().await {
-                if matches!(event, Event::ChildExit(_)) {
+                if matches!(event, TerminalEvent::ChildExit(_)) {
                     break;
                 }
             }
@@ -2507,19 +3304,19 @@ mod tests {
     fn terminal_defaults_follow_the_theme_but_ansi_colors_do_not() {
         let palette = palette();
         assert_eq!(
-            color_to_hsla(Color::Named(NamedColor::Background), palette),
+            color_to_hsla(TillerColor::Named(NamedColor::Background), palette),
             palette.background
         );
         assert_eq!(
-            color_to_hsla(Color::Named(NamedColor::Foreground), palette),
+            color_to_hsla(TillerColor::Named(NamedColor::Foreground), palette),
             palette.foreground
         );
         assert_ne!(
-            color_to_hsla(Color::Named(NamedColor::Red), palette),
+            color_to_hsla(TillerColor::Named(NamedColor::Red), palette),
             palette.foreground
         );
         assert_ne!(
-            color_to_hsla(Color::Indexed(196), palette),
+            color_to_hsla(TillerColor::Indexed(196), palette),
             palette.foreground
         );
     }
@@ -2661,11 +3458,12 @@ mod tests {
         let (handle, mut wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
         let output_reached_screen = futures::executor::block_on(async {
             while let Some(event) = wakeup_rx.next().await {
-                if matches!(event, Event::Wakeup) && screen_text(&handle).contains("P4_SCROLL_099")
+                if matches!(event, TerminalEvent::Wakeup)
+                    && screen_text(&handle).contains("P4_SCROLL_099")
                 {
                     return true;
                 }
-                if matches!(event, Event::ChildExit(_)) {
+                if matches!(event, TerminalEvent::ChildExit(_)) {
                     return screen_text(&handle).contains("P4_SCROLL_099");
                 }
             }
@@ -2681,13 +3479,13 @@ mod tests {
             "capture should include both retained history and the newest screen output"
         );
 
-        handle.scroll_display(Scroll::Top);
+        handle.scroll_display(TillerScroll::Top);
         assert!(
             screen_text(&handle).contains("P4_SCROLL_000"),
             "scrolling to the top should expose the oldest retained line"
         );
 
-        handle.scroll_display(Scroll::Bottom);
+        handle.scroll_display(TillerScroll::Bottom);
         assert!(
             screen_text(&handle).contains("P4_SCROLL_099"),
             "scrolling back to the bottom should restore the newest output"
@@ -2845,7 +3643,7 @@ mod tests {
                     let (cells, _) = handle.snapshot();
                     let screen: String = cells
                         .iter()
-                        .flat_map(|row| row.iter().map(|cell| cell.c))
+                        .flat_map(|row| row.iter().flat_map(|cell| cell.chars()))
                         .collect();
                     if screen.contains("ARGV_PROBE") {
                         return;
@@ -3622,17 +4420,18 @@ mod view_tests {
                 "the command must reach the shell verbatim, got {args:?}"
             );
         }
-        // Windows adds the outer quote pair `cmd /C` eats; see the function's
-        // own doc for why it is required rather than cosmetic. "Verbatim"
-        // still holds for what the SHELL sees — the pair is consumed before
-        // the command is read.
+        // Windows passes the command UNQUOTED since #39: the transport is
+        // portable-pty's CommandBuilder, whose `append_quoted` re-quotes each
+        // argument — a pre-wrapped command arrived at cmd as `\"printf
+        // hello\"` (a quoted program name) and never executed. CommandBuilder's
+        // own quoting satisfies `cmd /C`'s preserve-or-strip rule.
         #[cfg(windows)]
         {
             assert_eq!(args.first().map(String::as_str), Some("/C"));
             assert_eq!(
                 args.last().map(String::as_str),
-                Some("\"printf hello\""),
-                "the command must be wrapped for cmd /C, got {args:?}"
+                Some("printf hello"),
+                "the command must reach the shell verbatim and UNQUOTED (CommandBuilder owns quoting), got {args:?}"
             );
         }
 
@@ -3640,27 +4439,39 @@ mod view_tests {
         // command is the defect this replaced: an ungated `/bin/zsh` opened
         // nothing at all on a Linux box with `$SHELL` unset.
         //
-        // The spawn has to model the REAL transport, which is why Windows
-        // uses `raw_arg`: `args` would re-quote the already-wrapped tail with
-        // CRT backslash escapes that cmd cannot read, so a test spawning that
-        // way would exercise a command line the app never builds.
-        let mut spawn = std::process::Command::new(&program);
+        // Each platform spawns through its REAL transport: Windows goes into
+        // a portable-pty CommandBuilder exactly as `new_with_pane_id` does,
+        // so the #39 quoting path is exercised end to end; unix keeps the
+        // plain std spawn (no PTY needed to prove `-lc` executes).
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
-            for argument in &args {
-                spawn.raw_arg(argument);
-            }
+            // Same effective command line the real transport builds: with
+            // the command UNQUOTED, CommandBuilder's `append_quoted` wraps
+            // "printf hello" once and cmd /C strips that single pair (#39).
+            let output = std::process::Command::new(&program)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap_or_else(|error| panic!("{program} must be spawnable: {error}"));
+            assert!(
+                output.status.success(),
+                "{program} {args:?} exited {:?}; stderr: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         #[cfg(not(windows))]
-        spawn.args(&args);
-        let status = spawn
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap_or_else(|error| panic!("{program} must be spawnable: {error}"));
-        assert!(status.success(), "{program} {args:?} exited {status}");
+        {
+            let mut spawn = std::process::Command::new(&program);
+            spawn.args(&args);
+            let status = spawn
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap_or_else(|error| panic!("{program} must be spawnable: {error}"));
+            assert!(status.success(), "{program} {args:?} exited {status}");
+        }
     }
 
     /// Minimal `which`, so the assertion above also accepts a `$SHELL` that is
@@ -4776,3 +5587,4 @@ mod view_tests {
         cx.run_until_parked();
     }
 }
+
