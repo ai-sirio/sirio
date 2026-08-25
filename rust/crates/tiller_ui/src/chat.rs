@@ -5,19 +5,22 @@
 //! and view model live here so the transcript renderer stays deterministic.
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
+    Animation, AnimationExt as _, AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context,
+    CursorStyle, DispatchPhase,
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
     FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
     InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
     ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
-    canvas, div, list, point, prelude::*, px, quad, rgb, transparent_black,
+    canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad, rgb,
+    transparent_black,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 use tiller_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
     ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
@@ -49,6 +52,10 @@ pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
+
+fn streaming_border_angle(delta: f32) -> f32 {
+    delta.fract() * 360.0
+}
 
 /// The user turn's pill: rounded, right-aligned, capped at waku's bubble
 /// width. The assistant reply has no container at all.
@@ -6932,19 +6939,22 @@ impl Chat {
         // ending in the circular send control. The card is waku's: max
         // 720px, 13px radius, `composer` fill, a hairline border that turns
         // coral while focused.
-        div()
+        let composer = div()
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
-            .w(px(TRANSCRIPT_WIDTH))
+            .when(self.streaming, |this| this.w_full())
+            .when(!self.streaming, |this| {
+                this.w(px(TRANSCRIPT_WIDTH))
+                    .border_1()
+                    .border_color(if focused {
+                        colors.accent
+                    } else {
+                        colors.hairline
+                    })
+            })
             .rounded(theme.radii.composer)
             .bg(colors.composer)
-            .border_1()
-            .border_color(if focused {
-                colors.accent
-            } else {
-                colors.hairline
-            })
             .p(px(10.0))
             .flex()
             .flex_col()
@@ -7110,7 +7120,32 @@ impl Chat {
             .children(chat_history_menu)
             .children(model_picker)
             .children(mode_picker)
-            .children(context_popover)
+            .children(context_popover);
+
+        if self.streaming {
+            let orange = rgb(0xf5a623);
+            div()
+                .id("composer-streaming-border")
+                .debug_selector(|| "composer-streaming-border".into())
+                .w(px(TRANSCRIPT_WIDTH))
+                .rounded(theme.radii.composer)
+                .p(px(1.0))
+                .child(composer)
+                .with_animation(
+                    "composer-streaming-border",
+                    Animation::new(Duration::from_secs(2)).repeat(),
+                    move |element, delta| {
+                        element.bg(linear_gradient(
+                            streaming_border_angle(delta),
+                            linear_color_stop(orange, 0.0),
+                            linear_color_stop(orange.opacity(0.12), 1.0),
+                        ))
+                    },
+                )
+                .into_any_element()
+        } else {
+            composer.into_any_element()
+        }
     }
 }
 
@@ -8252,6 +8287,17 @@ mod tests {
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input(text);
+    }
+
+    #[test]
+    fn streaming_border_angle_rotates_one_revolution() {
+        assert_eq!(streaming_border_angle(0.0), 0.0);
+        assert_eq!(streaming_border_angle(0.5), 180.0);
+        assert!(streaming_border_angle(1.0) < 360.0);
+
+        let angles = [0.0, 0.25, 0.5, 0.75, 0.999]
+            .map(streaming_border_angle);
+        assert!(angles.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
