@@ -7,6 +7,8 @@
 //! strings; callers own the format). Column names are snake_case; the data
 //! mirrors what the Swift `TillerPersistence` package persists.
 
+use crate::agent_ref::AgentRef;
+
 /// A project the user added, as persisted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectRecord {
@@ -110,7 +112,12 @@ pub struct TabRecord {
     /// Surface kind: "terminal" | "chat" | "browser" | "editor" | "diff".
     pub kind: String,
     /// Stable agent identity for chat tabs, when one has been recorded.
-    pub agent_id: Option<String>,
+    //
+    // Qualified since v15: `adapter:<id>` / `registry:<id>` (see
+    // [`AgentRef`]). The run-time actions that select an agent know their
+    // own namespace and produce the right variant; the stored value is
+    // decoded once, at the DB boundary, never here.
+    pub agent_id: Option<AgentRef>,
     /// Position in the worktree's tab strip, 0-based.
     pub order_idx: i64,
     /// Whether this tab is the active one in its worktree. At most one tab
@@ -136,9 +143,14 @@ impl TabRecord {
         }
     }
 
-    /// Records which agent owns this tab's chat connection.
-    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
-        self.agent_id = Some(agent_id.into());
+    /// Records which agent owns this tab's chat connection. Takes an
+    /// [`AgentRef`] rather than anything string-shaped on purpose: the
+    /// caller knows which namespace its id came from, and a blanket
+    /// `From<String>` here would silently classify a registry id as an
+    /// adapter one — the exact confusion the qualified form exists to
+    /// prevent.
+    pub fn with_agent_id(mut self, agent_id: AgentRef) -> Self {
+        self.agent_id = Some(agent_id);
         self
     }
 }
@@ -201,7 +213,10 @@ pub struct ChatSessionSummary {
     /// The persisted shell-tab title.
     pub title: String,
     /// The agent associated with the chat tab, when known.
-    pub agent_id: Option<String>,
+    //
+    // Qualified since v15: `adapter:<id>` / `registry:<id>` (see
+    // [`AgentRef`] and the `TabRecord` field of the same name).
+    pub agent_id: Option<AgentRef>,
     /// Number of complete turns currently retained.
     pub turn_count: usize,
     /// Last transcript save time in Unix milliseconds.

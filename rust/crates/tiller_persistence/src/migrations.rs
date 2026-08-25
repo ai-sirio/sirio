@@ -263,6 +263,25 @@ fn migrate_v14(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v15 — qualify the persisted agent identity so it carries its namespace.
+///
+/// `tab.agent_id` (v10) holds a bare adapter id. Tiller is about to support
+/// agents from the ACP registry, whose ids live in a different namespace
+/// and collide with adapter ids: `registry_id("opencode")` resolves to
+/// `"opencode"`, the one adapter id the registry does not remap. A bare
+/// string cannot say which namespace it came from, so this prefixes every
+/// existing NON-NULL value with `adapter:`. The prefix rule has no
+/// exceptions and no whitelist: only adapters could ever have written this
+/// column, so every NON-NULL value is an adapter id by construction,
+/// including one that matches no current adapter — it is prefixed like any
+/// other (a tab whose identity does not resolve is already restorable, the
+/// same path as a NULL). Nothing is cleared and no row is deleted.
+fn migrate_v15(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "UPDATE tab SET agent_id = 'adapter:' || agent_id WHERE agent_id IS NOT NULL;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -280,6 +299,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v12,
     migrate_v13,
     migrate_v14,
+    migrate_v15,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -482,5 +502,63 @@ mod tests {
             .expect("exactly one row per provider");
         assert_eq!(identity, "second@example.com");
         assert_eq!(detected_at, 200);
+    }
+
+    /// v15 qualification (mirror of the v10 `agent_id` backfill test above):
+    /// the schema-creation half is proven by every `AppDatabase::open`, but
+    /// what v15 does on *existing* data needs its own proof. This plants
+    /// three tabs at v14 — the version right after v14's `agent_account`
+    /// table and before v15's prefixing — with a known adapter id, an
+    /// *unexpected* non-NULL id, and a NULL, migrates forward, and checks
+    /// the exact values the migration documents: every non-NULL value gets
+    /// the `adapter:` prefix with no whitelist check (the unexpected value
+    /// is prefixed like the known one), NULL stays NULL, and no row is
+    /// dropped.
+    #[test]
+    fn v15_qualifies_preexisting_bare_agent_ids_with_no_exceptions() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate_up_to(&mut conn, 14).expect("migrate to v14");
+
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path) VALUES ('proj', 'Proj', '/repo');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx)
+                 VALUES ('wt', 'proj', 'main', '/repo', 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active, agent_id)
+                 VALUES ('tab-known', 'wt', 'Chat', 'chat', 0, 1, 'codex');
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active, agent_id)
+                 VALUES ('tab-unexpected', 'wt', 'Chat', 'chat', 1, 0, 'some-unknown-agent');
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-null', 'wt', 'Chat', 'chat', 2, 0);",
+        )
+        .expect("plant rows at v14 with bare agent ids");
+
+        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward to current");
+        assert_eq!(
+            read_user_version(&conn).expect("read"),
+            CURRENT_SCHEMA_VERSION
+        );
+
+        let rows: Vec<(String, Option<String>)> = {
+            let mut statement = conn
+                .prepare("SELECT id, agent_id FROM tab ORDER BY order_idx")
+                .expect("prepare");
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query");
+            rows.collect::<Result<_, _>>().expect("collect")
+        };
+        assert_eq!(
+            rows,
+            vec![
+                ("tab-known".to_string(), Some("adapter:codex".to_string())),
+                (
+                    "tab-unexpected".to_string(),
+                    Some("adapter:some-unknown-agent".to_string()),
+                ),
+                ("tab-null".to_string(), None),
+            ],
+            "v15 prefixes every non-NULL agent_id with 'adapter:' — known ids,\n  \
+             unexpected ids alike — and leaves NULL and row count untouched"
+        );
     }
 }
