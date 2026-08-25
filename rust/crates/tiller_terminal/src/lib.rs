@@ -15,7 +15,7 @@ use std::{
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 
 use libghostty_vt::{
-    Error, RenderState, Terminal, TerminalOptions,
+    Error, RenderState, Terminal, TerminalOptions, key,
     render::{CellIteration, CellIterator, Colors, RowIterator},
     screen::{CellWide, GridRef},
     style::{StyleColor, Underline},
@@ -282,9 +282,20 @@ impl SnapshotCell {
 /// this channel. Blocking round-trips (Snapshot/Text) wait on a oneshot-ish
 /// reply channel; the owner loop polls with a small sleep so worst-case
 /// command latency is bounded by [`EVENT_POLL_INTERVAL`].
+struct KeyInput {
+    action: key::Action,
+    key: key::Key,
+    mods: key::Mods,
+    consumed_mods: key::Mods,
+    utf8: Option<String>,
+    unshifted_codepoint: Option<char>,
+}
+
 enum TerminalCommand {
-    /// Write bytes to the PTY (user input: keystrokes, paste).
+    /// Write bytes to the PTY (paste and programmatic input).
     Input(Vec<u8>),
+    /// Encode a keyboard event against the guest-controlled terminal state.
+    Key(KeyInput),
     /// Feed bytes straight into the VT parser without touching the PTY
     /// (`replay_scrollback`, `clear_screen`).
     Feed(Vec<u8>),
@@ -520,6 +531,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
         let mut render = RenderState::new().expect("terminal owner thread: RenderState");
         let mut row_iterator = RowIterator::new().expect("terminal owner thread: RowIterator");
         let mut cell_iterator = CellIterator::new().expect("terminal owner thread: CellIterator");
+        let mut key_encoder = key::Encoder::new().expect("terminal owner thread: key encoder");
 
         let mut last_title = String::new();
         let mut child_exit_reported = false;
@@ -547,6 +559,12 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     TerminalCommand::Input(bytes) => {
                         let _ = writer.write_all(&bytes);
                         let _ = writer.flush();
+                    }
+                    TerminalCommand::Key(input) => {
+                        if let Ok(bytes) = encode_key_input(&terminal, &mut key_encoder, input) {
+                            let _ = writer.write_all(&bytes);
+                            let _ = writer.flush();
+                        }
                     }
                     TerminalCommand::Feed(bytes) => terminal.vt_write(&bytes),
                     TerminalCommand::Resize(columns, lines, cell_width, cell_height) => {
@@ -973,6 +991,10 @@ impl TerminalHandle {
 
     fn write(&self, bytes: Vec<u8>) {
         let _ = self.commands.send(TerminalCommand::Input(bytes));
+    }
+
+    fn write_key(&self, input: KeyInput) {
+        let _ = self.commands.send(TerminalCommand::Key(input));
     }
 
     fn clear_screen(&self) {
@@ -2178,15 +2200,17 @@ impl TerminalView {
             return;
         }
         if let TerminalState::Running(terminal) = &self.terminal {
-            let scroll = match key.as_str() {
-                "pageup" | "page_up" => Some(TillerScroll::PageUp),
-                "pagedown" | "page_down" => Some(TillerScroll::PageDown),
-                _ => None,
-            };
+            let scroll = (!event.keystroke.modifiers.modified())
+                .then(|| match key.as_str() {
+                    "pageup" | "page_up" => Some(TillerScroll::PageUp),
+                    "pagedown" | "page_down" => Some(TillerScroll::PageDown),
+                    _ => None,
+                })
+                .flatten();
             if let Some(scroll) = scroll {
                 terminal.scroll_display(scroll);
-            } else if let Some(bytes) = key_bytes(event) {
-                terminal.write(bytes);
+            } else if let Some(input) = key_input(event) {
+                terminal.write_key(input);
             }
         }
     }
@@ -2913,38 +2937,165 @@ fn indexed_color(index: u8) -> (u8, u8, u8) {
     )
 }
 
-fn key_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
-    let key = event.keystroke.key.to_ascii_lowercase();
+fn key_input(event: &KeyDownEvent) -> Option<KeyInput> {
+    let name = event.keystroke.key.to_ascii_lowercase();
     let modifiers = event.keystroke.modifiers;
-    if modifiers.platform || key == "shift" || key == "control" || key == "alt" {
+    if modifiers.platform || matches!(name.as_str(), "shift" | "control" | "alt") {
         return None;
     }
-    let mut bytes = match key.as_str() {
-        "enter" | "return" => b"\r".to_vec(),
-        "backspace" => b"\x7f".to_vec(),
-        "tab" => b"\t".to_vec(),
-        "escape" => b"\x1b".to_vec(),
-        "up" => b"\x1b[A".to_vec(),
-        "down" => b"\x1b[B".to_vec(),
-        "right" => b"\x1b[C".to_vec(),
-        "left" => b"\x1b[D".to_vec(),
-        "home" => b"\x1b[H".to_vec(),
-        "end" => b"\x1b[F".to_vec(),
-        "delete" => b"\x1b[3~".to_vec(),
-        _ => event
-            .keystroke
-            .key_char
-            .as_deref()
-            .unwrap_or(&event.keystroke.key)
-            .as_bytes()
-            .to_vec(),
-    };
-    if modifiers.control && bytes.len() == 1 {
-        bytes[0] &= 0x1f;
-    } else if modifiers.alt {
-        bytes.insert(0, 0x1b);
+
+    let mapped = named_key(&name).or_else(|| {
+        let mut chars = name.chars();
+        let character = chars.next()?;
+        chars.next().is_none().then(|| character_key(character))
+    });
+    let utf8 = event.keystroke.key_char.clone().or_else(|| {
+        (name.chars().count() == 1).then(|| event.keystroke.key.clone())
+    });
+    let unshifted_codepoint = (name.chars().count() == 1)
+        .then(|| name.chars().next())
+        .flatten()
+        .or_else(|| utf8.as_deref()?.chars().next());
+
+    let mut mods = key::Mods::empty();
+    if modifiers.shift {
+        mods |= key::Mods::SHIFT;
     }
-    (!bytes.is_empty()).then_some(bytes)
+    if modifiers.alt {
+        mods |= key::Mods::ALT;
+    }
+    if modifiers.control {
+        mods |= key::Mods::CTRL;
+    }
+
+    Some(KeyInput {
+        // GPUI currently delivers key-down only. Key release remains out of
+        // scope until a hosted CLI requests Kitty REPORT_EVENTS.
+        action: if event.is_held {
+            key::Action::Repeat
+        } else {
+            key::Action::Press
+        },
+        key: mapped.unwrap_or(key::Key::Unidentified),
+        mods,
+        consumed_mods: if modifiers.shift && utf8.is_some() {
+            key::Mods::SHIFT
+        } else {
+            key::Mods::empty()
+        },
+        utf8,
+        unshifted_codepoint,
+    })
+}
+
+fn named_key(name: &str) -> Option<key::Key> {
+    Some(match name {
+        "enter" | "return" => key::Key::Enter,
+        "backspace" => key::Key::Backspace,
+        "tab" => key::Key::Tab,
+        "escape" => key::Key::Escape,
+        "up" => key::Key::ArrowUp,
+        "down" => key::Key::ArrowDown,
+        "right" => key::Key::ArrowRight,
+        "left" => key::Key::ArrowLeft,
+        "home" => key::Key::Home,
+        "end" => key::Key::End,
+        "insert" => key::Key::Insert,
+        "delete" => key::Key::Delete,
+        "pageup" | "page_up" => key::Key::PageUp,
+        "pagedown" | "page_down" => key::Key::PageDown,
+        "space" => key::Key::Space,
+        "f1" => key::Key::F1,
+        "f2" => key::Key::F2,
+        "f3" => key::Key::F3,
+        "f4" => key::Key::F4,
+        "f5" => key::Key::F5,
+        "f6" => key::Key::F6,
+        "f7" => key::Key::F7,
+        "f8" => key::Key::F8,
+        "f9" => key::Key::F9,
+        "f10" => key::Key::F10,
+        "f11" => key::Key::F11,
+        "f12" => key::Key::F12,
+        _ => return None,
+    })
+}
+
+fn character_key(character: char) -> key::Key {
+    match character {
+        'a' => key::Key::A,
+        'b' => key::Key::B,
+        'c' => key::Key::C,
+        'd' => key::Key::D,
+        'e' => key::Key::E,
+        'f' => key::Key::F,
+        'g' => key::Key::G,
+        'h' => key::Key::H,
+        'i' => key::Key::I,
+        'j' => key::Key::J,
+        'k' => key::Key::K,
+        'l' => key::Key::L,
+        'm' => key::Key::M,
+        'n' => key::Key::N,
+        'o' => key::Key::O,
+        'p' => key::Key::P,
+        'q' => key::Key::Q,
+        'r' => key::Key::R,
+        's' => key::Key::S,
+        't' => key::Key::T,
+        'u' => key::Key::U,
+        'v' => key::Key::V,
+        'w' => key::Key::W,
+        'x' => key::Key::X,
+        'y' => key::Key::Y,
+        'z' => key::Key::Z,
+        '0' => key::Key::Digit0,
+        '1' => key::Key::Digit1,
+        '2' => key::Key::Digit2,
+        '3' => key::Key::Digit3,
+        '4' => key::Key::Digit4,
+        '5' => key::Key::Digit5,
+        '6' => key::Key::Digit6,
+        '7' => key::Key::Digit7,
+        '8' => key::Key::Digit8,
+        '9' => key::Key::Digit9,
+        '`' => key::Key::Backquote,
+        '\\' => key::Key::Backslash,
+        '[' => key::Key::BracketLeft,
+        ']' => key::Key::BracketRight,
+        ',' => key::Key::Comma,
+        '=' => key::Key::Equal,
+        '-' => key::Key::Minus,
+        '.' => key::Key::Period,
+        '\'' => key::Key::Quote,
+        ';' => key::Key::Semicolon,
+        '/' => key::Key::Slash,
+        _ => key::Key::Unidentified,
+    }
+}
+
+fn encode_key_input(
+    terminal: &Terminal<'_, '_>,
+    encoder: &mut key::Encoder<'_>,
+    input: KeyInput,
+) -> std::result::Result<Vec<u8>, Error> {
+    let mut event = key::Event::new()?;
+    event
+        .set_action(input.action)
+        .set_key(input.key)
+        .set_mods(input.mods)
+        .set_consumed_mods(input.consumed_mods)
+        .set_utf8(input.utf8);
+    if let Some(codepoint) = input.unshifted_codepoint {
+        event.set_unshifted_codepoint(codepoint);
+    }
+
+    encoder
+        .set_options_from_terminal(terminal)
+        .set_macos_option_as_alt(key::OptionAsAlt::True);
+    let mut bytes = Vec::new();
+    encoder.encode_to_vec(&event, &mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -2999,6 +3150,173 @@ mod tests {
 
     fn advance_headless(term: &mut Terminal<'static, 'static>, bytes: &[u8]) {
         term.vt_write(bytes);
+    }
+
+    fn key_event(
+        key: &str,
+        key_char: Option<&str>,
+        modifiers: gpui::Modifiers,
+    ) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                key: key.to_string(),
+                key_char: key_char.map(str::to_string),
+                modifiers,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    fn encoded_key(
+        term: &Terminal<'static, 'static>,
+        event: &KeyDownEvent,
+    ) -> Vec<u8> {
+        let input = key_input(event).expect("guest-bound key");
+        let mut encoder = key::Encoder::new().expect("key encoder");
+        encode_key_input(term, &mut encoder, input).expect("encode key")
+    }
+
+    #[test]
+    fn default_keyboard_encoding_preserves_legacy_bytes() {
+        let term = headless_term(80, 24);
+        let plain = gpui::Modifiers::default();
+        let cases = [
+            ("enter", None, plain, b"\r".as_slice()),
+            ("backspace", None, plain, b"\x7f".as_slice()),
+            ("tab", None, plain, b"\t".as_slice()),
+            ("escape", None, plain, b"\x1b".as_slice()),
+            ("up", None, plain, b"\x1b[A".as_slice()),
+            ("down", None, plain, b"\x1b[B".as_slice()),
+            ("right", None, plain, b"\x1b[C".as_slice()),
+            ("left", None, plain, b"\x1b[D".as_slice()),
+            ("home", None, plain, b"\x1b[H".as_slice()),
+            ("end", None, plain, b"\x1b[F".as_slice()),
+            ("delete", None, plain, b"\x1b[3~".as_slice()),
+            ("a", Some("a"), plain, b"a".as_slice()),
+            (
+                "c",
+                Some("c"),
+                gpui::Modifiers {
+                    control: true,
+                    ..plain
+                },
+                b"\x03".as_slice(),
+            ),
+            (
+                "x",
+                Some("x"),
+                gpui::Modifiers {
+                    alt: true,
+                    ..plain
+                },
+                b"\x1bx".as_slice(),
+            ),
+        ];
+
+        for (key, key_char, modifiers, expected) in cases {
+            assert_eq!(
+                encoded_key(&term, &key_event(key, key_char, modifiers)),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_keys_emit_terminal_escape_sequences() {
+        let term = headless_term(80, 24);
+        let cases = [
+            ("f1", b"\x1bOP".as_slice()),
+            ("f2", b"\x1bOQ".as_slice()),
+            ("f3", b"\x1bOR".as_slice()),
+            ("f4", b"\x1bOS".as_slice()),
+            ("f5", b"\x1b[15~".as_slice()),
+            ("f6", b"\x1b[17~".as_slice()),
+            ("f7", b"\x1b[18~".as_slice()),
+            ("f8", b"\x1b[19~".as_slice()),
+            ("f9", b"\x1b[20~".as_slice()),
+            ("f10", b"\x1b[21~".as_slice()),
+            ("f11", b"\x1b[23~".as_slice()),
+            ("f12", b"\x1b[24~".as_slice()),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(
+                encoded_key(&term, &key_event(key, None, gpui::Modifiers::default())),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn application_cursor_mode_uses_ss3_for_navigation_keys() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[?1h");
+
+        for (key, expected) in [
+            ("up", b"\x1bOA".as_slice()),
+            ("down", b"\x1bOB".as_slice()),
+            ("right", b"\x1bOC".as_slice()),
+            ("left", b"\x1bOD".as_slice()),
+            ("home", b"\x1bOH".as_slice()),
+            ("end", b"\x1bOF".as_slice()),
+        ] {
+            assert_eq!(
+                encoded_key(&term, &key_event(key, None, gpui::Modifiers::default())),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_arrows_include_the_modifier_parameter() {
+        let term = headless_term(80, 24);
+        let modifiers = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            encoded_key(&term, &key_event("left", None, modifiers)),
+            b"\x1b[1;5D"
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_distinguishes_escape_and_ctrl_i() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[>1u");
+        let control = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            encoded_key(&term, &key_event("escape", None, Default::default())),
+            b"\x1b[27u"
+        );
+        assert_eq!(
+            encoded_key(&term, &key_event("i", Some("i"), control)),
+            b"\x1b[105;5u"
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_distinguishes_ctrl_i_from_tab() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[>4;2m");
+        let control = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            encoded_key(&term, &key_event("i", Some("i"), control)),
+            b"\x1b[27;5;105~"
+        );
     }
 
     fn resize_headless(term: &mut Terminal<'static, 'static>, columns: u16, lines: u16) {
