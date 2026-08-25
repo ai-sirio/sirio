@@ -11,7 +11,8 @@ tiller_theme.workspace = true
 tiller_project.workspace = true
 anyhow.workspace = true
 futures = "0.3"
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+libghostty-vt = "0.2.1"
+portable-pty = "0.9"
 parking_lot = "0.12"
 libc = "0.2"
 
@@ -25,9 +26,3 @@ gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-# PROTOTYPE ONLY -- branch `prototype/ghostty-pane`, issue #33.
-# These exist for `examples/prototype_ghostty_pane.rs` and must not reach the
-# real crate's dependency graph. Deliberately dev-dependencies: an example can
-# use them, `tiller_terminal` itself cannot.
-libghostty-vt = "0.2.1"
-portable-pty = "0.9"
