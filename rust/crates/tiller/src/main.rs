@@ -6166,6 +6166,13 @@ impl TillerWorkspace {
                 sidebar.set_worktree_tabs(old_sidebar_id, Vec::new(), cx);
             });
         }
+        // #114: the selection itself is a plausible moment the branch changed
+        // under Tiller (an agent just committed to a new one), so the labels
+        // are reread here, before `sync_activity`/`set_selected_worktree`
+        // re-apply activity facts and the highlight on top of any rebuilt
+        // rows. Running this after that sequence would rebuild the row tree
+        // and drop the highlight the selection just applied.
+        self.refresh_worktree_branches(cx);
         self.sync_activity(cx);
         self.sidebar.update(cx, |sidebar, cx| {
             // The host has updated its current path, control snapshot, status
@@ -6173,12 +6180,6 @@ impl TillerWorkspace {
             // is the final confirmation of that state transition.
             sidebar.set_selected_worktree(&selected_path, cx);
         });
-        // #114: the click itself is a plausible moment the branch changed
-        // under Tiller (an agent just committed to a new one), so the label
-        // set the rebuilt bars and rows are about to reflect is reread
-        // first. Clicking was never enough before; reselecting stayed stale
-        // forever.
-        self.refresh_worktree_branches(cx);
         self.schedule_save(cx);
         cx.notify();
         Ok(())
@@ -6204,6 +6205,13 @@ impl TillerWorkspace {
     /// bar and the control socket's workspace listings redraw) on exactly
     /// those frames, never unconditionally: notifying every call would
     /// deadlock into a permanent redraw loop.
+    ///
+    /// #114 follow-up: neither the sidebar nor the control socket reads the
+    /// catalog live — the sidebar is a pushed row tree rebuilt only by
+    /// `refresh_sidebar`, the socket answers from `ControlState` rebuilt only
+    /// by `sync_control_state`. Updating the catalog alone is therefore
+    /// invisible, so this pushes to both copies inside the `if changed`
+    /// branch.
     fn refresh_worktree_branches(&mut self, cx: &mut Context<Self>) -> bool {
         let mut changed = false;
         let mut projects = self.project_catalog.projects().to_vec();
@@ -6220,6 +6228,8 @@ impl TillerWorkspace {
         }
         if changed {
             self.project_catalog.replace_projects(projects);
+            self.sync_control_state();
+            self.refresh_sidebar(cx);
             cx.notify();
         }
         changed
@@ -21070,6 +21080,103 @@ mod tests {
                 "the now-current label must stop the notifies again"
             );
         });
+    }
+
+    /// #114 follow-up: the refreshed label was only written to
+    /// `project_catalog`, so the rows the user sees and the socket answers kept
+    /// their stale copy. This asserts the socket-visible copy follows, read back
+    /// through the same `ControlState`/`current_workspace()` path `workspace.list`
+    /// and `workspace.current` use. Before the fix this fails with
+    /// `left: "main"` / `right: "switched-underneath"` (or with the stale
+    /// initial label) because nothing republished the catalog to the control
+    /// state.
+    #[gpui::test]
+    async fn refresh_worktree_branches_publishes_to_control_state(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let repo = test_repo("live-branch-label-control-state");
+        std::fs::write(repo.join("file.txt"), "one\n").expect("seed fixture file");
+        git_test(&repo, &["add", "--", "file.txt"]);
+        git_test(&repo, &["commit", "-m", "root"]);
+
+        let repo_for_constructor = repo.clone();
+        let repo_for_state = repo.clone();
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            workspace.working_directory = repo_for_constructor.clone();
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "tiller".into(),
+                name: "tiller".into(),
+                root_path: repo_for_constructor.clone(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "stale-side-branch".into(),
+                    path: repo_for_constructor.clone(),
+                    is_primary: true,
+                }],
+            }]);
+            // Keep ControlState in lock-step with the stale catalog so the
+            // `current_workspace().branch` we read afterwards is not a stale
+            // `palette_test_workspace` leftover. `refresh_worktree_branches`
+            // must itself republish to both surfaces.
+            workspace.sync_control_state();
+            workspace
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "stale label must be corrected on first refresh"
+            );
+            let catalog_branch = workspace.project_catalog.projects()[0].worktrees[0].branch.clone();
+            assert_eq!(catalog_branch, "main");
+            // Read back through the socket-visible copy, not the catalog.
+            // `current_workspace()` can be None when `working_directory` has not
+            // yet been canonicalised to match the worktree path inside the
+            // test's throwaway temp dir (Windows `canonicalize` subtleties), so
+            // read the workspaces row directly — it is the same `ControlState`
+            // `workspace.list`/`workspace.current` answer from.
+            let control_branch = workspace
+                .control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workspaces
+                .first()
+                .expect("control state has a workspace row")
+                .branch
+                .clone();
+            assert_eq!(
+                control_branch, "main",
+                "ControlState must follow the catalog on first refresh — \
+                 before the fix it kept the stale label"
+            );
+        });
+
+        git_test(&repo_for_state, &["checkout", "-b", "switched-underneath"]);
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "HEAD changed under the app; the next refresh must notice"
+            );
+            let catalog_branch = workspace.project_catalog.projects()[0].worktrees[0].branch.clone();
+            assert_eq!(catalog_branch, "switched-underneath");
+            let control_branch = workspace
+                .control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workspaces
+                .first()
+                .expect("control state still has a workspace row")
+                .branch
+                .clone();
+            assert_eq!(
+                control_branch, "switched-underneath",
+                "ControlState must follow the catalog after a branch switch — \
+                 before the fix workspace.list/current kept the old branch"
+            );
+        });
+
+        // Sidebar rows cannot be asserted without a drawn test; those fail on
+        // this machine, so the ControlState assertion above stands as the guard.
     }
 
     #[test]
