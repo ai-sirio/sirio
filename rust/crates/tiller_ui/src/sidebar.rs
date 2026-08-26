@@ -579,10 +579,6 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    fn worktree_path_label(path: Option<&Path>) -> String {
-        path.map(display_path).unwrap_or_default()
-    }
-
     /// Text for the worktree-location field, which is *not* a label: what it
     /// holds is persisted as the project's worktree base and handed to
     /// `resolve_parent_directory`, which takes it verbatim. So it strips
@@ -1770,10 +1766,30 @@ impl Sidebar {
     /// an 18px line height plus 7px of vertical padding — the action-row
     /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
     /// the session-card math). Content-sized titles grow beyond this floor.
+    /// Whether a row draws a second line at all.
+    ///
+    /// The sub-line used to lead with the checkout path, which every project
+    /// and worktree row had, so "is a card" and "has a path" were the same
+    /// question. #151 dropped the path — it was almost always truncated,
+    /// repeated the project prefix on every child, and bought its second
+    /// line for every row in the tree. What remains on that line is the
+    /// `Primary` pill and the F-SID-11 worktree comment, either of which may
+    /// be absent, so both the sub-line and the taller height that pays for
+    /// it now follow whether there is anything left to put there.
+    ///
+    /// The render and the height read this one predicate, so they cannot
+    /// drift into disagreeing about whether a row has two lines.
+    fn has_sub_line(row: &SidebarRow) -> bool {
+        matches!(row.kind, RowKind::Project | RowKind::Worktree)
+            && (row.is_primary
+                || row
+                    .comment
+                    .as_ref()
+                    .is_some_and(|comment| !comment.is_empty()))
+    }
+
     fn row_min_height(row: &SidebarRow) -> f32 {
-        let is_card =
-            row.path.is_some() && matches!(row.kind, RowKind::Project | RowKind::Worktree);
-        if is_card {
+        if Self::has_sub_line(row) {
             CARD_TWO_LINE_HEIGHT
         } else {
             ROW_HEIGHT
@@ -3389,10 +3405,11 @@ impl Sidebar {
             kind,
             RowKind::Worktree | RowKind::Tab | RowKind::NewWorktree
         );
-        // waku's card rhythm: projects and worktrees are two-line cards
-        // (13.5px title over an 11.5px context line); leaf rows are
-        // single-line at the 32px action-row height.
-        let is_card = path.is_some() && matches!(kind, RowKind::Project | RowKind::Worktree);
+        // waku's card rhythm: a project or worktree row becomes a two-line
+        // card (13.5px title over an 11.5px context line) only when it has
+        // something for that second line; every other row is single-line at
+        // the 32px action-row height. See `has_sub_line`.
+        let has_sub_line = Self::has_sub_line(&row);
         let row_min_height = Self::row_min_height(&row);
         // Projects are the tree root. Every child level, including
         // worktrees, must move right from the project row; the previous
@@ -3796,8 +3813,7 @@ impl Sidebar {
                 )
             });
 
-        let row_view = row_view.child(main_line).when(is_card, |this| {
-            let sub = Self::worktree_path_label(path.as_deref());
+        let row_view = row_view.child(main_line).when(has_sub_line, |this| {
             this.child(
                 div()
                     // Aligned under the title: 12px leading slot + 7px gap
@@ -3810,7 +3826,6 @@ impl Sidebar {
                     .text_size(px(12.5))
                     .line_height(px(ROW_SUB_LINE_HEIGHT))
                     .text_color(theme.meta)
-                    .child(div().min_w_0().truncate().child(sub))
                     .when(row.is_primary, |this| {
                         this.child(
                             div()
@@ -4299,17 +4314,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn a_worktree_row_sub_line_hides_the_verbatim_prefix() {
-        let path = PathBuf::from(r"\\?\D:\x\y");
-        assert_eq!(
-            Sidebar::worktree_path_label(Some(&path)),
-            r"D:\x\y",
-            "the rendered worktree path must not expose Windows' verbatim prefix"
-        );
-    }
-
     /// The location field's text round-trips: it is persisted as the
     /// project's worktree base and later joined onto. `display_path` would
     /// collapse a home-relative choice to "~", which `Path::join` treats as a
@@ -4603,9 +4607,14 @@ mod tests {
         }
     }
 
-    /// The row's rhythm is a minimum, not a prediction: cards keep their
-    /// two-line context height and leaves keep the action-row height whatever
-    /// title the content layout needs above that floor.
+    /// The row's rhythm is a minimum, not a prediction: a row keeps the
+    /// height its own line count needs, whatever title the content layout
+    /// asks for above that floor.
+    ///
+    /// #151 changed which rows have two lines. A project or worktree row is
+    /// a two-line card only when something occupies its sub-line — before,
+    /// the checkout path put something there unconditionally, so every such
+    /// row was 51px whether or not it had anything else to say.
     #[test]
     fn a_rows_height_uses_only_the_row_kind_minimum() {
         let mut row = SidebarRow {
@@ -4626,15 +4635,45 @@ mod tests {
             comment: None,
             running_agents: Vec::new(),
         };
-        assert_eq!(Sidebar::row_min_height(&row), CARD_TWO_LINE_HEIGHT);
+        assert_eq!(
+            Sidebar::row_min_height(&row),
+            ROW_HEIGHT,
+            "a project row with no pill and no comment has one line, so it must \r
+             collapse to the action-row height rather than keep paying for the \r
+             sub-line the path used to occupy"
+        );
 
         row.title = "a".repeat(40);
         assert_eq!(
             Sidebar::row_min_height(&row),
-            CARD_TWO_LINE_HEIGHT,
-            "a long card title must grow from its content, not from a character estimate"
+            ROW_HEIGHT,
+            "a long title must grow from its content, not from a character estimate"
         );
 
+        row.kind = RowKind::Worktree;
+        row.is_primary = true;
+        assert_eq!(
+            Sidebar::row_min_height(&row),
+            CARD_TWO_LINE_HEIGHT,
+            "a primary worktree still draws its pill on a sub-line"
+        );
+
+        row.is_primary = false;
+        row.comment = Some("release branch".to_owned());
+        assert_eq!(
+            Sidebar::row_min_height(&row),
+            CARD_TWO_LINE_HEIGHT,
+            "a worktree comment still draws on a sub-line"
+        );
+
+        row.comment = Some(String::new());
+        assert_eq!(
+            Sidebar::row_min_height(&row),
+            ROW_HEIGHT,
+            "an empty comment is not content, so it must not buy a second line"
+        );
+
+        row.comment = None;
         row.kind = RowKind::Tab;
         row.path = None;
         assert_eq!(
@@ -5144,19 +5183,28 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
-        // The remove button sits at the row's right edge, on the card's
-        // title line. The new worktree row is inserted directly above the
-        // New Worktree row (whose bounds are known statically): the card is
-        // 51px tall with 7px top padding and an 18px title line, so the ×
-        // rides 16px below the card's top edge — i.e. 35px above the next
-        // row's top.
+        // The remove button sits at the row's right edge, on its title
+        // line. Locate the created worktree's own row and click against
+        // *its* bounds rather than deriving a point from a neighbour plus a
+        // constant row height: #151 made a row's height depend on whether it
+        // has a sub-line at all, so any hardcoded offset here silently rots
+        // the next time that changes — which is exactly how this test broke.
         let new_worktree_bounds = cx
             .debug_bounds("new-worktree-row")
             .expect("the New Worktree row's bounds are known");
+        let created_row = (0..64)
+            .filter_map(|row_id| {
+                let selector: &'static str =
+                    Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+                cx.debug_bounds(selector)
+            })
+            .filter(|bounds| bounds.origin.y < new_worktree_bounds.origin.y)
+            .max_by(|a, b| a.origin.y.partial_cmp(&b.origin.y).expect("finite y"))
+            .expect("the created worktree's row is drawn above the New Worktree row");
         // The × is 16px wide, inset 8px from the row's right edge.
         let remove_button = point(
-            new_worktree_bounds.origin.x + new_worktree_bounds.size.width - px(16.0),
-            new_worktree_bounds.origin.y - px(35.0),
+            created_row.origin.x + created_row.size.width - px(16.0),
+            created_row.center().y,
         );
         // The remove button is hover-revealed: move the mouse over the row
         // first so the × is visible and clickable.
@@ -6409,7 +6457,14 @@ mod tests {
         // Reset position -- the sheet is a full-height overlay starting at
         // the very top, so Reset's own y is constant regardless of which
         // project opened it.
-        let decoy_worktrees: Vec<SidebarWorktree> = (0..12)
+        //
+        // #151 shortened these rows: a worktree with no Primary pill and no
+        // comment has no sub-line, so it is 32px rather than 51px. Twelve of
+        // them no longer reach Reset, so the count is raised until they do.
+        // The invariant assertion below is what actually guards this — it
+        // fails loudly rather than letting the test quietly stop exercising
+        // the occlusion it exists to prove.
+        let decoy_worktrees: Vec<SidebarWorktree> = (0..24)
             .map(|i| SidebarWorktree {
                 branch: format!("decoy-{i}"),
                 path: PathBuf::from(format!("/tmp/prj13-decoy/wt-{i}")),
@@ -6463,7 +6518,7 @@ mod tests {
         // fixture, rather than assuming geometry: without it, a click at
         // Reset's centre proves nothing about occlusion either way.
         let overlapping_row = std::iter::once(0)
-            .chain(1000..1013)
+            .chain(1000..1040)
             .filter_map(|row_id| {
                 let selector: &'static str =
                     Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
