@@ -2016,7 +2016,9 @@ fn chat_entry_row(entry: &tiller_persistence::ChatEntry) -> BTreeMap<String, Str
             row.insert("kind".into(), "thought".into());
             row.insert("text".into(), text.clone());
         }
-        tiller_persistence::ChatEntry::ToolCall { id, title, status } => {
+        tiller_persistence::ChatEntry::ToolCall {
+            id, title, status, ..
+        } => {
             row.insert("kind".into(), "tool".into());
             row.insert("id".into(), id.clone());
             row.insert("text".into(), title.clone());

@@ -30,7 +30,7 @@ use tiller_git::{GitActions, status as git_status};
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
-    ChatSessionSummary, ChatTranscript, ChatTurn,
+    ChatSessionSummary, ChatToolLocation, ChatTranscript, ChatTurn,
 };
 use tiller_project::{display_absolute_path, display_path};
 use tiller_theme::Theme;
@@ -331,18 +331,37 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         Entry::Assistant { text, .. } => Some(ChatEntry::AssistantMessage { text: text.clone() }),
         Entry::Thought { text, .. } => Some(ChatEntry::Thought { text: text.clone() }),
         Entry::ToolCall {
-            id, title, status, ..
+            id,
+            title,
+            status,
+            kind,
+            locations,
+            ..
         } => Some(ChatEntry::ToolCall {
             id: id.clone(),
             title: title.clone(),
             status: status.clone(),
+            // #168: the `..` used to drop both of these, so a restored row
+            // named neither its tool nor the file it touched.
+            kind: Some(kind.clone()),
+            locations: locations
+                .iter()
+                .map(|location| ChatToolLocation {
+                    path: location.path.to_string_lossy().into_owned(),
+                    line: location.line,
+                })
+                .collect(),
         }),
+        // A subagent task carries neither a tool kind nor file locations, so
+        // it stores what it has and restores exactly as it did before #168.
         Entry::SubagentTask {
             id, title, status, ..
         } => Some(ChatEntry::ToolCall {
             id: id.clone(),
             title: title.clone(),
             status: status.clone(),
+            kind: None,
+            locations: Vec::new(),
         }),
         Entry::Permission {
             request_id,
@@ -459,13 +478,27 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             text,
             expanded: false,
         },
-        ChatEntry::ToolCall { id, title, status } => Entry::ToolCall {
+        ChatEntry::ToolCall {
             id,
             title,
             status,
-            kind: "tool".into(),
+            kind,
+            locations,
+        } => Entry::ToolCall {
+            id,
+            title,
+            status,
+            // A row stored before #168 carries neither, and restores as the
+            // generic label and the empty location list it always did.
+            kind: kind.unwrap_or_else(|| "tool".into()),
             content: Vec::new(),
-            locations: Vec::new(),
+            locations: locations
+                .into_iter()
+                .map(|location| ToolCallLocationInfo {
+                    path: PathBuf::from(location.path),
+                    line: location.line,
+                })
+                .collect(),
             raw_input: None,
             raw_output: None,
             expanded: false,
@@ -8680,6 +8713,69 @@ mod tests {
              does, not hold it open at the transcript width: idle={idle_card:?} \r
              streaming={ring:?}"
         );
+    }
+
+    /// #168: a transcript is the record of what an agent did to a repository,
+    /// and reading it back after a restart is exactly when someone is
+    /// reconstructing that — so a restored tool row has to keep naming the
+    /// file it touched, and the card has to keep its kind. Both used to be
+    /// dropped on the way into storage, so #119's target vanished at the
+    /// first restart.
+    #[test]
+    fn a_tool_call_round_trips_its_kind_and_locations() {
+        let live = Entry::ToolCall {
+            id: "tool-1".into(),
+            title: "read".into(),
+            status: "Completed".into(),
+            kind: "Read".into(),
+            content: Vec::new(),
+            locations: vec![ToolCallLocationInfo {
+                path: PathBuf::from("src").join("main.rs"),
+                line: Some(42),
+            }],
+            raw_input: None,
+            raw_output: None,
+            expanded: false,
+            group_expanded: false,
+        };
+
+        let stored = persisted_entry(&live).expect("a tool call is persisted");
+        let restored = restored_entry(stored);
+
+        let Entry::ToolCall {
+            kind, locations, ..
+        } = restored
+        else {
+            panic!("a stored tool call restores as one");
+        };
+        assert_eq!(kind, "Read", "the card's kind must survive the round trip");
+        assert_eq!(
+            locations,
+            vec![ToolCallLocationInfo {
+                path: PathBuf::from("src").join("main.rs"),
+                line: Some(42),
+            }],
+            "the file the call touched must survive the round trip"
+        );
+    }
+
+    /// A row written before #168 carries neither field and must restore
+    /// exactly as it always did, rather than failing to deserialize.
+    #[test]
+    fn a_tool_call_stored_before_the_fields_existed_still_restores() {
+        let legacy: ChatEntry = serde_json::from_str(
+            r#"{"ToolCall":{"id":"tool-1","title":"read","status":"Completed"}}"#,
+        )
+        .expect("a pre-#168 row still deserializes");
+
+        let Entry::ToolCall {
+            kind, locations, ..
+        } = restored_entry(legacy)
+        else {
+            panic!("a stored tool call restores as one");
+        };
+        assert_eq!(kind, "tool", "the generic label it always showed");
+        assert!(locations.is_empty(), "and no target to name");
     }
 
     /// #173: a user message longer than the pane must wrap inside it. The
