@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -48,6 +49,7 @@ pub struct TrayRosterEntry {
     pub branch: String,
     pub project_name: String,
     pub status: AgentStatus,
+    pub status_since: Option<Duration>,
 }
 
 /// What a tray click asks the app to do next. Drained by the same 40ms
@@ -96,13 +98,24 @@ const NORMAL_ICON_NAME: &str = "utilities-terminal";
 // theme lacks it, the host degrades to no overlay rather than a wrong icon.
 const ATTENTION_ICON_NAME: &str = "dialog-question";
 
+fn format_status_age(age: Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds < 60 {
+        format!("{}s", seconds.max(1))
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / (60 * 60))
+    }
+}
+
 fn roster_menu_label(entry: &TrayRosterEntry) -> String {
-    format!(
-        "{} — {} ({})",
-        entry.branch,
-        entry.project_name,
-        entry.status.human_label()
-    )
+    let status = entry.status.human_label();
+    let status = entry.status_since.map_or_else(
+        || status.to_string(),
+        |age| format!("{status} · {}", format_status_age(age)),
+    );
+    format!("{} — {} ({status})", entry.branch, entry.project_name)
 }
 
 /// Opaque handle kept alive for the process's lifetime. `ksni` serves
@@ -732,9 +745,47 @@ mod tests {
             branch: "feature".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::NeedsInput,
+            status_since: None,
         };
 
         assert_eq!(roster_menu_label(&entry), "feature — Tiller (needs input)");
+    }
+
+    #[test]
+    fn format_status_age_uses_seconds_minutes_and_hours_at_boundaries() {
+        assert_eq!(
+            format_status_age(std::time::Duration::from_secs(59)),
+            "59s"
+        );
+        assert_eq!(
+            format_status_age(std::time::Duration::from_secs(60)),
+            "1m"
+        );
+        assert_eq!(
+            format_status_age(std::time::Duration::from_secs(59 * 60)),
+            "59m"
+        );
+        assert_eq!(
+            format_status_age(std::time::Duration::from_secs(60 * 60)),
+            "1h"
+        );
+        assert_eq!(format_status_age(std::time::Duration::ZERO), "1s");
+    }
+
+    #[test]
+    fn roster_menu_label_includes_status_age_when_present() {
+        let entry = TrayRosterEntry {
+            path: PathBuf::from("/worktrees/feature"),
+            branch: "feature/login".into(),
+            project_name: "Tiller".into(),
+            status: AgentStatus::NeedsInput,
+            status_since: Some(std::time::Duration::from_secs(4 * 60)),
+        };
+
+        assert_eq!(
+            roster_menu_label(&entry),
+            "feature/login — Tiller (needs input · 4m)"
+        );
     }
 
     #[test]
@@ -751,12 +802,14 @@ mod tests {
             branch: "normal".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::Running,
+            status_since: None,
         };
         let waiting = TrayRosterEntry {
             path: PathBuf::from("/worktrees/waiting"),
             branch: "waiting".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::NeedsInput,
+            status_since: None,
         };
 
         assert_eq!(
@@ -782,12 +835,14 @@ mod tests {
                 branch: "running".into(),
                 project_name: "Tiller".into(),
                 status: AgentStatus::Running,
+                status_since: None,
             },
             TrayRosterEntry {
                 path: PathBuf::from("/worktrees/done"),
                 branch: "done".into(),
                 project_name: "Tiller".into(),
                 status: AgentStatus::Done,
+                status_since: None,
             },
         ];
 
