@@ -2412,13 +2412,47 @@ impl Chat {
     /// `CurrentModeUpdate`/`set_mode` confirmation.
     fn select_mode(&mut self, mode: AgentMode, cx: &mut Context<Self>) {
         if let Some(client) = &self.client {
-            let _ = client.set_mode(mode.id.clone());
+            // #136: a mode can reach us by either of two wires, and they are
+            // not interchangeable. ACP's own session-modes API answers
+            // `session/set_mode`; a mode advertised as a `configOptions`
+            // select (OpenCode's route, tagged `category: "mode"`) answers
+            // `session/set_config_option` and ignores the former — picking
+            // the wrong one leaves the picker looking live while changing
+            // nothing, which is worse than the bug this fixed.
+            match self
+                .mode_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.config_option_id.clone())
+            {
+                Some(option_id) => {
+                    let _ = client.set_config_option(option_id, mode.id.clone());
+                }
+                None => {
+                    let _ = client.set_mode(mode.id.clone());
+                }
+            }
         }
         if let Some(catalog) = &mut self.mode_catalog {
             catalog.current_id = mode.id;
         }
         self.mode_picker_open = false;
         cx.notify();
+    }
+
+    /// #136: whether the mode pill is a control the user can act on. Gated
+    /// on the catalog alone, never on `has_completed_turn`: the mode arrives
+    /// with `session/new`, before a token is exchanged, and "will this edit
+    /// my repo without asking me" is the first question a fresh chat has to
+    /// answer — not one it earns by replying once.
+    fn mode_selectable(&self) -> bool {
+        self.mode_catalog.is_some()
+    }
+
+    /// #136's twin for the model selector: offered as soon as the agent has
+    /// named models, which `Chat::launch` reads off `AcpClient::model_catalog`
+    /// before consuming a single event.
+    fn model_control_visible(&self) -> bool {
+        !self.available_models.is_empty()
     }
 
     // --- Slash-command popup (F-CHAT-09) ---
@@ -5898,7 +5932,10 @@ impl Chat {
             (rgb(0xf5a623), "connecting".to_string())
         } else if self.streaming {
             (rgb(0xf5a623), "working".to_string())
-        } else if self.has_completed_turn {
+        } else if self.mode_catalog.is_some() {
+            // #136: a known mode names itself from the first frame. This
+            // used to wait on `has_completed_turn`, so a fresh chat read
+            // "idle" while the agent had already told us it was in "build".
             (
                 rgb(0x53c653),
                 live_mode_name.unwrap_or_else(|| "Ask".into()),
@@ -5908,7 +5945,7 @@ impl Chat {
         } else {
             (rgb(0x8a8d99), "offline".to_string())
         };
-        let mode_selectable = self.has_completed_turn && self.mode_catalog.is_some();
+        let mode_selectable = self.mode_selectable();
         let status_pill = div()
             .flex()
             .flex_none()
@@ -5937,7 +5974,7 @@ impl Chat {
             })
             .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
             .child(div().text_color(colors.title).child(label))
-            .when(self.has_completed_turn, |this| {
+            .when(mode_selectable, |this| {
                 this.child(div().text_color(colors.meta).child("⌄"))
             });
 
@@ -5969,7 +6006,7 @@ impl Chat {
         // once a turn has completed and the agent reported models. Without
         // models the pill degrades to a plain agent badge (F-CHAT-36): no
         // label, no chevron, no picker.
-        let model_control = if self.has_completed_turn && !self.available_models.is_empty() {
+        let model_control = if self.model_control_visible() {
             let effort_for_chip = effort_label.clone();
             let model_selection_id = self
                 .selected_model
@@ -11488,6 +11525,7 @@ mod tests {
                         description: None,
                     },
                 ],
+                config_option_id: None,
             });
             chat
         });
@@ -13521,5 +13559,66 @@ mod tests {
             );
             assert!(!chat.can_send(), "the composer stays disabled");
         });
+    }
+
+    #[gpui::test]
+    fn mode_selectable_is_true_with_catalog_before_first_turn(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        chat.update(cx, |chat, _| {
+            chat.has_completed_turn = false;
+            chat.mode_catalog = Some(ModeCatalog {
+                current_id: "build".into(),
+                options: vec![
+                    AgentMode {
+                        id: "build".into(),
+                        name: "Build".into(),
+                        description: None,
+                    },
+                    AgentMode {
+                        id: "plan".into(),
+                        name: "Plan".into(),
+                        description: None,
+                    },
+                ],
+                config_option_id: Some("mode".into()),
+            });
+        });
+        assert!(
+            chat.read_with(cx, |chat, _| chat.mode_selectable()),
+            "mode pill should be selectable on a fresh chat when a mode catalog exists"
+        );
+        chat.update(cx, |chat, _| {
+            chat.mode_catalog = None;
+        });
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.mode_selectable()),
+            "mode pill should not be selectable without a catalog"
+        );
+    }
+
+    #[gpui::test]
+    fn model_control_visible_with_models_before_first_turn(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        chat.update(cx, |chat, _| {
+            chat.has_completed_turn = false;
+            chat.available_models = vec![ModelOption {
+                id: "opencode/big-pickle".into(),
+                name: "Big Pickle".into(),
+                description: None,
+            }];
+        });
+        assert!(
+            chat.read_with(cx, |chat, _| chat.model_control_visible()),
+            "model control should be visible on a fresh chat with models"
+        );
+        chat.update(cx, |chat, _| {
+            chat.available_models.clear();
+        });
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.model_control_visible()),
+            "model control should be hidden when no models"
+        );
     }
 }
