@@ -31,6 +31,7 @@ use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatSessionSummary, ChatTranscript, ChatTurn,
 };
+use tiller_project::display_path;
 use tiller_theme::Theme;
 
 use crate::caret;
@@ -7566,7 +7567,7 @@ impl Render for Chat {
                             .mt(px(8.0))
                             .text_size(theme.typography.caption2)
                             .text_color(theme.colors.meta)
-                            .child(self.agent_cwd.display().to_string()),
+                            .child(working_directory_label(&self.agent_cwd)),
                     ),
             )
             .child({
@@ -7638,6 +7639,10 @@ fn turn_end_label(reason: &str) -> &'static str {
         "MaxTurnRequests" => "stopped at the turn-request limit",
         _ => "ended",
     }
+}
+
+fn working_directory_label(path: &Path) -> String {
+    display_path(path)
 }
 
 fn default_agent_cwd() -> PathBuf {
@@ -10361,6 +10366,14 @@ mod tests {
             cost: None,
             ..Default::default()
         });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn chat_working_directory_line_hides_the_verbatim_prefix() {
+        let line = working_directory_label(Path::new(r"\\?\D:\x\y"));
+        assert!(!line.contains(r"\\?\"), "chat chrome leaked {line}");
+        assert_eq!(line, r"D:\x\y");
     }
 
     #[test]
