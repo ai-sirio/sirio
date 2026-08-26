@@ -31,7 +31,7 @@ use tiller_git::{
 use tiller_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
     OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
-    display_path, is_git_repository, numeric_tab_selection,
+    display_path, is_git_repository, numeric_tab_selection, read_head_label,
 };
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -6166,6 +6166,13 @@ impl TillerWorkspace {
                 sidebar.set_worktree_tabs(old_sidebar_id, Vec::new(), cx);
             });
         }
+        // #114: the selection itself is a plausible moment the branch changed
+        // under Tiller (an agent just committed to a new one), so the labels
+        // are reread here, before `sync_activity`/`set_selected_worktree`
+        // re-apply activity facts and the highlight on top of any rebuilt
+        // rows. Running this after that sequence would rebuild the row tree
+        // and drop the highlight the selection just applied.
+        self.refresh_worktree_branches(cx);
         self.sync_activity(cx);
         self.sidebar.update(cx, |sidebar, cx| {
             // The host has updated its current path, control snapshot, status
@@ -6176,6 +6183,56 @@ impl TillerWorkspace {
         self.schedule_save(cx);
         cx.notify();
         Ok(())
+    }
+
+    /// Re-reads every catalog worktree's branch label from its checkout's
+    /// `HEAD` file (#114). Tiller reads a branch once at discovery and an
+    /// agent inside a terminal switches branches constantly, so the label a
+    /// row showed could stay wrong indefinitely; this corrects the stored
+    /// value toward what the checkout actually says now.
+    ///
+    /// Deliberately NOT [`current_branch`] (`tiller_project`): that spawns
+    /// one git process per call, which this app — one sidebar per project,
+    /// agents per worktree, Raspberry-Pi-5 class hardware in mind — cannot
+    /// afford per row. Each call here is instead at most a handful of
+    /// `HEAD` file reads ([`read_head_label`]), made only at rare
+    /// user-driven moments: re-gaining window focus and selecting a
+    /// worktree. No timer, no watcher, no render-frame polling.
+    ///
+    /// A worktree whose `HEAD` cannot be read keeps the label it has; a
+    /// transient read failure must never blank a row. Returns whether any
+    /// label actually changed — and notifies (so sidebar rows, the status
+    /// bar and the control socket's workspace listings redraw) on exactly
+    /// those frames, never unconditionally: notifying every call would
+    /// deadlock into a permanent redraw loop.
+    ///
+    /// #114 follow-up: neither the sidebar nor the control socket reads the
+    /// catalog live — the sidebar is a pushed row tree rebuilt only by
+    /// `refresh_sidebar`, the socket answers from `ControlState` rebuilt only
+    /// by `sync_control_state`. Updating the catalog alone is therefore
+    /// invisible, so this pushes to both copies inside the `if changed`
+    /// branch.
+    fn refresh_worktree_branches(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        let mut projects = self.project_catalog.projects().to_vec();
+        for project in &mut projects {
+            for worktree in &mut project.worktrees {
+                let Some(label) = read_head_label(&worktree.path) else {
+                    continue;
+                };
+                if worktree.branch != label {
+                    worktree.branch = label;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.project_catalog.replace_projects(projects);
+            self.sync_control_state();
+            self.refresh_sidebar(cx);
+            cx.notify();
+        }
+        changed
     }
 
     fn control_select_worktree(
@@ -12354,7 +12411,18 @@ impl Render for TillerWorkspace {
         // whether to notify (`post_activity_notification`, off Layer B/C/D
         // activity transitions) carry no `Window`. `render` does, every
         // frame, so the value is cached here for those to read.
+        //
+        // #114 rides the same poll for free: on the false→true focus
+        // transition only -- the user came back from doing git work in
+        // another terminal/window and one file read per worktree row
+        // retells each branch label truthfully. Every other frame this is
+        // a field comparison; a call here at any wider cadence would both
+        // burn reads the Pi can't spare and notify-loop forever.
+        let was_window_active = self.window_active;
         self.window_active = window.is_window_active();
+        if !was_window_active && self.window_active {
+            self.refresh_worktree_branches(cx);
+        }
         // F-TERM-05: the "Set Title" modal's field claims focus on the first
         // render after it opens -- `set_terminal_title` has no `Window` to
         // call `focus.focus(window, cx)` with itself (see
@@ -20926,6 +20994,189 @@ mod tests {
                 (other_path.to_string_lossy().into_owned(), false),
             ]
         );
+    }
+
+    /// #114: a catalog row's branch label must follow what its checkout
+    /// actually says — including after a real `git checkout -b` flips
+    /// branches under the running app — and a call over an unchanged HEAD
+    /// must report `false`, i.e. never notify, or the app would redraw
+    /// forever on no-op refreshes.
+    #[gpui::test]
+    async fn refresh_worktree_branches_follows_head_changes_and_stays_quiet_when_stable(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = test_repo("live-branch-label");
+        std::fs::write(repo.join("file.txt"), "one\n").expect("seed fixture file");
+        git_test(&repo, &["add", "--", "file.txt"]);
+        git_test(&repo, &["commit", "-m", "root"]);
+        // A second row whose checkout has no `.git` at all: its stored
+        // label is all Tiller knows about it and must survive every
+        // refresh rather than be blanked by an unreadable HEAD.
+        let no_git_dir = std::env::temp_dir()
+            .join(format!("tiller-live-label-nogit-{}", std::process::id()));
+        std::fs::create_dir_all(&no_git_dir).expect("create non-repo fixture dir");
+
+        let repo_for_constructor = repo.clone();
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "tiller".into(),
+                name: "tiller".into(),
+                root_path: repo_for_constructor.clone(),
+                is_git: true,
+                worktrees: vec![
+                    session::CatalogWorktree {
+                        // Deliberately NOT what HEAD ("main") says: stale
+                        // exactly the way a label discovered before an
+                        // agent switched branches goes stale.
+                        branch: "stale-side-branch".into(),
+                        path: repo_for_constructor.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: "kept-as-is".into(),
+                        path: no_git_dir.clone(),
+                        is_primary: false,
+                    },
+                ],
+            }]);
+            workspace
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "the stale row disagrees with the checkout's real HEAD ('main'); \
+                 the first refresh must correct it"
+            );
+            let rows = &workspace.project_catalog.projects()[0].worktrees;
+            assert_eq!(rows[0].branch, "main");
+            assert_eq!(
+                rows[1].branch, "kept-as-is",
+                "a checkout whose HEAD cannot be read keeps the label it had"
+            );
+            assert!(
+                !workspace.refresh_worktree_branches(cx),
+                "nothing changed since the last refresh -- returning true here \
+                 would notify and redraw forever"
+            );
+        });
+
+        // The exact #114 event: the branch flips outside the app while it
+        // runs. No restart, no rediscovery -- the next refresh reads it.
+        git_test(&repo, &["checkout", "-b", "switched-underneath"]);
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "HEAD changed under the app; the next refresh must notice"
+            );
+            assert_eq!(
+                workspace.project_catalog.projects()[0].worktrees[0].branch,
+                "switched-underneath"
+            );
+            assert!(
+                !workspace.refresh_worktree_branches(cx),
+                "the now-current label must stop the notifies again"
+            );
+        });
+    }
+
+    /// #114 follow-up: the refreshed label was only written to
+    /// `project_catalog`, so the rows the user sees and the socket answers kept
+    /// their stale copy. This asserts the socket-visible copy follows, read back
+    /// through the same `ControlState`/`current_workspace()` path `workspace.list`
+    /// and `workspace.current` use. Before the fix this fails with
+    /// `left: "main"` / `right: "switched-underneath"` (or with the stale
+    /// initial label) because nothing republished the catalog to the control
+    /// state.
+    #[gpui::test]
+    async fn refresh_worktree_branches_publishes_to_control_state(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let repo = test_repo("live-branch-label-control-state");
+        std::fs::write(repo.join("file.txt"), "one\n").expect("seed fixture file");
+        git_test(&repo, &["add", "--", "file.txt"]);
+        git_test(&repo, &["commit", "-m", "root"]);
+
+        let repo_for_constructor = repo.clone();
+        let repo_for_state = repo.clone();
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            workspace.working_directory = repo_for_constructor.clone();
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "tiller".into(),
+                name: "tiller".into(),
+                root_path: repo_for_constructor.clone(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "stale-side-branch".into(),
+                    path: repo_for_constructor.clone(),
+                    is_primary: true,
+                }],
+            }]);
+            // Keep ControlState in lock-step with the stale catalog so the
+            // `current_workspace().branch` we read afterwards is not a stale
+            // `palette_test_workspace` leftover. `refresh_worktree_branches`
+            // must itself republish to both surfaces.
+            workspace.sync_control_state();
+            workspace
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "stale label must be corrected on first refresh"
+            );
+            let catalog_branch = workspace.project_catalog.projects()[0].worktrees[0].branch.clone();
+            assert_eq!(catalog_branch, "main");
+            // Read back through the socket-visible copy, not the catalog.
+            // `current_workspace()` can be None when `working_directory` has not
+            // yet been canonicalised to match the worktree path inside the
+            // test's throwaway temp dir (Windows `canonicalize` subtleties), so
+            // read the workspaces row directly — it is the same `ControlState`
+            // `workspace.list`/`workspace.current` answer from.
+            let control_branch = workspace
+                .control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workspaces
+                .first()
+                .expect("control state has a workspace row")
+                .branch
+                .clone();
+            assert_eq!(
+                control_branch, "main",
+                "ControlState must follow the catalog on first refresh — \
+                 before the fix it kept the stale label"
+            );
+        });
+
+        git_test(&repo_for_state, &["checkout", "-b", "switched-underneath"]);
+        workspace.update(cx, |workspace, cx| {
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "HEAD changed under the app; the next refresh must notice"
+            );
+            let catalog_branch = workspace.project_catalog.projects()[0].worktrees[0].branch.clone();
+            assert_eq!(catalog_branch, "switched-underneath");
+            let control_branch = workspace
+                .control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .workspaces
+                .first()
+                .expect("control state still has a workspace row")
+                .branch
+                .clone();
+            assert_eq!(
+                control_branch, "switched-underneath",
+                "ControlState must follow the catalog after a branch switch — \
+                 before the fix workspace.list/current kept the old branch"
+            );
+        });
+
+        // Sidebar rows cannot be asserted without a drawn test; those fail on
+        // this machine, so the ControlState assertion above stands as the guard.
     }
 
     #[test]
