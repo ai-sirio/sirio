@@ -1458,7 +1458,7 @@ fn terminate_descendant_process_groups(shell_pid: u32) {
 /// just in API: attach the child to a Job Object created with
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the job handle kills the
 /// whole descendant tree atomically — no enumerate-then-kill race at all.
-/// `alacritty_terminal`'s `tty/windows/` (ConPTY) backend is the natural
+/// `portable-pty`'s `tty/windows/` (ConPTY) backend is the natural
 /// place to own that job handle, since it already owns the child's lifetime;
 /// duplicating it here would fight that ownership rather than complement it.
 /// This is therefore a real no-op, not a partial implementation: the PTY's

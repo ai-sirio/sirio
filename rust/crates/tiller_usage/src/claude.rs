@@ -334,7 +334,7 @@ impl ClaudeUsageFetcher {
     ///
     /// Unix-only: drives a real PTY (`posix_openpt`/`ptsname`/`TIOCSCTTY`) under a login
     /// shell, exactly like the Swift app's `PtyProcess`. Windows has no POSIX PTY; the
-    /// counterpart is ConPTY (`CreatePseudoConsole`), which `alacritty_terminal`'s
+    /// counterpart is ConPTY (`CreatePseudoConsole`), which `portable-pty`'s
     /// `tty/windows/` already wraps for the terminal pane — reuse that rather than
     /// hand-rolling a second ConPTY client here. See the `#[cfg(not(unix))]` stub below.
     #[cfg(unix)]

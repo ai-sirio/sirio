@@ -27,7 +27,7 @@
 //! of design decision this wave was told not to make speculatively ("seam
 //! it, do not build it"). The honest Windows counterpart is not a handful of
 //! Win32 substitutions but a second backend built on ConPTY
-//! (`CreatePseudoConsole`) — `alacritty_terminal`'s already-vendored
+//! (`CreatePseudoConsole`) — `portable-pty`'s already-vendored
 //! `tty/windows/` is the natural implementation to reuse (it already owns a
 //! child's lifetime end-to-end) rather than a hand-rolled
 //! `CreateNamedPipeW`/`ConnectNamedPipe` + `CreatePseudoConsole` client
@@ -94,7 +94,7 @@ pub enum PaneError {
     TimedOut(String),
     /// This platform has no control-owned PTY backend implemented yet — see
     /// the module doc comment for the counterpart (ConPTY via
-    /// `alacritty_terminal`'s `tty/windows/`).
+    /// `portable-pty`'s `tty/windows/`).
     Unsupported(String),
 }
 
@@ -663,7 +663,7 @@ fn spawn_process(
 ) -> Result<Arc<PaneProcess>, PaneError> {
     Err(PaneError::Unsupported(
         "control-owned panes have no PTY backend on this platform yet \
-         (Windows counterpart: ConPTY via alacritty_terminal's tty/windows/)"
+         (Windows counterpart: ConPTY via portable-pty, already used by tiller_terminal on Windows)"
             .to_string(),
     ))
 }
@@ -967,4 +967,19 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     output
+}
+
+#[cfg(all(test, not(unix)))]
+mod tests {
+    use super::spawn_process;
+
+    #[test]
+    fn unsupported_pane_error_names_no_deleted_pty_backend() {
+        let error = match spawn_process("pane", std::path::Path::new("."), None) {
+            Ok(_) => panic!("control-owned panes are unsupported on this platform"),
+            Err(error) => error,
+        };
+
+        assert!(!error.to_string().to_lowercase().contains("alacritty"));
+    }
 }
