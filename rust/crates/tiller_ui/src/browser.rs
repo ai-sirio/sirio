@@ -1967,7 +1967,23 @@ impl Element for AddressTextElement {
 /// *live* `prepaint` bounds were already the post-divide value, not the
 /// pre-divide design size. Multiplying back by `window.scale_factor()`
 /// here recovers the true physical target before it ever reaches wry.
-fn native_webview_rect(bounds: Bounds<Pixels>, scale_factor: f64) -> Rect {
+///
+/// #143: that reasoning is entirely X11-shaped, and the function used to
+/// apply it everywhere under a neutral name. macOS passes the value to
+/// `setFrame`, whose frames are logical points, and Windows converts logical
+/// to physical itself against a live `GetDpiForWindow` — so both want GPUI's
+/// logical bounds untouched, and multiplying by the scale factor misplaced
+/// the page by exactly that factor the moment the window met a display whose
+/// scale was not 1. The conversion is now split in two, each **named for the
+/// coordinate space it speaks**, because a neutral name holding a platform
+/// rule explained only in a comment is what let this ship.
+///
+/// Both are compiled on every platform so both stay under test everywhere;
+/// only the dispatcher below is `cfg`-gated.
+/// Compiled on every platform so it stays under test everywhere, even where
+/// only Linux calls it (#143).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn x11_physical_webview_rect(bounds: Bounds<Pixels>, scale_factor: f64) -> Rect {
     let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
         scale_factor
     } else {
@@ -1987,12 +2003,47 @@ fn native_webview_rect(bounds: Bounds<Pixels>, scale_factor: f64) -> Rect {
     }
 }
 
+/// GPUI's layout bounds handed through unchanged, for the platforms whose
+/// `set_bounds` already speaks logical units: macOS (`setFrame`, logical
+/// points) and Windows (wry converts against `GetDpiForWindow` itself).
+/// Identity at every scale factor — that is the whole contract (#143).
+fn logical_webview_rect(bounds: Bounds<Pixels>) -> Rect {
+    Rect {
+        position: LogicalPosition::new(
+            f64::from(bounds.origin.x),
+            f64::from(bounds.origin.y),
+        )
+        .into(),
+        size: LogicalSize::new(
+            f64::from(bounds.size.width).max(1.0),
+            f64::from(bounds.size.height).max(1.0),
+        )
+        .into(),
+    }
+}
+
+/// Picks the conversion this platform's `set_bounds` actually wants.
+fn native_webview_rect(bounds: Bounds<Pixels>, scale_factor: f64) -> Rect {
+    #[cfg(target_os = "linux")]
+    {
+        x11_physical_webview_rect(bounds, scale_factor)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = scale_factor;
+        logical_webview_rect(bounds)
+    }
+}
+
 /// Reads the raw numeric width/height out of a `wry::Rect`'s `Size`,
 /// regardless of whether it is tagged `Physical` or `Logical`. Passing
 /// `scale_factor: 1.0` makes both variants' `to_logical` a no-op (see
 /// `dpi::PixelUnit::to_logical`), so this returns exactly the numbers
 /// stored, unscaled — including the mislabeled-but-real physical pixels
 /// `WebView::bounds()` reads back from `XGetWindowAttributes`.
+/// Compiled on every platform so it stays under test everywhere, even where
+/// only Linux calls it (#143).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn rect_size(rect: &Rect) -> (f64, f64) {
     let size = rect.size.to_logical::<f64>(1.0);
     (size.width, size.height)
@@ -2001,6 +2052,9 @@ fn rect_size(rect: &Rect) -> (f64, f64) {
 /// Scales a `Rect`'s position and size uniformly by `factor`, reusing
 /// [`rect_size`]'s tag-independent readout so this composes with rects
 /// built by [`native_webview_rect`] or read back from `WebView::bounds()`.
+/// Compiled on every platform so it stays under test everywhere, even where
+/// only Linux calls it (#143).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn scale_rect(rect: &Rect, factor: f64) -> Rect {
     let position = rect.position.to_logical::<f64>(1.0);
     let (width, height) = rect_size(rect);
@@ -2012,6 +2066,9 @@ fn scale_rect(rect: &Rect, factor: f64) -> Rect {
 
 struct NativeWebViewElement {
     webview: SharedWebView,
+    /// #143: read only on Linux, where the GTK/X11 self-calibration
+    /// lives. Kept on every platform so the struct shape does not fork.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     scale_correction: SharedScaleCorrection,
     visible: SharedNativeVisibility,
 }
@@ -2088,18 +2145,28 @@ impl Element for NativeWebViewElement {
             // to wry — see its doc comment for the live evidence.
             let requested = native_webview_rect(bounds, _window.scale_factor() as f64);
 
-            // Residual-error safety net: even with the scale-factor
-            // correction above, keep a one-shot self-calibration pass in
-            // case this box's actual/requested pair still disagrees by a
-            // consistent ratio (e.g. a compositor-level rounding quirk) --
-            // it is a no-op (factor converges to 1.0) whenever the direct
-            // correction above already lands exactly, as it now does.
+            // Residual-error safety net for the GTK/X11 quirk only: a
+            // one-shot self-calibration in case this box's
+            // actual/requested pair still disagrees by a consistent ratio
+            // (e.g. a compositor-level rounding quirk). It is a no-op
+            // (factor converges to 1.0) whenever the direct correction
+            // above already lands exactly.
+            //
+            // #143: Linux-only. Off Linux there is no GTK quirk to absorb,
+            // and keeping it is precisely what let a factor-of-two error
+            // reach a second display unnoticed: it latched 1.0 against the
+            // first screen, then never measured again, so the one thing
+            // that could have caught the misplacement stayed silent.
+            #[cfg(target_os = "linux")]
             let corrected = match self.scale_correction.get() {
                 Some(factor) => scale_rect(&requested, factor),
                 None => requested,
             };
+            #[cfg(not(target_os = "linux"))]
+            let corrected = requested;
             let _ = webview.set_bounds(corrected);
 
+            #[cfg(target_os = "linux")]
             if self.scale_correction.get().is_none()
                 && let Ok(actual) = webview.bounds()
             {
@@ -2339,7 +2406,7 @@ mod tests {
     }
 
     #[test]
-    fn webview_bounds_recover_physical_target_from_live_fractional_scale_factor() {
+    fn x11_webview_bounds_recover_physical_target_from_live_fractional_scale_factor() {
         // F-BRW-01 (corrected diagnosis): live instrumentation on this box
         // showed `prepaint` receiving `bounds` of ~330.857,114.0 /
         // 728.571x678.857 with `window.scale_factor() == 1.1666666` for a
@@ -2354,7 +2421,7 @@ mod tests {
             gpui::size(gpui::px(728.571_5), gpui::px(678.857_2)),
         );
 
-        let rect = native_webview_rect(laid_out_bounds, 1.166_666_6);
+        let rect = x11_physical_webview_rect(laid_out_bounds, 1.166_666_6);
 
         let (width, height) = rect_size(&rect);
         let position = rect.position.to_logical::<f64>(1.0);
@@ -2362,6 +2429,63 @@ mod tests {
         assert!((position.y - 133.0).abs() < 1.0, "y = {}", position.y);
         assert!((width - 850.0).abs() < 1.0, "width = {width}");
         assert!((height - 792.0).abs() < 1.0, "height = {height}");
+    }
+
+    /// #143: the mirror of the test above, and the one that would have
+    /// caught the defect. macOS hands the value to `setFrame`, whose frames
+    /// are logical points, and Windows converts logical to physical itself
+    /// against a live `GetDpiForWindow` — so on both the conversion must be
+    /// **identity at every scale factor**. Applying X11's multiplication
+    /// there misplaced and mis-sized the page by exactly the display's scale
+    /// the moment the window met a screen whose factor was not 1.
+    #[test]
+    fn logical_webview_bounds_are_identity_at_any_scale_factor() {
+        let laid_out_bounds = Bounds::new(
+            gpui::point(gpui::px(300.0), gpui::px(117.0)),
+            gpui::size(gpui::px(880.0), gpui::px(640.0)),
+        );
+
+        let rect = logical_webview_rect(laid_out_bounds);
+        let (width, height) = rect_size(&rect);
+        let position = rect.position.to_logical::<f64>(1.0);
+
+        assert!((position.x - 300.0).abs() < f64::EPSILON, "x = {}", position.x);
+        assert!((position.y - 117.0).abs() < f64::EPSILON, "y = {}", position.y);
+        assert!((width - 880.0).abs() < f64::EPSILON, "width = {width}");
+        assert!((height - 640.0).abs() < f64::EPSILON, "height = {height}");
+
+        // The 2x display from the report: the same bounds must still come
+        // back unchanged, because nothing here consults a scale factor at
+        // all. Before the split this drew the page at double its offset,
+        // overflowing the pane and covering the right-hand panel.
+        let same = logical_webview_rect(laid_out_bounds);
+        let (same_w, same_h) = rect_size(&same);
+        assert!((same_w - width).abs() < f64::EPSILON);
+        assert!((same_h - height).abs() < f64::EPSILON);
+    }
+
+    /// The dispatcher must pick the space this platform's `set_bounds`
+    /// speaks: physical on Linux, logical everywhere else (#143).
+    #[test]
+    fn native_webview_rect_speaks_this_platforms_coordinate_space() {
+        let laid_out_bounds = Bounds::new(
+            gpui::point(gpui::px(300.0), gpui::px(117.0)),
+            gpui::size(gpui::px(880.0), gpui::px(640.0)),
+        );
+        let dispatched = native_webview_rect(laid_out_bounds, 2.0);
+        let (width, _) = rect_size(&dispatched);
+        let position = dispatched.position.to_logical::<f64>(1.0);
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!((position.x - 600.0).abs() < 1.0, "x = {}", position.x);
+            assert!((width - 1760.0).abs() < 1.0, "width = {width}");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!((position.x - 300.0).abs() < 1.0, "x = {}", position.x);
+            assert!((width - 880.0).abs() < 1.0, "width = {width}");
+        }
     }
 
     #[test]
