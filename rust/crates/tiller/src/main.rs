@@ -7500,6 +7500,12 @@ impl TillerWorkspace {
         // Chat History menu has real sessions to list.
         let database_path = session::database_path();
         let worktree_id = session::persisted_worktree_id(&self.working_directory);
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         let chat = match adapter {
             Some(adapter) => {
                 let source = self.launch_source_for(adapter.id());
@@ -7546,6 +7552,12 @@ impl TillerWorkspace {
                 })
             }
         };
+        if let Some(agent_name) = agent_name {
+            chat.update(cx, |chat, cx| {
+                chat.set_agent_name(agent_name);
+                cx.notify();
+            });
+        }
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         // A chat pane is an agent pane: register its identity the same way
@@ -7617,6 +7629,12 @@ impl TillerWorkspace {
                     )),
                 ),
             };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         let is_unavailable = unavailable.is_some();
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
@@ -7636,6 +7654,12 @@ impl TillerWorkspace {
                 chat
             }
         });
+        if let Some(agent_name) = agent_name {
+            chat.update(cx, |chat, cx| {
+                chat.set_agent_name(agent_name);
+                cx.notify();
+            });
+        }
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         register_restored_agent(
@@ -12924,6 +12948,12 @@ fn restore_tabs(
                 None,
             )
         };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         // Registering the identity would tell the activity model this pane
         // hosts a running agent. Nothing was started, so it does not.
         register_restored_agent(
@@ -12936,24 +12966,30 @@ fn restore_tabs(
             },
         );
         let content = match tab.kind.as_str() {
-            "chat" => TabContent::Chat(cx.new(|cx| {
-                if let Some(reason) = unavailable {
-                    return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+            "chat" => {
+                let chat = cx.new(|cx| {
+                    if let Some(reason) = unavailable {
+                        return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+                    }
+                    let mut chat = Chat::launch_with_command_and_persistence(
+                        command.expect("a chat with no refusal reason carries its command"),
+                        working_directory.to_path_buf(),
+                        database_path.clone(),
+                        tab.id.clone(),
+                        worktree_id.clone(),
+                        cx,
+                    );
+                    // F-CORE-WSP-08: an unsent draft survives a restart.
+                    if !tab_state.chat_draft.is_empty() {
+                        chat.control_compose(&tab_state.chat_draft, cx);
+                    }
+                    chat
+                });
+                if let Some(agent_name) = agent_name.clone() {
+                    chat.update(cx, |chat, _| chat.set_agent_name(agent_name));
                 }
-                let mut chat = Chat::launch_with_command_and_persistence(
-                    command.expect("a chat with no refusal reason carries its command"),
-                    working_directory.to_path_buf(),
-                    database_path.clone(),
-                    tab.id.clone(),
-                    worktree_id.clone(),
-                    cx,
-                );
-                // F-CORE-WSP-08: an unsent draft survives a restart.
-                if !tab_state.chat_draft.is_empty() {
-                    chat.control_compose(&tab_state.chat_draft, cx);
-                }
-                chat
-            })),
+                TabContent::Chat(chat)
+            },
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
@@ -13120,6 +13156,12 @@ fn restore_tabs_in_workspace(
                 None,
             )
         };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         // Registering the identity would tell the activity model this pane
         // hosts a running agent. Nothing was started, so it does not.
         register_restored_agent(
@@ -13132,24 +13174,30 @@ fn restore_tabs_in_workspace(
             },
         );
         let content = match tab.kind.as_str() {
-            "chat" => TabContent::Chat(cx.new(|cx| {
-                if let Some(reason) = unavailable {
-                    return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+            "chat" => {
+                let chat = cx.new(|cx| {
+                    if let Some(reason) = unavailable {
+                        return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+                    }
+                    let mut chat = Chat::launch_with_command_and_persistence(
+                        command.expect("a chat with no refusal reason carries its command"),
+                        working_directory.to_path_buf(),
+                        database_path.clone(),
+                        tab.id.clone(),
+                        worktree_id.clone(),
+                        cx,
+                    );
+                    // F-CORE-WSP-08: an unsent draft survives a restart.
+                    if !tab_state.chat_draft.is_empty() {
+                        chat.control_compose(&tab_state.chat_draft, cx);
+                    }
+                    chat
+                });
+                if let Some(agent_name) = agent_name.clone() {
+                    chat.update(cx, |chat, _| chat.set_agent_name(agent_name));
                 }
-                let mut chat = Chat::launch_with_command_and_persistence(
-                    command.expect("a chat with no refusal reason carries its command"),
-                    working_directory.to_path_buf(),
-                    database_path.clone(),
-                    tab.id.clone(),
-                    worktree_id.clone(),
-                    cx,
-                );
-                // F-CORE-WSP-08: an unsent draft survives a restart.
-                if !tab_state.chat_draft.is_empty() {
-                    chat.control_compose(&tab_state.chat_draft, cx);
-                }
-                chat
-            })),
+                TabContent::Chat(chat)
+            },
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");

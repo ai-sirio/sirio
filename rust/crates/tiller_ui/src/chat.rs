@@ -917,6 +917,8 @@ pub struct Chat {
     client: Option<AcpClient>,
     /// `None` when there is nothing to launch — see [`Chat::unavailable`].
     agent_command: Option<AgentCommand>,
+    /// Display name shown in the empty composer placeholder when known.
+    agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
     composer: Composer,
@@ -1063,6 +1065,24 @@ impl Chat {
         chat
     }
 
+    /// Sets the agent display name used by the empty composer placeholder.
+    pub fn set_agent_name(&mut self, name: impl Into<String>) {
+        self.agent_name = Some(name.into());
+    }
+
+    fn default_placeholder(&self) -> String {
+        let head = self
+            .agent_name
+            .as_deref()
+            .map_or_else(|| "Message…".to_string(), |name| format!("Message {name}"));
+        let commands = if self.available_commands.is_empty() {
+            ""
+        } else {
+            ", / for commands"
+        };
+        format!("{head} — @ for files{commands}")
+    }
+
     /// Launches an ACP chat whose completed turns are restored and saved in
     /// the durable transcript owned by its shell tab.
     pub fn launch_with_command_and_persistence(
@@ -1141,6 +1161,7 @@ impl Chat {
         Self {
             client: None,
             agent_command: command,
+            agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
             composer: Composer::new(),
@@ -6859,8 +6880,13 @@ impl Chat {
             } else {
                 vec![
                     div()
+                        .id("composer-placeholder")
+                        .debug_selector(|| "composer-placeholder".into())
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(colors.meta)
-                        .child("Message...")
+                        .child(self.default_placeholder())
                         .into_any_element(),
                 ]
             }
@@ -8437,6 +8463,35 @@ mod tests {
         assert!(
             cx.debug_bounds("composer-streaming-border").is_none(),
             "the static border returns the moment streaming ends"
+        );
+    }
+
+    #[gpui::test]
+    async fn narrow_composer_placeholder_stays_inside_composer_card(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.set_agent_name("OpenCode");
+            chat.available_commands.push(AvailableCommandInfo {
+                name: "help".into(),
+                description: "Show help".into(),
+            });
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(595.0), px(600.0)));
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
+        let placeholder = cx
+            .debug_bounds("composer-placeholder")
+            .expect("the default placeholder is drawn");
+        assert!(
+            placeholder.left() >= card.left() && placeholder.right() <= card.right(),
+            "the placeholder must truncate inside the composer card: card={card:?} placeholder={placeholder:?}"
         );
     }
 
@@ -10491,6 +10546,50 @@ mod tests {
             cost: None,
             ..Default::default()
         });
+    }
+
+    #[gpui::test]
+    fn default_placeholder_names_agent_without_commands(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.set_agent_name("OpenCode");
+            chat
+        });
+
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.default_placeholder()),
+            "Message OpenCode — @ for files"
+        );
+    }
+
+    #[gpui::test]
+    fn default_placeholder_names_agent_commands(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.set_agent_name("OpenCode");
+            chat.available_commands.push(AvailableCommandInfo {
+                name: "help".into(),
+                description: "Show help".into(),
+            });
+            chat
+        });
+
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.default_placeholder()),
+            "Message OpenCode — @ for files, / for commands"
+        );
+    }
+
+    #[gpui::test]
+    fn default_placeholder_without_agent_keeps_file_affordance(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+
+        let placeholder = chat.read_with(cx, |chat, _| chat.default_placeholder());
+        assert!(placeholder.starts_with("Message…"));
+        assert!(placeholder.contains("@ for files"));
     }
 
     #[cfg(windows)]
