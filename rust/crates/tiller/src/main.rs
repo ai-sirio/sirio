@@ -13310,7 +13310,7 @@ fn resolve_tillerctl_path(
         }
     };
 
-    install_tillerctl(&source, &destination).map(|()| destination)
+    install_tillerctl(&source, &destination, environment).map(|()| destination)
 }
 
 fn resolve_tillerctl_for_process() -> Result<PathBuf, String> {
@@ -13414,7 +13414,24 @@ fn installed_copy_is_stale(source: &Path, destination: &Path) -> bool {
         )
 }
 
-fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TillerctlInstallKind {
+    Symlink,
+    Copy,
+}
+
+fn tillerctl_install_kind(environment: &BTreeMap<String, String>) -> TillerctlInstallKind {
+    match environment.get("APPIMAGE") {
+        Some(path) if !path.is_empty() => TillerctlInstallKind::Copy,
+        _ => TillerctlInstallKind::Symlink,
+    }
+}
+
+fn install_tillerctl(
+    source: &Path,
+    destination: &Path,
+    _environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
     let parent = destination.parent().ok_or_else(|| {
         format!(
             "tillerctl install path has no parent: {}",
@@ -13426,7 +13443,14 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
 
     let destination_is_executable = is_executable_file(destination);
     #[cfg(unix)]
-    if destination_is_executable {
+    let install_kind = tillerctl_install_kind(_environment);
+    #[cfg(unix)]
+    if destination_is_executable
+        && (matches!(install_kind, TillerctlInstallKind::Symlink)
+            || !std::fs::symlink_metadata(destination)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false))
+    {
         return Ok(());
     }
     #[cfg(not(unix))]
@@ -13458,12 +13482,41 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
     }
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(source, destination).map_err(|error| {
-        format!(
-            "could not install tillerctl at {}: {error}",
-            destination.display()
-        )
-    })?;
+    match install_kind {
+        TillerctlInstallKind::Symlink => {
+            std::os::unix::fs::symlink(source, destination).map_err(|error| {
+                format!(
+                    "could not install tillerctl at {}: {error}",
+                    destination.display()
+                )
+            })
+        }
+        TillerctlInstallKind::Copy => {
+            std::fs::copy(source, destination).map_err(|error| {
+                format!(
+                    "could not install tillerctl at {}: {error}",
+                    destination.display()
+                )
+            })?;
+
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(destination)
+                .map_err(|error| {
+                    format!(
+                        "could not read installed tillerctl at {}: {error}",
+                        destination.display()
+                    )
+                })?
+                .permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            std::fs::set_permissions(destination, permissions).map_err(|error| {
+                format!(
+                    "could not make installed tillerctl at {} executable: {error}",
+                    destination.display()
+                )
+            })
+        }
+    }?;
 
     #[cfg(not(unix))]
     if let Err(error) = std::fs::copy(source, destination) {
@@ -19964,6 +20017,39 @@ mod tests {
 
         assert!(installed_copy_is_stale(&source, &destination));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn absent_appimage_selects_a_tillerctl_symlink() {
+        let environment = BTreeMap::new();
+
+        assert_eq!(
+            tillerctl_install_kind(&environment),
+            TillerctlInstallKind::Symlink
+        );
+    }
+
+    #[test]
+    fn non_empty_appimage_selects_a_tillerctl_copy() {
+        let environment = BTreeMap::from([(
+            String::from("APPIMAGE"),
+            String::from("/tmp/Tiller.AppImage"),
+        )]);
+
+        assert_eq!(
+            tillerctl_install_kind(&environment),
+            TillerctlInstallKind::Copy
+        );
+    }
+
+    #[test]
+    fn empty_appimage_selects_a_tillerctl_symlink() {
+        let environment = BTreeMap::from([(String::from("APPIMAGE"), String::new())]);
+
+        assert_eq!(
+            tillerctl_install_kind(&environment),
+            TillerctlInstallKind::Symlink
+        );
     }
 
     #[test]
