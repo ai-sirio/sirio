@@ -1641,7 +1641,13 @@ impl ControlHandler for AppControlHandler {
                         ("id".to_string(), workspace.id.clone()),
                         ("project".to_string(), workspace.project.clone()),
                         ("branch".to_string(), workspace.branch.clone()),
-                        ("path".to_string(), workspace.path.clone()),
+                        // #113: this reply is built by hand rather than through
+                        // `workspace_rows`, so #106's fix missed it and the two
+                        // commands disagreed about one workspace's path.
+                        (
+                            "path".to_string(),
+                            display_absolute_path(Path::new(&workspace.path)),
+                        ),
                     ],
                 )
             }
@@ -22498,6 +22504,54 @@ mod tests {
             Some(r"D:\x\y"),
             "workspace.list must return a pasteable path without the verbatim prefix"
         );
+    }
+
+    /// #113: `workspace.current` builds its reply by hand instead of going
+    /// through `workspace_rows`, so #106's fix skipped it and the two commands
+    /// disagreed about one workspace's path. The assertion is over the whole
+    /// response rather than the one field, so the next hand-built reply cannot
+    /// reintroduce a verbatim path somewhere else in it.
+    #[cfg(windows)]
+    #[test]
+    fn no_workspace_command_serves_a_verbatim_path() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: vec![ControlWorkspace {
+                    id: "workspace-1".into(),
+                    project: "project".into(),
+                    branch: "main".into(),
+                    path: r"\\?\D:\x\y".into(),
+                    selected: true,
+                    mounted: true,
+                    comment: String::new(),
+                    session: None,
+                }],
+                current: Some(0),
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-workspace-current-path-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::workspace_current());
+        assert!(response.ok, "workspace.current failed: {:?}", response.error);
+        let result = response.result.as_ref().expect("workspace.current result");
+        assert_eq!(
+            result.get("path").map(String::as_str),
+            Some(r"D:\x\y"),
+            "workspace.current must agree with workspace.list about the path"
+        );
+        for (field, value) in result {
+            assert!(
+                !value.contains(r"\\?\"),
+                "workspace.current field {field} still carries the verbatim prefix: {value}"
+            );
+        }
     }
 
     #[test]
