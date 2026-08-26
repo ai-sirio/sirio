@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use tiller_control::protocol::rows;
 use tiller_control::{
-    ControlRequest, ControlResponse, default_socket_path,
+    ControlRequest, ControlResponse, default_socket_path, format_version_json,
+    format_version_lines,
     extract::{session_ref_from_json, session_ref_from_payload_arguments},
     round_trip,
 };
@@ -59,6 +60,7 @@ fn main() {
 
     let result = match subcommand.as_str() {
         "ping" => cmd_ping(socket, &parsed),
+        "version" => cmd_version(socket, &parsed),
         "quit" => cmd_quit(socket, &parsed),
         "capabilities" => cmd_capabilities(socket, &parsed),
         "identify" => cmd_identify(socket, &parsed, &environment),
@@ -102,6 +104,7 @@ fn usage() {
          \n\
          commands:\n\
          \x20 ping                              check that Tiller is running\n\
+         \x20 version [--json]                  report CLI and running Tiller versions\n\
          \x20 quit                              gracefully quit Tiller\n\
          \x20 capabilities [--json]             list available socket methods\n\
          \x20 project list [--json]              list discovered projects and worktrees\n\
@@ -289,6 +292,29 @@ fn cmd_ping(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), String> {
     let response = require_ok(socket, &tiller_control::protocol::request::system_ping());
     let _ = response;
     println!("pong");
+    Ok(())
+}
+
+fn cmd_version(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let app_version = round_trip(
+        &socket,
+        &tiller_control::protocol::request::system_capabilities(),
+        Duration::from_secs(1),
+    )
+    .ok()
+    .and_then(|response| response.result)
+    .and_then(|result| result.get("version").cloned());
+
+    if parsed.flag("json") {
+        println!(
+            "{}",
+            format_version_json(tiller_control::VERSION, app_version.as_deref())
+        );
+    } else {
+        for line in format_version_lines(tiller_control::VERSION, app_version.as_deref()) {
+            println!("{line}");
+        }
+    }
     Ok(())
 }
 
@@ -863,4 +889,24 @@ fn read_bounded_stdin() -> Vec<u8> {
     receiver
         .recv_timeout(Duration::from_secs(5))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_command_succeeds_without_a_running_app() {
+        let parsed = ParsedArgs {
+            values: BTreeMap::new(),
+            flags: std::collections::BTreeSet::new(),
+            positional: Vec::new(),
+        };
+        let socket = std::env::temp_dir().join(format!(
+            "tillerctl-version-no-socket-{}",
+            std::process::id()
+        ));
+
+        assert!(cmd_version(socket, &parsed).is_ok());
+    }
 }
