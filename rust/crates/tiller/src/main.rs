@@ -1444,8 +1444,8 @@ impl AppControlHandler {
             Ok(()) => Self::success(
                 &request.id,
                 [
-                    ("worktree".to_string(), repo.to_string_lossy().into_owned()),
-                    ("path".to_string(), path.to_string_lossy().into_owned()),
+                    ("worktree".to_string(), display_absolute_path(&repo)),
+                    ("path".to_string(), display_absolute_path(path)),
                 ],
             ),
             Err(error) => ControlResponse::failure(&request.id, error.to_string()),
@@ -1464,7 +1464,7 @@ impl AppControlHandler {
         match action(&repo) {
             Ok(()) => Self::success(
                 &request.id,
-                [("worktree".to_string(), repo.to_string_lossy().into_owned())],
+                [("worktree".to_string(), display_absolute_path(&repo))],
             ),
             Err(error) => ControlResponse::failure(&request.id, error.to_string()),
         }
@@ -1560,7 +1560,7 @@ impl ControlHandler for AppControlHandler {
                         ),
                         (
                             "socketPath".to_string(),
-                            self.socket_info.path.to_string_lossy().into_owned(),
+                            display_absolute_path(&self.socket_info.path),
                         ),
                     ],
                 )
@@ -1590,7 +1590,10 @@ impl ControlHandler for AppControlHandler {
                 let mut result = vec![
                     ("project".to_string(), workspace.project),
                     ("branch".to_string(), workspace.branch),
-                    ("path".to_string(), workspace.path),
+                    (
+                        "path".to_string(),
+                        display_absolute_path(Path::new(&workspace.path)),
+                    ),
                     ("workspaceId".to_string(), workspace.id),
                     (
                         "surfaceId".to_string(),
@@ -2273,7 +2276,10 @@ impl ControlHandler for AppControlHandler {
                 }
                 let mut result = vec![
                     ("id".to_string(), workspace.id),
-                    ("path".to_string(), workspace.path),
+                    (
+                        "path".to_string(),
+                        display_absolute_path(Path::new(&workspace.path)),
+                    ),
                     ("comment".to_string(), workspace.comment),
                 ];
                 if let Some(session) = workspace.session {
@@ -2880,7 +2886,7 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
     let mut pairs = vec![
         (
             "workingDirectory".to_string(),
-            snapshot.working_directory.to_string_lossy().into_owned(),
+            display_absolute_path(&snapshot.working_directory),
         ),
         (
             "scrollback".to_string(),
@@ -2934,7 +2940,7 @@ fn changes_report_pairs(
                 .iter()
                 .map(|file| {
                     BTreeMap::from([
-                        ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                        ("path".to_string(), display_absolute_path(&file.path)),
                         ("additions".to_string(), file.additions.to_string()),
                         ("deletions".to_string(), file.deletions.to_string()),
                         ("binary".to_string(), file.is_binary.to_string()),
@@ -2968,7 +2974,7 @@ fn changes_report_pairs(
         ("tabId".to_string(), tab_id.to_string()),
         (
             "worktree".to_string(),
-            report.repo_root.to_string_lossy().into_owned(),
+            display_absolute_path(&report.repo_root),
         ),
         ("loading".to_string(), report.loading.to_string()),
         ("ready".to_string(), (!report.loading).to_string()),
@@ -2987,7 +2993,7 @@ fn changes_report_pairs(
                     .iter()
                     .map(|file| {
                         BTreeMap::from([
-                            ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                            ("path".to_string(), display_absolute_path(&file.path)),
                             ("additions".to_string(), file.additions.to_string()),
                             ("deletions".to_string(), file.deletions.to_string()),
                             ("binary".to_string(), file.is_binary.to_string()),
@@ -3004,7 +3010,7 @@ fn changes_report_pairs(
                     .iter()
                     .map(|file| {
                         BTreeMap::from([
-                            ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                            ("path".to_string(), display_absolute_path(&file.path)),
                             ("additions".to_string(), file.additions.to_string()),
                             ("deletions".to_string(), file.deletions.to_string()),
                             ("binary".to_string(), file.is_binary.to_string()),
@@ -3021,7 +3027,7 @@ fn changes_report_pairs(
                     .iter()
                     .map(|file| {
                         BTreeMap::from([
-                            ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                            ("path".to_string(), display_absolute_path(&file.path)),
                             ("additions".to_string(), file.additions.to_string()),
                             ("deletions".to_string(), file.deletions.to_string()),
                             ("binary".to_string(), file.is_binary.to_string()),
@@ -3061,7 +3067,7 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
                     provider
                         .executable
                         .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
+                        .map(|path| display_absolute_path(path))
                         .unwrap_or_default(),
                 ),
             ])
@@ -3097,7 +3103,10 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
             "controlSocketEnabled".to_string(),
             snapshot.control_socket_enabled.to_string(),
         ),
-        ("socketPath".to_string(), snapshot.socket_path.clone()),
+        (
+            "socketPath".to_string(),
+            display_absolute_path(Path::new(&snapshot.socket_path)),
+        ),
         (
             "resumeAgentSessions".to_string(),
             report.resume_agent_sessions.to_string(),
@@ -6190,7 +6199,10 @@ impl TillerWorkspace {
             ("id".to_string(), workspace.id.clone()),
             ("project".to_string(), workspace.project.clone()),
             ("branch".to_string(), workspace.branch.clone()),
-            ("path".to_string(), workspace.path.clone()),
+            (
+                "path".to_string(),
+                display_absolute_path(Path::new(&workspace.path)),
+            ),
         ])
     }
 
@@ -6223,7 +6235,10 @@ impl TillerWorkspace {
             ("id".to_string(), workspace.id.clone()),
             ("project".to_string(), workspace.project.clone()),
             ("branch".to_string(), workspace.branch.clone()),
-            ("path".to_string(), workspace.path.clone()),
+            (
+                "path".to_string(),
+                display_absolute_path(Path::new(&workspace.path)),
+            ),
         ];
         match jump {
             Some((tab_id, tab_title)) => {
@@ -6315,7 +6330,7 @@ impl TillerWorkspace {
                 format!("{}-wt-{worktree_index}", project_id),
             ),
             ("branch".to_string(), branch),
-            ("path".to_string(), path.to_string_lossy().into_owned()),
+            ("path".to_string(), display_absolute_path(&path)),
         ])
     }
 
@@ -6368,7 +6383,7 @@ impl TillerWorkspace {
         }
         Ok(vec![
             ("closed".to_string(), "true".to_string()),
-            ("path".to_string(), path.to_string_lossy().into_owned()),
+            ("path".to_string(), display_absolute_path(&path)),
         ])
     }
 
@@ -6433,7 +6448,7 @@ impl TillerWorkspace {
             ("restoredCount".to_string(), restored_count.to_string()),
             (
                 "path".to_string(),
-                snapshot.working_directory.to_string_lossy().into_owned(),
+                display_absolute_path(&snapshot.working_directory),
             ),
         ])
     }
@@ -14122,7 +14137,7 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
@@ -22552,6 +22567,330 @@ mod tests {
                 "workspace.current field {field} still carries the verbatim prefix: {value}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    const VERBATIM_PATH: &str = r"\\?\D:\x\y";
+    #[cfg(windows)]
+    const VERBATIM_PREFIX: &str = r"\\?\";
+
+    #[cfg(windows)]
+    fn find_verbatim_path(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(text) => {
+                if text.contains(VERBATIM_PREFIX) {
+                    Some(text.clone())
+                } else {
+                    serde_json::from_str::<serde_json::Value>(text)
+                        .ok()
+                        .and_then(|nested| find_verbatim_path(&nested))
+                }
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(find_verbatim_path),
+            serde_json::Value::Object(values) => values.values().find_map(find_verbatim_path),
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                None
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn response_verbatim_path(response: &ControlResponse) -> Option<String> {
+        serde_json::to_value(response)
+            .ok()
+            .and_then(|value| find_verbatim_path(&value))
+    }
+
+    #[cfg(windows)]
+    fn respond_to_control_action(action: ControlAction) {
+        match action {
+            ControlAction::Quit { reply }
+            | ControlAction::SelectWorktree { reply, .. }
+            | ControlAction::TrayJump { reply, .. }
+            | ControlAction::AddProject { reply, .. }
+            | ControlAction::CreateWorkspace { reply, .. }
+            | ControlAction::CloseWorkspace { reply, .. }
+            | ControlAction::RestoreSession { reply }
+            | ControlAction::OpenChanges { reply, .. }
+            | ControlAction::ReadChanges { reply }
+            | ControlAction::OpenSettings { reply, .. }
+            | ControlAction::SelectSettings { reply, .. }
+            | ControlAction::ReadSettings { reply }
+            | ControlAction::AddAgentAccount { reply, .. }
+            | ControlAction::SelectAgentAccount { reply, .. }
+            | ControlAction::ReadPane { reply, .. }
+            | ControlAction::FocusPane { reply, .. }
+            | ControlAction::SplitPane { reply, .. }
+            | ControlAction::ClosePane { reply }
+            | ControlAction::CycleTab { reply, .. }
+            | ControlAction::SelectTab { reply, .. }
+            | ControlAction::Browser { reply, .. }
+            | ControlAction::Chat { reply, .. } => {
+                let _ = reply.send(Ok(Vec::new()));
+            }
+            ControlAction::Notify { .. }
+            | ControlAction::UpdateEvent(_)
+            | ControlAction::RefreshSidebar => {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn handle_with_control_action_drain(
+        handler: &AppControlHandler,
+        control_actions: Arc<Mutex<Vec<ControlAction>>>,
+        request: ControlRequest,
+    ) -> ControlResponse {
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let worker = std::thread::spawn(move || {
+            while !worker_finished.load(Ordering::SeqCst) {
+                if let Some(action) = control_actions
+                    .lock()
+                    .expect("control action queue")
+                    .pop()
+                {
+                    respond_to_control_action(action);
+                    return;
+                }
+                std::thread::yield_now();
+            }
+        });
+        let response = handler.handle(&request);
+        finished.store(true, Ordering::SeqCst);
+        worker.join().expect("control action drain did not panic");
+        response
+    }
+
+    #[cfg(windows)]
+    fn request_with_params(method: &str, params: &[(&str, &str)]) -> ControlRequest {
+        ControlRequest {
+            id: method.to_string(),
+            method: method.to_string(),
+            params: params
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn request_for_control_method(method: &str) -> ControlRequest {
+        use tiller_control::protocol::request;
+
+        let mut request = match method {
+            "system.ping" => request::system_ping(),
+            "system.capabilities" => request::system_capabilities(),
+            "system.identify" => request::system_identify(None, None),
+            "system.quit" => request::system_quit(),
+            "project.list" => request::project_list(),
+            "project.add" => request::project_add(VERBATIM_PATH),
+            "workspace.list" => request::workspace_list(),
+            "workspace.create" => request::workspace_create("project", Some("branch")),
+            "workspace.select" => request::workspace_select("workspace-1"),
+            "tray.jump" => request_with_params(method, &[("workspace", "workspace-1")]),
+            "workspace.current" => request::workspace_current(),
+            "workspace.close" => request::workspace_close("workspace-1"),
+            "worktree.set" => request::worktree_set("workspace-1", Some("comment"), None),
+            "notify" => request::notify("pane-1", "done", None),
+            "update.event" => request_with_params(method, &[("event", "reset")]),
+            "panel.create" => request_with_params(method, &[]),
+            "panel.split" => request_with_params(method, &[]),
+            "panel.list" => request::panel_list(None),
+            "panel.write" => request_with_params(method, &[]),
+            "panel.key" => request_with_params(method, &[]),
+            "panel.read" => request_with_params(method, &[]),
+            "panel.state" => request_with_params(method, &[]),
+            "panel.scrollback" => request_with_params(method, &[]),
+            "panel.wait" => request_with_params(method, &[]),
+            "panel.focus" => request_with_params(method, &[]),
+            "panel.close" => request_with_params(method, &[]),
+            "pane.split" => request_with_params(method, &[]),
+            "pane.focus" => request_with_params(method, &[]),
+            "pane.close" => request::pane_close(),
+            "tab.cycle" => request_with_params(method, &[]),
+            "tab.select" => request_with_params(method, &[]),
+            "notification.create" => {
+                request::notification_create("title", Some("subtitle"), "body")
+            }
+            "notification.list" => request::notification_list(),
+            "notification.clear" => request::notification_clear(),
+            "session.ref" => request::session_ref("pane-1", "agent-1"),
+            "session.restore" => request::session_restore(),
+            "session.transcript" => request_with_params(method, &[]),
+            "surface.changes.open" => request::changes_open(Some("workspace-1")),
+            "surface.changes.read" => request::changes_read(),
+            "surface.changes.stage" => {
+                request::changes_stage(VERBATIM_PATH, Some("workspace-1"))
+            }
+            "surface.changes.unstage" => {
+                request::changes_unstage(VERBATIM_PATH, Some("workspace-1"))
+            }
+            "surface.changes.discard" => {
+                request::changes_discard(VERBATIM_PATH, Some("workspace-1"))
+            }
+            "surface.changes.stage_all" => request::changes_stage_all(Some("workspace-1")),
+            "surface.changes.discard_all" => request::changes_discard_all(Some("workspace-1")),
+            "git.branches" => request_with_params(method, &[]),
+            "surface.settings.open" => request::settings_open(None),
+            "surface.settings.select" => request_with_params(method, &[]),
+            "surface.settings.read" => request::settings_read(),
+            "settings.account.add" => request_with_params(
+                method,
+                &[("provider", "claude"), ("label", "test")],
+            ),
+            "settings.account.select" => request_with_params(method, &[]),
+            "surface.chat.open" => request::chat_open(Some("workspace-1")),
+            "surface.chat.send" => request_with_params(method, &[]),
+            "surface.chat.compose" => request_with_params(method, &[]),
+            "surface.chat.permission" => request_with_params(method, &[]),
+            "surface.chat.stop" => request_with_params(method, &[]),
+            "surface.chat.read" => request_with_params(method, &[]),
+            "browser.open"
+            | "browser.navigate"
+            | "browser.act"
+            | "browser.get"
+            | "browser.wait"
+            | "browser.eval"
+            | "browser.console"
+            | "browser.snapshot"
+            | "browser.permission" => request_with_params(method, &[]),
+            _ => panic!(
+                "system.capabilities advertised {method}, but the enforcement test has no request"
+            ),
+        };
+        request.id = format!("path-scan-{method}");
+        request
+    }
+
+    #[cfg(windows)]
+    fn verbatim_changes_response(id: &str) -> ControlResponse {
+        let file = || tiller_ui::changes::ChangesFileReport {
+            path: PathBuf::from(VERBATIM_PATH),
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+        };
+        let report = ChangesReport {
+            repo_root: PathBuf::from(VERBATIM_PATH),
+            sections: vec![
+                tiller_ui::changes::ChangesSectionReport {
+                    name: "Staged",
+                    count: 1,
+                    files: vec![file()],
+                },
+                tiller_ui::changes::ChangesSectionReport {
+                    name: "Changed",
+                    count: 1,
+                    files: vec![file()],
+                },
+                tiller_ui::changes::ChangesSectionReport {
+                    name: "Untracked",
+                    count: 1,
+                    files: vec![file()],
+                },
+            ],
+            loading: false,
+            error: None,
+        };
+        ControlResponse::success(
+            id,
+            changes_report_pairs(0, &report)
+                .expect("complete changes report")
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn every_control_response_hides_verbatim_paths() {
+        let raw_path = PathBuf::from(VERBATIM_PATH);
+        let catalog_project = session::CatalogProject {
+            id: "project".into(),
+            name: "project".into(),
+            root_path: raw_path.clone(),
+            is_git: true,
+            worktrees: vec![session::CatalogWorktree {
+                branch: "main".into(),
+                path: raw_path.clone(),
+                is_primary: true,
+            }],
+        };
+        let handler_actions = Arc::new(Mutex::new(Vec::new()));
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: vec![catalog_project],
+                project_settings: BTreeMap::new(),
+                workspaces: vec![ControlWorkspace {
+                    id: "workspace-1".into(),
+                    project: "project".into(),
+                    branch: "main".into(),
+                    path: VERBATIM_PATH.into(),
+                    selected: true,
+                    mounted: true,
+                    comment: String::new(),
+                    session: None,
+                }],
+                current: Some(0),
+            })),
+            handler_actions.clone(),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(raw_path.join("control.sock")),
+        );
+
+        let capabilities = handler.handle(&tiller_control::protocol::request::system_capabilities());
+        let methods = capabilities
+            .result
+            .as_ref()
+            .and_then(|result| result.get("methods"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("system.capabilities method rows");
+        assert!(!methods.is_empty(), "capabilities must advertise methods");
+
+        let mut leaks = Vec::new();
+        for row in methods {
+            let method = row
+                .get("method")
+                .cloned()
+                .expect("every capability row must name a method");
+            let request = request_for_control_method(&method);
+            let response =
+                handle_with_control_action_drain(&handler, handler_actions.clone(), request.clone());
+            if let Some(value) = response_verbatim_path(&response) {
+                leaks.push(format!("{method}: {value}"));
+            }
+
+            // These methods' final responses are produced by GPUI-thread
+            // actions, which a handler-only unit test cannot run. Exercise
+            // their shared response builders directly as well, without
+            // silently omitting the advertised methods from the dispatch pass.
+            let response = match method.as_str() {
+                "surface.changes.stage"
+                | "surface.changes.unstage"
+                | "surface.changes.discard" => {
+                    handler.run_changes_path_action(&request, |_, _| Ok(()))
+                }
+                "surface.changes.stage_all" | "surface.changes.discard_all" => {
+                    handler.run_changes_all_action(&request, |_| Ok(()))
+                }
+                "surface.changes.open" | "surface.changes.read" => {
+                    verbatim_changes_response(&request.id)
+                }
+                _ => continue,
+            };
+            if let Some(value) = response_verbatim_path(&response) {
+                leaks.push(format!("{method}: {value}"));
+            }
+        }
+
+        assert!(
+            leaks.is_empty(),
+            "control responses exposed Windows verbatim paths:\n{}",
+            leaks.join("\n")
+        );
     }
 
     #[test]
