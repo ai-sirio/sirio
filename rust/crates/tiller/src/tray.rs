@@ -25,6 +25,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -67,9 +68,33 @@ pub enum TrayRequest {
 pub type SharedRoster = Arc<Mutex<Vec<TrayRosterEntry>>>;
 pub type TrayRequestQueue = Arc<Mutex<Vec<TrayRequest>>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayIconKind {
+    Normal,
+    Attention,
+}
+
+fn tray_icon_kind(roster: &[TrayRosterEntry]) -> TrayIconKind {
+    if roster
+        .iter()
+        .any(|entry| entry.status == AgentStatus::NeedsInput)
+    {
+        TrayIconKind::Attention
+    } else {
+        TrayIconKind::Normal
+    }
+}
+
 const NO_ACTIVE_AGENTS_LABEL: &str = "No active agents";
 const OPEN_TILLER_LABEL: &str = "Open Tiller";
 const QUIT_TILLER_LABEL: &str = "Quit Tiller";
+#[cfg(target_os = "linux")]
+const NORMAL_ICON_NAME: &str = "utilities-terminal";
+#[cfg(target_os = "linux")]
+// `dialog-question` is the freedesktop mark for an unanswered question,
+// matching `NeedsInput` instead of implying that something is broken. If a
+// theme lacks it, the host degrades to no overlay rather than a wrong icon.
+const ATTENTION_ICON_NAME: &str = "dialog-question";
 
 fn roster_menu_label(entry: &TrayRosterEntry) -> String {
     format!(
@@ -104,14 +129,41 @@ impl TrayHandle {
 pub struct TrayHandle {
     hwnd: isize,
     thread: Option<std::thread::JoinHandle<()>>,
+    roster: SharedRoster,
+    icon: isize,
+    attention_icon: isize,
+    shown_kind: Mutex<TrayIconKind>,
 }
 
 #[cfg(target_os = "windows")]
 impl TrayHandle {
-    /// Windows constructs this menu fresh at every click, unlike ksni, which
-    /// serves `GetLayout` from an internally cached tree and needs poking, so
-    /// a [`SharedRoster`] write is visible with no further action.
-    pub fn nudge(&self) {}
+    /// Windows caches the notification-area icon, so compare the shared roster
+    /// with the currently shown kind and ask the shell to repaint only when
+    /// the two differ.
+    pub fn nudge(&self) {
+        let Ok(roster) = self.roster.lock() else {
+            return;
+        };
+        let kind = tray_icon_kind(&roster);
+        drop(roster);
+
+        let Ok(mut shown_kind) = self.shown_kind.lock() else {
+            return;
+        };
+        if *shown_kind == kind {
+            return;
+        }
+
+        let icon = match kind {
+            TrayIconKind::Normal => self.icon,
+            TrayIconKind::Attention => self.attention_icon,
+        } as windows_sys::Win32::UI::WindowsAndMessaging::HICON;
+        let mut data = notify_icon_data(self.hwnd as HWND, icon);
+        data.uFlags = NIF_ICON;
+        if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0 {
+            *shown_kind = kind;
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -164,7 +216,23 @@ impl ksni::Tray for AgentRosterTray {
     }
 
     fn icon_name(&self) -> String {
-        "utilities-terminal".into()
+        NORMAL_ICON_NAME.into()
+    }
+
+    fn overlay_icon_name(&self) -> String {
+        let kind = self
+            .roster
+            .lock()
+            .map(|roster| tray_icon_kind(&roster))
+            .unwrap_or(TrayIconKind::Normal);
+        if kind == TrayIconKind::Attention {
+            // ksni 0.3 exposes OverlayIconName, which keeps the base icon
+            // recognisable while the question mark signals that an agent is
+            // waiting for an answer.
+            ATTENTION_ICON_NAME.into()
+        } else {
+            String::new()
+        }
     }
 
     /// Left-click on the icon itself. There is no Swift equivalent -- the
@@ -282,6 +350,13 @@ const WINDOWS_TRAY_QUIT_COMMAND: u32 = 0x7fff;
 struct WindowsTrayState {
     roster: SharedRoster,
     requests: TrayRequestQueue,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsTrayReady {
+    hwnd: isize,
+    icon: isize,
+    attention_icon: isize,
 }
 
 #[cfg(target_os = "windows")]
@@ -480,7 +555,7 @@ unsafe extern "system" fn windows_window_proc(
 fn run_windows_tray(
     roster: SharedRoster,
     requests: TrayRequestQueue,
-    ready: std::sync::mpsc::SyncSender<Option<isize>>,
+    ready: std::sync::mpsc::SyncSender<Option<WindowsTrayReady>>,
 ) {
     let class_name = wide("TillerTrayWindowClass");
     // A null module name asks Windows for the current executable's instance.
@@ -533,14 +608,22 @@ fn run_windows_tray(
         return;
     }
 
-    // Resource ID 1 is the same embedded app-icon.ico resource used by gpui.
-    let mut icon = unsafe { LoadIconW(instance, 1usize as *const u16) };
+    // Resource IDs 1 and 2 are the normal and attention app icons used by
+    // gpui and the Windows tray respectively.
+    let mut icon = unsafe { LoadIconW(instance, std::ptr::with_exposed_provenance::<u16>(1)) };
     if icon.is_null() {
-        // A system application icon keeps the tray alive when the embedded
-        // resource is unavailable in an unusual build.
+        // A system application icon keeps the normal tray state alive when its
+        // embedded resource is unavailable in an unusual build.
         icon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
     }
-    if icon.is_null() {
+    let mut attention_icon =
+        unsafe { LoadIconW(instance, std::ptr::with_exposed_provenance::<u16>(2)) };
+    if attention_icon.is_null() {
+        // Keep the attention state usable with the same documented fallback
+        // when its embedded resource is unavailable in an unusual build.
+        attention_icon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+    }
+    if icon.is_null() || attention_icon.is_null() {
         // hwnd is the message-only window created by this thread and is valid
         // for the synchronous cleanup call below.
         unsafe { DestroyWindow(hwnd) };
@@ -564,7 +647,14 @@ fn run_windows_tray(
         return;
     }
 
-    if ready.send(Some(hwnd as isize)).is_err() {
+    if ready
+        .send(Some(WindowsTrayReady {
+            hwnd: hwnd as isize,
+            icon: icon as isize,
+            attention_icon: attention_icon as isize,
+        }))
+        .is_err()
+    {
         delete_windows_tray_icon(hwnd);
         // hwnd is still owned by this thread and no message loop consumer is
         // waiting now that the caller abandoned the startup handshake.
@@ -602,12 +692,16 @@ pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
     });
 
     match ready_rx.recv() {
-        Ok(Some(hwnd)) => Some((
-            roster,
+        Ok(Some(ready)) => Some((
+            roster.clone(),
             requests,
             TrayHandle {
-                hwnd,
+                hwnd: ready.hwnd,
                 thread: Some(thread),
+                roster,
+                icon: ready.icon,
+                attention_icon: ready.attention_icon,
+                shown_kind: Mutex::new(TrayIconKind::Normal),
             },
         )),
         Ok(None) | Err(_) => {
@@ -648,6 +742,56 @@ mod tests {
         assert!(!OPEN_TILLER_LABEL.is_empty());
         assert!(!QUIT_TILLER_LABEL.is_empty());
         assert_ne!(OPEN_TILLER_LABEL, QUIT_TILLER_LABEL);
+    }
+
+    #[test]
+    fn tray_icon_kind_reports_attention_regardless_of_roster_position() {
+        let normal = TrayRosterEntry {
+            path: PathBuf::from("/worktrees/normal"),
+            branch: "normal".into(),
+            project_name: "Tiller".into(),
+            status: AgentStatus::Running,
+        };
+        let waiting = TrayRosterEntry {
+            path: PathBuf::from("/worktrees/waiting"),
+            branch: "waiting".into(),
+            project_name: "Tiller".into(),
+            status: AgentStatus::NeedsInput,
+        };
+
+        assert_eq!(
+            tray_icon_kind(&[normal.clone(), waiting.clone()]),
+            TrayIconKind::Attention
+        );
+        assert_eq!(
+            tray_icon_kind(&[waiting, normal]),
+            TrayIconKind::Attention
+        );
+    }
+
+    #[test]
+    fn tray_icon_kind_is_normal_for_an_empty_roster() {
+        assert_eq!(tray_icon_kind(&[]), TrayIconKind::Normal);
+    }
+
+    #[test]
+    fn tray_icon_kind_is_normal_when_no_entry_needs_input() {
+        let roster = [
+            TrayRosterEntry {
+                path: PathBuf::from("/worktrees/running"),
+                branch: "running".into(),
+                project_name: "Tiller".into(),
+                status: AgentStatus::Running,
+            },
+            TrayRosterEntry {
+                path: PathBuf::from("/worktrees/done"),
+                branch: "done".into(),
+                project_name: "Tiller".into(),
+                status: AgentStatus::Done,
+            },
+        ];
+
+        assert_eq!(tray_icon_kind(&roster), TrayIconKind::Normal);
     }
 
     #[test]
