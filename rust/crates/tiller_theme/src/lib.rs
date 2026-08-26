@@ -177,6 +177,9 @@ pub struct ThemeColors {
     pub meta: Rgba,
     /// Primary pill fill.
     pub primary_pill_bg: Rgba,
+    /// Resting fill of a control the user clicks. Must stay distinguishable
+    /// from `raised`; that is the property this token exists to preserve.
+    pub primary_action_bg: Rgba,
     /// Filter field fill.
     pub filter_field_bg: Rgba,
     /// Tree guide stroke, including its source alpha.
@@ -442,6 +445,7 @@ impl ThemeColors {
             subtitle: text_secondary,
             meta: text_tertiary,
             primary_pill_bg: raised,
+            primary_action_bg: selected_fill,
             filter_field_bg: inset,
             tree_guide: veil(VEIL_MID, appearance),
             git_staged: success,
@@ -1694,6 +1698,7 @@ mod tests {
             assert_eq!(theme.composer, theme.raised);
             assert_eq!(theme.card_fill, theme.raised);
             assert_eq!(theme.primary_pill_bg, theme.raised);
+            assert_ne!(theme.primary_action_bg, theme.raised);
             assert_eq!(theme.filter_field_bg, theme.inset);
             assert_eq!(theme.code_inset_fill, theme.inset);
             assert_eq!(theme.panel_focus_ring, theme.accent);
@@ -2366,6 +2371,11 @@ mod tests {
                 "primary_pill_bg",
                 light.primary_pill_bg,
                 dark.primary_pill_bg,
+            ),
+            (
+                "primary_action_bg",
+                light.primary_action_bg,
+                dark.primary_action_bg,
             ),
             (
                 "filter_field_bg",

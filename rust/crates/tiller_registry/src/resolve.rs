@@ -10,6 +10,7 @@
 
 use std::path::PathBuf;
 
+use crate::installer::{unpack_kind, UnpackKind};
 use crate::model::{AcpRegistry, Distribution, RegistryAgent};
 
 /// An adapter's in-binary ACP claim: a subcommand of a CLI the user already
@@ -47,7 +48,8 @@ pub enum UnavailableReason {
     /// platform. Measured: `linux-aarch64` has 16 artifacts against
     /// `linux-x86_64`'s 18.
     NoArtifactForPlatform,
-    /// `uvx`, `.tar.bz2`, or a kind published after this build.
+    /// `uvx`, an artifact whose archive format the installer cannot unpack,
+    /// or a kind published after this build.
     UnsupportedDistribution,
     NotInRegistry,
 }
@@ -136,7 +138,17 @@ pub fn resolve(input: ResolveInput<'_>) -> LaunchSource {
     // platform is known, is the whole reason the model keeps a Vec.
     let installable_binary = agent.distributions.iter().any(|distribution| {
         matches!(distribution, Distribution::Binary(artifacts)
-            if artifacts.contains_key(input.platform_key))
+            if matches!(
+                artifacts.get(input.platform_key),
+                Some(artifact) if unpack_kind(&artifact.archive) != UnpackKind::Unsupported
+            ))
+    });
+    let has_unsupported_binary_artifact = agent.distributions.iter().any(|distribution| {
+        matches!(distribution, Distribution::Binary(artifacts)
+            if matches!(
+                artifacts.get(input.platform_key),
+                Some(artifact) if unpack_kind(&artifact.archive) == UnpackKind::Unsupported
+            ))
     });
     let has_npx = agent
         .distributions
@@ -149,6 +161,10 @@ pub fn resolve(input: ResolveInput<'_>) -> LaunchSource {
     }
 
     // Nothing installable: say which kind of "no" this is.
+    if has_unsupported_binary_artifact {
+        return LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution);
+    }
+
     let declares_binary = agent
         .distributions
         .iter()
@@ -177,6 +193,7 @@ pub fn current_platform_key() -> &'static str {
 mod tests {
     use super::*;
     use crate::model::{AcpRegistry, BinaryArtifact, Distribution, RegistryAgent};
+    use crate::{unpack_kind, UnpackKind};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -216,17 +233,25 @@ mod tests {
     }
 
     fn binary_for(platform: &str) -> Distribution {
+        binary_for_archive(platform, "https://example.invalid/a.zip")
+    }
+
+    fn binary_for_archive(platform: &str, archive: &str) -> Distribution {
         let mut artifacts = BTreeMap::new();
         artifacts.insert(
             platform.to_string(),
             BinaryArtifact {
-                archive: "https://example.invalid/a.zip".into(),
+                archive: archive.into(),
                 cmd: "./a".into(),
                 args: vec!["acp".into()],
                 sha256: Some("00".repeat(32)),
             },
         );
         Distribution::Binary(artifacts)
+    }
+
+    fn binary_for_current_platform(archive: &str) -> Distribution {
+        binary_for_archive(current_platform_key(), archive)
     }
 
     fn input<'a>(registry: Option<&'a AcpRegistry>) -> ResolveInput<'a> {
@@ -284,6 +309,65 @@ mod tests {
             LaunchSource::Installable { agent } => assert_eq!(agent.id, "opencode"),
             other => panic!("expected Installable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_unsupported_binary_archive_is_unavailable_not_installable() {
+        let registry = registry_with(
+            "opencode",
+            vec![binary_for_current_platform(
+                "https://example.invalid/a.tar.bz2",
+            )],
+        );
+        assert_eq!(
+            resolve(ResolveInput {
+                platform_key: current_platform_key(),
+                ..input(Some(&registry))
+            }),
+            LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution)
+        );
+    }
+
+    #[test]
+    fn unpackable_binary_archives_remain_installable() {
+        for archive in [
+            "https://example.invalid/a.zip",
+            "https://example.invalid/a.tar.gz",
+        ] {
+            let registry = registry_with("opencode", vec![binary_for_current_platform(archive)]);
+            assert!(
+                matches!(
+                    resolve(ResolveInput {
+                        platform_key: current_platform_key(),
+                        ..input(Some(&registry))
+                    }),
+                    LaunchSource::Installable { .. }
+                ),
+                "{archive} should remain installable"
+            );
+        }
+    }
+
+    #[test]
+    fn npx_rescues_an_unsupported_binary_archive() {
+        let registry = registry_with(
+            "mixed",
+            vec![
+                binary_for_current_platform("https://example.invalid/a.tar.bz2"),
+                Distribution::Npx {
+                    package: "@example/mixed-acp".into(),
+                    args: Vec::new(),
+                },
+            ],
+        );
+        assert!(matches!(
+            resolve(ResolveInput {
+                adapter_id: "mixed",
+                platform_key: current_platform_key(),
+                ..input(Some(&registry))
+            }),
+            LaunchSource::Installable { .. }
+        ));
     }
 
     #[test]
@@ -406,5 +490,51 @@ mod tests {
             }),
             LaunchSource::Unavailable(UnavailableReason::NotInRegistry)
         );
+    }
+
+    #[test]
+    fn fixture_binary_installability_agrees_with_archive_support() {
+        let registry = AcpRegistry::from_json(include_str!(
+            "../tests/fixtures/registry-v1.json"
+        ))
+        .expect("decode the recorded registry");
+        let platform_keys = ["linux-x86_64", "darwin-aarch64", "windows-x86_64"];
+        let mut saw_goose = false;
+
+        for agent in &registry.agents {
+            saw_goose |= agent.id == "goose";
+            let has_npx = agent
+                .distributions
+                .iter()
+                .any(|distribution| matches!(distribution, Distribution::Npx { .. }));
+
+            for platform_key in platform_keys {
+                let source = resolve(ResolveInput {
+                    adapter_id: &agent.id,
+                    builtin: None,
+                    builtin_on_path: false,
+                    installed: None,
+                    registry: Some(&registry),
+                    platform_key,
+                });
+                if !has_npx && matches!(source, LaunchSource::Installable { .. }) {
+                    let artifact = agent.distributions.iter().find_map(|distribution| {
+                        match distribution {
+                            Distribution::Binary(artifacts) => artifacts.get(platform_key),
+                            _ => None,
+                        }
+                    });
+                    let artifact = artifact.expect("binary installability requires an artifact");
+                    assert_ne!(
+                        unpack_kind(&artifact.archive),
+                        UnpackKind::Unsupported,
+                        "{} on {platform_key} is installable but its archive is unsupported",
+                        agent.id
+                    );
+                }
+            }
+        }
+
+        assert!(saw_goose, "the agreement fixture must cover goose");
     }
 }

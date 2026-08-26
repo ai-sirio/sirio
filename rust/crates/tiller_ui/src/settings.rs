@@ -684,7 +684,7 @@ pub(crate) fn launch_badge_label(source: &tiller_registry::LaunchSource) -> &'st
     use tiller_registry::{LaunchSource, UnavailableReason};
     match source {
         LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => "ACP chat available",
-        LaunchSource::Installable { .. } => "Install",
+        LaunchSource::Installable { .. } => "Available to install",
         LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform) => {
             "Not available for this platform"
         }
@@ -961,6 +961,9 @@ pub struct Settings {
     summarizer_agent: SummarizerChoice,
     control_socket_enabled: bool,
     socket_path: String,
+    /// The host-supplied app version shown in General settings. The UI crate
+    /// deliberately does not depend on `tiller_control` for this fact.
+    version: String,
     /// Whether the summarizer picker's agent menu is open (F-SET-05).
     summarizer_popover_open: bool,
     /// Focus handle for the picker menu, so Escape closes the menu alone:
@@ -1203,6 +1206,7 @@ impl Settings {
             // on this machine — never a fixed list of "Active" claims.
             provider_accounts: ProviderAccountStates::discovered(),
             socket_path: initial.socket_path,
+            version: String::new(),
             summarizer_popover_open: false,
             summarizer_focus: cx.focus_handle(),
             surface_focus: cx.focus_handle(),
@@ -1252,6 +1256,14 @@ impl Settings {
             active_claude_account_id: None,
             active_codex_account_id: None,
         }
+    }
+
+    /// Supplies the host's compiled app version for the General settings row.
+    /// The host owns the value so this UI crate stays independent of
+    /// `tiller_control`.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 
     /// Wires the durable account-identity cache (F-PERSIST-DB-06). Call
@@ -3381,17 +3393,27 @@ impl Settings {
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .min_w_0()
                         .gap(px(2.0))
                         .child(
                             div()
+                                .debug_selector(move || format!("settings-agent-name-{index}"))
                                 .text_size(theme.typography.headline)
                                 .text_color(theme.title)
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(text!(id = ("settings-agent-name", index), row.name)),
                         )
                         .child(
                             div()
+                                .debug_selector(move || {
+                                    format!("settings-agent-description-{index}")
+                                })
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.subtitle)
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(text!(
                                     id = ("settings-agent-description", index),
                                     row.description
@@ -3444,7 +3466,7 @@ impl Settings {
                     .text_size(theme.typography.caption2)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.title)
-                    .bg(theme.primary_pill_bg)
+                    .bg(theme.primary_action_bg)
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, cx| {
                         install_entity.update(cx, |_, cx| {
@@ -3816,7 +3838,7 @@ impl Settings {
                 .debug_selector(|| "settings-version".into())
                 .text_size(theme.typography.callout)
                 .text_color(theme.subtitle)
-                .child(text!("0.1.0")),
+                .child(text!(self.version.clone())),
             theme,
         ));
 
@@ -3892,6 +3914,10 @@ impl Settings {
         // The socket row must display the *resolved* path (the one the live
         // socket listens on), not a template — a user needs to find the
         // socket to talk to it. The host routes it through the snapshot.
+        #[cfg(windows)]
+        let socket_kind = "Named pipe";
+        #[cfg(not(windows))]
+        let socket_kind = "Socket path";
         let socket_label = div()
             .flex()
             .flex_col()
@@ -3909,7 +3935,7 @@ impl Settings {
                     .mt(px(2.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.subtitle)
-                    .child(text!(format!("Socket path: {}", self.socket_path))),
+                    .child(text!(format!("{socket_kind}: {}", self.socket_path))),
             );
         // The tillerctl card shows the bundled binary's name. "Copy install
         // command" is not offered: no install mechanism exists on this
@@ -4761,6 +4787,38 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn agent_description_stays_within_its_row(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex agent with a deliberately long display name that exceeds the available row width",
+            executable: None,
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Codex row renders");
+        let description = cx
+            .debug_bounds("settings-agent-description-0")
+            .expect("the Codex description renders");
+        assert!(
+            description.origin.x + description.size.width <= row.origin.x + row.size.width,
+            "agent description must stay inside its row: description={description:?} row={row:?}"
+        );
+    }
+
     /// F-SET-18 (closed): an Installable row draws a real Install button
     /// whose click emits [`SettingsEvent::InstallAgent`] — the host owns
     /// the actual install (Task 8); this crate only renders and emits. A
@@ -5454,7 +5512,30 @@ mod tests {
             distributions: vec![Distribution::Binary(Default::default())],
         };
         let source = LaunchSource::Installable { agent };
-        assert_eq!(launch_badge_label(&source), "Install");
+        assert_eq!(launch_badge_label(&source), "Available to install");
+    }
+
+    #[test]
+    fn the_state_pill_never_repeats_the_action_button_label() {
+        use tiller_registry::{LaunchSource, RegistryAgent};
+
+        let source = LaunchSource::Installable {
+            agent: RegistryAgent {
+                id: "cursor".into(),
+                name: "Cursor".into(),
+                version: "1.0.0".into(),
+                description: None,
+                repository: None,
+                website: None,
+                license: None,
+                icon: None,
+                distributions: vec![],
+            },
+        };
+        let action_label = "Install";
+
+        assert_ne!(launch_badge_label(&source), "Install");
+        assert_ne!(launch_badge_label(&source), action_label);
     }
 
     #[test]
@@ -6774,8 +6855,9 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_version("test-version")
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -6790,6 +6872,16 @@ mod tests {
             cx.debug_bounds("settings-version").is_some(),
             "the app version is stated in General settings"
         );
+        let version = cx.update(|window, app| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(app)
+                .version
+                .clone()
+        });
+        assert_eq!(version, "test-version");
         assert!(
             cx.debug_bounds("settings-control-socket-row").is_some(),
             "the tillerctl card renders"

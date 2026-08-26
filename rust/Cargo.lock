@@ -7013,7 +7013,7 @@ dependencies = [
 
 [[package]]
 name = "tiller"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -7036,11 +7036,12 @@ dependencies = [
  "tiller_terminal",
  "tiller_theme",
  "tiller_ui",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "tiller_acp"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7066,7 +7067,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_control"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -7104,7 +7105,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_project"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "serde",
@@ -7113,7 +7114,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_registry"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -7128,7 +7129,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_terminal"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -7144,7 +7145,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_theme"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -7154,7 +7155,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_ui"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7167,6 +7168,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
+ "serde_json",
  "smallvec",
  "tiller_acp",
  "tiller_agents",

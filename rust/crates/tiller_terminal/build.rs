@@ -13,7 +13,9 @@
 //! This script finds the vendored install's `ghostty-vt-static.lib`, links it
 //! explicitly, and excludes the import library from the link. Unix is
 //! untouched: `static=ghostty-vt` correctly resolves to `libghostty-vt.a`
-//! there. Drop this file when the `-sys` crate fixes its Windows link mode.
+//! there. The defect is reported upstream as
+//! <https://github.com/Uzaaft/libghostty-rs/issues/78>; drop this file once a
+//! `libghostty-vt-sys` release ships with that issue fixed.
 
 use std::path::PathBuf;
 
