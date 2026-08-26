@@ -53,6 +53,10 @@ pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
+const TOOL_CALL_GROUP_GAP: f32 = 6.0;
+const TOOL_CALL_GROUP_CHEVRON_WIDTH: f32 = 12.0;
+const TOOL_CALL_GROUP_MEMBER_INDENT: f32 =
+    CARD_H_PADDING + TOOL_CALL_GROUP_CHEVRON_WIDTH + TOOL_CALL_GROUP_GAP;
 
 /// The composer's animated-border sweep, in gradient degrees. gpui has no
 /// conic gradient, so the Swift app's rotating ring is approximated by a
@@ -5665,6 +5669,7 @@ impl Chat {
         group_index: usize,
         group_expanded: bool,
         transcript_focus: FocusHandle,
+        cwd: &Path,
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
@@ -5679,7 +5684,7 @@ impl Chat {
             .py(px(6.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(TOOL_CALL_GROUP_GAP))
             .cursor(CursorStyle::PointingHand)
             .hover(|style| style.text_color(colors.title))
             .child(
@@ -5740,14 +5745,32 @@ impl Chat {
                 }
             }
         } else {
-            for (_, _, member) in members {
-                if let Entry::ToolCall { title, status, .. } = member {
+            for (member_index, _, member) in members {
+                if let Entry::ToolCall {
+                    title,
+                    status,
+                    locations,
+                    ..
+                } = member
+                {
                     column = column.child(
                         div()
-                            .pl(px(CARD_H_PADDING + 16.0))
+                            .id(("tool-call-group-member", member_index))
+                            .debug_selector(move || {
+                                format!("tool-call-group-member-{member_index}")
+                            })
+                            .pl(px(TOOL_CALL_GROUP_MEMBER_INDENT))
                             .text_size(typography.footnote)
                             .text_color(colors.meta)
-                            .child(format!("{status} · {title}")),
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis_start()
+                            .child(collapsed_tool_row_text(
+                                &status,
+                                &title,
+                                &locations,
+                                cwd,
+                            )),
                     );
                 }
             }
@@ -7509,6 +7532,7 @@ impl Render for Chat {
                                             end,
                                             group_expanded,
                                             transcript_focus.clone(),
+                                            &this.agent_cwd,
                                             &transcript_theme,
                                             entity.clone(),
                                         ))
@@ -8185,6 +8209,50 @@ impl ToolCallPlainText {
             .map(|offset| entry_start + self.offset_of(first + offset))
             .collect()
     }
+}
+
+/// Names the first file a collapsed tool call touched, keeping the path
+/// useful without repeating a path already present in the tool title.
+fn collapsed_tool_row_text(
+    status: &str,
+    title: &str,
+    locations: &[ToolCallLocationInfo],
+    cwd: &Path,
+) -> String {
+    let base = format!("{status} · {title}");
+    let Some(location) = locations.first() else {
+        return base;
+    };
+
+    let relative = location
+        .path
+        .strip_prefix(cwd)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty());
+    let target = relative
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| {
+            if location.path == cwd {
+                ".".to_string()
+            } else {
+                display_path(&location.path)
+            }
+        });
+    if target.is_empty() {
+        return base;
+    }
+
+    let title_for_match = title.replace('\\', "/").to_lowercase();
+    let target_for_match = target.replace('\\', "/").to_lowercase();
+    if title_for_match.contains(&target_for_match) {
+        return base;
+    }
+
+    let target = match location.line {
+        Some(line) => format!("{target}:{line}"),
+        None => target,
+    };
+    format!("{base} {target}")
 }
 
 fn tool_call_plain_text(
@@ -10606,6 +10674,79 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_tool_row_text_names_a_relative_location_and_line() {
+        let cwd = Path::new("/workspace");
+        let locations = vec![ToolCallLocationInfo {
+            path: cwd.join("src").join("main.rs"),
+            line: Some(42),
+        }];
+
+        assert_eq!(
+            collapsed_tool_row_text("Completed", "read", &locations, cwd),
+            format!(
+                "Completed · read {}:42",
+                Path::new("src").join("main.rs").display()
+            )
+        );
+    }
+
+    #[test]
+    fn collapsed_tool_row_text_keeps_the_existing_bash_row_unchanged() {
+        assert_eq!(
+            collapsed_tool_row_text("Completed", "git status --short", &[], Path::new("/workspace")),
+            "Completed · git status --short"
+        );
+    }
+
+    #[test]
+    fn collapsed_tool_row_text_does_not_repeat_a_path_in_the_title() {
+        let cwd = Path::new("/workspace");
+        let relative = Path::new("src").join("main.rs");
+        let locations = vec![ToolCallLocationInfo {
+            path: cwd.join(&relative),
+            line: Some(42),
+        }];
+        let title = format!("read {}", relative.display());
+
+        assert_eq!(
+            collapsed_tool_row_text("Completed", &title, &locations, cwd),
+            format!("Completed · {title}")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn collapsed_tool_row_text_uses_display_path_outside_the_cwd() {
+        let locations = vec![ToolCallLocationInfo {
+            path: PathBuf::from("/other/project/file.rs"),
+            line: None,
+        }];
+
+        assert_eq!(
+            collapsed_tool_row_text("Completed", "read", &locations, Path::new("/workspace")),
+            "Completed · read /other/project/file.rs"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collapsed_tool_row_text_strips_the_windows_verbatim_prefix_outside_the_cwd() {
+        let locations = vec![ToolCallLocationInfo {
+            path: PathBuf::from(r"\\?\D:\outside\file.rs"),
+            line: None,
+        }];
+        let row = collapsed_tool_row_text(
+            "Completed",
+            "read",
+            &locations,
+            Path::new(r"D:\workspace"),
+        );
+
+        assert!(!row.contains(r"\\?\"), "collapsed row leaked {row}");
+        assert!(row.contains(r"D:\outside\file.rs"), "row = {row}");
+    }
+
+    #[test]
     fn thought_summary_flattens_and_caps_long_text() {
         assert_eq!(thought_summary(""), "Thinking…");
         assert_eq!(thought_summary("short thought"), "short thought");
@@ -11763,6 +11904,39 @@ mod tests {
         assert!(
             cx.debug_bounds("tool-call-toggle-0").is_none(),
             "clicking again collapses the group back"
+        );
+    }
+
+    #[gpui::test]
+    async fn collapsed_tool_call_rows_stay_single_line_with_long_paths(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let cwd = std::env::temp_dir();
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, cwd.clone(), cx);
+            chat.push_entry(test_tool_call("short"));
+            let mut long = test_tool_call("long");
+            if let Entry::ToolCall { locations, .. } = &mut long {
+                locations.push(ToolCallLocationInfo {
+                    path: cwd.join(format!("{}file.rs", "directory ".repeat(80))),
+                    line: None,
+                });
+            }
+            chat.push_entry(long);
+            chat
+        });
+        refresh_frame(cx);
+
+        let short = cx
+            .debug_bounds("tool-call-group-member-0")
+            .expect("the short collapsed row is drawn");
+        let long = cx
+            .debug_bounds("tool-call-group-member-1")
+            .expect("the long collapsed row is drawn");
+        assert_eq!(
+            long.size.height, short.size.height,
+            "a long target must stay a single-line row: short={short:?} long={long:?}"
         );
     }
 
