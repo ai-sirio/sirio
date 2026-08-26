@@ -139,6 +139,50 @@ fn version_label(id: String, version: &str, theme: Theme) -> impl IntoElement {
         .child(format!("v{version}"))
 }
 
+fn agent_name_line(
+    name: String,
+    version: Option<String>,
+    color: Rgba,
+    theme: Theme,
+) -> Div {
+    let line_height = theme.typography.ui_line_height;
+    let mut line = div()
+        .w_full()
+        .h(line_height)
+        .line_height(line_height)
+        .overflow_hidden()
+        .text_ellipsis()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(theme.typography.headline)
+        .text_color(color)
+        .child(name);
+    if let Some(version) = version {
+        line = line.child(
+            div()
+                .flex_none()
+                .text_size(theme.typography.caption2)
+                .text_color(theme.meta)
+                .child(version),
+        );
+    }
+    line
+}
+
+fn agent_description_line(description: String, color: Rgba, theme: Theme) -> Div {
+    let line_height = theme.typography.ui_line_height;
+    div()
+        .w_full()
+        .h(line_height)
+        .line_height(line_height)
+        .overflow_hidden()
+        .text_ellipsis()
+        .text_size(theme.typography.footnote)
+        .text_color(color)
+        .child(description)
+}
+
 fn agent_label(
     icon: Icon,
     icon_color: Rgba,
@@ -150,22 +194,6 @@ fn agent_label(
 ) -> Div {
     let title_color = if enabled { theme.title } else { theme.meta };
     let description_color = if enabled { theme.subtitle } else { theme.text_ghost };
-    let mut title = div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .text_size(theme.typography.headline)
-        .text_color(title_color)
-        .child(name);
-    if let Some(version) = version {
-        title = title.child(
-            div()
-                .flex_none()
-                .text_size(theme.typography.caption2)
-                .text_color(theme.meta)
-                .child(version),
-        );
-    }
 
     div()
         .flex()
@@ -187,20 +215,8 @@ fn agent_label(
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(title)
-                // A fixed one-line box is intentional. `text_ellipsis` keeps
-                // the 261-character registry outlier from growing a row or
-                // slicing a UTF-8 string in the middle of a glyph.
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(17.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_size(theme.typography.footnote)
-                        .text_color(description_color)
-                        .child(description),
-                ),
+                .child(agent_name_line(name, version, title_color, theme))
+                .child(agent_description_line(description, description_color, theme)),
         )
 }
 
@@ -662,5 +678,28 @@ mod tests {
             agent.name.to_lowercase().contains(&query)
                 || agent.description.to_lowercase().contains(&query)
         }));
+    }
+
+    #[test]
+    fn agent_text_lines_use_a_full_theme_line_box() {
+        use gpui::{Length, Styled};
+
+        let theme = Theme::dark();
+        let expected_height = Length::Definite(theme.typography.ui_line_height.into());
+        for mut line in [
+            agent_name_line("Agoragentic".to_owned(), None, theme.title, theme),
+            agent_description_line(
+                "Agent marketplace with capabilities".to_owned(),
+                theme.subtitle,
+                theme,
+            ),
+        ] {
+            let style = Styled::style(&mut line);
+            assert_eq!(
+                style.text.line_height,
+                Some(theme.typography.ui_line_height.into())
+            );
+            assert_eq!(style.size.height, Some(expected_height));
+        }
     }
 }
