@@ -43,7 +43,11 @@ struct DemoInstalledAgent {
     installed_version: Option<&'static str>,
     state: DemoUpdateState,
     reason: Option<&'static str>,
+    unverified: bool,
 }
+
+const DEMO_PATH_COLUMN_WIDTH: f32 = 220.0;
+const DEMO_VERSION_COLUMN_WIDTH: f32 = 150.0;
 
 const DEMO_INSTALLED_AGENTS: [DemoInstalledAgent; 6] = [
     DemoInstalledAgent {
@@ -51,43 +55,50 @@ const DEMO_INSTALLED_AGENTS: [DemoInstalledAgent; 6] = [
         installed_version: Some("0.9.0"),
         state: DemoUpdateState::UpToDate,
         reason: None,
+        unverified: true,
     },
     DemoInstalledAgent {
         registry_id: "kilo",
         installed_version: Some("7.4.0"),
         state: DemoUpdateState::UpdateAvailableVerified,
         reason: None,
+        unverified: false,
     },
     DemoInstalledAgent {
         registry_id: "antigravity-acp",
         installed_version: Some("0.9.0"),
         state: DemoUpdateState::UpdateAvailableUnverifiable,
         reason: None,
+        unverified: false,
     },
     DemoInstalledAgent {
         registry_id: "goose",
         installed_version: Some("1.46.0"),
         state: DemoUpdateState::InFlight,
         reason: None,
+        unverified: false,
     },
     DemoInstalledAgent {
         registry_id: "harn",
         installed_version: Some("0.10.115"),
         state: DemoUpdateState::UpdateFailed,
         reason: Some("The archive download was interrupted."),
+        unverified: false,
     },
     DemoInstalledAgent {
         registry_id: "qwen-code",
         installed_version: None,
         state: DemoUpdateState::InstallFailed,
-        reason: Some("The package manager returned an error."),
+        reason: Some("The package manager could not install v0.22.1."),
+        unverified: false,
     },
 ];
 
-fn demo_version_text(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> String {
-    let Some(installed_version) = demo.installed_version else {
-        return format!("v{}", agent.version);
-    };
+fn demo_version_text(
+    demo: &DemoInstalledAgent,
+    agent: &RegistryAgent,
+) -> Option<String> {
+    let installed_version = demo.installed_version?;
     if matches!(
         demo.state,
         DemoUpdateState::UpdateAvailableVerified
@@ -95,18 +106,17 @@ fn demo_version_text(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> String
             | DemoUpdateState::InFlight
             | DemoUpdateState::UpdateFailed
     ) {
-        format!("v{installed_version} → v{}", agent.version)
+        Some(format!("v{installed_version} → v{}", agent.version))
     } else {
-        format!("v{installed_version}")
+        Some(format!("v{installed_version}"))
     }
 }
 
 fn demo_action_label(state: DemoUpdateState) -> Option<&'static str> {
     match state {
         DemoUpdateState::UpToDate => Some("Installed"),
-        DemoUpdateState::UpdateAvailableVerified
-        | DemoUpdateState::UpdateAvailableUnverifiable => Some("Update"),
-        DemoUpdateState::InFlight => None,
+        DemoUpdateState::UpdateAvailableVerified => Some("Update"),
+        DemoUpdateState::UpdateAvailableUnverifiable | DemoUpdateState::InFlight => None,
         DemoUpdateState::UpdateFailed | DemoUpdateState::InstallFailed => Some("Retry"),
     }
 }
@@ -114,6 +124,12 @@ fn demo_action_label(state: DemoUpdateState) -> Option<&'static str> {
 fn demo_status_lines(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> Vec<String> {
     let latest = format!("v{}", agent.version);
     match demo.state {
+        DemoUpdateState::UpdateAvailableVerified
+        | DemoUpdateState::UpdateAvailableUnverifiable => vec![format!(
+            "v{} stays in use until you relaunch · restored if the update fails",
+            demo.installed_version
+                .expect("update demo has an old version")
+        )],
         DemoUpdateState::InFlight => vec![
             format!("Updating to {latest}…"),
             format!(
@@ -137,18 +153,43 @@ fn demo_status_lines(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> Vec<St
     }
 }
 
-fn unverifiable_confirmation_copy(agent_name: &str, latest_version: &str) -> String {
-    format!(
-        "Update {agent_name} to v{latest_version}? The publisher ships no checksum and none could be recovered, so Tiller cannot tell whether this download is what the publisher intended. This is an executable Tiller will run."
-    )
+fn demo_path_text(demo: &DemoInstalledAgent) -> Option<String> {
+    demo.installed_version?;
+    Some(if cfg!(windows) {
+        format!(r"%LOCALAPPDATA%\Tiller\agents\{}\bin", demo.registry_id)
+    } else {
+        format!("~/.local/share/tiller/agents/{}/bin", demo.registry_id)
+    })
+}
+
+fn demo_version_marker(demo: &DemoInstalledAgent) -> Option<&'static str> {
+    if demo.unverified {
+        Some("unverified")
+    } else if demo.state == DemoUpdateState::UpdateFailed {
+        Some("failed")
+    } else {
+        None
+    }
+}
+
+fn unverifiable_confirmation_heading(agent_name: &str, latest_version: &str) -> String {
+    format!("No checksum for {agent_name} v{latest_version}")
+}
+
+fn unverifiable_confirmation_body() -> &'static str {
+    "Its publisher does not publish checksums and Tiller found none from any other source, so it cannot tell whether the file it downloaded from releases.antigravity.dev is the one they built. If it was tampered with, Tiller will run it with your permissions."
+}
+
+fn unverifiable_confirmation_survival(installed_version: &str) -> String {
+    format!("v{installed_version} is restored if the update fails — not after it succeeds.")
 }
 
 fn confirmation_primary_label() -> &'static str {
-    "Update without verifying"
+    "Install unverified v1.0.0"
 }
 
 fn confirmation_secondary_label() -> &'static str {
-    "Cancel"
+    "Keep v0.9.0"
 }
 
 fn confirmation_default_focus() -> &'static str {
@@ -307,7 +348,7 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
         .py(px(3.0))
         .rounded(theme.radii.row_card)
         .overflow_hidden()
-        .text_ellipsis()
+        .text_ellipsis_start()
         .text_size(theme.typography.caption2)
         .font_weight(if danger {
             FontWeight::SEMIBOLD
@@ -579,14 +620,63 @@ impl RegistryBrowseProto {
 
     fn render_unverifiable_confirmation(
         &self,
+        demo: &DemoInstalledAgent,
         agent: &RegistryAgent,
         theme: Theme,
         entity: Entity<Self>,
         window: &Window,
     ) -> impl IntoElement {
-        let update_entity = entity.clone();
-        let cancel_entity = entity;
-        let cancel_focused = self.confirmation_focus.is_focused(window);
+        let install_entity = entity.clone();
+        let keep_entity = entity;
+        let keep_focused = self.confirmation_focus.is_focused(window);
+        let install = div()
+            .id("registry-confirm-unverified")
+            .debug_selector(|| "registry-confirm-unverified".to_owned())
+            .px(px(10.0))
+            .py(px(3.0))
+            .rounded(theme.radii.control)
+            .border_1()
+            .border_color(theme.hairline)
+            .text_size(theme.typography.caption2)
+            .text_color(theme.title)
+            .hover(|style| style.bg(theme.row_hover))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(move |_, _, cx| {
+                install_entity.update(cx, |prototype, cx| {
+                    prototype.notice = Some(
+                        "Install unverified is not wired in this prototype.".to_owned(),
+                    );
+                    cx.notify();
+                });
+            })
+            .child(confirmation_primary_label());
+        let keep = div()
+            .id("registry-confirm-keep")
+            .debug_selector(|| "registry-confirm-keep".to_owned())
+            .track_focus(&self.confirmation_focus)
+            .focusable()
+            .tab_stop(true)
+            .px(px(10.0))
+            .py(px(3.0))
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.caption2)
+            .text_color(theme.title)
+            .bg(theme.selected_fill)
+            .border_1()
+            .hover(|style| style.bg(theme.row_hover))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(move |_, _, cx| {
+                keep_entity.update(cx, |prototype, cx| {
+                    prototype.notice = Some("Keeping the installed version.".to_owned());
+                    cx.notify();
+                });
+            })
+            .border_color(if keep_focused {
+                theme.selection_ring
+            } else {
+                theme.selected_fill
+            })
+            .child(confirmation_default_focus());
         div()
             .id("registry-unverifiable-confirmation")
             .debug_selector(|| "registry-unverifiable-confirmation".to_owned())
@@ -599,56 +689,32 @@ impl RegistryBrowseProto {
             .border_color(theme.hairline)
             .flex()
             .flex_col()
-            .gap(px(10.0))
+            .gap(px(8.0))
             .text_size(theme.typography.footnote)
             .text_color(theme.subtitle)
-            .child(unverifiable_confirmation_copy(&agent.name, &agent.version))
+            .child(
+                div()
+                    .text_size(theme.typography.headline)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child(unverifiable_confirmation_heading(
+                        &agent.name,
+                        &agent.version,
+                    )),
+            )
+            .child(unverifiable_confirmation_body())
+            .child(unverifiable_confirmation_survival(
+                demo.installed_version
+                    .expect("unverifiable update has an old version"),
+            ))
             .child(
                 div()
                     .flex()
                     .justify_end()
                     .items_center()
                     .gap(px(8.0))
-                    .child(
-                        action_affordance(
-                            "registry-confirm-unverified".to_owned(),
-                            confirmation_primary_label(),
-                            theme,
-                            update_entity,
-                            "Update without verifying is not wired in this prototype."
-                                .to_owned(),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .id("registry-confirm-cancel")
-                            .debug_selector(|| "registry-confirm-cancel".to_owned())
-                            .track_focus(&self.confirmation_focus)
-                            .focusable()
-                            .tab_stop(true)
-                            .px(px(10.0))
-                            .py(px(3.0))
-                            .rounded(theme.radii.control)
-                            .border_1()
-                            .border_color(if cancel_focused {
-                                theme.selection_ring
-                            } else {
-                                theme.hairline
-                            })
-                            .text_size(theme.typography.caption2)
-                            .text_color(theme.title)
-                            .hover(|style| style.bg(theme.row_hover))
-                            .cursor(CursorStyle::PointingHand)
-                            .on_click(move |_, _, cx| {
-                                cancel_entity.update(cx, |prototype, cx| {
-                                    prototype.notice = Some(
-                                        "Update canceled in this prototype.".to_owned(),
-                                    );
-                                    cx.notify();
-                                });
-                            })
-                            .child(confirmation_default_focus()),
-                    ),
+                    .child(install)
+                    .child(keep),
             )
     }
 
@@ -661,18 +727,48 @@ impl RegistryBrowseProto {
         entity: Entity<Self>,
         window: &Window,
     ) -> impl IntoElement {
-        let path = if let Some(version) = demo.installed_version {
-            if cfg!(windows) {
-                format!(
-                    r"%LOCALAPPDATA%\Tiller\agents\{}\{}",
-                    demo.registry_id, version
-                )
-            } else {
-                format!("~/.local/share/tiller/agents/{}/{}", demo.registry_id, version)
-            }
-        } else {
-            "—".to_owned()
-        };
+        let mut path_slot = div()
+            .w(px(DEMO_PATH_COLUMN_WIDTH))
+            .flex_none()
+            .flex()
+            .justify_end();
+        if let Some(path) = demo_path_text(demo) {
+            path_slot = path_slot.child(pill(
+                format!("your-agent-path-{index}"),
+                path,
+                theme,
+                false,
+            ));
+        }
+
+        let mut version_slot = div()
+            .w(px(DEMO_VERSION_COLUMN_WIDTH))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(4.0));
+        if let Some(version) = demo_version_text(demo, agent) {
+            version_slot = version_slot.child(
+                div()
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.meta)
+                    .child(version),
+            );
+        }
+        if let Some(marker) = demo_version_marker(demo) {
+            version_slot = version_slot.child(
+                div()
+                    .text_size(theme.typography.caption2)
+                    .text_color(if marker == "failed" {
+                        theme.tab_error
+                    } else {
+                        theme.tab_needs_input
+                    })
+                    .child(marker),
+            );
+        }
+
         let status_lines = demo_status_lines(demo, agent);
         let action = match demo_action_label(demo.state) {
             Some("Installed") => pill(
@@ -698,6 +794,9 @@ impl RegistryBrowseProto {
                 format!("Retry is not wired in this prototype ({})", agent.name),
             )
             .into_any_element(),
+            None if demo.state == DemoUpdateState::UpdateAvailableUnverifiable => {
+                div().flex_none().into_any_element()
+            }
             None => {
                 let mut status = div()
                     .flex_none()
@@ -727,23 +826,8 @@ impl RegistryBrowseProto {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(pill(
-                format!("your-agent-path-{index}"),
-                path,
-                theme,
-                false,
-            ))
-            .child({
-                let id = format!("your-agent-version-{index}");
-                let selector = id.clone();
-                div()
-                    .id(id)
-                    .debug_selector(move || selector.clone())
-                    .flex_none()
-                    .text_size(theme.typography.caption2)
-                    .text_color(theme.meta)
-                    .child(demo_version_text(demo, agent))
-            })
+            .child(path_slot)
+            .child(version_slot)
             .child(action);
         let row = controls::row_view(
             agent_label(
@@ -763,26 +847,23 @@ impl RegistryBrowseProto {
             trailing_column(trailing),
             theme,
         );
-        let mut row_container = div().flex().flex_col().child(row);
+        let mut row_container = div().w_full().flex().flex_col().child(row);
         if demo.state != DemoUpdateState::InFlight {
-            for (line_index, line) in status_lines.iter().enumerate() {
+            for line in status_lines {
                 row_container = row_container.child(
                     div()
-                        .pl(px(36.0))
+                        .pl(px(42.0))
                         .pr(px(12.0))
                         .text_size(theme.typography.footnote)
-                        .font_weight(if line_index == 0 {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(theme.subtitle)
-                        .child(line.clone()),
+                        .child(line),
                 );
             }
         }
         if demo.state == DemoUpdateState::UpdateAvailableUnverifiable {
             row_container = row_container.child(self.render_unverifiable_confirmation(
+                demo,
                 agent,
                 theme,
                 entity,
@@ -1178,6 +1259,8 @@ mod tests {
                 DemoUpdateState::InstallFailed,
             ]
         );
+        assert!(DEMO_INSTALLED_AGENTS[0].unverified);
+        assert_eq!(demo_action_label(DemoUpdateState::UpdateAvailableUnverifiable), None);
     }
 
     #[test]
@@ -1191,25 +1274,34 @@ mod tests {
             .iter()
             .find(|agent| agent.id == demo.registry_id)
             .unwrap();
-        assert_eq!(demo_version_text(demo, agent), "v7.4.0 → v7.4.23");
+        assert_eq!(
+            demo_version_text(demo, agent),
+            Some("v7.4.0 → v7.4.23".to_owned())
+        );
         assert_eq!(demo_action_label(demo.state), Some("Update"));
         assert_eq!(
             demo_status_lines(demo, agent),
-            Vec::<String>::new()
+            vec!["v7.4.0 stays in use until you relaunch · restored if the update fails".to_owned()]
         );
     }
 
     #[test]
     fn unverifiable_update_names_the_agent_version_and_unchecked_executable_risk() {
-        let copy = unverifiable_confirmation_copy("Google Antigravity", "1.0.0");
-        assert!(copy.contains("Google Antigravity"));
-        assert!(copy.contains("v1.0.0"));
-        assert!(copy.contains("publisher ships no checksum and none could be recovered"));
-        assert!(copy.contains("cannot tell whether this download is what the publisher intended"));
-        assert!(copy.contains("executable Tiller will run"));
-        assert_eq!(confirmation_primary_label(), "Update without verifying");
-        assert_eq!(confirmation_secondary_label(), "Cancel");
-        assert_eq!(confirmation_default_focus(), "Cancel");
+        assert_eq!(
+            unverifiable_confirmation_heading("Google Antigravity", "1.0.0"),
+            "No checksum for Google Antigravity v1.0.0"
+        );
+        assert_eq!(
+            unverifiable_confirmation_body(),
+            "Its publisher does not publish checksums and Tiller found none from any other source, so it cannot tell whether the file it downloaded from releases.antigravity.dev is the one they built. If it was tampered with, Tiller will run it with your permissions."
+        );
+        assert_eq!(
+            unverifiable_confirmation_survival("0.9.0"),
+            "v0.9.0 is restored if the update fails — not after it succeeds."
+        );
+        assert_eq!(confirmation_primary_label(), "Install unverified v1.0.0");
+        assert_eq!(confirmation_secondary_label(), "Keep v0.9.0");
+        assert_eq!(confirmation_default_focus(), "Keep v0.9.0");
     }
 
     #[test]
@@ -1260,15 +1352,40 @@ mod tests {
             .iter()
             .find(|agent| agent.id == demo.registry_id)
             .unwrap();
-        assert_eq!(demo_version_text(demo, agent), "v0.22.1");
+        assert_eq!(demo_version_text(demo, agent), None);
         assert_eq!(
             demo_status_lines(demo, agent),
             vec![
                 "Install failed.".to_owned(),
-                "The package manager returned an error.".to_owned(),
+                "The package manager could not install v0.22.1.".to_owned(),
             ]
         );
         assert_eq!(demo_action_label(demo.state), Some("Retry"));
+    }
+
+    #[test]
+    fn paths_keep_the_distinguishing_suffix_and_columns_stay_fixed() {
+        let kilo = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.registry_id == "kilo")
+            .unwrap();
+        assert_eq!(
+            demo_path_text(kilo),
+            Some(r"%LOCALAPPDATA%\Tiller\agents\kilo\bin".to_owned())
+        );
+        let qwen = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.registry_id == "qwen-code")
+            .unwrap();
+        assert_eq!(demo_path_text(qwen), None);
+        assert_eq!(DEMO_PATH_COLUMN_WIDTH, 220.0);
+        assert_eq!(DEMO_VERSION_COLUMN_WIDTH, 150.0);
+        assert_eq!(demo_version_marker(&DEMO_INSTALLED_AGENTS[0]), Some("unverified"));
+        let failed = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::UpdateFailed)
+            .unwrap();
+        assert_eq!(demo_version_marker(failed), Some("failed"));
     }
 
     #[test]
