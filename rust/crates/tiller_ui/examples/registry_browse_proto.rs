@@ -27,6 +27,134 @@ struct RegistryAgent {
     distribution: Value,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemoUpdateState {
+    UpToDate,
+    UpdateAvailableVerified,
+    UpdateAvailableUnverifiable,
+    InFlight,
+    UpdateFailed,
+    InstallFailed,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DemoInstalledAgent {
+    registry_id: &'static str,
+    installed_version: Option<&'static str>,
+    state: DemoUpdateState,
+    reason: Option<&'static str>,
+}
+
+const DEMO_INSTALLED_AGENTS: [DemoInstalledAgent; 6] = [
+    DemoInstalledAgent {
+        registry_id: "amp-acp",
+        installed_version: Some("0.9.0"),
+        state: DemoUpdateState::UpToDate,
+        reason: None,
+    },
+    DemoInstalledAgent {
+        registry_id: "kilo",
+        installed_version: Some("7.4.0"),
+        state: DemoUpdateState::UpdateAvailableVerified,
+        reason: None,
+    },
+    DemoInstalledAgent {
+        registry_id: "antigravity-acp",
+        installed_version: Some("0.9.0"),
+        state: DemoUpdateState::UpdateAvailableUnverifiable,
+        reason: None,
+    },
+    DemoInstalledAgent {
+        registry_id: "goose",
+        installed_version: Some("1.46.0"),
+        state: DemoUpdateState::InFlight,
+        reason: None,
+    },
+    DemoInstalledAgent {
+        registry_id: "harn",
+        installed_version: Some("0.10.115"),
+        state: DemoUpdateState::UpdateFailed,
+        reason: Some("The archive download was interrupted."),
+    },
+    DemoInstalledAgent {
+        registry_id: "qwen-code",
+        installed_version: None,
+        state: DemoUpdateState::InstallFailed,
+        reason: Some("The package manager returned an error."),
+    },
+];
+
+fn demo_version_text(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> String {
+    let Some(installed_version) = demo.installed_version else {
+        return format!("v{}", agent.version);
+    };
+    if matches!(
+        demo.state,
+        DemoUpdateState::UpdateAvailableVerified
+            | DemoUpdateState::UpdateAvailableUnverifiable
+            | DemoUpdateState::InFlight
+            | DemoUpdateState::UpdateFailed
+    ) {
+        format!("v{installed_version} → v{}", agent.version)
+    } else {
+        format!("v{installed_version}")
+    }
+}
+
+fn demo_action_label(state: DemoUpdateState) -> Option<&'static str> {
+    match state {
+        DemoUpdateState::UpToDate => Some("Installed"),
+        DemoUpdateState::UpdateAvailableVerified
+        | DemoUpdateState::UpdateAvailableUnverifiable => Some("Update"),
+        DemoUpdateState::InFlight => None,
+        DemoUpdateState::UpdateFailed | DemoUpdateState::InstallFailed => Some("Retry"),
+    }
+}
+
+fn demo_status_lines(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> Vec<String> {
+    let latest = format!("v{}", agent.version);
+    match demo.state {
+        DemoUpdateState::InFlight => vec![
+            format!("Updating to {latest}…"),
+            format!(
+                "v{} stays in use until you relaunch",
+                demo.installed_version.expect("in-flight demo has an old version")
+            ),
+        ],
+        DemoUpdateState::UpdateFailed => vec![
+            format!(
+                "Update to {latest} failed — v{} is still installed and working.",
+                demo.installed_version
+                    .expect("failed update demo has an old version")
+            ),
+            demo.reason.expect("failed update demo has a reason").to_owned(),
+        ],
+        DemoUpdateState::InstallFailed => vec![
+            "Install failed.".to_owned(),
+            demo.reason.expect("failed install demo has a reason").to_owned(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn unverifiable_confirmation_copy(agent_name: &str, latest_version: &str) -> String {
+    format!(
+        "Update {agent_name} to v{latest_version}? The publisher ships no checksum and none could be recovered, so Tiller cannot tell whether this download is what the publisher intended. This is an executable Tiller will run."
+    )
+}
+
+fn confirmation_primary_label() -> &'static str {
+    "Update without verifying"
+}
+
+fn confirmation_secondary_label() -> &'static str {
+    "Cancel"
+}
+
+fn confirmation_default_focus() -> &'static str {
+    confirmation_secondary_label()
+}
+
 /// Decode only the fields this prototype needs. The URL-valued icon is
 /// intentionally not rendered: a remote icon would make a network-free
 /// prototype pretend it can provide something it cannot.
@@ -349,6 +477,8 @@ struct RegistryBrowseProto {
     builtins: Vec<AgentAvailability>,
     search: String,
     search_focus: FocusHandle,
+    confirmation_focus: FocusHandle,
+    confirmation_focus_requested: bool,
     notice: Option<String>,
 }
 
@@ -362,6 +492,8 @@ impl RegistryBrowseProto {
                 .collect(),
             search: String::new(),
             search_focus: cx.focus_handle(),
+            confirmation_focus: cx.focus_handle().tab_stop(true),
+            confirmation_focus_requested: false,
             notice: None,
         }
     }
@@ -445,55 +577,185 @@ impl RegistryBrowseProto {
         row_shell(index, row)
     }
 
-    fn render_installed_demo_row(
+    fn render_unverifiable_confirmation(
         &self,
-        index: usize,
         agent: &RegistryAgent,
         theme: Theme,
         entity: Entity<Self>,
+        window: &Window,
     ) -> impl IntoElement {
-        let path = if cfg!(windows) {
-            r"%LOCALAPPDATA%\Tiller\agents\amp-acp\0.9.0\amp-acp.exe".to_owned()
+        let update_entity = entity.clone();
+        let cancel_entity = entity;
+        let cancel_focused = self.confirmation_focus.is_focused(window);
+        div()
+            .id("registry-unverifiable-confirmation")
+            .debug_selector(|| "registry-unverifiable-confirmation".to_owned())
+            .mx(px(36.0))
+            .mb(px(8.0))
+            .p(px(12.0))
+            .rounded(theme.radii.control)
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.hairline)
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .text_size(theme.typography.footnote)
+            .text_color(theme.subtitle)
+            .child(unverifiable_confirmation_copy(&agent.name, &agent.version))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        action_affordance(
+                            "registry-confirm-unverified".to_owned(),
+                            confirmation_primary_label(),
+                            theme,
+                            update_entity,
+                            "Update without verifying is not wired in this prototype."
+                                .to_owned(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .id("registry-confirm-cancel")
+                            .debug_selector(|| "registry-confirm-cancel".to_owned())
+                            .track_focus(&self.confirmation_focus)
+                            .focusable()
+                            .tab_stop(true)
+                            .px(px(10.0))
+                            .py(px(3.0))
+                            .rounded(theme.radii.control)
+                            .border_1()
+                            .border_color(if cancel_focused {
+                                theme.selection_ring
+                            } else {
+                                theme.hairline
+                            })
+                            .text_size(theme.typography.caption2)
+                            .text_color(theme.title)
+                            .hover(|style| style.bg(theme.row_hover))
+                            .cursor(CursorStyle::PointingHand)
+                            .on_click(move |_, _, cx| {
+                                cancel_entity.update(cx, |prototype, cx| {
+                                    prototype.notice = Some(
+                                        "Update canceled in this prototype.".to_owned(),
+                                    );
+                                    cx.notify();
+                                });
+                            })
+                            .child(confirmation_default_focus()),
+                    ),
+            )
+    }
+
+    fn render_demo_registry_row(
+        &self,
+        index: usize,
+        demo: &DemoInstalledAgent,
+        agent: &RegistryAgent,
+        theme: Theme,
+        entity: Entity<Self>,
+        window: &Window,
+    ) -> impl IntoElement {
+        let path = if let Some(version) = demo.installed_version {
+            if cfg!(windows) {
+                format!(
+                    r"%LOCALAPPDATA%\Tiller\agents\{}\{}",
+                    demo.registry_id, version
+                )
+            } else {
+                format!("~/.local/share/tiller/agents/{}/{}", demo.registry_id, version)
+            }
         } else {
-            "~/.local/share/tiller/agents/amp-acp/0.9.0/amp-acp".to_owned()
+            "—".to_owned()
         };
-        let uninstall = action_affordance(
-            "your-agent-uninstall-amp".to_owned(),
-            "Uninstall",
-            theme,
-            entity,
-            "Uninstall is not wired in this prototype.".to_owned(),
-        );
+        let status_lines = demo_status_lines(demo, agent);
+        let action = match demo_action_label(demo.state) {
+            Some("Installed") => pill(
+                format!("your-agent-state-{index}"),
+                "Installed".to_owned(),
+                theme,
+                false,
+            )
+            .into_any_element(),
+            Some("Update") => action_affordance(
+                format!("your-agent-update-{index}"),
+                "Update",
+                theme,
+                entity.clone(),
+                format!("Update is not wired in this prototype ({})", agent.name),
+            )
+            .into_any_element(),
+            Some("Retry") => action_affordance(
+                format!("your-agent-retry-{index}"),
+                "Retry",
+                theme,
+                entity.clone(),
+                format!("Retry is not wired in this prototype ({})", agent.name),
+            )
+            .into_any_element(),
+            None => {
+                let mut status = div()
+                    .flex_none()
+                    .max_w(px(300.0))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(2.0));
+                for (line_index, line) in status_lines.iter().enumerate() {
+                    status = status.child(
+                        div()
+                            .text_size(theme.typography.footnote)
+                            .text_color(if line_index == 0 {
+                                theme.title
+                            } else {
+                                theme.subtitle
+                            })
+                            .child(line.clone()),
+                    );
+                }
+                status.into_any_element()
+            }
+            _ => unreachable!("unknown demo action label"),
+        };
         let trailing = div()
             .flex_none()
             .flex()
             .items_center()
             .gap(px(8.0))
             .child(pill(
-                "your-agent-installed-path".to_owned(),
+                format!("your-agent-path-{index}"),
                 path,
                 theme,
                 false,
             ))
-            .child(version_label(
-                "your-agent-installed-version".to_owned(),
-                Some(agent.version.as_str()),
-                theme,
-            ))
-            .child(pill(
-                "your-agent-installed-state".to_owned(),
-                "Installed".to_owned(),
-                theme,
-                false,
-            ))
-            .child(uninstall);
+            .child({
+                let id = format!("your-agent-version-{index}");
+                let selector = id.clone();
+                div()
+                    .id(id)
+                    .debug_selector(move || selector.clone())
+                    .flex_none()
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.meta)
+                    .child(demo_version_text(demo, agent))
+            })
+            .child(action);
         let row = controls::row_view(
             agent_label(
                 Icon::Sparkles,
                 theme.meta,
                 agent.name.clone(),
                 None,
-                "Installed by Tiller from the ACP registry.".to_owned(),
+                if demo.state == DemoUpdateState::InstallFailed {
+                    "Install requested from the ACP registry.".to_owned()
+                } else {
+                    "Installed by Tiller from the ACP registry.".to_owned()
+                },
                 None,
                 true,
                 theme,
@@ -501,10 +763,36 @@ impl RegistryBrowseProto {
             trailing_column(trailing),
             theme,
         );
-        row_shell(index, row)
+        let mut row_container = div().flex().flex_col().child(row);
+        if demo.state != DemoUpdateState::InFlight {
+            for (line_index, line) in status_lines.iter().enumerate() {
+                row_container = row_container.child(
+                    div()
+                        .pl(px(36.0))
+                        .pr(px(12.0))
+                        .text_size(theme.typography.footnote)
+                        .font_weight(if line_index == 0 {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(theme.subtitle)
+                        .child(line.clone()),
+                );
+            }
+        }
+        if demo.state == DemoUpdateState::UpdateAvailableUnverifiable {
+            row_container = row_container.child(self.render_unverifiable_confirmation(
+                agent,
+                theme,
+                entity,
+                window,
+            ));
+        }
+        row_shell(index, row_container)
     }
 
-    fn render_your_agents(&self, theme: Theme, entity: Entity<Self>) -> Div {
+    fn render_your_agents(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> Div {
         let mut card = controls::card(theme);
         for (index, availability) in self.builtins.iter().enumerate() {
             if index > 0 {
@@ -512,14 +800,22 @@ impl RegistryBrowseProto {
             }
             card = card.child(self.render_builtin_row(index, availability, theme));
         }
-        if let Some(agent) = self.registry.iter().find(|agent| agent.id == INSTALLED_DEMO_ID) {
-            card = card.child(controls::separator(theme));
-            card = card.child(self.render_installed_demo_row(
-                self.builtins.len(),
-                agent,
-                theme,
-                entity,
-            ));
+        for (demo_index, demo) in DEMO_INSTALLED_AGENTS.iter().enumerate() {
+            if let Some(agent) = self
+                .registry
+                .iter()
+                .find(|agent| agent.id == demo.registry_id)
+            {
+                card = card.child(controls::separator(theme));
+                card = card.child(self.render_demo_registry_row(
+                    self.builtins.len() + demo_index,
+                    demo,
+                    agent,
+                    theme,
+                    entity.clone(),
+                    window,
+                ));
+            }
         }
         card
     }
@@ -662,6 +958,11 @@ impl Render for RegistryBrowseProto {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let entity = cx.entity();
+        if !self.confirmation_focus_requested {
+            self.confirmation_focus_requested = true;
+            let focus = self.confirmation_focus.clone();
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        }
         div()
             .id("registry-browse-proto")
             .size_full()
@@ -692,7 +993,7 @@ impl Render for RegistryBrowseProto {
                     })
                     .child(controls::section(
                         "Your agents",
-                        self.render_your_agents(theme, entity.clone()),
+                        self.render_your_agents(theme, entity.clone(), window),
                         theme,
                     ))
                     .child(controls::section(
@@ -858,6 +1159,116 @@ mod tests {
     fn missing_versions_render_no_placeholder_text() {
         assert_eq!(version_text(None), None);
         assert_eq!(version_text(Some("1.2.3")), Some("v1.2.3".to_owned()));
+    }
+
+    #[test]
+    fn update_demo_rows_cover_every_requested_state() {
+        assert_eq!(DEMO_INSTALLED_AGENTS.len(), 6);
+        assert_eq!(
+            DEMO_INSTALLED_AGENTS
+                .iter()
+                .map(|demo| demo.state)
+                .collect::<Vec<_>>(),
+            vec![
+                DemoUpdateState::UpToDate,
+                DemoUpdateState::UpdateAvailableVerified,
+                DemoUpdateState::UpdateAvailableUnverifiable,
+                DemoUpdateState::InFlight,
+                DemoUpdateState::UpdateFailed,
+                DemoUpdateState::InstallFailed,
+            ]
+        );
+    }
+
+    #[test]
+    fn update_rows_show_old_and_new_versions_and_the_right_gesture() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let demo = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.registry_id == "kilo")
+            .unwrap();
+        let agent = registry
+            .iter()
+            .find(|agent| agent.id == demo.registry_id)
+            .unwrap();
+        assert_eq!(demo_version_text(demo, agent), "v7.4.0 → v7.4.23");
+        assert_eq!(demo_action_label(demo.state), Some("Update"));
+        assert_eq!(
+            demo_status_lines(demo, agent),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn unverifiable_update_names_the_agent_version_and_unchecked_executable_risk() {
+        let copy = unverifiable_confirmation_copy("Google Antigravity", "1.0.0");
+        assert!(copy.contains("Google Antigravity"));
+        assert!(copy.contains("v1.0.0"));
+        assert!(copy.contains("publisher ships no checksum and none could be recovered"));
+        assert!(copy.contains("cannot tell whether this download is what the publisher intended"));
+        assert!(copy.contains("executable Tiller will run"));
+        assert_eq!(confirmation_primary_label(), "Update without verifying");
+        assert_eq!(confirmation_secondary_label(), "Cancel");
+        assert_eq!(confirmation_default_focus(), "Cancel");
+    }
+
+    #[test]
+    fn update_in_flight_and_failure_copy_preserve_the_old_agent_state() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let updating = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::InFlight)
+            .unwrap();
+        let updating_agent = registry
+            .iter()
+            .find(|agent| agent.id == updating.registry_id)
+            .unwrap();
+        assert_eq!(
+            demo_status_lines(updating, updating_agent),
+            vec![
+                "Updating to v1.47.0…".to_owned(),
+                "v1.46.0 stays in use until you relaunch".to_owned(),
+            ]
+        );
+
+        let failed = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::UpdateFailed)
+            .unwrap();
+        let failed_agent = registry
+            .iter()
+            .find(|agent| agent.id == failed.registry_id)
+            .unwrap();
+        assert_eq!(
+            demo_status_lines(failed, failed_agent),
+            vec![
+                "Update to v0.10.116 failed — v0.10.115 is still installed and working.".to_owned(),
+                "The archive download was interrupted.".to_owned(),
+            ]
+        );
+        assert_eq!(demo_action_label(failed.state), Some("Retry"));
+    }
+
+    #[test]
+    fn failed_install_has_no_false_reassurance_and_can_retry() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let demo = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::InstallFailed)
+            .unwrap();
+        let agent = registry
+            .iter()
+            .find(|agent| agent.id == demo.registry_id)
+            .unwrap();
+        assert_eq!(demo_version_text(demo, agent), "v0.22.1");
+        assert_eq!(
+            demo_status_lines(demo, agent),
+            vec![
+                "Install failed.".to_owned(),
+                "The package manager returned an error.".to_owned(),
+            ]
+        );
+        assert_eq!(demo_action_label(demo.state), Some("Retry"));
     }
 
     #[test]
