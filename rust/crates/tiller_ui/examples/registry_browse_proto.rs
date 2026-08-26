@@ -54,6 +54,10 @@ fn demo_fixed_slot(width: f32) -> Div {
     div().w(px(width)).min_w(px(width)).flex_none()
 }
 
+fn demo_version_slot() -> Div {
+    demo_fixed_slot(DEMO_VERSION_COLUMN_WIDTH).ml(px(DEMO_COLUMN_GAP))
+}
+
 const DEMO_INSTALLED_AGENTS: [DemoInstalledAgent; 6] = [
     DemoInstalledAgent {
         registry_id: "amp-acp",
@@ -744,8 +748,7 @@ impl RegistryBrowseProto {
             ));
         }
 
-        let mut version_slot = demo_fixed_slot(DEMO_VERSION_COLUMN_WIDTH)
-            .flex()
+        let mut version_slot = demo_version_slot().flex()
             .items_center()
             .justify_end()
             .gap(px(4.0));
@@ -1394,9 +1397,10 @@ mod tests {
         use gpui::Styled;
 
         let mut path_slot = demo_fixed_slot(DEMO_PATH_COLUMN_WIDTH);
-        let mut version_slot = demo_fixed_slot(DEMO_VERSION_COLUMN_WIDTH);
+        let mut version_slot = demo_version_slot();
         assert!(Styled::style(&mut path_slot).min_size.width.is_some());
         assert!(Styled::style(&mut version_slot).min_size.width.is_some());
+        assert!(Styled::style(&mut version_slot).margin.left.is_some());
         assert_eq!(Styled::style(&mut path_slot).flex_shrink, Some(0.0));
         assert_eq!(Styled::style(&mut version_slot).flex_shrink, Some(0.0));
         assert!(DEMO_COLUMN_GAP > 0.0);
