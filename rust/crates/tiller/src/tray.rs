@@ -68,6 +68,8 @@ pub type SharedRoster = Arc<Mutex<Vec<TrayRosterEntry>>>;
 pub type TrayRequestQueue = Arc<Mutex<Vec<TrayRequest>>>;
 
 const NO_ACTIVE_AGENTS_LABEL: &str = "No active agents";
+const OPEN_TILLER_LABEL: &str = "Open Tiller";
+const QUIT_TILLER_LABEL: &str = "Quit Tiller";
 
 fn roster_menu_label(entry: &TrayRosterEntry) -> String {
     format!(
@@ -210,10 +212,22 @@ impl ksni::Tray for AgentRosterTray {
                 );
             }
         }
+        items.push(
+            StandardItem {
+                label: OPEN_TILLER_LABEL.into(),
+                activate: Box::new(|this: &mut Self| {
+                    if let Ok(mut requests) = this.requests.lock() {
+                        requests.push(TrayRequest::ShowWindow);
+                    }
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
-                label: "Quit Tiller".into(),
+                label: QUIT_TILLER_LABEL.into(),
                 activate: Box::new(|this: &mut Self| {
                     if let Ok(mut requests) = this.requests.lock() {
                         requests.push(TrayRequest::Quit);
@@ -259,6 +273,8 @@ const WINDOWS_TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 1;
 const WINDOWS_TRAY_SHUTDOWN_MESSAGE: u32 = WM_APP + 2;
 #[cfg(target_os = "windows")]
 const WINDOWS_TRAY_FIRST_ROSTER_COMMAND: u32 = 1;
+#[cfg(target_os = "windows")]
+const WINDOWS_TRAY_OPEN_COMMAND: u32 = 0x7ffe;
 #[cfg(target_os = "windows")]
 const WINDOWS_TRAY_QUIT_COMMAND: u32 = 0x7fff;
 
@@ -337,9 +353,20 @@ fn show_windows_menu(hwnd: HWND, state: &WindowsTrayState) {
         }
     }
 
+    let open_label = wide(OPEN_TILLER_LABEL);
+    // `open_label` remains allocated while AppendMenuW copies its text.
+    let _ = unsafe {
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            WINDOWS_TRAY_OPEN_COMMAND as usize,
+            open_label.as_ptr(),
+        )
+    };
+
     // A null item string is the documented separator form of AppendMenuW.
     let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) };
-    let quit_label = wide("Quit Tiller");
+    let quit_label = wide(QUIT_TILLER_LABEL);
     // `quit_label` remains allocated while AppendMenuW copies its text.
     let _ = unsafe {
         AppendMenuW(
@@ -377,6 +404,10 @@ fn show_windows_menu(hwnd: HWND, state: &WindowsTrayState) {
     if command == WINDOWS_TRAY_QUIT_COMMAND {
         if let Ok(mut requests) = state.requests.lock() {
             requests.push(TrayRequest::Quit);
+        }
+    } else if command == WINDOWS_TRAY_OPEN_COMMAND {
+        if let Ok(mut requests) = state.requests.lock() {
+            requests.push(TrayRequest::ShowWindow);
         }
     } else if command >= WINDOWS_TRAY_FIRST_ROSTER_COMMAND {
         let index = (command - WINDOWS_TRAY_FIRST_ROSTER_COMMAND) as usize;
@@ -610,6 +641,13 @@ mod tests {
         };
 
         assert_eq!(roster_menu_label(&entry), "feature — Tiller (needs input)");
+    }
+
+    #[test]
+    fn tray_action_labels_are_nonempty_and_distinct() {
+        assert!(!OPEN_TILLER_LABEL.is_empty());
+        assert!(!QUIT_TILLER_LABEL.is_empty());
+        assert_ne!(OPEN_TILLER_LABEL, QUIT_TILLER_LABEL);
     }
 
     #[test]
