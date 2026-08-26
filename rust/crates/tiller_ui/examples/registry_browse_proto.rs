@@ -74,6 +74,69 @@ fn is_installable(agent: &RegistryAgent) -> bool {
     has_binary || has_npx
 }
 
+fn requirements_line(agent: &RegistryAgent) -> &'static str {
+    if agent
+        .distribution
+        .get("npx")
+        .is_some_and(Value::is_object)
+    {
+        return "npm package · runs through npx";
+    }
+
+    if let Some(binary) = agent.distribution.get("binary").and_then(Value::as_object) {
+        match binary.get(TARGET_PLATFORM).and_then(Value::as_object) {
+            Some(artifact) => {
+                let archive = artifact.get("archive").and_then(Value::as_str);
+                if archive.is_some_and(|archive| {
+                    archive.ends_with(".tar.bz2") || archive.ends_with(".tar.xz")
+                }) {
+                    return "Windows build published in an archive Tiller cannot open";
+                }
+                return "prebuilt binary · Windows x64";
+            }
+            None => return "No Windows build — other platforms only",
+        }
+    }
+
+    if agent
+        .distribution
+        .get("uvx")
+        .is_some_and(Value::is_object)
+    {
+        return "Python package · needs uvx, which Tiller does not run";
+    }
+
+    unreachable!("registry agent has no recognized distribution: {}", agent.id)
+}
+
+fn visible_registry_agents<'a>(
+    registry: &'a [RegistryAgent],
+    query: &str,
+) -> Vec<(usize, &'a RegistryAgent)> {
+    let query = query.trim().to_lowercase();
+    let mut visible = registry
+        .iter()
+        .enumerate()
+        .filter(|(_, agent)| {
+            query.is_empty()
+                || agent.name.to_lowercase().contains(&query)
+                || agent.description.to_lowercase().contains(&query)
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by_cached_key(|(_, agent)| agent.name.to_lowercase());
+    visible
+}
+
+fn browse_action_label(agent: &RegistryAgent) -> Option<&'static str> {
+    if agent.id == INSTALLED_DEMO_ID {
+        Some("Installed")
+    } else if is_installable(agent) {
+        Some("Install")
+    } else {
+        None
+    }
+}
+
 fn builtin_registry_id(adapter_id: &str) -> Option<&'static str> {
     match adapter_id {
         "claude" => Some("claude-acp"),
@@ -128,7 +191,11 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
         .child(label)
 }
 
-fn version_label(id: String, version: &str, theme: Theme) -> impl IntoElement {
+fn version_text(version: Option<&str>) -> Option<String> {
+    version.map(|version| format!("v{version}"))
+}
+
+fn version_label(id: String, version: Option<&str>, theme: Theme) -> impl IntoElement {
     let selector = id.clone();
     div()
         .id(id)
@@ -136,7 +203,7 @@ fn version_label(id: String, version: &str, theme: Theme) -> impl IntoElement {
         .flex_none()
         .text_size(theme.typography.caption2)
         .text_color(theme.meta)
-        .child(format!("v{version}"))
+        .when_some(version_text(version), |this, version| this.child(version))
 }
 
 fn agent_name_line(
@@ -189,11 +256,23 @@ fn agent_label(
     name: String,
     version: Option<String>,
     description: String,
+    requirements: Option<String>,
     enabled: bool,
     theme: Theme,
 ) -> Div {
     let title_color = if enabled { theme.title } else { theme.meta };
     let description_color = if enabled { theme.subtitle } else { theme.text_ghost };
+    let mut text = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(agent_name_line(name, version, title_color, theme))
+        .child(agent_description_line(description, description_color, theme));
+    if let Some(requirements) = requirements {
+        text = text.child(agent_description_line(requirements, description_color, theme));
+    }
 
     div()
         .flex()
@@ -208,21 +287,25 @@ fn agent_label(
                 .justify_center()
                 .child(IconElement::new(icon, IconSize::Small).text_color(icon_color)),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(agent_name_line(name, version, title_color, theme))
-                .child(agent_description_line(description, description_color, theme)),
-        )
+        .child(text)
 }
 
 fn row_shell(index: usize, row: Div) -> impl IntoElement {
     row.id(("registry-proto-row", index))
         .debug_selector(move || format!("registry-proto-row-{index}"))
+}
+
+fn action_button_shell(label: &'static str, theme: Theme) -> Div {
+    let spacing = theme.cosmic.spacing;
+    div()
+        .flex_none()
+        .px(px(spacing.xs as f32))
+        .py(px(spacing.xxxs as f32))
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.callout)
+        .text_color(theme.title)
+        .bg(theme.primary_pill_bg)
+        .child(label)
 }
 
 fn action_affordance(
@@ -233,17 +316,9 @@ fn action_affordance(
     message: String,
 ) -> impl IntoElement {
     let selector = id.clone();
-    div()
+    action_button_shell(label, theme)
         .id(id)
         .debug_selector(move || selector.clone())
-        .flex_none()
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(theme.radii.row_card)
-        .text_size(theme.typography.caption2)
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.title)
-        .bg(theme.primary_pill_bg)
         .hover(|style| style.bg(theme.row_hover))
         .cursor(CursorStyle::PointingHand)
         .on_click(move |_, _, cx| {
@@ -253,7 +328,16 @@ fn action_affordance(
                 cx.notify();
             });
         })
-        .child(label)
+}
+
+fn trailing_column(control: impl IntoElement) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .child(control)
 }
 
 struct RegistryBrowseProto {
@@ -297,9 +381,7 @@ impl RegistryBrowseProto {
         availability: &AgentAvailability,
         theme: Theme,
     ) -> impl IntoElement {
-        let version = builtin_version(availability.id, &self.registry)
-            .map(str::to_owned)
-            .unwrap_or_else(|| "—".to_owned());
+        let version = builtin_version(availability.id, &self.registry);
         let description = format!(
             "Built-in: uses the {} binary on your PATH.",
             availability.id
@@ -324,7 +406,7 @@ impl RegistryBrowseProto {
         trailing = trailing
             .child(version_label(
                 format!("your-agent-version-{index}"),
-                &version,
+                version,
                 theme,
             ))
             .child(pill(
@@ -345,10 +427,11 @@ impl RegistryBrowseProto {
                 availability.display_name.to_owned(),
                 None,
                 description,
+                None,
                 true,
                 theme,
             ),
-            trailing,
+            trailing_column(trailing),
             theme,
         );
         row_shell(index, row)
@@ -368,7 +451,7 @@ impl RegistryBrowseProto {
         };
         let uninstall = action_affordance(
             "your-agent-uninstall-amp".to_owned(),
-            "⌫ Uninstall",
+            "Uninstall",
             theme,
             entity,
             "Uninstall is not wired in this prototype.".to_owned(),
@@ -386,7 +469,7 @@ impl RegistryBrowseProto {
             ))
             .child(version_label(
                 "your-agent-installed-version".to_owned(),
-                &agent.version,
+                Some(agent.version.as_str()),
                 theme,
             ))
             .child(pill(
@@ -403,10 +486,11 @@ impl RegistryBrowseProto {
                 agent.name.clone(),
                 None,
                 "Installed by Tiller from the ACP registry.".to_owned(),
+                None,
                 true,
                 theme,
             ),
-            trailing,
+            trailing_column(trailing),
             theme,
         );
         row_shell(index, row)
@@ -439,41 +523,48 @@ impl RegistryBrowseProto {
         theme: Theme,
         entity: Entity<Self>,
     ) -> impl IntoElement {
-        let installable = is_installable(agent);
-        let action = if installable {
-            action_affordance(
+        let action_label = browse_action_label(agent);
+        let enabled = action_label.is_some();
+        let action = match action_label {
+            Some("Install") => action_affordance(
                 format!("registry-install-{index}"),
                 "Install",
                 theme,
                 entity,
                 format!("Install is not wired in this prototype ({})", agent.name),
             )
-            .into_any_element()
-        } else {
-            pill(
-                format!("registry-reason-{index}"),
-                "Unsupported distribution".to_owned(),
+            .into_any_element(),
+            Some("Installed") => pill(
+                format!("registry-installed-{index}"),
+                "Installed".to_owned(),
                 theme,
-                true,
+                false,
             )
-            .into_any_element()
+            .into_any_element(),
+            None => div()
+                .flex_none()
+                .text_size(theme.typography.callout)
+                .text_color(theme.meta)
+                .child("Unavailable")
+                .into_any_element(),
+            _ => unreachable!("unknown browse action label"),
         };
-        let title_version = format!("v{}", agent.version);
         let row = controls::row_view(
             agent_label(
                 Icon::Sparkles,
-                if installable {
+                if enabled {
                     theme.meta
                 } else {
                     theme.text_ghost
                 },
                 agent.name.clone(),
-                Some(title_version),
+                Some(format!("v{}", agent.version)),
                 agent.description.clone(),
-                installable,
+                Some(requirements_line(agent).to_owned()),
+                enabled,
                 theme,
             ),
-            action,
+            trailing_column(action),
             theme,
         );
         row_shell(index, row)
@@ -530,23 +621,13 @@ impl RegistryBrowseProto {
     }
 
     fn render_browse(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> Div {
-        let query = self.search.trim().to_lowercase();
         let mut card = controls::card(theme).child(
             div()
                 .px(px(theme.cosmic.spacing.xs as f32))
                 .py(px(theme.cosmic.spacing.xs as f32))
                 .child(self.render_search(theme, entity.clone(), window)),
         );
-        let visible = self
-            .registry
-            .iter()
-            .enumerate()
-            .filter(|(_, agent)| {
-                query.is_empty()
-                    || agent.name.to_lowercase().contains(&query)
-                    || agent.description.to_lowercase().contains(&query)
-            })
-            .collect::<Vec<_>>();
+        let visible = visible_registry_agents(&self.registry, &self.search);
         if visible.is_empty() {
             card = card.child(controls::separator(theme)).child(
                 div()
@@ -701,5 +782,90 @@ mod tests {
             );
             assert_eq!(style.size.height, Some(expected_height));
         }
+    }
+
+    fn test_agent(id: &str, name: &str, distribution: serde_json::Value) -> RegistryAgent {
+        RegistryAgent {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            description: "test agent".to_owned(),
+            distribution,
+        }
+    }
+
+    #[test]
+    fn registry_requirements_use_only_distribution_and_platform_facts() {
+        use serde_json::json;
+
+        let cases = [
+            (
+                json!({"npx": {"package": "agent@1.0.0"}}),
+                "npm package · runs through npx",
+            ),
+            (
+                json!({"binary": {"windows-x86_64": {"archive": "agent.zip"}}}),
+                "prebuilt binary · Windows x64",
+            ),
+            (
+                json!({"binary": {"linux-x86_64": {"archive": "agent.tar.gz"}}}),
+                "No Windows build — other platforms only",
+            ),
+            (
+                json!({"binary": {"windows-x86_64": {"archive": "agent.tar.xz"}}}),
+                "Windows build published in an archive Tiller cannot open",
+            ),
+            (
+                json!({"uvx": {"package": "agent"}}),
+                "Python package · needs uvx, which Tiller does not run",
+            ),
+        ];
+        for (distribution, expected) in cases {
+            assert_eq!(requirements_line(&test_agent("test", "Test", distribution)), expected);
+        }
+
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        assert!(registry.iter().all(|agent| !requirements_line(agent).is_empty()));
+    }
+
+    #[test]
+    fn registry_rows_sort_by_display_name_and_installed_rows_have_no_install_action() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let names = visible_registry_agents(&registry, "")
+            .into_iter()
+            .take(4)
+            .map(|(_, agent)| agent.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Agoragentic", "Amp", "Auggie CLI", "Autohand Code"]);
+
+        let amp = registry.iter().find(|agent| agent.id == INSTALLED_DEMO_ID).unwrap();
+        let other = registry.iter().find(|agent| agent.id == "auggie").unwrap();
+        let unsupported = registry.iter().find(|agent| agent.id == "fast-agent").unwrap();
+        assert_eq!(browse_action_label(amp), Some("Installed"));
+        assert_eq!(browse_action_label(other), Some("Install"));
+        assert_eq!(browse_action_label(unsupported), None);
+    }
+
+    #[test]
+    fn missing_versions_render_no_placeholder_text() {
+        assert_eq!(version_text(None), None);
+        assert_eq!(version_text(Some("1.2.3")), Some("v1.2.3".to_owned()));
+    }
+
+    #[test]
+    fn browse_controls_are_right_aligned_and_use_install_button_chrome() {
+        use gpui::{JustifyContent, Styled};
+
+        let theme = Theme::dark();
+        let mut trailing = trailing_column(div().child("Install"));
+        assert_eq!(
+            Styled::style(&mut trailing).justify_content,
+            Some(JustifyContent::End)
+        );
+
+        let mut button = action_button_shell("Install", theme);
+        let style = Styled::style(&mut button);
+        assert_eq!(style.background, Some(theme.primary_pill_bg.into()));
+        assert_eq!(style.text.font_size, Some(theme.typography.callout.into()));
     }
 }
