@@ -4674,8 +4674,16 @@ impl Chat {
                 .w_full()
                 .flex()
                 .justify_end()
+                // #173: without this the row's flex child keeps its content
+                // width as a floor, so a message wider than the pane refuses
+                // to shrink and — being end-justified — spills off the *left*
+                // edge, where nothing can scroll to it. `max_w` never binds in
+                // that case, because the pane is already narrower than the cap.
+                .min_w_0()
                 .child(
                     div()
+                        .debug_selector(move || format!("user-bubble-{entry_index}"))
+                        .min_w_0()
                         .max_w(px(USER_PILL_MAX_WIDTH))
                         .rounded(theme.radii.user_pill)
                         .bg(colors.raised)
@@ -8671,6 +8679,42 @@ mod tests {
             "the animated border must track the pane exactly as the static one \r
              does, not hold it open at the transcript width: idle={idle_card:?} \r
              streaming={ring:?}"
+        );
+    }
+
+    /// #173: a user message longer than the pane must wrap inside it. The
+    /// bubble is end-justified, so when it refuses to shrink below its
+    /// content width the overflow goes off the *left* edge — off screen,
+    /// with nothing to scroll it back. `max_w(USER_PILL_MAX_WIDTH)` does not
+    /// save it: the pane is already narrower than that cap.
+    #[gpui::test]
+    async fn a_long_user_message_wraps_inside_a_narrow_pane(cx: &mut TestAppContext) {
+        let message = "Count slowly from 1 to 40, one number per line, nothing else, \r
+                       and do not stop until you reach the very end of the list."
+            .to_owned();
+        let (chat, cx) = chat_view(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(Entry::User(message));
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(420.0), px(600.0)));
+        refresh_frame(cx);
+
+        let bubble = (0..8)
+            .find_map(|index| {
+                let selector: &'static str =
+                    Box::leak(format!("user-bubble-{index}").into_boxed_str());
+                cx.debug_bounds(selector)
+            })
+            .expect("the user's message is drawn");
+        assert!(
+            bubble.left() >= px(0.0),
+            "the bubble must wrap inside the pane rather than spill off its \r
+             left edge, where nothing can scroll to it: {bubble:?}"
+        );
+        assert!(
+            bubble.size.width <= px(420.0),
+            "the bubble must be no wider than the pane it lives in: {bubble:?}"
         );
     }
 
