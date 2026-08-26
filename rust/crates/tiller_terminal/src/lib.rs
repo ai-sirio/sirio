@@ -874,6 +874,47 @@ fn resolve_style_color(color: StyleColor, colors: Option<&Colors>) -> Option<Til
     }
 }
 
+/// The working directory handed to a spawned PTY child. Strips the Windows
+/// verbatim prefix on Windows: `\\?\C:\a\b` becomes `C:\a\b` and
+/// `\\?\UNC\server\share\x` becomes `\\server\share\x`; on every other
+/// platform (and for any non-verbatim path) the input passes through
+/// untouched.
+///
+/// This is a **deliberate third copy** of an idiom already carried twice in
+/// this repo: `tiller_git::path_arg`/`tiller_git::strip_verbatim_prefix`
+/// (`crates/tiller_git/src/git.rs`) strip the prefix for paths leaving as
+/// *git arguments*, and `tiller_project::display_absolute_path`
+/// (`crates/tiller_project/src/domain.rs`) strips it for *display*. No new
+/// dependency is taken and neither existing copy is made public — the copies
+/// live independently on purpose. This one exists because a path handed to
+/// a **child process** as its working directory must not carry the prefix:
+/// `CreateProcess` accepts it, but `cmd.exe` then refuses to keep a `\\?\`
+/// directory as its cwd (it reads it as UNC) and silently falls back to the
+/// Windows directory — so every command in the terminal runs against the
+/// wrong directory (#150).
+///
+/// [`validate_working_directory`] deliberately keeps the original verbatim
+/// path: `std::fs::metadata` handles it fine and keeps its long-path
+/// capability. Only the child's cwd is stripped.
+fn spawn_cwd(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let string = path.to_string_lossy();
+        let rest = string.strip_prefix(r"\\?\");
+        if let Some(rest) = rest {
+            if let Some(unc) = rest.strip_prefix("UNC\\") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest.to_string());
+        }
+        path.to_path_buf()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
 impl TerminalHandle {
     fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
@@ -943,7 +984,7 @@ impl TerminalHandle {
         if let Some(pane_id) = pane_id {
             command.env("TILLER_PANE_ID", pane_id);
         }
-        command.cwd(working_directory);
+        command.cwd(spawn_cwd(working_directory));
 
         let child = pair.slave.spawn_command(command).context("spawning PTY child")?;
         drop(pair.slave);
@@ -3476,6 +3517,36 @@ mod tests {
             "tiller-terminal-test-{name}-{}-{serial}",
             std::process::id()
         ))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_cwd_strips_the_windows_verbatim_prefix() {
+        assert_eq!(
+            spawn_cwd(Path::new(r"\\?\C:\Users\me\project")),
+            Path::new(r"C:\Users\me\project")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_cwd_converts_the_verbatim_unc_form_to_a_dos_unc_path() {
+        assert_eq!(
+            spawn_cwd(Path::new(r"\\?\UNC\server\share\x")),
+            Path::new(r"\\server\share\x")
+        );
+    }
+
+    #[test]
+    fn spawn_cwd_passes_ordinary_paths_through_unchanged() {
+        assert_eq!(
+            spawn_cwd(Path::new("/tmp/note.md")),
+            Path::new("/tmp/note.md")
+        );
+        assert_eq!(
+            spawn_cwd(Path::new("relative/path")),
+            Path::new("relative/path")
+        );
     }
 
     // -----------------------------------------------------------------------
