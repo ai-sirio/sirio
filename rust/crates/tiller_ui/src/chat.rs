@@ -3973,6 +3973,15 @@ impl Chat {
         }
     }
 
+    /// Estimates a marker column from its widest marker's character count.
+    fn markdown_list_marker_width(marker_chars: usize, headline: Pixels) -> Pixels {
+        // This is an estimate: gpui cannot measure text before the frame, and
+        // render_markdown_list has no Window. Its safe failure mode is a
+        // slightly wide column, never clipped or wrapped text because the
+        // marker is nowrap.
+        px((marker_chars as f32 * f32::from(headline) * 0.6).max(18.0))
+    }
+
     fn render_markdown_list(
         kind: ListKind,
         items: Vec<ListItem>,
@@ -3985,6 +3994,15 @@ impl Chat {
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
+        let marker_chars = match kind {
+            ListKind::Bullet => 1,
+            ListKind::Ordered { start } => {
+                format!("{}.", start + items.len().saturating_sub(1) as u64)
+                    .chars()
+                    .count()
+            }
+        };
+        let marker_width = Self::markdown_list_marker_width(marker_chars, typography.headline);
         div()
             .w_full()
             .pl(px(18.0 * depth as f32))
@@ -4045,7 +4063,10 @@ impl Chat {
                         .gap(px(8.0))
                         .child(
                             div()
-                                .w(px(18.0))
+                                .debug_selector(|| "markdown-list-marker".into())
+                                .w(marker_width)
+                                .flex_none()
+                                .whitespace_nowrap()
                                 .text_size(typography.headline)
                                 .text_color(colors.file_link)
                                 .child(Self::render_plain_text(
@@ -8325,6 +8346,37 @@ mod tests {
         cx.simulate_input(text);
     }
 
+    struct MarkdownHarness {
+        document: Document,
+    }
+
+    impl Render for MarkdownHarness {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = *Theme::get(cx);
+            div().size_full().child(
+                div()
+                    .id("assistant-response-0")
+                    .debug_selector(|| "assistant-response-0".into())
+                    .w_full()
+                    .child(Chat::render_markdown(
+                        self.document.clone(),
+                        &theme,
+                        None,
+                        0,
+                        None,
+                    )),
+            )
+        }
+    }
+
+    fn markdown_view(cx: &mut TestAppContext, markdown: String) -> VisualTestContext {
+        cx.update(Theme::init);
+        let window = cx.open_window(size(px(900.0), px(900.0)), move |_, _| MarkdownHarness {
+            document: parse(&markdown),
+        });
+        VisualTestContext::from_window(window.into(), cx)
+    }
+
     #[test]
     fn streaming_border_angle_rotates_one_revolution() {
         assert_eq!(streaming_border_angle(0.0), 0.0);
@@ -8432,6 +8484,79 @@ mod tests {
             card.size.width,
             px(TRANSCRIPT_WIDTH),
             "the composer stays capped below a wider pane: card={card:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn fifteen_item_ordered_list_keeps_each_marker_on_its_item_line(
+        cx: &mut TestAppContext,
+    ) {
+        let markdown = (1..=15)
+            .map(|number| format!("{number}. item {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cx = markdown_view(cx, markdown);
+        refresh_frame(&mut cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the ordered list response is drawn");
+        assert!(
+            response.size.height <= px(450.0),
+            "a wrapped marker would add a stray period line: response={response:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds("markdown-list-marker")
+                .expect("the final marker is drawn")
+                .size
+                .width,
+            px(27.0),
+            "the fifteen-item list sizes its marker column for three glyphs"
+        );
+    }
+
+    #[gpui::test]
+    async fn three_digit_ordered_markers_keep_the_item_column_aligned(cx: &mut TestAppContext) {
+        let markdown = (98..=102)
+            .map(|number| format!("{number}. item {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cx = markdown_view(cx, markdown);
+        refresh_frame(&mut cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the ordered list response is drawn");
+        assert!(
+            response.size.height <= px(150.0),
+            "three-digit markers must stay intact instead of wrapping: response={response:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds("markdown-list-marker")
+                .expect("the final marker is drawn")
+                .size
+                .width,
+            px(36.0),
+            "the item column starts after a four-glyph marker column"
+        );
+    }
+
+    #[gpui::test]
+    async fn nine_item_ordered_list_keeps_the_existing_marker_column(cx: &mut TestAppContext) {
+        let markdown = (1..=9)
+            .map(|number| format!("{number}. item {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cx = markdown_view(cx, markdown);
+        refresh_frame(&mut cx);
+
+        assert_eq!(
+            cx.debug_bounds("markdown-list-marker")
+                .expect("the final marker is drawn")
+                .size
+                .width,
+            px(18.0),
+            "the common two-glyph case keeps its 18px marker column"
         );
     }
 
