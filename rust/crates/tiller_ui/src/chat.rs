@@ -5,19 +5,21 @@
 //! and view model live here so the transcript renderer stays deterministic.
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
-    InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
-    ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
-    canvas, div, list, point, prelude::*, px, quad, rgb, transparent_black,
+    Animation, AnimationExt as _, AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle,
+    Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId,
+    ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window,
+    actions, canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad,
+    rgb, transparent_black,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::Duration;
 use tiller_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
     ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
@@ -49,6 +51,15 @@ pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
+
+/// The composer's animated-border sweep, in gradient degrees. gpui has no
+/// conic gradient, so the Swift app's rotating ring is approximated by a
+/// linear gradient whose angle turns once per animation cycle. `fract` keeps
+/// the end of a cycle from landing on a full 360°, which would flip back to
+/// the same frame the next cycle opens with and read as a stutter.
+fn streaming_border_angle(delta: f32) -> f32 {
+    delta.fract() * 360.0
+}
 
 /// The user turn's pill: rounded, right-aligned, capped at waku's bubble
 /// width. The assistant reply has no container at all.
@@ -6932,19 +6943,22 @@ impl Chat {
         // ending in the circular send control. The card is waku's: max
         // 720px, 13px radius, `composer` fill, a hairline border that turns
         // coral while focused.
-        div()
+        let composer = div()
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
-            .w(px(TRANSCRIPT_WIDTH))
+            .when(self.streaming, |this| this.w_full())
+            .when(!self.streaming, |this| {
+                this.w(px(TRANSCRIPT_WIDTH))
+                    .border_1()
+                    .border_color(if focused {
+                        colors.accent
+                    } else {
+                        colors.hairline
+                    })
+            })
             .rounded(theme.radii.composer)
             .bg(colors.composer)
-            .border_1()
-            .border_color(if focused {
-                colors.accent
-            } else {
-                colors.hairline
-            })
             .p(px(10.0))
             .flex()
             .flex_col()
@@ -7110,7 +7124,32 @@ impl Chat {
             .children(chat_history_menu)
             .children(model_picker)
             .children(mode_picker)
-            .children(context_popover)
+            .children(context_popover);
+
+        if self.streaming {
+            let orange = rgb(0xf5a623);
+            div()
+                .id("composer-streaming-border")
+                .debug_selector(|| "composer-streaming-border".into())
+                .w(px(TRANSCRIPT_WIDTH))
+                .rounded(theme.radii.composer)
+                .p(px(1.0))
+                .child(composer)
+                .with_animation(
+                    "composer-streaming-border",
+                    Animation::new(Duration::from_secs(2)).repeat(),
+                    move |element, delta| {
+                        element.bg(linear_gradient(
+                            streaming_border_angle(delta),
+                            linear_color_stop(orange, 0.0),
+                            linear_color_stop(orange.opacity(0.12), 1.0),
+                        ))
+                    },
+                )
+                .into_any_element()
+        } else {
+            composer.into_any_element()
+        }
     }
 }
 
@@ -8252,6 +8291,69 @@ mod tests {
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input(text);
+    }
+
+    #[test]
+    fn streaming_border_angle_rotates_one_revolution() {
+        assert_eq!(streaming_border_angle(0.0), 0.0);
+        assert_eq!(streaming_border_angle(0.5), 180.0);
+        assert!(streaming_border_angle(1.0) < 360.0);
+
+        let angles = [0.0, 0.25, 0.5, 0.75, 0.999].map(streaming_border_angle);
+        assert!(angles.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[gpui::test]
+    async fn the_rotating_border_wraps_the_composer_only_while_streaming(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &[]);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-streaming-border").is_none(),
+            "an idle composer keeps its static border"
+        );
+        // The static border lives on the card itself, the animated one on a
+        // wrapper the card sits inside — so the card's own width legitimately
+        // differs by the wrapper's inset. What must not move is the card's
+        // outer footprint and the text the user is typing inside it.
+        let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
+        let idle_input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let wrapper = cx
+            .debug_bounds("composer-streaming-border")
+            .expect("a working agent wraps the composer in the animated border");
+        let streaming_input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+        assert_eq!(
+            idle_card.size, wrapper.size,
+            "the animated border must occupy exactly the footprint the static one did"
+        );
+        assert_eq!(
+            idle_input, streaming_input,
+            "the draft text must not shift when the animated border takes over"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = false;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-streaming-border").is_none(),
+            "the static border returns the moment streaming ends"
+        );
     }
 
     #[test]
