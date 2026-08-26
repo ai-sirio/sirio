@@ -13271,6 +13271,7 @@ fn resolve_tillerctl_path(
     environment: &BTreeMap<String, String>,
 ) -> Result<PathBuf, String> {
     let destination = xdg_data_home_for(environment).join(tillerctl_install_subpath());
+    #[cfg(unix)]
     if is_executable_file(&destination) {
         return Ok(destination);
     }
@@ -13286,21 +13287,24 @@ fn resolve_tillerctl_path(
         candidates.push(path);
     }
 
-    let source = candidates
+    let source = match candidates
         .iter()
         .find(|candidate| is_executable_file(candidate))
         .map(|candidate| {
             std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
-        })
-        .ok_or_else(|| {
-            format!(
+        }) {
+        Some(source) => source,
+        None if is_executable_file(&destination) => return Ok(destination),
+        None => {
+            return Err(format!(
                 "tillerctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
                 current_exe
                     .parent()
                     .map(|path| path.join(tillerctl_binary_name()).display().to_string())
                     .unwrap_or_else(|| "the app executable directory".to_string())
-            )
-        })?;
+            ));
+        }
+    };
 
     install_tillerctl(&source, &destination).map(|()| destination)
 }
@@ -13390,6 +13394,22 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+fn installed_copy_is_stale(source: &Path, destination: &Path) -> bool {
+    let Ok(source_metadata) = std::fs::metadata(source) else {
+        return false;
+    };
+    let Ok(destination_metadata) = std::fs::metadata(destination) else {
+        return true;
+    };
+
+    source_metadata.len() != destination_metadata.len()
+        || matches!(
+            (source_metadata.modified(), destination_metadata.modified()),
+            (Ok(source_modified), Ok(destination_modified))
+                if source_modified > destination_modified
+        )
+}
+
 fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
     let parent = destination.parent().ok_or_else(|| {
         format!(
@@ -13400,9 +13420,16 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
 
-    if is_executable_file(destination) {
+    let destination_is_executable = is_executable_file(destination);
+    #[cfg(unix)]
+    if destination_is_executable {
         return Ok(());
     }
+    #[cfg(not(unix))]
+    if destination_is_executable && !installed_copy_is_stale(source, destination) {
+        return Ok(());
+    }
+
     // `symlink_metadata` describes the link itself and `is_executable_file`
     // follows it, so the two disagree on exactly one thing: a link whose
     // target is gone. That is our own install after a rebuild moved or
@@ -13417,13 +13444,13 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
                 )
             })?;
         }
-        Ok(_) => {
+        Ok(_) if !destination_is_executable => {
             return Err(format!(
                 "cannot install tillerctl at {}: a non-executable file already exists",
                 destination.display()
             ));
         }
-        Err(_) => {}
+        Ok(_) | Err(_) => {}
     }
 
     #[cfg(unix)]
@@ -13435,14 +13462,18 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
     })?;
 
     #[cfg(not(unix))]
-    std::fs::copy(source, destination)
-        .map(|_| ())
-        .map_err(|error| {
-            format!(
-                "could not install tillerctl at {}: {error}",
-                destination.display()
-            )
-        })?;
+    if let Err(error) = std::fs::copy(source, destination) {
+        // A running-exe lock can make Windows refuse to refresh the copy. Keep
+        // the usable old binary and retry on the next launch; only fail when
+        // there is no executable at the destination at all.
+        if is_executable_file(destination) {
+            return Ok(());
+        }
+        return Err(format!(
+            "could not install tillerctl at {}: {error}",
+            destination.display()
+        ));
+    }
 
     if is_executable_file(destination) {
         Ok(())
@@ -19857,6 +19888,76 @@ mod tests {
         );
         assert_eq!(restored.translucency, persisted.translucency);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn stale_copy_test_files(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-tillerctl-stale-copy-{}-{}-{}",
+            name,
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create stale-copy fixture");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        (root, source, destination)
+    }
+
+    fn set_modified(path: &Path, seconds: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open fixture for timestamp update")
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_secs(seconds),
+                ),
+            )
+            .expect("set fixture timestamp");
+    }
+
+    #[test]
+    fn installed_copy_same_size_and_newer_destination_is_not_stale() {
+        let (root, source, destination) = stale_copy_test_files("same-size-newer-destination");
+        std::fs::write(&source, b"source").expect("write source fixture");
+        std::fs::write(&destination, b"copy!!").expect("write destination fixture");
+        set_modified(&source, 1);
+        set_modified(&destination, 2);
+
+        assert!(!installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_copy_different_size_is_stale() {
+        let (root, source, destination) = stale_copy_test_files("different-size");
+        std::fs::write(&source, b"new source").expect("write source fixture");
+        std::fs::write(&destination, b"old").expect("write destination fixture");
+
+        assert!(installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_copy_same_size_with_newer_source_is_stale() {
+        let (root, source, destination) = stale_copy_test_files("same-size-newer-source");
+        std::fs::write(&source, b"source").expect("write source fixture");
+        std::fs::write(&destination, b"copy!!").expect("write destination fixture");
+        set_modified(&destination, 1);
+        set_modified(&source, 2);
+
+        assert!(installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_copy_with_missing_destination_is_stale() {
+        let (root, source, destination) = stale_copy_test_files("missing-destination");
+        std::fs::write(&source, b"source").expect("write source fixture");
+
+        assert!(installed_copy_is_stale(&source, &destination));
         let _ = std::fs::remove_dir_all(root);
     }
 
