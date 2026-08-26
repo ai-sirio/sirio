@@ -352,6 +352,20 @@ fn tab_strip_available_width_for_shell(
     viewport_width - fixed_panels - (gap * visible_gaps as f32) - (2.0 * outer_inset)
 }
 
+fn clamp_first_visible(first: usize, active: usize, visible_count: usize, group_len: usize) -> usize {
+    if visible_count == 0 || group_len == 0 {
+        return 0;
+    }
+    let mut new_first = first;
+    if active < new_first {
+        new_first = active;
+    } else if active >= new_first + visible_count {
+        new_first = active - visible_count + 1;
+    }
+    let max_first = group_len.saturating_sub(visible_count);
+    new_first.min(max_first)
+}
+
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_METHODS: [&str; 11] = [
     "browser.open",
@@ -3660,6 +3674,7 @@ struct TillerWorkspace {
     launch_snapshot: RestoredSession,
     launch: AgentLaunchState,
     tab_machinery: TabMachinery,
+    tab_strip_first_visible: usize,
     overflow_menu_open: bool,
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
@@ -4347,6 +4362,7 @@ impl TillerWorkspace {
             launch_snapshot,
             launch,
             tab_machinery,
+            tab_strip_first_visible: 0,
             overflow_menu_open: false,
             tab_menu_open: false,
             tab_menu_tab: None,
@@ -10653,6 +10669,72 @@ impl TillerWorkspace {
     /// This shell overlay owns the visible tabs. The UI crate's TabBar remains
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
+    fn tab_strip_fit(&self, window: &Window, theme: Theme) -> (usize, bool, usize) {
+        let active_group = self.tab_command_machinery().active_group();
+        let group_len = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == active_group)
+            .count();
+        if group_len == 0 {
+            return (0, false, 0);
+        }
+        let tab_widths = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == active_group)
+            .map(|tab| Self::tab_render_width(tab))
+            .collect::<Vec<_>>();
+        let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
+        let available_width = self.tab_strip_available_width(window, theme);
+        // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
+        // overflow_width` unconditionally reserves room for the chevron even
+        // when no chevron will ever be shown, so the strip flipped into
+        // overflow mode before the tabs actually exceeded the real pixel
+        // width. Decide overflow against the *full* width first (no
+        // reservation); only once that says the strip truly doesn't fit do
+        // we recompute how many tabs fit in the width that remains once the
+        // chevron itself is carved out.
+        let all_visible_count = visible_tab_count(&tab_widths, available_width, 0.0);
+        let has_overflow = all_visible_count < tab_widths.len();
+        let visible_count = if has_overflow {
+            visible_tab_count(&tab_widths, available_width, overflow_width)
+        } else {
+            all_visible_count
+        };
+        (visible_count, has_overflow, group_len)
+    }
+
+    fn keep_active_tab_visible(&mut self, window: &Window, theme: Theme) {
+        let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(window, theme);
+        if visible_count == 0 || group_len == 0 {
+            self.tab_strip_first_visible = 0;
+            return;
+        }
+        let active_group = self.tab_command_machinery().active_group();
+        let Some(active_tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let active_group_id = active_tab.group_id;
+        if active_group_id != active_group {
+            return;
+        }
+        let active_index = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == active_group)
+            .position(|tab| tab.id == active_tab.id);
+        let Some(active_index) = active_index else {
+            return;
+        };
+        self.tab_strip_first_visible = clamp_first_visible(
+            self.tab_strip_first_visible,
+            active_index,
+            visible_count,
+            group_len,
+        );
+    }
+
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             f32::from(window.bounds().size.width),
@@ -10781,27 +10863,7 @@ impl TillerWorkspace {
             .iter()
             .filter(|tab| tab.group_id == active_group)
             .collect::<Vec<_>>();
-        let tab_widths = group_tabs
-            .iter()
-            .map(|tab| Self::tab_render_width(tab))
-            .collect::<Vec<_>>();
-        let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
-        let available_width = self.tab_strip_available_width(window, theme);
-        // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
-        // overflow_width` unconditionally reserves room for the chevron even
-        // when no chevron will ever be shown, so the strip flipped into
-        // overflow mode before the tabs actually exceeded the real pixel
-        // width. Decide overflow against the *full* width first (no
-        // reservation); only once that says the strip truly doesn't fit do
-        // we recompute how many tabs fit in the width that remains once the
-        // chevron itself is carved out.
-        let all_visible_count = visible_tab_count(&tab_widths, available_width, 0.0);
-        let has_overflow = all_visible_count < group_tabs.len();
-        let visible_count = if has_overflow {
-            visible_tab_count(&tab_widths, available_width, overflow_width)
-        } else {
-            all_visible_count
-        };
+        let (visible_count, has_overflow, _) = self.tab_strip_fit(window, theme);
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let mut tabs = div()
             .absolute()
@@ -10832,7 +10894,12 @@ impl TillerWorkspace {
         if has_overflow {
             tabs = tabs.pr(theme.spacing.titlebar_control_frame.width);
         }
-        for (index, tab) in group_tabs.iter().take(visible_count).enumerate() {
+        for (index, tab) in group_tabs
+            .iter()
+            .enumerate()
+            .skip(self.tab_strip_first_visible)
+            .take(visible_count)
+        {
             let renaming = self
                 .tab_rename
                 .as_ref()
@@ -12420,6 +12487,7 @@ impl Render for TillerWorkspace {
         // burn reads the Pi can't spare and notify-loop forever.
         let was_window_active = self.window_active;
         self.window_active = window.is_window_active();
+        self.keep_active_tab_visible(window, *Theme::get(cx));
         if !was_window_active && self.window_active {
             self.refresh_worktree_branches(cx);
         }
@@ -21845,6 +21913,48 @@ mod tests {
         assert_eq!(visible_tab_count(&widths, 306.0, 0.0), 1);
         assert_eq!(visible_tab_count(&widths, 306.5, 0.0), 2);
         assert_eq!(visible_tab_count(&widths, 306.0, 24.0), 1);
+    }
+
+    #[test]
+    fn tab_strip_clamp_keeps_active_inside_window() {
+        // Active inside window -> offset does not move.
+        assert_eq!(clamp_first_visible(0, 1, 4, 11), 0);
+        assert_eq!(clamp_first_visible(2, 3, 4, 11), 2);
+        assert_eq!(clamp_first_visible(5, 5, 4, 11), 5);
+    }
+
+    #[test]
+    fn tab_strip_clamp_scrolls_active_past_right_edge_into_view() {
+        // The #109 case: 11 tabs, 4 visible, active 10 -> offset 7 so active is last visible.
+        assert_eq!(clamp_first_visible(0, 10, 4, 11), 7);
+        assert_eq!(clamp_first_visible(2, 10, 4, 11), 7);
+        // Already visible at right edge does not move.
+        assert_eq!(clamp_first_visible(7, 10, 4, 11), 7);
+    }
+
+    #[test]
+    fn tab_strip_clamp_scrolls_active_before_left_edge_into_view() {
+        assert_eq!(clamp_first_visible(5, 2, 4, 11), 2);
+        assert_eq!(clamp_first_visible(7, 0, 4, 11), 0);
+        assert_eq!(clamp_first_visible(3, 3, 4, 11), 3);
+    }
+
+    #[test]
+    fn tab_strip_clamp_pulls_back_trailing_gap_after_close() {
+        // 11 tabs, 4 visible, offset 7 shows 7..11. Close to 8 tabs -> max is 4, so clamp to 4.
+        assert_eq!(clamp_first_visible(7, 7, 4, 8), 4);
+        // Close more: 5 tabs total, offset 4 -> max 1
+        assert_eq!(clamp_first_visible(4, 4, 4, 5), 1);
+        // No trailing gap when group shrinks but active already inside.
+        assert_eq!(clamp_first_visible(7, 6, 4, 7), 3);
+    }
+
+    #[test]
+    fn tab_strip_clamp_handles_zero_visible_and_empty_group() {
+        assert_eq!(clamp_first_visible(0, 0, 0, 11), 0);
+        assert_eq!(clamp_first_visible(5, 5, 0, 11), 0);
+        assert_eq!(clamp_first_visible(0, 0, 4, 0), 0);
+        assert_eq!(clamp_first_visible(3, 10, 0, 0), 0);
     }
 
     #[gpui::test]
