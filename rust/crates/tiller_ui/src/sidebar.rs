@@ -2581,6 +2581,13 @@ impl Sidebar {
             Icon::FileTree => "file-tree",
             Icon::Thread => "thread",
             Icon::Diff => "diff",
+            Icon::DiffUnified => "diff-unified",
+            Icon::DiffSplit => "diff-split",
+            Icon::ExpandVertical => "expand-vertical",
+            Icon::FoldVertical => "fold-vertical",
+            Icon::SquarePlus => "square-plus",
+            Icon::SquareMinus => "square-minus",
+            Icon::Undo => "undo",
             Icon::GitGraph => "git-graph",
             Icon::FileType(_) => "file-type",
         }

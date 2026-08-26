@@ -105,6 +105,20 @@ pub enum Icon {
     Diff,
     /// The History view in the right panel's rail (`zed/git_graph.svg`).
     GitGraph,
+    /// Unified Changes view (`zed/diff_unified.svg`).
+    DiffUnified,
+    /// Split Changes view (`zed/diff_split.svg`).
+    DiffSplit,
+    /// Expand vertically (`zed/expand_vertical.svg`).
+    ExpandVertical,
+    /// Fold vertically (`zed/fold_vertical.svg`).
+    FoldVertical,
+    /// Add a square item (`zed/square_plus.svg`).
+    SquarePlus,
+    /// Remove a square item (`zed/square_minus.svg`).
+    SquareMinus,
+    /// Undo (`zed/undo.svg`).
+    Undo,
     /// A full-colour Material icon for a file type.
     FileType(&'static str),
 }
@@ -167,6 +181,13 @@ impl Icon {
             Icon::Thread => "icons/zed/thread.svg",
             Icon::Diff => "icons/zed/diff.svg",
             Icon::GitGraph => "icons/zed/git_graph.svg",
+            Icon::DiffUnified => "icons/zed/diff_unified.svg",
+            Icon::DiffSplit => "icons/zed/diff_split.svg",
+            Icon::ExpandVertical => "icons/zed/expand_vertical.svg",
+            Icon::FoldVertical => "icons/zed/fold_vertical.svg",
+            Icon::SquarePlus => "icons/zed/square_plus.svg",
+            Icon::SquareMinus => "icons/zed/square_minus.svg",
+            Icon::Undo => "icons/zed/undo.svg",
             Icon::FileType(name) => match name {
                 "audio" => "icons/file-types/audio.svg",
                 "c" => "icons/file-types/c.svg",
@@ -246,6 +267,13 @@ impl Icon {
             Icon::Thread => include_bytes!("../../../assets/icons/zed/thread.svg"),
             Icon::Diff => include_bytes!("../../../assets/icons/zed/diff.svg"),
             Icon::GitGraph => include_bytes!("../../../assets/icons/zed/git_graph.svg"),
+            Icon::DiffUnified => include_bytes!("../../../assets/icons/zed/diff_unified.svg"),
+            Icon::DiffSplit => include_bytes!("../../../assets/icons/zed/diff_split.svg"),
+            Icon::ExpandVertical => include_bytes!("../../../assets/icons/zed/expand_vertical.svg"),
+            Icon::FoldVertical => include_bytes!("../../../assets/icons/zed/fold_vertical.svg"),
+            Icon::SquarePlus => include_bytes!("../../../assets/icons/zed/square_plus.svg"),
+            Icon::SquareMinus => include_bytes!("../../../assets/icons/zed/square_minus.svg"),
+            Icon::Undo => include_bytes!("../../../assets/icons/zed/undo.svg"),
             Icon::FileType(name) => match name {
                 "audio" => include_bytes!("../../../assets/icons/file-types/audio.svg"),
                 "c" => include_bytes!("../../../assets/icons/file-types/c.svg"),
@@ -509,7 +537,7 @@ impl AssetSource for TillerAssets {
 }
 
 /// Every icon, used by [`TillerAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 25] = [
+pub const ALL_ICONS: [Icon; 32] = [
     Icon::FolderFill,
     Icon::GitBranch,
     Icon::MessageSquare,
@@ -535,6 +563,13 @@ pub const ALL_ICONS: [Icon; 25] = [
     Icon::PanelRight,
     Icon::Archive,
     Icon::Lock,
+    Icon::DiffUnified,
+    Icon::DiffSplit,
+    Icon::ExpandVertical,
+    Icon::FoldVertical,
+    Icon::SquarePlus,
+    Icon::SquareMinus,
+    Icon::Undo,
 ];
 
 #[cfg(test)]
@@ -602,6 +637,13 @@ mod tests {
             (Icon::PanelRight, "icons/zed/threads_sidebar_right_open.svg"),
             (Icon::Archive, "icons/zed/archive.svg"),
             (Icon::Lock, "icons/zed/lock.svg"),
+            (Icon::DiffUnified, "icons/zed/diff_unified.svg"),
+            (Icon::DiffSplit, "icons/zed/diff_split.svg"),
+            (Icon::ExpandVertical, "icons/zed/expand_vertical.svg"),
+            (Icon::FoldVertical, "icons/zed/fold_vertical.svg"),
+            (Icon::SquarePlus, "icons/zed/square_plus.svg"),
+            (Icon::SquareMinus, "icons/zed/square_minus.svg"),
+            (Icon::Undo, "icons/zed/undo.svg"),
         ];
 
         assert_eq!(expected.len(), ALL_ICONS.len());
