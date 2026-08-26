@@ -24,7 +24,7 @@ use gpui::{
 use tiller_git::{
     create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
 };
-use tiller_project::{TabKind, display_path};
+use tiller_project::{TabKind, display_absolute_path, display_path};
 use tiller_theme::{AgentBrandColor, Theme};
 
 use crate::caret;
@@ -596,6 +596,16 @@ pub struct Sidebar {
 impl Sidebar {
     fn worktree_path_label(path: Option<&Path>) -> String {
         path.map(display_path).unwrap_or_default()
+    }
+
+    /// Text for the worktree-location field, which is *not* a label: what it
+    /// holds is persisted as the project's worktree base and handed to
+    /// `resolve_parent_directory`, which takes it verbatim. So it strips
+    /// Windows' verbatim prefix like every other user-facing path, but keeps
+    /// the home directory spelled out — `Path::join` would treat a collapsed
+    /// "~" as a directory of that name.
+    fn worktree_location_text(path: &Path) -> String {
+        display_absolute_path(path)
     }
 
     /// The host pushes the resolved sidebar width every render; same
@@ -1442,7 +1452,8 @@ impl Sidebar {
                     // while the portal dialog was up.
                     return;
                 }
-                *card.worktree_location_override.borrow_mut() = display_path(&path);
+                *card.worktree_location_override.borrow_mut() =
+                    Self::worktree_location_text(&path);
                 sidebar.emit_project_settings_changed(cx);
                 cx.notify();
             });
@@ -3261,8 +3272,8 @@ impl Sidebar {
         let default_location = card
             .path
             .parent()
-            .map(display_path)
-            .unwrap_or_else(|| display_path(&card.path));
+            .map(Self::worktree_location_text)
+            .unwrap_or_else(|| Self::worktree_location_text(&card.path));
         let location_focus = card.worktree_location_focus.clone();
         let focus_entity = entity.clone();
         let key_entity = entity.clone();
@@ -4320,6 +4331,30 @@ mod tests {
             Sidebar::worktree_path_label(Some(&path)),
             r"D:\x\y",
             "the rendered worktree path must not expose Windows' verbatim prefix"
+        );
+    }
+
+    /// The location field's text round-trips: it is persisted as the
+    /// project's worktree base and later joined onto. `display_path` would
+    /// collapse a home-relative choice to "~", which `Path::join` treats as a
+    /// directory of that name — so this seam must stay absolute.
+    #[test]
+    fn the_worktree_location_field_keeps_the_home_directory_spelled_out() {
+        let Some(home) = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        else {
+            return;
+        };
+        let text = Sidebar::worktree_location_text(&home.join("code"));
+        assert!(
+            !text.starts_with('~'),
+            "the location field must not collapse the home directory, got {text}"
+        );
+        assert!(
+            text.ends_with("code"),
+            "the location field must still name the chosen directory, got {text}"
         );
     }
 
