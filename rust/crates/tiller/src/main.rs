@@ -5736,6 +5736,7 @@ impl TillerWorkspace {
             .control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
         let mut entries = Vec::new();
         for workspace in &state.workspaces {
             let Ok(panes) = self.panes.list_for(Path::new(&workspace.path)) else {
@@ -5751,6 +5752,7 @@ impl TillerWorkspace {
                 branch: workspace.branch.clone(),
                 project_name: workspace.project.clone(),
                 status,
+                status_since: self.activity.status_age_for_panes(&refs, now),
             });
         }
         tiller_activity::AttentionSort::sorted(&entries, |entry| Some(entry.status))
