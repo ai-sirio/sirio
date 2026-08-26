@@ -30,8 +30,8 @@ use tiller_git::{
 };
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
-    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_path, is_git_repository,
-    numeric_tab_selection,
+    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
+    display_path, is_git_repository, numeric_tab_selection,
 };
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -987,10 +987,7 @@ impl ControlState {
                         BTreeMap::from([
                             ("id".to_string(), format!("{}-wt-{index}", project.id)),
                             ("branch".to_string(), worktree.branch.clone()),
-                            (
-                                "path".to_string(),
-                                worktree.path.to_string_lossy().into_owned(),
-                            ),
+                            ("path".to_string(), display_absolute_path(&worktree.path)),
                             ("primary".to_string(), worktree.is_primary.to_string()),
                         ])
                     })
@@ -1008,10 +1005,7 @@ impl ControlState {
                 BTreeMap::from([
                     ("id".to_string(), project.id.clone()),
                     ("name".to_string(), project.name.clone()),
-                    (
-                        "path".to_string(),
-                        project.root_path.to_string_lossy().into_owned(),
-                    ),
+                    ("path".to_string(), display_absolute_path(&project.root_path)),
                     ("isGit".to_string(), project.is_git.to_string()),
                     (
                         "worktreeCount".to_string(),
@@ -1056,7 +1050,10 @@ impl ControlState {
                     ("id".to_string(), workspace.id.clone()),
                     ("project".to_string(), workspace.project.clone()),
                     ("branch".to_string(), workspace.branch.clone()),
-                    ("path".to_string(), workspace.path.clone()),
+                    (
+                        "path".to_string(),
+                        display_absolute_path(Path::new(&workspace.path)),
+                    ),
                     ("selected".to_string(), workspace.selected.to_string()),
                     ("mounted".to_string(), workspace.mounted.to_string()),
                     ("comment".to_string(), workspace.comment.clone()),
@@ -22459,6 +22456,48 @@ mod tests {
         drop(relaunch_server);
         drop(relaunch_handler);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_list_encodes_paths_without_the_verbatim_prefix() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: vec![ControlWorkspace {
+                    id: "workspace-1".into(),
+                    project: "project".into(),
+                    branch: "main".into(),
+                    path: r"\\?\D:\x\y".into(),
+                    selected: true,
+                    mounted: true,
+                    comment: String::new(),
+                    session: None,
+                }],
+                current: Some(0),
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-workspace-list-path-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::workspace_list());
+        assert!(response.ok, "workspace.list failed: {:?}", response.error);
+        let rows = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("workspaces"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("workspace rows");
+        assert_eq!(
+            rows.first().and_then(|row| row.get("path")).map(String::as_str),
+            Some(r"D:\x\y"),
+            "workspace.list must return a pasteable path without the verbatim prefix"
+        );
     }
 
     #[test]
