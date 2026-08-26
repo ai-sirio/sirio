@@ -13,7 +13,7 @@
 //! a New Worktree row, exactly like non-git projects.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
@@ -24,7 +24,7 @@ use gpui::{
 use tiller_git::{
     create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
 };
-use tiller_project::TabKind;
+use tiller_project::{TabKind, display_path};
 use tiller_theme::{AgentBrandColor, Theme};
 
 use crate::caret;
@@ -594,6 +594,10 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
+    fn worktree_path_label(path: Option<&Path>) -> String {
+        path.map(display_path).unwrap_or_default()
+    }
+
     /// The host pushes the resolved sidebar width every render; same
     /// every-render push as `RightPanel::set_panel_width`, no-op when
     /// unchanged so a drag does not notify more than it must.
@@ -1438,7 +1442,7 @@ impl Sidebar {
                     // while the portal dialog was up.
                     return;
                 }
-                *card.worktree_location_override.borrow_mut() = path.display().to_string();
+                *card.worktree_location_override.borrow_mut() = display_path(&path);
                 sidebar.emit_project_settings_changed(cx);
                 cx.notify();
             });
@@ -2959,7 +2963,7 @@ impl Sidebar {
                 div()
                     .text_size(theme.typography.footnote)
                     .text_color(theme.meta)
-                    .child(card.path.display().to_string()),
+                    .child(display_path(&card.path)),
             )
             .child(
                 div()
@@ -3257,8 +3261,8 @@ impl Sidebar {
         let default_location = card
             .path
             .parent()
-            .map(|parent| parent.display().to_string())
-            .unwrap_or_else(|| card.path.display().to_string());
+            .map(display_path)
+            .unwrap_or_else(|| display_path(&card.path));
         let location_focus = card.worktree_location_focus.clone();
         let focus_entity = entity.clone();
         let key_entity = entity.clone();
@@ -3806,10 +3810,7 @@ impl Sidebar {
             });
 
         let row_view = row_view.child(main_line).when(is_card, |this| {
-            let sub = path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
+            let sub = Self::worktree_path_label(path.as_deref());
             this.child(
                 div()
                     // Aligned under the title: 12px leading slot + 7px gap
@@ -4308,6 +4309,17 @@ mod tests {
         assert_eq!(
             PickedPath::from_prompt(chosen),
             PickedPath::Chosen(PathBuf::from("/tmp/somewhere"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_worktree_row_sub_line_hides_the_verbatim_prefix() {
+        let path = PathBuf::from(r"\\?\D:\x\y");
+        assert_eq!(
+            Sidebar::worktree_path_label(Some(&path)),
+            r"D:\x\y",
+            "the rendered worktree path must not expose Windows' verbatim prefix"
         );
     }
 
