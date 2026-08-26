@@ -308,7 +308,7 @@ fn action_button_shell(label: &'static str, theme: Theme) -> Div {
         .text_size(theme.typography.caption2)
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.title)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.selected_fill)
         .child(label)
 }
 
@@ -873,7 +873,7 @@ mod tests {
 
         let mut button = action_button_shell("Install", theme);
         let style = Styled::style(&mut button);
-        assert_eq!(style.background, Some(theme.primary_pill_bg.into()));
+        assert_eq!(style.background, Some(theme.selected_fill.into()));
         assert_eq!(style.text.font_size, Some(theme.typography.caption2.into()));
         assert_eq!(style.text.font_weight, Some(FontWeight::SEMIBOLD));
         assert_eq!(builtin_state_margin_right(false), px(8.0));
