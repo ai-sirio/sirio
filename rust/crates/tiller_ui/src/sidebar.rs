@@ -220,24 +220,6 @@ fn row_width(panel_width: f32, depth: usize) -> f32 {
     (panel_width - row_left_inset(panel_width, depth) - ROW_RIGHT_INSET).max(0.0)
 }
 
-/// How many lines a row's title is laid out for.
-///
-/// The estimate is a character count against a fixed
-/// [`PROJECT_TITLE_CHARS_PER_LINE`], which is only ever right at one width.
-/// That is tolerable *because* the same number is used twice: `row_height`
-/// budgets this many lines and the title is clamped to exactly this many, so
-/// the height and the text cannot disagree however wrong the estimate is —
-/// a narrow panel costs an ellipsis, not a title drawn over its neighbours.
-/// Measuring the text properly would mean laying it out to find its height
-/// and sizing the row from that, which gpui gives no way to do before the
-/// frame the row is in.
-fn title_lines(title: &str) -> usize {
-    title
-        .chars()
-        .count()
-        .div_ceil(PROJECT_TITLE_CHARS_PER_LINE)
-        .max(1)
-}
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
@@ -251,7 +233,10 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
 const GUIDE_LEFT: f32 = 20.0;
 const GUIDE_WIDTH: f32 = 2.0;
-const PROJECT_TITLE_CHARS_PER_LINE: usize = 30;
+/// Maximum title lines rendered for a row. The row sizes itself from the
+/// content, so this is a guard against pathological branch names rather than
+/// a prediction of how many lines a title needs.
+const MAX_TITLE_LINES: usize = 3;
 
 // TODO(theme): tree_guide is translucent white and does not match the measured opaque guide.
 const INDENT_GUIDE_FILL: Rgba = Rgba {
@@ -1781,18 +1766,17 @@ impl Sidebar {
         }
     }
 
-    /// waku's row rhythm: a single-line row is 32px (13.5px title at an
-    /// 18px line height plus 7px of vertical padding — the action-row
+    /// The minimum row rhythm: a single-line row is 32px (13.5px title at
+    /// an 18px line height plus 7px of vertical padding — the action-row
     /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
-    /// the session-card math). Long titles add one 18px line each.
-    fn row_height(row: &SidebarRow) -> f32 {
-        let extra_lines = title_lines(&row.title).saturating_sub(1) as f32;
+    /// the session-card math). Content-sized titles grow beyond this floor.
+    fn row_min_height(row: &SidebarRow) -> f32 {
         let is_card =
             row.path.is_some() && matches!(row.kind, RowKind::Project | RowKind::Worktree);
         if is_card {
-            CARD_TWO_LINE_HEIGHT + extra_lines * ROW_TITLE_LINE_HEIGHT
+            CARD_TWO_LINE_HEIGHT
         } else {
-            ROW_HEIGHT + extra_lines * ROW_TITLE_LINE_HEIGHT
+            ROW_HEIGHT
         }
     }
 
@@ -3409,7 +3393,7 @@ impl Sidebar {
         // (13.5px title over an 11.5px context line); leaf rows are
         // single-line at the 32px action-row height.
         let is_card = path.is_some() && matches!(kind, RowKind::Project | RowKind::Worktree);
-        let row_height = Self::row_height(&row);
+        let row_min_height = Self::row_min_height(&row);
         // Projects are the tree root. Every child level, including
         // worktrees, must move right from the project row; the previous
         // saturating subtraction made depth-one worktrees share the project's
@@ -3512,7 +3496,7 @@ impl Sidebar {
             .debug_selector(move || row_debug_selector)
             .group(hover_group.clone())
             .relative()
-            .h(px(row_height))
+            .min_h(px(row_min_height))
             .w(px(row_width))
             .ml(px(row_left_inset))
             .mr(px(ROW_RIGHT_INSET))
@@ -3673,21 +3657,13 @@ impl Sidebar {
                     .w(px(title_width))
                     .flex_none()
                     .whitespace_normal()
-                    // Clamped to what `row_height` budgeted for this same
-                    // title. Wrapping is the reference design — a project
-                    // path breaks over two lines on purpose — but the row's
-                    // height is fixed, so a title that wraps further than
-                    // predicted draws over the rows beneath it. It did, as
-                    // soon as the panel could be dragged narrow.
-                    //
-                    // Not covered by a drawn test, and not for want of
-                    // trying: this div's bounds stay one line high however
-                    // many lines the text paints, so `debug_bounds` reports
-                    // 18px either way. The overflow was only ever visible by
-                    // running the app. The selector is here for whatever
-                    // harness can eventually see it.
+                    // The row sizes itself from this title's content, so
+                    // its height and the rendered lines cannot disagree. The
+                    // clamp is only a floor on absurdity (a pathological
+                    // branch name), not a prediction of how many lines it
+                    // needs.
                     .debug_selector(move || format!("sidebar-row-title-{row_id}"))
-                    .line_clamp(title_lines(&title))
+                    .line_clamp(MAX_TITLE_LINES)
                     // `line_clamp` implies `overflow_hidden`, but the "…"
                     // affix comes only from `TextOverflow::Truncate` — with
                     // no `text_ellipsis` the clamp would cut the title dead.
@@ -3871,7 +3847,7 @@ impl Sidebar {
             )
         });
 
-        let mut container = div().relative().w_full().h(px(row_height));
+        let mut container = div().relative().w_full();
         if guide {
             let guide_left = guide_left(panel_width, row.depth);
             container = container.child(
@@ -4627,11 +4603,11 @@ mod tests {
         }
     }
 
-    /// The arithmetic half of the invariant: a row pays for the lines
-    /// `title_lines` counts. On its own this proves nothing about the
-    /// drawing — see `a_title_never_draws_taller_than_its_row` for that.
+    /// The row's rhythm is a minimum, not a prediction: cards keep their
+    /// two-line context height and leaves keep the action-row height whatever
+    /// title the content layout needs above that floor.
     #[test]
-    fn a_rows_height_grows_with_the_lines_its_title_needs() {
+    fn a_rows_height_uses_only_the_row_kind_minimum() {
         let mut row = SidebarRow {
             id: 0,
             kind: RowKind::Project,
@@ -4650,18 +4626,22 @@ mod tests {
             comment: None,
             running_agents: Vec::new(),
         };
-        assert_eq!(title_lines(&row.title), 1);
-        assert_eq!(Sidebar::row_height(&row), CARD_TWO_LINE_HEIGHT);
+        assert_eq!(Sidebar::row_min_height(&row), CARD_TWO_LINE_HEIGHT);
 
-        row.title = "a".repeat(PROJECT_TITLE_CHARS_PER_LINE + 1);
-        assert_eq!(title_lines(&row.title), 2);
+        row.title = "a".repeat(40);
         assert_eq!(
-            Sidebar::row_height(&row),
-            CARD_TWO_LINE_HEIGHT + ROW_TITLE_LINE_HEIGHT,
-            "the second line the title is clamped to is the second line the row pays for"
+            Sidebar::row_min_height(&row),
+            CARD_TWO_LINE_HEIGHT,
+            "a long card title must grow from its content, not from a character estimate"
         );
 
-        assert_eq!(title_lines(""), 1, "an empty title still occupies a line");
+        row.kind = RowKind::Tab;
+        row.path = None;
+        assert_eq!(
+            Sidebar::row_min_height(&row),
+            ROW_HEIGHT,
+            "a long leaf title must keep the action-row height as its minimum"
+        );
     }
 
     #[test]
