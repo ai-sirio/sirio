@@ -3914,6 +3914,10 @@ impl Settings {
         // The socket row must display the *resolved* path (the one the live
         // socket listens on), not a template — a user needs to find the
         // socket to talk to it. The host routes it through the snapshot.
+        #[cfg(windows)]
+        let socket_kind = "Named pipe";
+        #[cfg(not(windows))]
+        let socket_kind = "Socket path";
         let socket_label = div()
             .flex()
             .flex_col()
@@ -3931,7 +3935,7 @@ impl Settings {
                     .mt(px(2.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.subtitle)
-                    .child(text!(format!("Socket path: {}", self.socket_path))),
+                    .child(text!(format!("{socket_kind}: {}", self.socket_path))),
             );
         // The tillerctl card shows the bundled binary's name. "Copy install
         // command" is not offered: no install mechanism exists on this

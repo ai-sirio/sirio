@@ -13805,7 +13805,7 @@ fn main() {
         // (P23: the socket row must show the real path, not a template).
         let settings_snapshot = {
             let mut snapshot = settings_snapshot_from_app_settings(saved_settings.clone());
-            snapshot.socket_path = socket_info.path.to_string_lossy().into_owned();
+            snapshot.socket_path = tiller_control::display_endpoint(socket_info.path.as_path());
             // F-SET-22: AppSettings has no agent_colors column yet, so the
             // persisted choices are overlaid from the session store's
             // key-value table (see SessionStore::load_agent_color_ids)
