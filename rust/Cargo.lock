@@ -7036,6 +7036,7 @@ dependencies = [
  "tiller_terminal",
  "tiller_theme",
  "tiller_ui",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
