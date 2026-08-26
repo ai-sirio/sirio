@@ -31,7 +31,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::notification::NotificationPayload;
 use crate::status::{AgentStatus, Transition};
@@ -59,6 +59,7 @@ pub struct AgentActivityModel {
     /// rejected because of Layer C, and content must never be gated by a
     /// hook timestamp.
     last_hook_push_at: HashMap<String, Instant>,
+    status_changed_at: HashMap<String, Instant>,
     /// Layer E — what the live surface entity knows about itself and no
     /// other layer can see: an ACP chat that is mid-stream, a terminal that
     /// failed to spawn or has already reaped its child. Revocable, so it is
@@ -75,6 +76,32 @@ impl AgentActivityModel {
     /// An empty model.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Records the timestamp only when the pane's resolved status changes.
+    /// Signals can reassert the same status frequently, but those are not
+    /// meaningful transitions for an age displayed to users.
+    fn track_status_change(
+        &mut self,
+        pane_id: &str,
+        old: Option<AgentStatus>,
+        now: Instant,
+    ) {
+        let new = self.resolved(pane_id);
+        if old == new {
+            return;
+        }
+        if new.is_some() {
+            self.status_changed_at.insert(pane_id.to_string(), now);
+        } else {
+            self.status_changed_at.remove(pane_id);
+        }
+    }
+
+    fn set_agent_status(&mut self, pane_id: &str, status: AgentStatus, now: Instant) {
+        let old = self.resolved(pane_id);
+        self.agent_status.insert(pane_id.to_string(), status);
+        self.track_status_change(pane_id, old, now);
     }
 
     // ------------------------------------------------------------------
@@ -114,7 +141,7 @@ impl AgentActivityModel {
                 new: old.unwrap_or(status),
             };
         }
-        self.agent_status.insert(pane_id.to_string(), status);
+        self.set_agent_status(pane_id, status, now);
         self.last_hook_update_at.insert(pane_id.to_string(), now);
         self.last_hook_push_at.insert(pane_id.to_string(), now);
         Transition {
@@ -134,8 +161,7 @@ impl AgentActivityModel {
     pub fn agent_spawned(&mut self, pane_id: &str, agent_id: &str, now: Instant) {
         self.pane_agents
             .insert(pane_id.to_string(), agent_id.to_string());
-        self.agent_status
-            .insert(pane_id.to_string(), AgentStatus::Running);
+        self.set_agent_status(pane_id, AgentStatus::Running, now);
         self.last_hook_update_at.insert(pane_id.to_string(), now);
         // The spawn is Layer-A-relevant (the Swift model says so): it is
         // the baseline any later hook push must be newer than.
@@ -167,11 +193,11 @@ impl AgentActivityModel {
         &mut self,
         pane_id: &str,
         exit_code: i32,
-        _now: Instant,
+        now: Instant,
     ) -> Option<Transition> {
         let old = self.agent_status.get(pane_id).copied()?;
         let new = AgentStatus::from_exit_code(exit_code);
-        self.agent_status.insert(pane_id.to_string(), new);
+        self.set_agent_status(pane_id, new, now);
         Some(Transition {
             pane_id: pane_id.to_string(),
             old: Some(old),
@@ -205,7 +231,7 @@ impl AgentActivityModel {
             self.title_owned_panes.insert(pane_id.to_string());
             let status =
                 detect_status_from_title(title, identified).unwrap_or(AgentStatus::Running);
-            self.agent_status.insert(pane_id.to_string(), status);
+            self.set_agent_status(pane_id, status, now);
             return Some(Transition {
                 pane_id: pane_id.to_string(),
                 old: None,
@@ -219,9 +245,11 @@ impl AgentActivityModel {
             // Only clear title-owned panes; spawn-owned panes rely on
             // process exit and must survive a transient nil classification.
             if self.title_owned_panes.contains(pane_id) {
+                let old = self.resolved(pane_id);
                 self.agent_status.remove(pane_id);
                 self.pane_agents.remove(pane_id);
                 self.title_owned_panes.remove(pane_id);
+                self.track_status_change(pane_id, old, now);
             }
             return None;
         };
@@ -236,7 +264,7 @@ impl AgentActivityModel {
         }
 
         let old = self.agent_status.get(pane_id).copied();
-        self.agent_status.insert(pane_id.to_string(), status);
+        self.set_agent_status(pane_id, status, now);
         Some(Transition {
             pane_id: pane_id.to_string(),
             old,
@@ -268,7 +296,7 @@ impl AgentActivityModel {
         if old == Some(status) {
             return None;
         }
-        self.agent_status.insert(pane_id.to_string(), status);
+        self.set_agent_status(pane_id, status, now);
         self.last_hook_update_at.insert(pane_id.to_string(), now);
         Some(Transition {
             pane_id: pane_id.to_string(),
@@ -292,9 +320,8 @@ impl AgentActivityModel {
         }
         self.pane_agents
             .insert(pane_id.to_string(), agent_id.to_string());
-        self.agent_status
-            .insert(pane_id.to_string(), AgentStatus::Running);
         self.process_owned_panes.insert(pane_id.to_string());
+        self.set_agent_status(pane_id, AgentStatus::Running, Instant::now());
         Some(Transition {
             pane_id: pane_id.to_string(),
             old: None,
@@ -309,9 +336,11 @@ impl AgentActivityModel {
         if !self.process_owned_panes.contains(pane_id) {
             return;
         }
+        let old = self.resolved(pane_id);
         self.agent_status.remove(pane_id);
         self.pane_agents.remove(pane_id);
         self.process_owned_panes.remove(pane_id);
+        self.track_status_change(pane_id, old, Instant::now());
     }
 
     /// Refreshes Layer-D evidence from a terminal shell PID. A matching
@@ -382,13 +411,21 @@ impl AgentActivityModel {
     /// Returns whether the stored evidence changed, so a caller that syncs
     /// on every redraw can skip the redraw it would otherwise cause.
     pub fn set_entity_status(&mut self, pane_id: &str, status: Option<AgentStatus>) -> bool {
-        if self.title_owned_panes.contains(pane_id) || self.process_owned_panes.contains(pane_id) {
-            return self.entity_status.remove(pane_id).is_some();
-        }
-        match status {
-            Some(status) => self.entity_status.insert(pane_id.to_string(), status) != Some(status),
-            None => self.entity_status.remove(pane_id).is_some(),
-        }
+        let old = self.resolved(pane_id);
+        let changed = if self.title_owned_panes.contains(pane_id)
+            || self.process_owned_panes.contains(pane_id)
+        {
+            self.entity_status.remove(pane_id).is_some()
+        } else {
+            match status {
+                Some(status) => {
+                    self.entity_status.insert(pane_id.to_string(), status) != Some(status)
+                }
+                None => self.entity_status.remove(pane_id).is_some(),
+            }
+        };
+        self.track_status_change(pane_id, old, Instant::now());
+        changed
     }
 
     /// The live surface's own claim about this pane, if it is making one.
@@ -425,6 +462,7 @@ impl AgentActivityModel {
         self.entity_status.remove(pane_id);
         self.last_hook_update_at.remove(pane_id);
         self.last_hook_push_at.remove(pane_id);
+        self.status_changed_at.remove(pane_id);
         self.pane_agents.remove(pane_id);
         self.title_owned_panes.remove(pane_id);
         self.process_owned_panes.remove(pane_id);
@@ -461,6 +499,16 @@ impl AgentActivityModel {
             .iter()
             .filter_map(|id| self.resolved(id))
             .min_by_key(|status| status.priority())
+    }
+
+    /// Age of the same pane whose status [`Self::status_for_panes`] selects.
+    /// The caller supplies `now` so this remains deterministic in tests.
+    pub fn status_age_for_panes(&self, pane_ids: &[&str], now: Instant) -> Option<Duration> {
+        let status = self.status_for_panes(pane_ids)?;
+        let pane_id = pane_ids
+            .iter()
+            .find(|id| self.resolved(id) == Some(status))?;
+        now.checked_duration_since(*self.status_changed_at.get(*pane_id)?)
     }
 
     /// Agent id of the most relevant pane among the given pane ids (same
@@ -607,6 +655,63 @@ mod tests {
             model.agent_id_for_panes(&["pane-91", "pane-90"]),
             Some("codex"),
             "the function must follow the slice order it is handed, not re-derive one"
+        );
+    }
+
+    #[test]
+    fn status_age_for_panes_uses_the_winning_pane_and_supplied_now() {
+        let start = Instant::now();
+        let mut model = AgentActivityModel::new();
+        model.agent_spawned("pane-running", "claude", start);
+        model.agent_spawned(
+            "pane-waiting",
+            "codex",
+            start + std::time::Duration::from_secs(10),
+        );
+        model.notify(
+            "pane-waiting",
+            AgentStatus::NeedsInput,
+            start + std::time::Duration::from_secs(20),
+        );
+
+        assert_eq!(
+            model.status_age_for_panes(
+                &["pane-running", "pane-waiting"],
+                start + std::time::Duration::from_secs(35),
+            ),
+            Some(std::time::Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn status_age_does_not_reset_for_a_reassertion_but_does_for_a_change() {
+        let start = Instant::now();
+        let mut model = AgentActivityModel::new();
+        model.agent_spawned("pane-1", "claude", start);
+        model.notify(
+            "pane-1",
+            AgentStatus::Running,
+            start + std::time::Duration::from_secs(5),
+        );
+        assert_eq!(
+            model.status_age_for_panes(
+                &["pane-1"],
+                start + std::time::Duration::from_secs(20),
+            ),
+            Some(std::time::Duration::from_secs(20))
+        );
+
+        model.notify(
+            "pane-1",
+            AgentStatus::NeedsInput,
+            start + std::time::Duration::from_secs(25),
+        );
+        assert_eq!(
+            model.status_age_for_panes(
+                &["pane-1"],
+                start + std::time::Duration::from_secs(40),
+            ),
+            Some(std::time::Duration::from_secs(15))
         );
     }
 }
