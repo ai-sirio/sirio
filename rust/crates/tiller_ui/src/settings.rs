@@ -684,7 +684,7 @@ pub(crate) fn launch_badge_label(source: &tiller_registry::LaunchSource) -> &'st
     use tiller_registry::{LaunchSource, UnavailableReason};
     match source {
         LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => "ACP chat available",
-        LaunchSource::Installable { .. } => "Install",
+        LaunchSource::Installable { .. } => "Available to install",
         LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform) => {
             "Not available for this platform"
         }
@@ -3381,17 +3381,27 @@ impl Settings {
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .min_w_0()
                         .gap(px(2.0))
                         .child(
                             div()
+                                .debug_selector(move || format!("settings-agent-name-{index}"))
                                 .text_size(theme.typography.headline)
                                 .text_color(theme.title)
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(text!(id = ("settings-agent-name", index), row.name)),
                         )
                         .child(
                             div()
+                                .debug_selector(move || {
+                                    format!("settings-agent-description-{index}")
+                                })
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.subtitle)
+                                .overflow_hidden()
+                                .text_ellipsis()
                                 .child(text!(
                                     id = ("settings-agent-description", index),
                                     row.description
@@ -4761,6 +4771,38 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn agent_description_stays_within_its_row(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex agent with a deliberately long display name that exceeds the available row width",
+            executable: None,
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Codex row renders");
+        let description = cx
+            .debug_bounds("settings-agent-description-0")
+            .expect("the Codex description renders");
+        assert!(
+            description.origin.x + description.size.width <= row.origin.x + row.size.width,
+            "agent description must stay inside its row: description={description:?} row={row:?}"
+        );
+    }
+
     /// F-SET-18 (closed): an Installable row draws a real Install button
     /// whose click emits [`SettingsEvent::InstallAgent`] — the host owns
     /// the actual install (Task 8); this crate only renders and emits. A
@@ -5454,7 +5496,30 @@ mod tests {
             distributions: vec![Distribution::Binary(Default::default())],
         };
         let source = LaunchSource::Installable { agent };
-        assert_eq!(launch_badge_label(&source), "Install");
+        assert_eq!(launch_badge_label(&source), "Available to install");
+    }
+
+    #[test]
+    fn the_state_pill_never_repeats_the_action_button_label() {
+        use tiller_registry::{LaunchSource, RegistryAgent};
+
+        let source = LaunchSource::Installable {
+            agent: RegistryAgent {
+                id: "cursor".into(),
+                name: "Cursor".into(),
+                version: "1.0.0".into(),
+                description: None,
+                repository: None,
+                website: None,
+                license: None,
+                icon: None,
+                distributions: vec![],
+            },
+        };
+        let action_label = "Install";
+
+        assert_ne!(launch_badge_label(&source), "Install");
+        assert_ne!(launch_badge_label(&source), action_label);
     }
 
     #[test]
