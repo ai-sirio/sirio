@@ -300,6 +300,11 @@ pub struct ModeCatalog {
     pub current_id: String,
     /// Every mode the agent offers.
     pub options: Vec<AgentMode>,
+    /// When `Some`, this mode is applied with `session/set_config_option`
+    /// against this option id — OpenCode reports its mode as a `configOptions`
+    /// select tagged `category: "mode"`, not through ACP's session-modes API.
+    /// When `None`, it is applied with `session/set_mode` as before.
+    pub config_option_id: Option<String>,
 }
 
 /// A structured question folded out of an `AskUserQuestion`-shaped tool
@@ -1023,6 +1028,13 @@ fn run_connection(
                     // update into an `AcpEvent`, so `AcpClient::mode_catalog`
                     // is already current by the time a caller reacts to that
                     // event (F-CHAT-15).
+                    if let SessionUpdate::ConfigOptionUpdate(ref update) = notification.update
+                        && let Some(catalog) =
+                            mode_catalog_from_options(Some(&update.config_options))
+                        && let Ok(mut guard) = mode_catalog_for_notifications.lock()
+                    {
+                        *guard = Some(catalog);
+                    }
                     if let SessionUpdate::CurrentModeUpdate(ref update) = notification.update {
                         apply_current_mode(
                             &mode_catalog_for_notifications,
@@ -1140,10 +1152,14 @@ fn run_connection(
                 };
                 let model_catalog = model_catalog_from_options(session.config_options.as_ref());
                 let effort = effort_from_options(session.config_options.as_ref());
-                if let Some(state) = &session.modes
-                    && let Ok(mut catalog) = mode_catalog_for_session.lock()
-                {
-                    *catalog = Some(mode_catalog_from_state(state));
+                if let Ok(mut catalog) = mode_catalog_for_session.lock() {
+                    if let Some(state) = &session.modes {
+                        *catalog = Some(mode_catalog_from_state(state));
+                    } else if let Some(fallback) =
+                        mode_catalog_from_options(session.config_options.as_ref())
+                    {
+                        *catalog = Some(fallback);
+                    }
                 }
                 let model_event = model_catalog.clone().map(AcpEvent::ModelCatalog);
                 startup_sender
@@ -1283,6 +1299,7 @@ fn run_connection(
                         }
                         Command::SetConfigOption { option_id, value } => {
                             let event_tx = connection_events.clone();
+                            let mode_catalog_for_config = Arc::clone(&mode_catalog_for_session);
                             connection
                                 .send_request(SetSessionConfigOptionRequest::new(
                                     session.session_id.clone(),
@@ -1292,6 +1309,13 @@ fn run_connection(
                                 .on_receiving_result(move |result| async move {
                                     match result {
                                         Ok(response) => {
+                                            if let Some(catalog) = mode_catalog_from_options(Some(
+                                                &response.config_options,
+                                            )) && let Ok(mut guard) =
+                                                mode_catalog_for_config.lock()
+                                            {
+                                                *guard = Some(catalog);
+                                            }
                                             if let Some(effort) =
                                                 effort_from_options(Some(&response.config_options))
                                             {
@@ -1820,6 +1844,40 @@ fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<Eff
     })
 }
 
+/// Extracts the session-mode selector from a session configuration option
+/// list: the select whose id is `mode` (or whose category tag reads
+/// `mode`, as OpenCode reports it).
+fn mode_catalog_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<ModeCatalog> {
+    let option = options?.iter().find(|option| {
+        option.id.to_string() == "mode"
+            || matches!(&option.category, Some(SessionConfigOptionCategory::Mode))
+            || matches!(&option.category, Some(SessionConfigOptionCategory::Other(category)) if category == "mode")
+    })?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let values = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(values) => values.clone(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter().cloned())
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(ModeCatalog {
+        current_id: select.current_value.to_string(),
+        options: values
+            .into_iter()
+            .map(|option| AgentMode {
+                id: option.value.to_string(),
+                name: option.name.clone(),
+                description: option.description.clone(),
+            })
+            .collect(),
+        config_option_id: Some(option.id.to_string()),
+    })
+}
+
 /// Converts ACP's `SessionModeState` (from `session/new`'s `modes` field)
 /// into the client's [`ModeCatalog`] (F-CHAT-15).
 fn mode_catalog_from_state(state: &SessionModeState) -> ModeCatalog {
@@ -1834,6 +1892,7 @@ fn mode_catalog_from_state(state: &SessionModeState) -> ModeCatalog {
                 description: mode.description.clone(),
             })
             .collect(),
+        config_option_id: None,
     }
 }
 
@@ -1852,6 +1911,7 @@ fn apply_current_mode(cell: &Arc<Mutex<Option<ModeCatalog>>>, current_id: String
                 *catalog = Some(ModeCatalog {
                     current_id,
                     options: Vec::new(),
+                    config_option_id: None,
                 });
             }
         }
@@ -2293,6 +2353,61 @@ mod tests {
     }
 
     #[test]
+    fn mode_catalog_from_options_extracts_opencode_mode() {
+        let options = vec![SessionConfigOption::select(
+            "mode",
+            "Session Mode",
+            "build",
+            vec![
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new("build", "Build"),
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new("plan", "Plan"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Other("mode".into()))];
+        let catalog = mode_catalog_from_options(Some(&options)).expect("mode selector");
+        assert_eq!(catalog.current_id, "build");
+        assert_eq!(catalog.config_option_id, Some("mode".into()));
+        assert_eq!(
+            catalog.options,
+            vec![
+                AgentMode {
+                    id: "build".into(),
+                    name: "Build".into(),
+                    description: None,
+                },
+                AgentMode {
+                    id: "plan".into(),
+                    name: "Plan".into(),
+                    description: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mode_catalog_from_options_returns_none_without_mode_entry() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "sonnet",
+            vec![agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                "sonnet", "Sonnet",
+            )],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        assert!(mode_catalog_from_options(Some(&options)).is_none());
+        assert!(mode_catalog_from_options(None).is_none());
+        assert!(mode_catalog_from_options(Some(&Vec::new())).is_none());
+    }
+
+    #[test]
+    fn mode_catalog_from_state_has_no_config_option_id() {
+        let state = SessionModeState::new("ask", vec![]);
+        let catalog = mode_catalog_from_state(&state);
+        assert_eq!(catalog.config_option_id, None);
+    }
+
+    #[test]
     fn prompt_blocks_builds_trimmed_text_resource_links_and_images() {
         let cwd = std::env::temp_dir().join("tiller-acp-blocks-test");
         let blocks = prompt_blocks(
@@ -2547,6 +2662,7 @@ mod tests {
                         description: Some("Plan before editing".into()),
                     },
                 ],
+                config_option_id: None,
             })
         );
 
