@@ -7856,6 +7856,39 @@ impl TillerWorkspace {
     }
 
     fn add_changes_tab(&mut self, focus_path: Option<PathBuf>, cx: &mut Context<Self>) {
+        // The shell keeps one tab list for the current worktree, while
+        // `group_id` identifies pane placement rather than a worktree. Read
+        // the Changes surface's own repository root so a verbatim path and
+        // its plain equivalent resolve to the same existing surface.
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            let mut matches_worktree = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Changes(changes) = content {
+                    let repo_root = changes.read(cx).report().repo_root;
+                    matches_worktree |= paths_name_the_same_document(
+                        &repo_root,
+                        &self.working_directory,
+                    );
+                }
+            });
+            matches_worktree
+        }) {
+            self.active_tab = index;
+            let tab = &self.tabs[index];
+            self.tab_machinery.select_tab(tab.group_id, tab.id);
+            if let Some(path) = focus_path.as_deref() {
+                self.tabs[index].panes.for_each(&mut |_, content| {
+                    if let TabContent::Changes(changes) = content {
+                        changes.update(cx, |tab, cx| tab.focus_path(path, cx));
+                    }
+                });
+            }
+            self.schedule_save(cx);
+            self.sync_activity(cx);
+            cx.notify();
+            return;
+        }
+
         let changes = cx.new(|cx| ChangesTab::new(self.working_directory.clone(), cx));
         Self::subscribe_changes_tab(&changes, cx);
         // F-CHG-13: OpenDiff(path) expects the Changes tab to do something
@@ -23400,7 +23433,116 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn drawn_changes_open_diff_action_opens_a_diff_tab_in_the_workspace(
+    fn opening_changes_again_reveals_the_existing_worktree_tab(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let repo = test_repo("changes-reveal-existing");
+            let mut workspace = test_workspace_for_repo(cx, repo, false);
+            workspace.add_changes_tab(None, cx);
+            let first_count = workspace.tabs.len();
+            workspace.active_tab = 0;
+
+            workspace.add_changes_tab(None, cx);
+
+            let second_count = workspace.tabs.len();
+            assert_eq!(
+                second_count, first_count,
+                "opening Changes again must keep the first count ({first_count}), not add a tab (second count: {second_count})"
+            );
+            let changes_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::Diff)
+                .expect("the existing Changes tab remains present");
+            assert_eq!(
+                workspace.active_tab, changes_index,
+                "reopening Changes must reveal the existing tab"
+            );
+            workspace
+        });
+
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().filter(|tab| tab.kind == TabKind::Diff).count(),
+                1,
+                "one worktree must have one Changes tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn opening_changes_without_an_existing_tab_creates_one(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let repo = test_repo("changes-reveal-create");
+            test_workspace_for_repo(cx, repo, false)
+        });
+
+        let (before, after, changes_count) = workspace.update(cx, |workspace, cx| {
+            let before = workspace.tabs.len();
+            workspace.add_changes_tab(None, cx);
+            let after = workspace.tabs.len();
+            let changes_count = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.kind == TabKind::Diff)
+                .count();
+            (before, after, changes_count)
+        });
+        assert_eq!(before, 1, "the fixture starts with only its terminal tab");
+        assert_eq!(after, 2, "opening Changes creates one tab");
+        assert_eq!(changes_count, 1, "the new tab is a Changes surface");
+    }
+
+    #[gpui::test]
+    async fn opening_changes_with_a_path_reveals_and_focuses_existing_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = changed_test_repo("changes-reveal-focus");
+        let window = cx.add_window({
+            let repo = repo.clone();
+            move |_window, cx| test_workspace_for_repo(cx, repo, true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        wait_for_drawn(&mut cx, "changes-file-row");
+        assert!(
+            cx.debug_bounds("changes-open-diff").is_none(),
+            "the existing Changes tab starts with its file collapsed"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.active_tab = 0;
+            workspace.add_changes_tab(Some(PathBuf::from("changed.md")), cx);
+        });
+        wait_for_drawn(&mut cx, "changes-open-diff");
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().filter(|tab| tab.kind == TabKind::Diff).count(),
+                1,
+                "focusing a file in Changes must not add a second surface"
+            );
+            let changes_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::Diff)
+                .expect("the existing Changes tab remains present");
+            assert_eq!(
+                workspace.active_tab, changes_index,
+                "OpenDiff must reveal the existing Changes tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn drawn_changes_open_diff_action_reveals_the_existing_diff_tab(
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
@@ -23431,8 +23573,8 @@ mod tests {
                     .filter(|tab| tab.kind == TabKind::Diff)
                     .count()
             }),
-            2,
-            "the host subscriber opens a new Diff tab after the drawn action"
+            1,
+            "the host subscriber reveals the existing Diff tab after the drawn action"
         );
     }
 
