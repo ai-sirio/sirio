@@ -7321,7 +7321,15 @@ impl Chat {
                 div()
                     .id("composer-streaming-ring")
                     .debug_selector(|| "composer-streaming-ring".into())
-                    .w(px(TRANSCRIPT_WIDTH))
+                    // #110 turned every transcript-width site into a maximum
+                    // rather than a fixed width; this ring was missed, and
+                    // being the outermost element of the composer it held the
+                    // whole column open at 720px inside a narrower pane —
+                    // clipping the composer's own controls and the transcript
+                    // bubbles above off the left edge, but only while an agent
+                    // was streaming, which is why an idle frame looked fine.
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_WIDTH))
                     .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
                     .p(STREAMING_BORDER_WIDTH)
                     .bg(linear_gradient(
@@ -7722,16 +7730,14 @@ impl Render for Chat {
                                 ),
                         )
                     })
-                    .child(self.render_composer(&theme, window, cx))
-                    .child(
-                        // A quiet context line under the card: the agent's
-                        // working directory. Chrome below the fold.
-                        div()
-                            .mt(px(8.0))
-                            .text_size(theme.typography.caption2)
-                            .text_color(theme.colors.meta)
-                            .child(working_directory_label(&self.agent_cwd)),
-                    ),
+                    // #159: nothing is drawn between the composer card and
+                    // the bottom of the pane. The working directory used to
+                    // sit here as a centred caption, duplicating what the
+                    // worktree selection already says — the same chrome #151
+                    // dropped from the sidebar rows. `agent_cwd` itself stays:
+                    // it is load-bearing for prompt content, mention
+                    // resolution and the ACP client's launch directory.
+                    .child(self.render_composer(&theme, window, cx)),
             )
             .child({
                 // F-CHAT-13: the "Drop files to attach" overlay, matching
@@ -7802,10 +7808,6 @@ fn turn_end_label(reason: &str) -> &'static str {
         "MaxTurnRequests" => "stopped at the turn-request limit",
         _ => "ended",
     }
-}
-
-fn working_directory_label(path: &Path) -> String {
-    display_path(path)
 }
 
 fn default_agent_cwd() -> PathBuf {
@@ -8633,6 +8635,66 @@ mod tests {
         assert!(
             cx.debug_bounds("composer-streaming-ring").is_none(),
             "the static border returns the moment streaming ends"
+        );
+    }
+
+    /// #159: the animated border was the last transcript-width element laid
+    /// out at a *fixed* 720px after #110 turned the other eight into maxima.
+    /// Being the outermost element of the composer, it held the whole column
+    /// open inside a narrower pane, clipping the composer's own controls and
+    /// the transcript bubbles off the left edge — and only while an agent was
+    /// streaming, so an idle frame looked perfectly fine.
+    #[gpui::test]
+    async fn the_rotating_border_shrinks_with_a_narrow_pane(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &[]);
+        cx.simulate_resize(size(px(595.0), px(600.0)));
+        refresh_frame(cx);
+
+        let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert!(
+            idle_card.size.width < px(TRANSCRIPT_WIDTH),
+            "fixture invariant: the pane must be narrower than the transcript \r
+             width for this test to exercise anything: {idle_card:?}"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let ring = cx
+            .debug_bounds("composer-streaming-ring")
+            .expect("a working agent wraps the composer in the animated border");
+        assert_eq!(
+            ring.size.width, idle_card.size.width,
+            "the animated border must track the pane exactly as the static one \r
+             does, not hold it open at the transcript width: idle={idle_card:?} \r
+             streaming={ring:?}"
+        );
+    }
+
+    /// #159: nothing is drawn between the composer card and the bottom of
+    /// the pane. A centred caption naming the agent's working directory used
+    /// to sit there, duplicating what the worktree selection already says.
+    /// Measured rather than assumed: the card now ends 18px above the pane's
+    /// bottom edge, which is the container's own padding; the caption added
+    /// its 8px margin and a caption2 line on top of that, so it pushed the
+    /// card roughly 22px higher.
+    #[gpui::test]
+    async fn nothing_is_drawn_below_the_composer(cx: &mut TestAppContext) {
+        const PANE_HEIGHT: f32 = 600.0;
+        let (_chat, cx) = chat_view(cx, &[]);
+        cx.simulate_resize(size(px(900.0), px(PANE_HEIGHT)));
+        refresh_frame(cx);
+
+        let card = cx.debug_bounds("composer").expect("the composer is drawn");
+        let below = px(PANE_HEIGHT) - card.bottom();
+        assert!(
+            below <= px(20.0),
+            "only the container's own padding may sit below the composer, but \r
+             {below:?} does — something is being drawn under the card again: \r
+             card={card:?}"
         );
     }
 
@@ -10760,14 +10822,6 @@ mod tests {
         let placeholder = chat.read_with(cx, |chat, _| chat.default_placeholder());
         assert!(placeholder.starts_with("Message…"));
         assert!(placeholder.contains("@ for files"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn chat_working_directory_line_hides_the_verbatim_prefix() {
-        let line = working_directory_label(Path::new(r"\\?\D:\x\y"));
-        assert!(!line.contains(r"\\?\"), "chat chrome leaked {line}");
-        assert_eq!(line, r"D:\x\y");
     }
 
     #[test]
