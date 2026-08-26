@@ -244,6 +244,18 @@ pub enum ChatEntry {
         id: String,
         title: String,
         status: String,
+        /// The tool's category (`Read`, `Edit`, `Execute`, ...), which is
+        /// what labels the restored card. `None` predates the field and
+        /// restores as the generic `tool` label it always did.
+        #[serde(default)]
+        kind: Option<String>,
+        /// The files this call touched. A transcript is the record of what
+        /// an agent did to a repository, and reading it back after a restart
+        /// is exactly when someone is reconstructing that — so the row has
+        /// to keep naming its target (#168). Empty predates the field and
+        /// restores exactly as it did then, naming nothing.
+        #[serde(default)]
+        locations: Vec<ChatToolLocation>,
     },
     /// A permission card and the outcome selected by the user or agent.
     /// `title` names the tool that asked (an empty string predates the
@@ -261,6 +273,21 @@ pub enum ChatEntry {
     TurnFooter { text: String },
     /// A permanent error that belongs in the restored transcript.
     Error { message: String, retryable: bool },
+}
+
+/// One file a persisted tool call touched.
+///
+/// A storage-side twin of `tiller_acp::ToolCallLocationInfo`, spelled with a
+/// `String` path because this crate is a dependency-free leaf and must not
+/// reach for the ACP types — the same reason its sibling display helpers are
+/// duplicated rather than shared.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChatToolLocation {
+    /// The file path the call named, stored as written.
+    pub path: String,
+    /// Line within that file, when the agent reported one.
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 /// One option rendered in a permission card.

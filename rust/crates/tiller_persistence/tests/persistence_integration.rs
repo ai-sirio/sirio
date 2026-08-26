@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tiller_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, CURRENT_SCHEMA_VERSION, ChatEntry,
-    ChatPermissionOption, ChatPermissionOutcome, ChatTranscript, ChatTurn, FileIconTheme,
+    ChatPermissionOption, ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn,
+    FileIconTheme,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord, TabStateRecord,
     WorktreeRecord, migrate_up_to,
 };
@@ -588,6 +589,11 @@ fn sample_chat_transcript() -> ChatTranscript {
                         id: "tool-1".into(),
                         title: "Read file".into(),
                         status: "Completed".into(),
+                        kind: Some("Read".into()),
+                        locations: vec![ChatToolLocation {
+                            path: "src/main.rs".into(),
+                            line: Some(42),
+                        }],
                     },
                 ],
             },

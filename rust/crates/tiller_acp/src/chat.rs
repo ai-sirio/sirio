@@ -12,10 +12,10 @@ use std::thread::{self, JoinHandle};
 
 use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
-    ChatTranscript, ChatTurn,
+    ChatToolLocation, ChatTranscript, ChatTurn,
 };
 
-use crate::{AcpClient, AcpEvent, AgentCommand, EventStream};
+use crate::{AcpClient, AcpEvent, AgentCommand, EventStream, ToolCallLocationInfo};
 
 /// Observable state of a non-drawing chat session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,11 +537,23 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             EventFold::default()
         }
         AcpEvent::ToolCallStarted {
-            id, title, status, ..
+            id,
+            title,
+            status,
+            kind,
+            locations,
+            ..
         } => {
-            state
-                .current_turn
-                .push(ChatEntry::ToolCall { id, title, status });
+            // #168: `kind` and `locations` used to be dropped here by the
+            // `..`, so a restored transcript could name neither the tool nor
+            // the file it touched — the evidence vanished at the restart.
+            state.current_turn.push(ChatEntry::ToolCall {
+                id,
+                title,
+                status,
+                kind: Some(kind),
+                locations: persisted_locations(&locations),
+            });
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
@@ -689,11 +701,24 @@ fn append_assistant(entries: &mut Vec<ChatEntry>, text: String) {
     }
 }
 
+/// Converts the ACP locations of a tool call into their stored form (#168).
+/// The path is kept as the agent wrote it; it is de-verbatimised and
+/// shortened only when rendered, which is where that decision belongs.
+fn persisted_locations(locations: &[ToolCallLocationInfo]) -> Vec<ChatToolLocation> {
+    locations
+        .iter()
+        .map(|location| ChatToolLocation {
+            path: location.path.to_string_lossy().into_owned(),
+            line: location.line,
+        })
+        .collect()
+}
+
 fn update_tool(entries: &mut [ChatEntry], id: &str, title: Option<String>, status: Option<String>) {
     if let Some(ChatEntry::ToolCall {
-        id: _entry_id,
         title: entry_title,
         status: entry_status,
+        ..
     }) = entries
         .iter_mut()
         .find(|entry| matches!(entry, ChatEntry::ToolCall { id: entry_id, .. } if entry_id == id))
