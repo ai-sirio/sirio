@@ -20,13 +20,51 @@
 //! doc comment for the container-level decision.
 
 use gpui::{
-    App, ClickEvent, CursorStyle, Div, FontWeight, Rgba, Window, div, prelude::*, px, text,
+    AnyView, App, ClickEvent, Context, CursorStyle, Div, FontWeight, Render, Rgba, Window, div,
+    prelude::*, px, text,
 };
 use std::rc::Rc;
 use tiller_theme::Theme;
 
+use crate::sidebar::icons::{Icon, IconElement, IconSize};
+
 /// A segmented control's selection callback.
 type SegmentCallback = Rc<dyn Fn(usize, &mut App)>;
+
+/// Creates the single-line hover card used by compact icon controls.
+pub fn text_tooltip(
+    text: impl Into<String>,
+    theme: Theme,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| {
+        cx.new(|_| TextTooltip {
+            theme,
+            text: text.clone(),
+        })
+        .into()
+    }
+}
+
+struct TextTooltip {
+    theme: Theme,
+    text: String,
+}
+
+impl Render for TextTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(self.theme.radii.control)
+            .bg(self.theme.raised)
+            .border_1()
+            .border_color(self.theme.hairline)
+            .text_size(self.theme.typography.caption2)
+            .text_color(self.theme.title)
+            .child(self.text.clone())
+    }
+}
 
 /// Creates a titled settings section with a card beneath it.
 pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement {
@@ -212,6 +250,60 @@ pub fn segmented(
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(text!(id = ("segmented-option", index), *label)),
+        );
+    }
+
+    control
+}
+
+/// A segmented control whose options are icon/tooltip pairs.
+pub fn segmented_icons(
+    id: &'static str,
+    options: &[(Icon, &'static str)],
+    selected: usize,
+    theme: Theme,
+    callback: impl Fn(usize, &mut App) + 'static,
+) -> impl IntoElement {
+    let callback: SegmentCallback = Rc::new(callback);
+    let mut control = div()
+        .id(id)
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .rounded(theme.radii.control)
+        .bg(theme.primary_pill_bg)
+        .p(px(2.0));
+
+    for (index, (icon, tooltip)) in options.iter().copied().enumerate() {
+        let callback = callback.clone();
+        let active = index == selected;
+        control = control.child(
+            div()
+                .id(format!("{id}-{index}"))
+                .debug_selector(move || format!("{id}-{index}"))
+                .h(px(22.0))
+                .min_w(px(56.0))
+                .px(px(theme.cosmic.spacing.xs as f32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radii.chip_active)
+                .text_size(theme.typography.callout)
+                .font_weight(if active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if active {
+                    theme.title_selected
+                } else {
+                    theme.subtitle
+                })
+                .when(active, |this| this.bg(theme.selected_fill))
+                .hover(|style| style.bg(theme.row_hover))
+                .tooltip(text_tooltip(tooltip, theme))
+                .on_click(move |_, _, cx| callback(index, cx))
+                .child(IconElement::new(icon, IconSize::Small)),
         );
     }
 

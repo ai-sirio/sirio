@@ -15,7 +15,7 @@ use std::{
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 
 use libghostty_vt::{
-    Error, RenderState, Terminal, TerminalOptions, key,
+    Error, RenderState, Terminal, TerminalOptions, key, mouse,
     render::{CellIteration, CellIterator, Colors, RowIterator},
     screen::{CellWide, GridRef},
     style::{StyleColor, Underline},
@@ -27,8 +27,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Element, ElementId, EventEmitter, Font, FontStyle,
     FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement, Pixels, Point,
-    ShapedLine, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement, Pixels,
+    Point, ScrollDelta, ScrollWheelEvent, ShapedLine, StatefulInteractiveElement,
+    StrikethroughStyle, Style, Styled, TextRun,
     UnderlineStyle, Window, anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
 use parking_lot::Mutex;
@@ -291,11 +292,55 @@ struct KeyInput {
     unshifted_codepoint: Option<char>,
 }
 
+/// Plain-data description of one mouse event (#43), converted from GPUI's
+/// window-space events by [`mouse_input`] and encoded against guest-controlled
+/// terminal state on the owner thread. Like [`KeyInput`], it carries everything
+/// the encoder needs so libghostty-vt types never cross the command channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MouseInput {
+    action: mouse::Action,
+    button: Option<mouse::Button>,
+    mods: key::Mods,
+    /// Whether any button is held at the moment this event fires — from
+    /// GPUI move events' `pressed_button`, true/false around press/release.
+    any_button_pressed: bool,
+    /// Pane-local surface-space pixels (window position minus pane origin).
+    x: f32,
+    y: f32,
+    /// Geometry snapshot so the owner thread keeps `EncoderSize` current
+    /// (cell height is the crate's fixed LINE_HEIGHT).
+    pane_width: f32,
+    pane_height: f32,
+    cell_width: f32,
+}
+
+/// One persistent libghostty mouse encoder plus the state whose setters clear
+/// its internal last-cell motion dedup. We only reapply changed values; calling
+/// either setter unconditionally per event in libghostty-vt 0.2.1 would erase
+/// the dedup state immediately before every motion encode.
+struct MouseEncoderState<'alloc> {
+    encoder: mouse::Encoder<'alloc>,
+    terminal_modes: Option<[bool; 8]>,
+    size: Option<mouse::EncoderSize>,
+}
+
+impl MouseEncoderState<'static> {
+    fn new() -> std::result::Result<Self, Error> {
+        Ok(Self {
+            encoder: mouse::Encoder::new()?,
+            terminal_modes: None,
+            size: None,
+        })
+    }
+}
+
 enum TerminalCommand {
     /// Write bytes to the PTY (paste and programmatic input).
     Input(Vec<u8>),
     /// Encode a keyboard event against the guest-controlled terminal state.
     Key(KeyInput),
+    /// Encode a mouse event against the guest-controlled terminal state.
+    Mouse(MouseInput),
     /// Feed bytes straight into the VT parser without touching the PTY
     /// (`replay_scrollback`, `clear_screen`).
     Feed(Vec<u8>),
@@ -351,6 +396,11 @@ struct TerminalHandle {
     /// even though the origin-subtraction half of the same hit-test was
     /// already correct and unit-tested.
     last_cell_width: Arc<Mutex<Option<Pixels>>>,
+    /// #43: refreshed once per owner-thread poll-loop iteration from
+    /// `terminal.is_mouse_tracking()`. The view reads it to decide
+    /// Tiller-gesture vs encode without a blocking round-trip into the !Send
+    /// terminal state.
+    mouse_tracking: Arc<AtomicBool>,
     /// F-TERM-03: the PTY master's raw fd number, captured once at spawn
     /// time before the master itself moves to the terminal owner thread (the
     /// fd *number* stays valid for as long as the master is open, so holding
@@ -470,6 +520,7 @@ struct TerminalThreadInputs {
     writer: Box<dyn std::io::Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    mouse_tracking: Arc<AtomicBool>,
 }
 
 /// Runs a terminal's dedicated owner thread.
@@ -496,6 +547,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             mut writer,
             master,
             mut child,
+            mouse_tracking,
         } = inputs;
 
         // libghostty-vt never writes to the pty itself; it hands the
@@ -532,6 +584,8 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
         let mut row_iterator = RowIterator::new().expect("terminal owner thread: RowIterator");
         let mut cell_iterator = CellIterator::new().expect("terminal owner thread: CellIterator");
         let mut key_encoder = key::Encoder::new().expect("terminal owner thread: key encoder");
+        let mut mouse_encoder =
+            MouseEncoderState::new().expect("terminal owner thread: mouse encoder");
 
         let mut last_title = String::new();
         let mut child_exit_reported = false;
@@ -562,6 +616,12 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     }
                     TerminalCommand::Key(input) => {
                         if let Ok(bytes) = encode_key_input(&terminal, &mut key_encoder, input) {
+                            let _ = writer.write_all(&bytes);
+                            let _ = writer.flush();
+                        }
+                    }
+                    TerminalCommand::Mouse(input) => {
+                        if let Ok(bytes) = encode_mouse_input(&terminal, &mut mouse_encoder, input) {
                             let _ = writer.write_all(&bytes);
                             let _ = writer.flush();
                         }
@@ -636,6 +696,13 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
                 }
             }
+
+            // #43: refresh the shared tracking gate once per poll-loop
+            // iteration so the view can decide Tiller-gesture vs encode from a
+            // plain atomic instead of blocking round-trips into the !Send
+            // terminal state.
+            let tracking = terminal.is_mouse_tracking().unwrap_or(false);
+            mouse_tracking.store(tracking, Ordering::Relaxed);
 
             std::thread::sleep(EVENT_POLL_INTERVAL);
         }
@@ -909,6 +976,9 @@ impl TerminalHandle {
         });
 
         let (commands, command_rx) = std::sync::mpsc::channel::<TerminalCommand>();
+        // Shared before the thread spawns and handed to both the owner loop
+        // (writer) and the handle (reader) below.
+        let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
         spawn_terminal_thread(TerminalThreadInputs {
             cols: COLS,
             rows: ROWS,
@@ -918,6 +988,7 @@ impl TerminalHandle {
             writer,
             master: pair.master,
             child,
+            mouse_tracking: mouse_tracking_flag.clone(),
         });
 
         Ok((
@@ -929,6 +1000,7 @@ impl TerminalHandle {
                 resize_generation: Arc::new(AtomicU64::new(0)),
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
+                mouse_tracking: mouse_tracking_flag,
                 #[cfg(unix)]
                 pty_master_fd,
             },
@@ -1386,7 +1458,7 @@ fn terminate_descendant_process_groups(shell_pid: u32) {
 /// just in API: attach the child to a Job Object created with
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the job handle kills the
 /// whole descendant tree atomically — no enumerate-then-kill race at all.
-/// `alacritty_terminal`'s `tty/windows/` (ConPTY) backend is the natural
+/// `portable-pty`'s `tty/windows/` (ConPTY) backend is the natural
 /// place to own that job handle, since it already owns the child's lifetime;
 /// duplicating it here would fight that ownership rather than complement it.
 /// This is therefore a real no-op, not a partial implementation: the PTY's
@@ -1982,6 +2054,45 @@ impl TerminalView {
         }
     }
 
+    /// Shared encode-or-drop path for every mouse listener (#43): when the
+    /// guest requested tracking (the shared flag the owner thread refreshes
+    /// each poll iteration), convert through the tested `mouse_input` path and
+    /// fire-and-forget to the owner thread. Shift/right-button gating lives
+    /// inside `mouse_input`, so tests drive exactly what production runs.
+    fn encode_mouse(
+        handle: &TerminalHandle,
+        action: mouse::Action,
+        button: Option<mouse::Button>,
+        pressed_button: Option<MouseButton>,
+        event_position: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+    ) {
+        if !handle.mouse_tracking.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(bounds) = *handle.last_bounds.lock() else {
+            return;
+        };
+        let cell_width = px(
+            handle
+                .last_cell_width
+                .lock()
+                .map(f32::from)
+                .unwrap_or(8.0),
+        );
+        if let Some(input) = mouse_input(
+            action,
+            button,
+            pressed_button,
+            event_position,
+            modifiers,
+            bounds,
+            cell_width,
+        ) {
+            let _ = handle.commands.send(TerminalCommand::Mouse(input));
+        }
+    }
+
     fn open_context_menu(
         &mut self,
         event: &MouseDownEvent,
@@ -2000,6 +2111,20 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
+        // #43: Tiller's gestures are decided BEFORE any encoding — left-down
+        // still focuses (above) and platform+left-click still opens links
+        // below. Whatever remains may belong to the guest: encode the press
+        // when it requested reporting and shift isn't bypassing it.
+        if let Some(terminal) = self.running_terminal() {
+            Self::encode_mouse(
+                terminal,
+                mouse::Action::Press,
+                Some(mouse::Button::Left),
+                Some(MouseButton::Left),
+                event.position,
+                event.modifiers,
+            );
+        }
         if !opens_terminal_link(event.modifiers.platform) {
             return;
         }
@@ -2065,6 +2190,20 @@ impl TerminalView {
         _: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        // #43: encode guest-bound motion first; the hover logic below is a
+        // Tiller-only concern gated on the platform modifier and must not
+        // consume the move event.
+        if let Some(terminal) = self.running_terminal() {
+            let button = event.pressed_button.and_then(gpui_to_ghostty_button);
+            Self::encode_mouse(
+                terminal,
+                mouse::Action::Motion,
+                button,
+                event.pressed_button,
+                event.position,
+                event.modifiers,
+            );
+        }
         if !opens_terminal_link(event.modifiers.platform) {
             if self.link_hover.take().is_some() {
                 cx.notify();
@@ -2107,6 +2246,99 @@ impl TerminalView {
         if changed {
             cx.notify();
         }
+    }
+
+    /// #43: left release has no Tiller gesture; it belongs to the guest
+    /// whenever tracking was requested.
+    fn on_left_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _: &mut Window,
+        _: &mut gpui::Context<Self>,
+    ) {
+        if let Some(terminal) = self.running_terminal() {
+            Self::encode_mouse(
+                terminal,
+                mouse::Action::Release,
+                Some(mouse::Button::Left),
+                None,
+                event.position,
+                event.modifiers,
+            );
+        }
+    }
+
+    /// #43: middle button has no Tiller gesture at all; press and release
+    /// belong to the guest whenever tracking was requested.
+    fn on_middle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _: &mut Window,
+        _: &mut gpui::Context<Self>,
+    ) {
+        if let Some(terminal) = self.running_terminal() {
+            Self::encode_mouse(
+                terminal,
+                mouse::Action::Press,
+                Some(mouse::Button::Middle),
+                Some(MouseButton::Middle),
+                event.position,
+                event.modifiers,
+            );
+        }
+    }
+
+    fn on_middle_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _: &mut Window,
+        _: &mut gpui::Context<Self>,
+    ) {
+        if let Some(terminal) = self.running_terminal() {
+            Self::encode_mouse(
+                terminal,
+                mouse::Action::Release,
+                Some(mouse::Button::Middle),
+                None,
+                event.position,
+                event.modifiers,
+            );
+        }
+    }
+
+    /// #43: wheel ticks encode Button Four/Five presses while the guest has
+    /// tracking on; when tracking is OFF the wheel keeps doing exactly what it
+    /// does today: nothing.
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        _: &mut gpui::Context<Self>,
+    ) {
+        let Some(terminal) = self.running_terminal() else {
+            return;
+        };
+        // GPUI convention (matches Zed's editor): positive y scrolls toward
+        // the top, i.e. the wheel rolled up.
+        let delta_y = match event.delta {
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y),
+            ScrollDelta::Lines(lines) => lines.y,
+        };
+        let button = if delta_y > 0.0 {
+            mouse::Button::Four
+        } else if delta_y < 0.0 {
+            mouse::Button::Five
+        } else {
+            return;
+        };
+        Self::encode_mouse(
+            terminal,
+            mouse::Action::Press,
+            Some(button),
+            None,
+            event.position,
+            event.modifiers,
+        );
     }
 
     fn emit_prompt(&mut self, action: TerminalPromptAction, cx: &mut gpui::Context<Self>) {
@@ -2619,6 +2851,10 @@ impl gpui::Render for TerminalView {
                 .track_focus(&self.focus_handle)
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_mouse_down))
                 .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+                .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_mouse_down))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_left_mouse_up))
+                .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_mouse_up))
+                .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
                 .on_mouse_move(cx.listener(Self::on_link_hover_move))
                 .on_key_down(cx.listener(Self::on_key_down))
                 .on_drop::<(PathBuf, String)>(move |payload: &(PathBuf, String), _, cx| {
@@ -3098,6 +3334,125 @@ fn encode_key_input(
     Ok(bytes)
 }
 
+fn encode_mouse_input(
+    terminal: &Terminal<'_, '_>,
+    state: &mut MouseEncoderState<'_>,
+    input: MouseInput,
+) -> std::result::Result<Vec<u8>, Error> {
+    // Keep TRACKING MODE and FORMAT synchronized with guest state. The mode
+    // snapshot avoids resetting libghostty-vt 0.2.1's internal last-cell state
+    // when nothing changed; the setter itself clears that state.
+    let terminal_modes = [
+        terminal.mode(Mode::X10_MOUSE)?,
+        terminal.mode(Mode::NORMAL_MOUSE)?,
+        terminal.mode(Mode::BUTTON_MOUSE)?,
+        terminal.mode(Mode::ANY_MOUSE)?,
+        terminal.mode(Mode::UTF8_MOUSE)?,
+        terminal.mode(Mode::SGR_MOUSE)?,
+        terminal.mode(Mode::URXVT_MOUSE)?,
+        terminal.mode(Mode::SGR_PIXELS_MOUSE)?,
+    ];
+    if state.terminal_modes != Some(terminal_modes) {
+        state.encoder.set_options_from_terminal(terminal);
+        state.terminal_modes = Some(terminal_modes);
+    }
+
+    let size = mouse::EncoderSize {
+        screen_width: input.pane_width as u32,
+        screen_height: input.pane_height as u32,
+        cell_width: input.cell_width.round().max(1.0) as u32,
+        cell_height: f32::from(LINE_HEIGHT).round().max(1.0) as u32,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    };
+    // Size is likewise current for every event, but only reapplied when the
+    // pane geometry changed because this setter also clears last-cell state.
+    if state.size != Some(size) {
+        state.encoder.set_size(size);
+        state.size = Some(size);
+    }
+    state
+        .encoder
+        // Per-cell motion dedup inside the encoder — GPUI fires mouse-move per
+        // pixel; the encoder drops same-cell motion for us.
+        .set_track_last_cell(true)
+        .set_any_button_pressed(input.any_button_pressed);
+    let mut event = mouse::Event::new()?;
+    event
+        .set_action(input.action)
+        .set_button(input.button)
+        .set_mods(input.mods)
+        .set_position(mouse::Position {
+            x: input.x,
+            y: input.y,
+        });
+    let mut bytes = Vec::new();
+    state.encoder.encode_to_vec(&event, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn gpui_to_ghostty_button(button: MouseButton) -> Option<mouse::Button> {
+    Some(match button {
+        MouseButton::Left => mouse::Button::Left,
+        MouseButton::Middle => mouse::Button::Middle,
+        MouseButton::Right => mouse::Button::Right,
+        MouseButton::Navigate(_) => return None,
+    })
+}
+
+/// Converts a GPUI mouse event into a guest-bound [`MouseInput`], deciding
+/// Tiller-gesture vs encode BEFORE any encoding (#43):
+///
+/// * Shift bypasses reporting — the standard terminal override, so any
+///   shift-held event stays Tiller's no matter what tracking the guest
+///   requested.
+/// * The right button stays Tiller's (the context menu); it is never encoded.
+///
+/// `position` arrives in WINDOW space like every other handler; the pane
+/// origin is undone here with the same `last_bounds` math as
+/// `on_left_mouse_down` (F-TERM-UI-02).
+#[allow(clippy::too_many_arguments)]
+fn mouse_input(
+    action: mouse::Action,
+    button: Option<mouse::Button>,
+    pressed_button: Option<MouseButton>,
+    position: Point<Pixels>,
+    modifiers: gpui::Modifiers,
+    bounds: Bounds<Pixels>,
+    cell_width: Pixels,
+) -> Option<MouseInput> {
+    if modifiers.shift {
+        return None;
+    }
+    if button == Some(mouse::Button::Right)
+        || pressed_button == Some(MouseButton::Right)
+    {
+        return None;
+    }
+    // Shift never reaches the encoder (it bypasses reporting above), so only
+    // alt/ctrl are reportable.
+    let mut mods = key::Mods::empty();
+    if modifiers.alt {
+        mods |= key::Mods::ALT;
+    }
+    if modifiers.control {
+        mods |= key::Mods::CTRL;
+    }
+    Some(MouseInput {
+        action,
+        button,
+        mods,
+        any_button_pressed: pressed_button.is_some(),
+        x: (position.x - bounds.origin.x).into(),
+        y: (position.y - bounds.origin.y).into(),
+        pane_width: bounds.size.width.into(),
+        pane_height: bounds.size.height.into(),
+        cell_width: cell_width.into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use futures::StreamExt as _;
@@ -3316,6 +3671,208 @@ mod tests {
         assert_eq!(
             encoded_key(&term, &key_event("i", Some("i"), control)),
             b"\x1b[27;5;105~"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mouse reporting boundary tests (#43): same headless shape as the #42
+    // key tests — guest state driven with real bytes via vt_write, then
+    // MouseInputs encoded through the exact production path (`encode_mouse_input`)
+    // and the bytes asserted. No PTY, no window.
+    // -----------------------------------------------------------------------
+
+    /// Geometry matching a 640x360 pane at cell 8x18 — non-trivial cell size so
+    /// the pixel→cell conversion is actually proven, not trivially identity.
+    fn mouse_input_at(
+        action: mouse::Action,
+        button: Option<mouse::Button>,
+        x: f32,
+        y: f32,
+        any_button_pressed: bool,
+    ) -> MouseInput {
+        MouseInput {
+            action,
+            button,
+            mods: key::Mods::empty(),
+            any_button_pressed,
+            x,
+            y,
+            pane_width: 640.0,
+            pane_height: 360.0,
+            cell_width: 8.0,
+        }
+    }
+
+    fn encoded_mouse(term: &Terminal<'static, 'static>, input: MouseInput) -> Vec<u8> {
+        let mut encoder = MouseEncoderState::new().expect("mouse encoder");
+        encode_mouse_input(term, &mut encoder, input).expect("encode mouse")
+    }
+
+    #[test]
+    fn is_mouse_tracking_reflects_guest_requests() {
+        let mut term = headless_term(80, 24);
+        assert!(!term.is_mouse_tracking().expect("tracking query"));
+        advance_headless(&mut term, b"\x1b[?1000h");
+        assert!(term.is_mouse_tracking().expect("tracking query"));
+        advance_headless(&mut term, b"\x1b[?1000l");
+        assert!(!term.is_mouse_tracking().expect("tracking query"));
+    }
+
+    #[test]
+    fn sgr_press_and_release_encode_cell_coordinates() {
+        // opencode's startup request minus its any-event mode.
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[?1002h\x1b[?1006h");
+        // Pane-local (44, 60) px at cell 8x18 lands on 0-based column 5 row 3;
+        // SGR output is 1-based, so column 6 row 4.
+        let press = encoded_mouse(
+            &term,
+            mouse_input_at(mouse::Action::Press, Some(mouse::Button::Left), 44.0, 60.0, true),
+        );
+        assert_eq!(press, b"\x1b[<0;6;4M");
+        let release = encoded_mouse(
+            &term,
+            mouse_input_at(mouse::Action::Release, Some(mouse::Button::Left), 44.0, 60.0, false),
+        );
+        assert_eq!(release, b"\x1b[<0;6;4m");
+    }
+
+    #[test]
+    fn motion_with_button_held_encodes_plus_32_form_and_dedups_per_cell() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[?1002h\x1b[?1006h");
+        // One shared encoder mirrors the owner thread: per-cell dedup only
+        // kicks in across events on the SAME encoder.
+        let mut encoder = MouseEncoderState::new().expect("mouse encoder");
+        // First move into cell (5, 3) with left held: +32 form of button 0 = 32.
+        let first = encode_mouse_input(
+            &term,
+            &mut encoder,
+            mouse_input_at(mouse::Action::Motion, Some(mouse::Button::Left), 44.0, 60.0, true),
+        )
+        .expect("motion");
+        assert_eq!(first, b"\x1b[<32;6;4M");
+        // Second move inside the SAME cell encodes nothing (track_last_cell).
+        let second = encode_mouse_input(
+            &term,
+            &mut encoder,
+            mouse_input_at(mouse::Action::Motion, Some(mouse::Button::Left), 46.0, 62.0, true),
+        )
+        .expect("same-cell motion");
+        assert_eq!(second, Vec::<u8>::new());
+        // Moving into a different cell encodes again.
+        let third = encode_mouse_input(
+            &term,
+            &mut encoder,
+            mouse_input_at(mouse::Action::Motion, Some(mouse::Button::Left), 88.0, 96.0, true),
+        )
+        .expect("next-cell motion");
+        assert_eq!(third, b"\x1b[<32;12;6M");
+    }
+
+    #[test]
+    fn any_event_motion_requires_1003_mode() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[?1003h\x1b[?1006h");
+        let with_any_event = encoded_mouse(
+            &term,
+            mouse_input_at(mouse::Action::Motion, None, 44.0, 60.0, false),
+        );
+        // No-button motion is the +32 form of button 3 = 35.
+        assert_eq!(with_any_event, b"\x1b[<35;6;4M");
+
+        // Button-event tracking alone must not report no-button motion.
+        let mut without_any_event = headless_term(80, 24);
+        advance_headless(&mut without_any_event, b"\x1b[?1002h\x1b[?1006h");
+        let without = encoded_mouse(
+            &without_any_event,
+            mouse_input_at(mouse::Action::Motion, None, 44.0, 60.0, false),
+        );
+        assert_eq!(without, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn wheel_ticks_encode_four_and_five_presses() {
+        let mut term = headless_term(80, 24);
+        advance_headless(&mut term, b"\x1b[?1002h\x1b[?1006h");
+        let up = encoded_mouse(
+            &term,
+            mouse_input_at(mouse::Action::Press, Some(mouse::Button::Four), 44.0, 60.0, false),
+        );
+        assert_eq!(up, b"\x1b[<64;6;4M");
+        let down = encoded_mouse(
+            &term,
+            mouse_input_at(mouse::Action::Press, Some(mouse::Button::Five), 44.0, 60.0, false),
+        );
+        assert_eq!(down, b"\x1b[<65;6;4M");
+    }
+
+    #[test]
+    fn without_tracking_modes_the_same_inputs_encode_zero_bytes() {
+        let term = headless_term(80, 24);
+        let inputs = [
+            (mouse::Action::Press, Some(mouse::Button::Left)),
+            (mouse::Action::Release, Some(mouse::Button::Left)),
+            (mouse::Action::Press, Some(mouse::Button::Four)),
+        ];
+        for (action, button) in inputs {
+            let bytes = encoded_mouse(
+                &term,
+                mouse_input_at(action, button, 44.0, 60.0, button.is_some()),
+            );
+            assert_eq!(bytes, Vec::<u8>::new());
+        }
+    }
+
+    #[test]
+    fn shift_bypasses_reporting_in_the_conversion() {
+        let bounds = Bounds {
+            origin: point(px(10.0), px(20.0)),
+            size: size(px(640.0), px(360.0)),
+        };
+        let shift = gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        // Whatever the tracking state, shift-held events stay Tiller's.
+        assert_eq!(
+            mouse_input(
+                mouse::Action::Press,
+                Some(mouse::Button::Left),
+                Some(MouseButton::Left),
+                point(px(54.0), px(80.0)),
+                shift,
+                bounds,
+                px(8.0),
+            ),
+            None
+        );
+        // Without shift it converts, undoing the pane origin.
+        let converted = mouse_input(
+            mouse::Action::Press,
+            Some(mouse::Button::Left),
+            Some(MouseButton::Left),
+            point(px(54.0), px(80.0)),
+            gpui::Modifiers::default(),
+            bounds,
+            px(8.0),
+        )
+        .expect("guest-bound");
+        assert_eq!(converted.x, 44.0);
+        assert_eq!(converted.y, 60.0);
+        assert!(converted.any_button_pressed);
+        // The right button stays Tiller's even without shift.
+        assert_eq!(
+            mouse_input(
+                mouse::Action::Press,
+                Some(mouse::Button::Right),
+                Some(MouseButton::Right),
+                point(px(54.0), px(80.0)),
+                gpui::Modifiers::default(),
+                bounds,
+                px(8.0),
+            ),
+            None
         );
     }
 

@@ -5,13 +5,14 @@
 //! and view model live here so the transcript renderer stays deterministic.
 
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
-    InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
-    ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
-    canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad, rgb,
+    AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context,
+    CursorStyle, DispatchPhase, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle,
+    Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId,
+    ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window,
+    actions, canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad,
+    rgb,
     transparent_black,
 };
 use std::cell::Cell;
@@ -31,6 +32,7 @@ use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatSessionSummary, ChatTranscript, ChatTurn,
 };
+use tiller_project::display_path;
 use tiller_theme::Theme;
 
 use crate::caret;
@@ -46,8 +48,9 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 /// assistant-authored chat prose.
 pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
-/// The transcript's content column — waku's measured `CONTENT_MAX_WIDTH`
-/// 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` §A.2).
+/// The transcript's content column maximum — waku's measured
+/// `CONTENT_MAX_WIDTH` 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md`
+/// §A.2); below that limit, the column takes the pane's width.
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
@@ -65,8 +68,9 @@ const STREAMING_BORDER_REVOLUTION: Duration = Duration::from_secs(2);
 /// interval `BrowserView` already uses for its own frame-driven redraw.
 const STREAMING_BORDER_TICK: Duration = Duration::from_millis(16);
 /// Thickness of the rotating ring drawn around the composer card while
-/// streaming, outside its normal 1px border.
-const STREAMING_BORDER_WIDTH: Pixels = px(2.5);
+/// streaming. Matching the static 1px border keeps the composer's footprint
+/// and its contents stationary while the ring is shown.
+const STREAMING_BORDER_WIDTH: Pixels = px(1.0);
 
 /// Degrees of rotation for a streaming-border revolution `progress`
 /// (`0.0` = start of a revolution, `1.0` = one full turn) — continuous
@@ -925,6 +929,8 @@ pub struct Chat {
     client: Option<AcpClient>,
     /// `None` when there is nothing to launch — see [`Chat::unavailable`].
     agent_command: Option<AgentCommand>,
+    /// Display name shown in the empty composer placeholder when known.
+    agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
     composer: Composer,
@@ -1079,6 +1085,24 @@ impl Chat {
         chat
     }
 
+    /// Sets the agent display name used by the empty composer placeholder.
+    pub fn set_agent_name(&mut self, name: impl Into<String>) {
+        self.agent_name = Some(name.into());
+    }
+
+    fn default_placeholder(&self) -> String {
+        let head = self
+            .agent_name
+            .as_deref()
+            .map_or_else(|| "Message…".to_string(), |name| format!("Message {name}"));
+        let commands = if self.available_commands.is_empty() {
+            ""
+        } else {
+            ", / for commands"
+        };
+        format!("{head} — @ for files{commands}")
+    }
+
     /// Launches an ACP chat whose completed turns are restored and saved in
     /// the durable transcript owned by its shell tab.
     pub fn launch_with_command_and_persistence(
@@ -1157,6 +1181,7 @@ impl Chat {
         Self {
             client: None,
             agent_command: command,
+            agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
             composer: Composer::new(),
@@ -3991,6 +4016,15 @@ impl Chat {
         }
     }
 
+    /// Estimates a marker column from its widest marker's character count.
+    fn markdown_list_marker_width(marker_chars: usize, headline: Pixels) -> Pixels {
+        // This is an estimate: gpui cannot measure text before the frame, and
+        // render_markdown_list has no Window. Its safe failure mode is a
+        // slightly wide column, never clipped or wrapped text because the
+        // marker is nowrap.
+        px((marker_chars as f32 * f32::from(headline) * 0.6).max(18.0))
+    }
+
     fn render_markdown_list(
         kind: ListKind,
         items: Vec<ListItem>,
@@ -4003,6 +4037,15 @@ impl Chat {
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
+        let marker_chars = match kind {
+            ListKind::Bullet => 1,
+            ListKind::Ordered { start } => {
+                format!("{}.", start + items.len().saturating_sub(1) as u64)
+                    .chars()
+                    .count()
+            }
+        };
+        let marker_width = Self::markdown_list_marker_width(marker_chars, typography.headline);
         div()
             .w_full()
             .pl(px(18.0 * depth as f32))
@@ -4063,7 +4106,10 @@ impl Chat {
                         .gap(px(8.0))
                         .child(
                             div()
-                                .w(px(18.0))
+                                .debug_selector(|| "markdown-list-marker".into())
+                                .w(marker_width)
+                                .flex_none()
+                                .whitespace_nowrap()
                                 .text_size(typography.headline)
                                 .text_color(colors.file_link)
                                 .child(Self::render_plain_text(
@@ -5842,6 +5888,7 @@ impl Chat {
         let mode_selectable = self.has_completed_turn && self.mode_catalog.is_some();
         let status_pill = div()
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(6.0))
             .h(px(24.0))
@@ -5917,6 +5964,8 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
+                .flex_1()
+                .min_w_0()
                 .hover(|style| style.bg(colors.chat_row_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
@@ -5926,6 +5975,9 @@ impl Chat {
                     div()
                         .id(model_selection_id.clone())
                         .debug_selector(move || model_selection_id)
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
                         .text_color(colors.title)
                         .child(selected_model_name.clone()),
                 )
@@ -5952,7 +6004,16 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
-                .child(div().text_color(colors.title).child(selected_model_name))
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(colors.title)
+                        .child(selected_model_name),
+                )
         };
 
         let model_picker = if self.model_picker_open {
@@ -6792,6 +6853,7 @@ impl Chat {
             .debug_selector(|| "attach-image".into())
             .w(px(24.0))
             .h(px(24.0))
+            .flex_none()
             .rounded(theme.radii.control)
             .flex()
             .items_center()
@@ -6807,6 +6869,7 @@ impl Chat {
             .debug_selector(|| "composer-overflow".into())
             .w(px(24.0))
             .h(px(24.0))
+            .flex_none()
             .rounded(theme.radii.control)
             .flex()
             .items_center()
@@ -6872,8 +6935,13 @@ impl Chat {
             } else {
                 vec![
                     div()
+                        .id("composer-placeholder")
+                        .debug_selector(|| "composer-placeholder".into())
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(colors.meta)
-                        .child("Message...")
+                        .child(self.default_placeholder())
                         .into_any_element(),
                 ]
             }
@@ -7000,15 +7068,19 @@ impl Chat {
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
-            .w(px(TRANSCRIPT_WIDTH))
+            .when(self.streaming, |this| this.w_full())
+            .when(!self.streaming, |this| {
+                this.w_full()
+                    .max_w(px(TRANSCRIPT_WIDTH))
+                    .border_1()
+                    .border_color(if focused {
+                        colors.accent
+                    } else {
+                        colors.hairline
+                    })
+            })
             .rounded(theme.radii.composer)
             .bg(colors.composer)
-            .border_1()
-            .border_color(if focused {
-                colors.accent
-            } else {
-                colors.hairline
-            })
             .p(px(10.0))
             .flex()
             .flex_col()
@@ -7097,11 +7169,11 @@ impl Chat {
                     .child(attach_button)
                     .child(status_pill)
                     .child(model_control)
-                    .child(div().flex_1())
                     .child(overflow_button)
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap(px(6.0))
                             .h(px(24.0))
@@ -7122,6 +7194,7 @@ impl Chat {
                             .debug_selector(|| "send".into())
                             .w(px(26.0))
                             .h(px(26.0))
+                            .flex_none()
                             .rounded_full()
                             .flex()
                             .items_center()
@@ -7188,6 +7261,7 @@ impl Chat {
                 div()
                     .id("composer-streaming-ring")
                     .debug_selector(|| "composer-streaming-ring".into())
+                    .w(px(TRANSCRIPT_WIDTH))
                     .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
                     .p(STREAMING_BORDER_WIDTH)
                     .bg(linear_gradient(
@@ -7354,7 +7428,8 @@ impl Render for Chat {
                 div()
                     .id("chat-transcript")
                     .debug_selector(|| "chat-transcript".into())
-                    .w(px(TRANSCRIPT_WIDTH))
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_WIDTH))
                     .pt(px(22.0))
                     .flex_1()
                     .flex()
@@ -7383,7 +7458,8 @@ impl Render for Chat {
                                     TurnRowRole::Fold { turn_id, label, at } => {
                                         return div()
                                             .id(("chat-entry", entry_index))
-                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .w_full()
+                                            .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(8.0))
                                             .child(Chat::render_turn_fold_row(
                                                 turn_id,
@@ -7408,7 +7484,8 @@ impl Render for Chat {
                                             .unwrap_or(0);
                                         return div()
                                             .id(("chat-entry", entry_index))
-                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .w_full()
+                                            .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(8.0))
                                             .child(
                                                 div()
@@ -7479,7 +7556,8 @@ impl Render for Chat {
                                     );
                                     return div()
                                         .id(("chat-entry", entry_index))
-                                        .w(px(TRANSCRIPT_WIDTH))
+                                        .w_full()
+                                        .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
                                         .child(Chat::render_tool_call_group(
                                             members,
@@ -7501,7 +7579,8 @@ impl Render for Chat {
                                     .map(|entry| {
                                         div()
                                             .id(("chat-entry", entry_index))
-                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .w_full()
+                                            .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(8.0))
                                             .child(Chat::render_entry(
                                                 entry,
@@ -7542,7 +7621,8 @@ impl Render for Chat {
                             div()
                                 .id("pending-question-bar")
                                 .debug_selector(|| "pending-question-bar".into())
-                                .w(px(TRANSCRIPT_WIDTH))
+                                .w_full()
+                                .max_w(px(TRANSCRIPT_WIDTH))
                                 .mb(px(8.0))
                                 .flex()
                                 .items_center()
@@ -7589,7 +7669,7 @@ impl Render for Chat {
                             .mt(px(8.0))
                             .text_size(theme.typography.caption2)
                             .text_color(theme.colors.meta)
-                            .child(self.agent_cwd.display().to_string()),
+                            .child(working_directory_label(&self.agent_cwd)),
                     ),
             )
             .child({
@@ -7661,6 +7741,10 @@ fn turn_end_label(reason: &str) -> &'static str {
         "MaxTurnRequests" => "stopped at the turn-request limit",
         _ => "ended",
     }
+}
+
+fn working_directory_label(path: &Path) -> String {
+    display_path(path)
 }
 
 fn default_agent_cwd() -> PathBuf {
@@ -8242,7 +8326,7 @@ fn split_diff_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext, size};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -8348,6 +8432,249 @@ mod tests {
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input(text);
+    }
+
+    struct MarkdownHarness {
+        document: Document,
+    }
+
+    impl Render for MarkdownHarness {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = *Theme::get(cx);
+            div().size_full().child(
+                div()
+                    .id("assistant-response-0")
+                    .debug_selector(|| "assistant-response-0".into())
+                    .w_full()
+                    .child(Chat::render_markdown(
+                        self.document.clone(),
+                        &theme,
+                        None,
+                        0,
+                        None,
+                    )),
+            )
+        }
+    }
+
+    fn markdown_view(cx: &mut TestAppContext, markdown: String) -> VisualTestContext {
+        cx.update(Theme::init);
+        let window = cx.open_window(size(px(900.0), px(900.0)), move |_, _| MarkdownHarness {
+            document: parse(&markdown),
+        });
+        VisualTestContext::from_window(window.into(), cx)
+    }
+
+    #[test]
+    fn streaming_border_angle_rotates_one_revolution() {
+        assert_eq!(streaming_border_angle(0.0), 0.0);
+        assert_eq!(streaming_border_angle(0.5), 180.0);
+        assert_eq!(streaming_border_angle(1.0), 360.0);
+
+        let angles = [0.0, 0.25, 0.5, 0.75, 0.999].map(streaming_border_angle);
+        assert!(angles.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[gpui::test]
+    async fn the_rotating_border_wraps_the_composer_only_while_streaming(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &[]);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-streaming-ring").is_none(),
+            "an idle composer keeps its static border"
+        );
+        // The static border lives on the card itself, the animated one on a
+        // wrapper the card sits inside — so the card's own width legitimately
+        // differs by the wrapper's inset. What must not move is the card's
+        // outer footprint and the text the user is typing inside it.
+        let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
+        let idle_input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let wrapper = cx
+            .debug_bounds("composer-streaming-ring")
+            .expect("a working agent wraps the composer in the animated border");
+        let streaming_input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+        assert_eq!(
+            idle_card.size, wrapper.size,
+            "the animated border must occupy exactly the footprint the static one did"
+        );
+        assert_eq!(
+            idle_input, streaming_input,
+            "the draft text must not shift when the animated border takes over"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = false;
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-streaming-ring").is_none(),
+            "the static border returns the moment streaming ends"
+        );
+    }
+
+    #[gpui::test]
+    async fn narrow_composer_placeholder_stays_inside_composer_card(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.set_agent_name("OpenCode");
+            chat.available_commands.push(AvailableCommandInfo {
+                name: "help".into(),
+                description: "Show help".into(),
+            });
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(595.0), px(600.0)));
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
+        let placeholder = cx
+            .debug_bounds("composer-placeholder")
+            .expect("the default placeholder is drawn");
+        assert!(
+            placeholder.left() >= card.left() && placeholder.right() <= card.right(),
+            "the placeholder must truncate inside the composer card: card={card:?} placeholder={placeholder:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn narrow_composer_stays_inside_chat_pane_and_keeps_send_reachable(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(595.0), px(600.0)));
+        refresh_frame(cx);
+
+        let pane = cx
+            .debug_bounds("chat-root")
+            .expect("the chat pane is drawn");
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
+        let send = cx.debug_bounds("send").expect("the send control is drawn");
+        assert!(
+            card.left() >= pane.left(),
+            "the composer must not overflow the pane's left edge: pane={pane:?} card={card:?}"
+        );
+        assert!(
+            card.right() <= pane.right(),
+            "the composer must not overflow the pane's right edge: pane={pane:?} card={card:?}"
+        );
+        assert!(
+            send.left() >= card.left() && send.right() <= card.right(),
+            "the send control must be fully inside the composer: card={card:?} send={send:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn wide_composer_remains_capped_at_transcript_maximum(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(1140.0), px(600.0)));
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
+        assert_eq!(
+            card.size.width,
+            px(TRANSCRIPT_WIDTH),
+            "the composer stays capped below a wider pane: card={card:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn fifteen_item_ordered_list_keeps_each_marker_on_its_item_line(
+        cx: &mut TestAppContext,
+    ) {
+        let markdown = (1..=15)
+            .map(|number| format!("{number}. item {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cx = markdown_view(cx, markdown);
+        refresh_frame(&mut cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the ordered list response is drawn");
+        assert!(
+            response.size.height <= px(450.0),
+            "a wrapped marker would add a stray period line: response={response:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds("markdown-list-marker")
+                .expect("the final marker is drawn")
+                .size
+                .width,
+            px(27.0),
+            "the fifteen-item list sizes its marker column for three glyphs"
+        );
+    }
+
+    #[gpui::test]
+    async fn three_digit_ordered_markers_keep_the_item_column_aligned(cx: &mut TestAppContext) {
+        let markdown = (98..=102)
+            .map(|number| format!("{number}. item {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cx = markdown_view(cx, markdown);
+        refresh_frame(&mut cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the ordered list response is drawn");
+        assert!(
+            response.size.height <= px(150.0),
+            "three-digit markers must stay intact instead of wrapping: response={response:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds("markdown-list-marker")
+                .expect("the final marker is drawn")
+                .size
+                .width,
+            px(36.0),
+            "the item column starts after a four-glyph marker column"
+        );
+    }
+
+    #[gpui::test]
+    async fn nine_item_ordered_list_keeps_the_existing_marker_column(cx: &mut TestAppContext) {
+        let markdown = (1..=9)
+            .map(|number| format!("{number}. item {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut cx = markdown_view(cx, markdown);
+        refresh_frame(&mut cx);
+
+        assert_eq!(
+            cx.debug_bounds("markdown-list-marker")
+                .expect("the final marker is drawn")
+                .size
+                .width,
+            px(18.0),
+            "the common two-glyph case keeps its 18px marker column"
+        );
     }
 
     #[test]
@@ -10281,6 +10608,58 @@ mod tests {
             cost: None,
             ..Default::default()
         });
+    }
+
+    #[gpui::test]
+    fn default_placeholder_names_agent_without_commands(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.set_agent_name("OpenCode");
+            chat
+        });
+
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.default_placeholder()),
+            "Message OpenCode — @ for files"
+        );
+    }
+
+    #[gpui::test]
+    fn default_placeholder_names_agent_commands(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.set_agent_name("OpenCode");
+            chat.available_commands.push(AvailableCommandInfo {
+                name: "help".into(),
+                description: "Show help".into(),
+            });
+            chat
+        });
+
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.default_placeholder()),
+            "Message OpenCode — @ for files, / for commands"
+        );
+    }
+
+    #[gpui::test]
+    fn default_placeholder_without_agent_keeps_file_affordance(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+
+        let placeholder = chat.read_with(cx, |chat, _| chat.default_placeholder());
+        assert!(placeholder.starts_with("Message…"));
+        assert!(placeholder.contains("@ for files"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn chat_working_directory_line_hides_the_verbatim_prefix() {
+        let line = working_directory_label(Path::new(r"\\?\D:\x\y"));
+        assert!(!line.contains(r"\\?\"), "chat chrome leaked {line}");
+        assert_eq!(line, r"D:\x\y");
     }
 
     #[test]

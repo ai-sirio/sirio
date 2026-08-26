@@ -30,8 +30,8 @@ use tiller_git::{
 };
 use tiller_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
-    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_path, is_git_repository,
-    numeric_tab_selection,
+    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
+    display_path, is_git_repository, numeric_tab_selection,
 };
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -987,10 +987,7 @@ impl ControlState {
                         BTreeMap::from([
                             ("id".to_string(), format!("{}-wt-{index}", project.id)),
                             ("branch".to_string(), worktree.branch.clone()),
-                            (
-                                "path".to_string(),
-                                worktree.path.to_string_lossy().into_owned(),
-                            ),
+                            ("path".to_string(), display_absolute_path(&worktree.path)),
                             ("primary".to_string(), worktree.is_primary.to_string()),
                         ])
                     })
@@ -1008,10 +1005,7 @@ impl ControlState {
                 BTreeMap::from([
                     ("id".to_string(), project.id.clone()),
                     ("name".to_string(), project.name.clone()),
-                    (
-                        "path".to_string(),
-                        project.root_path.to_string_lossy().into_owned(),
-                    ),
+                    ("path".to_string(), display_absolute_path(&project.root_path)),
                     ("isGit".to_string(), project.is_git.to_string()),
                     (
                         "worktreeCount".to_string(),
@@ -1056,7 +1050,10 @@ impl ControlState {
                     ("id".to_string(), workspace.id.clone()),
                     ("project".to_string(), workspace.project.clone()),
                     ("branch".to_string(), workspace.branch.clone()),
-                    ("path".to_string(), workspace.path.clone()),
+                    (
+                        "path".to_string(),
+                        display_absolute_path(Path::new(&workspace.path)),
+                    ),
                     ("selected".to_string(), workspace.selected.to_string()),
                     ("mounted".to_string(), workspace.mounted.to_string()),
                     ("comment".to_string(), workspace.comment.clone()),
@@ -1447,8 +1444,8 @@ impl AppControlHandler {
             Ok(()) => Self::success(
                 &request.id,
                 [
-                    ("worktree".to_string(), repo.to_string_lossy().into_owned()),
-                    ("path".to_string(), path.to_string_lossy().into_owned()),
+                    ("worktree".to_string(), display_absolute_path(&repo)),
+                    ("path".to_string(), display_absolute_path(path)),
                 ],
             ),
             Err(error) => ControlResponse::failure(&request.id, error.to_string()),
@@ -1467,7 +1464,7 @@ impl AppControlHandler {
         match action(&repo) {
             Ok(()) => Self::success(
                 &request.id,
-                [("worktree".to_string(), repo.to_string_lossy().into_owned())],
+                [("worktree".to_string(), display_absolute_path(&repo))],
             ),
             Err(error) => ControlResponse::failure(&request.id, error.to_string()),
         }
@@ -1550,6 +1547,10 @@ impl ControlHandler for AppControlHandler {
                             tiller_control::protocol::rows::encode(&rows),
                         ),
                         (
+                            "version".to_string(),
+                            tiller_control::VERSION.to_string(),
+                        ),
+                        (
                             "socketEnabled".to_string(),
                             self.socket_info.enabled().to_string(),
                         ),
@@ -1559,7 +1560,7 @@ impl ControlHandler for AppControlHandler {
                         ),
                         (
                             "socketPath".to_string(),
-                            self.socket_info.path.to_string_lossy().into_owned(),
+                            display_absolute_path(&self.socket_info.path),
                         ),
                     ],
                 )
@@ -1589,7 +1590,10 @@ impl ControlHandler for AppControlHandler {
                 let mut result = vec![
                     ("project".to_string(), workspace.project),
                     ("branch".to_string(), workspace.branch),
-                    ("path".to_string(), workspace.path),
+                    (
+                        "path".to_string(),
+                        display_absolute_path(Path::new(&workspace.path)),
+                    ),
                     ("workspaceId".to_string(), workspace.id),
                     (
                         "surfaceId".to_string(),
@@ -1640,7 +1644,13 @@ impl ControlHandler for AppControlHandler {
                         ("id".to_string(), workspace.id.clone()),
                         ("project".to_string(), workspace.project.clone()),
                         ("branch".to_string(), workspace.branch.clone()),
-                        ("path".to_string(), workspace.path.clone()),
+                        // #113: this reply is built by hand rather than through
+                        // `workspace_rows`, so #106's fix missed it and the two
+                        // commands disagreed about one workspace's path.
+                        (
+                            "path".to_string(),
+                            display_absolute_path(Path::new(&workspace.path)),
+                        ),
                     ],
                 )
             }
@@ -2266,7 +2276,10 @@ impl ControlHandler for AppControlHandler {
                 }
                 let mut result = vec![
                     ("id".to_string(), workspace.id),
-                    ("path".to_string(), workspace.path),
+                    (
+                        "path".to_string(),
+                        display_absolute_path(Path::new(&workspace.path)),
+                    ),
                     ("comment".to_string(), workspace.comment),
                 ];
                 if let Some(session) = workspace.session {
@@ -2873,7 +2886,7 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
     let mut pairs = vec![
         (
             "workingDirectory".to_string(),
-            snapshot.working_directory.to_string_lossy().into_owned(),
+            display_absolute_path(&snapshot.working_directory),
         ),
         (
             "scrollback".to_string(),
@@ -2927,7 +2940,7 @@ fn changes_report_pairs(
                 .iter()
                 .map(|file| {
                     BTreeMap::from([
-                        ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                        ("path".to_string(), display_absolute_path(&file.path)),
                         ("additions".to_string(), file.additions.to_string()),
                         ("deletions".to_string(), file.deletions.to_string()),
                         ("binary".to_string(), file.is_binary.to_string()),
@@ -2961,7 +2974,7 @@ fn changes_report_pairs(
         ("tabId".to_string(), tab_id.to_string()),
         (
             "worktree".to_string(),
-            report.repo_root.to_string_lossy().into_owned(),
+            display_absolute_path(&report.repo_root),
         ),
         ("loading".to_string(), report.loading.to_string()),
         ("ready".to_string(), (!report.loading).to_string()),
@@ -2980,7 +2993,7 @@ fn changes_report_pairs(
                     .iter()
                     .map(|file| {
                         BTreeMap::from([
-                            ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                            ("path".to_string(), display_absolute_path(&file.path)),
                             ("additions".to_string(), file.additions.to_string()),
                             ("deletions".to_string(), file.deletions.to_string()),
                             ("binary".to_string(), file.is_binary.to_string()),
@@ -2997,7 +3010,7 @@ fn changes_report_pairs(
                     .iter()
                     .map(|file| {
                         BTreeMap::from([
-                            ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                            ("path".to_string(), display_absolute_path(&file.path)),
                             ("additions".to_string(), file.additions.to_string()),
                             ("deletions".to_string(), file.deletions.to_string()),
                             ("binary".to_string(), file.is_binary.to_string()),
@@ -3014,7 +3027,7 @@ fn changes_report_pairs(
                     .iter()
                     .map(|file| {
                         BTreeMap::from([
-                            ("path".to_string(), file.path.to_string_lossy().into_owned()),
+                            ("path".to_string(), display_absolute_path(&file.path)),
                             ("additions".to_string(), file.additions.to_string()),
                             ("deletions".to_string(), file.deletions.to_string()),
                             ("binary".to_string(), file.is_binary.to_string()),
@@ -3054,7 +3067,7 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
                     provider
                         .executable
                         .as_ref()
-                        .map(|path| path.to_string_lossy().into_owned())
+                        .map(|path| display_absolute_path(path))
                         .unwrap_or_default(),
                 ),
             ])
@@ -3090,7 +3103,10 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
             "controlSocketEnabled".to_string(),
             snapshot.control_socket_enabled.to_string(),
         ),
-        ("socketPath".to_string(), snapshot.socket_path.clone()),
+        (
+            "socketPath".to_string(),
+            display_absolute_path(Path::new(&snapshot.socket_path)),
+        ),
         (
             "resumeAgentSessions".to_string(),
             report.resume_agent_sessions.to_string(),
@@ -5739,6 +5755,7 @@ impl TillerWorkspace {
             .control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
         let mut entries = Vec::new();
         for workspace in &state.workspaces {
             let Ok(panes) = self.panes.list_for(Path::new(&workspace.path)) else {
@@ -5754,6 +5771,7 @@ impl TillerWorkspace {
                 branch: workspace.branch.clone(),
                 project_name: workspace.project.clone(),
                 status,
+                status_since: self.activity.status_age_for_panes(&refs, now),
             });
         }
         tiller_activity::AttentionSort::sorted(&entries, |entry| Some(entry.status))
@@ -6184,7 +6202,10 @@ impl TillerWorkspace {
             ("id".to_string(), workspace.id.clone()),
             ("project".to_string(), workspace.project.clone()),
             ("branch".to_string(), workspace.branch.clone()),
-            ("path".to_string(), workspace.path.clone()),
+            (
+                "path".to_string(),
+                display_absolute_path(Path::new(&workspace.path)),
+            ),
         ])
     }
 
@@ -6217,7 +6238,10 @@ impl TillerWorkspace {
             ("id".to_string(), workspace.id.clone()),
             ("project".to_string(), workspace.project.clone()),
             ("branch".to_string(), workspace.branch.clone()),
-            ("path".to_string(), workspace.path.clone()),
+            (
+                "path".to_string(),
+                display_absolute_path(Path::new(&workspace.path)),
+            ),
         ];
         match jump {
             Some((tab_id, tab_title)) => {
@@ -6309,7 +6333,7 @@ impl TillerWorkspace {
                 format!("{}-wt-{worktree_index}", project_id),
             ),
             ("branch".to_string(), branch),
-            ("path".to_string(), path.to_string_lossy().into_owned()),
+            ("path".to_string(), display_absolute_path(&path)),
         ])
     }
 
@@ -6362,7 +6386,7 @@ impl TillerWorkspace {
         }
         Ok(vec![
             ("closed".to_string(), "true".to_string()),
-            ("path".to_string(), path.to_string_lossy().into_owned()),
+            ("path".to_string(), display_absolute_path(&path)),
         ])
     }
 
@@ -6427,7 +6451,7 @@ impl TillerWorkspace {
             ("restoredCount".to_string(), restored_count.to_string()),
             (
                 "path".to_string(),
-                snapshot.working_directory.to_string_lossy().into_owned(),
+                display_absolute_path(&snapshot.working_directory),
             ),
         ])
     }
@@ -7479,6 +7503,12 @@ impl TillerWorkspace {
         // Chat History menu has real sessions to list.
         let database_path = session::database_path();
         let worktree_id = session::persisted_worktree_id(&self.working_directory);
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         let chat = match adapter {
             Some(adapter) => {
                 let source = self.launch_source_for(adapter.id());
@@ -7525,6 +7555,12 @@ impl TillerWorkspace {
                 })
             }
         };
+        if let Some(agent_name) = agent_name {
+            chat.update(cx, |chat, cx| {
+                chat.set_agent_name(agent_name);
+                cx.notify();
+            });
+        }
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         // A chat pane is an agent pane: register its identity the same way
@@ -7596,6 +7632,12 @@ impl TillerWorkspace {
                     )),
                 ),
             };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         let is_unavailable = unavailable.is_some();
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
@@ -7615,6 +7657,12 @@ impl TillerWorkspace {
                 chat
             }
         });
+        if let Some(agent_name) = agent_name {
+            chat.update(cx, |chat, cx| {
+                chat.set_agent_name(agent_name);
+                cx.notify();
+            });
+        }
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         register_restored_agent(
@@ -7835,6 +7883,39 @@ impl TillerWorkspace {
     }
 
     fn add_changes_tab(&mut self, focus_path: Option<PathBuf>, cx: &mut Context<Self>) {
+        // The shell keeps one tab list for the current worktree, while
+        // `group_id` identifies pane placement rather than a worktree. Read
+        // the Changes surface's own repository root so a verbatim path and
+        // its plain equivalent resolve to the same existing surface.
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            let mut matches_worktree = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Changes(changes) = content {
+                    let repo_root = changes.read(cx).report().repo_root;
+                    matches_worktree |= paths_name_the_same_document(
+                        &repo_root,
+                        &self.working_directory,
+                    );
+                }
+            });
+            matches_worktree
+        }) {
+            self.active_tab = index;
+            let tab = &self.tabs[index];
+            self.tab_machinery.select_tab(tab.group_id, tab.id);
+            if let Some(path) = focus_path.as_deref() {
+                self.tabs[index].panes.for_each(&mut |_, content| {
+                    if let TabContent::Changes(changes) = content {
+                        changes.update(cx, |tab, cx| tab.focus_path(path, cx));
+                    }
+                });
+            }
+            self.schedule_save(cx);
+            self.sync_activity(cx);
+            cx.notify();
+            return;
+        }
+
         let changes = cx.new(|cx| ChangesTab::new(self.working_directory.clone(), cx));
         Self::subscribe_changes_tab(&changes, cx);
         // F-CHG-13: OpenDiff(path) expects the Changes tab to do something
@@ -10957,7 +11038,7 @@ impl TillerWorkspace {
                 shell_chrome::panel(
                     "shell-center-panel",
                     &self.center_panel_focus,
-                    false,
+                    false, // #58: The center pane deliberately never shows the shell focus ring.
                     theme,
                 )
                 .flex_1()
@@ -12876,6 +12957,12 @@ fn restore_tabs(
                 None,
             )
         };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         // Registering the identity would tell the activity model this pane
         // hosts a running agent. Nothing was started, so it does not.
         register_restored_agent(
@@ -12888,24 +12975,30 @@ fn restore_tabs(
             },
         );
         let content = match tab.kind.as_str() {
-            "chat" => TabContent::Chat(cx.new(|cx| {
-                if let Some(reason) = unavailable {
-                    return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+            "chat" => {
+                let chat = cx.new(|cx| {
+                    if let Some(reason) = unavailable {
+                        return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+                    }
+                    let mut chat = Chat::launch_with_command_and_persistence(
+                        command.expect("a chat with no refusal reason carries its command"),
+                        working_directory.to_path_buf(),
+                        database_path.clone(),
+                        tab.id.clone(),
+                        worktree_id.clone(),
+                        cx,
+                    );
+                    // F-CORE-WSP-08: an unsent draft survives a restart.
+                    if !tab_state.chat_draft.is_empty() {
+                        chat.control_compose(&tab_state.chat_draft, cx);
+                    }
+                    chat
+                });
+                if let Some(agent_name) = agent_name.clone() {
+                    chat.update(cx, |chat, _| chat.set_agent_name(agent_name));
                 }
-                let mut chat = Chat::launch_with_command_and_persistence(
-                    command.expect("a chat with no refusal reason carries its command"),
-                    working_directory.to_path_buf(),
-                    database_path.clone(),
-                    tab.id.clone(),
-                    worktree_id.clone(),
-                    cx,
-                );
-                // F-CORE-WSP-08: an unsent draft survives a restart.
-                if !tab_state.chat_draft.is_empty() {
-                    chat.control_compose(&tab_state.chat_draft, cx);
-                }
-                chat
-            })),
+                TabContent::Chat(chat)
+            },
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
@@ -13076,6 +13169,12 @@ fn restore_tabs_in_workspace(
                 None,
             )
         };
+        let agent_name = agent_id.as_deref().and_then(|agent_id| {
+            AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent_id)
+                .map(|adapter| adapter.display_name().to_string())
+        });
         // Registering the identity would tell the activity model this pane
         // hosts a running agent. Nothing was started, so it does not.
         register_restored_agent(
@@ -13088,24 +13187,30 @@ fn restore_tabs_in_workspace(
             },
         );
         let content = match tab.kind.as_str() {
-            "chat" => TabContent::Chat(cx.new(|cx| {
-                if let Some(reason) = unavailable {
-                    return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+            "chat" => {
+                let chat = cx.new(|cx| {
+                    if let Some(reason) = unavailable {
+                        return Chat::unavailable(reason, working_directory.to_path_buf(), cx);
+                    }
+                    let mut chat = Chat::launch_with_command_and_persistence(
+                        command.expect("a chat with no refusal reason carries its command"),
+                        working_directory.to_path_buf(),
+                        database_path.clone(),
+                        tab.id.clone(),
+                        worktree_id.clone(),
+                        cx,
+                    );
+                    // F-CORE-WSP-08: an unsent draft survives a restart.
+                    if !tab_state.chat_draft.is_empty() {
+                        chat.control_compose(&tab_state.chat_draft, cx);
+                    }
+                    chat
+                });
+                if let Some(agent_name) = agent_name.clone() {
+                    chat.update(cx, |chat, _| chat.set_agent_name(agent_name));
                 }
-                let mut chat = Chat::launch_with_command_and_persistence(
-                    command.expect("a chat with no refusal reason carries its command"),
-                    working_directory.to_path_buf(),
-                    database_path.clone(),
-                    tab.id.clone(),
-                    worktree_id.clone(),
-                    cx,
-                );
-                // F-CORE-WSP-08: an unsent draft survives a restart.
-                if !tab_state.chat_draft.is_empty() {
-                    chat.control_compose(&tab_state.chat_draft, cx);
-                }
-                chat
-            })),
+                TabContent::Chat(chat)
+            },
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
@@ -13282,6 +13387,7 @@ fn resolve_tillerctl_path(
     environment: &BTreeMap<String, String>,
 ) -> Result<PathBuf, String> {
     let destination = xdg_data_home_for(environment).join(tillerctl_install_subpath());
+    #[cfg(unix)]
     if is_executable_file(&destination) {
         return Ok(destination);
     }
@@ -13297,23 +13403,26 @@ fn resolve_tillerctl_path(
         candidates.push(path);
     }
 
-    let source = candidates
+    let source = match candidates
         .iter()
         .find(|candidate| is_executable_file(candidate))
         .map(|candidate| {
             std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
-        })
-        .ok_or_else(|| {
-            format!(
+        }) {
+        Some(source) => source,
+        None if is_executable_file(&destination) => return Ok(destination),
+        None => {
+            return Err(format!(
                 "tillerctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
                 current_exe
                     .parent()
                     .map(|path| path.join(tillerctl_binary_name()).display().to_string())
                     .unwrap_or_else(|| "the app executable directory".to_string())
-            )
-        })?;
+            ));
+        }
+    };
 
-    install_tillerctl(&source, &destination).map(|()| destination)
+    install_tillerctl(&source, &destination, environment).map(|()| destination)
 }
 
 fn resolve_tillerctl_for_process() -> Result<PathBuf, String> {
@@ -13401,7 +13510,40 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
+fn installed_copy_is_stale(source: &Path, destination: &Path) -> bool {
+    let Ok(source_metadata) = std::fs::metadata(source) else {
+        return false;
+    };
+    let Ok(destination_metadata) = std::fs::metadata(destination) else {
+        return true;
+    };
+
+    source_metadata.len() != destination_metadata.len()
+        || matches!(
+            (source_metadata.modified(), destination_metadata.modified()),
+            (Ok(source_modified), Ok(destination_modified))
+                if source_modified > destination_modified
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TillerctlInstallKind {
+    Symlink,
+    Copy,
+}
+
+fn tillerctl_install_kind(environment: &BTreeMap<String, String>) -> TillerctlInstallKind {
+    match environment.get("APPIMAGE") {
+        Some(path) if !path.is_empty() => TillerctlInstallKind::Copy,
+        _ => TillerctlInstallKind::Symlink,
+    }
+}
+
+fn install_tillerctl(
+    source: &Path,
+    destination: &Path,
+    _environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
     let parent = destination.parent().ok_or_else(|| {
         format!(
             "tillerctl install path has no parent: {}",
@@ -13411,9 +13553,23 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
 
-    if is_executable_file(destination) {
+    let destination_is_executable = is_executable_file(destination);
+    #[cfg(unix)]
+    let install_kind = tillerctl_install_kind(_environment);
+    #[cfg(unix)]
+    if destination_is_executable
+        && (matches!(install_kind, TillerctlInstallKind::Symlink)
+            || !std::fs::symlink_metadata(destination)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false))
+    {
         return Ok(());
     }
+    #[cfg(not(unix))]
+    if destination_is_executable && !installed_copy_is_stale(source, destination) {
+        return Ok(());
+    }
+
     // `symlink_metadata` describes the link itself and `is_executable_file`
     // follows it, so the two disagree on exactly one thing: a link whose
     // target is gone. That is our own install after a rebuild moved or
@@ -13428,32 +13584,65 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
                 )
             })?;
         }
-        Ok(_) => {
+        Ok(_) if !destination_is_executable => {
             return Err(format!(
                 "cannot install tillerctl at {}: a non-executable file already exists",
                 destination.display()
             ));
         }
-        Err(_) => {}
+        Ok(_) | Err(_) => {}
     }
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(source, destination).map_err(|error| {
-        format!(
-            "could not install tillerctl at {}: {error}",
-            destination.display()
-        )
-    })?;
+    match install_kind {
+        TillerctlInstallKind::Symlink => {
+            std::os::unix::fs::symlink(source, destination).map_err(|error| {
+                format!(
+                    "could not install tillerctl at {}: {error}",
+                    destination.display()
+                )
+            })
+        }
+        TillerctlInstallKind::Copy => {
+            std::fs::copy(source, destination).map_err(|error| {
+                format!(
+                    "could not install tillerctl at {}: {error}",
+                    destination.display()
+                )
+            })?;
+
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(destination)
+                .map_err(|error| {
+                    format!(
+                        "could not read installed tillerctl at {}: {error}",
+                        destination.display()
+                    )
+                })?
+                .permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            std::fs::set_permissions(destination, permissions).map_err(|error| {
+                format!(
+                    "could not make installed tillerctl at {} executable: {error}",
+                    destination.display()
+                )
+            })
+        }
+    }?;
 
     #[cfg(not(unix))]
-    std::fs::copy(source, destination)
-        .map(|_| ())
-        .map_err(|error| {
-            format!(
-                "could not install tillerctl at {}: {error}",
-                destination.display()
-            )
-        })?;
+    if let Err(error) = std::fs::copy(source, destination) {
+        // A running-exe lock can make Windows refuse to refresh the copy. Keep
+        // the usable old binary and retry on the next launch; only fail when
+        // there is no executable at the destination at all.
+        if is_executable_file(destination) {
+            return Ok(());
+        }
+        return Err(format!(
+            "could not install tillerctl at {}: {error}",
+            destination.display()
+        ));
+    }
 
     if is_executable_file(destination) {
         Ok(())
@@ -13728,7 +13917,7 @@ fn main() {
         // (P23: the socket row must show the real path, not a template).
         let settings_snapshot = {
             let mut snapshot = settings_snapshot_from_app_settings(saved_settings.clone());
-            snapshot.socket_path = socket_info.path.to_string_lossy().into_owned();
+            snapshot.socket_path = tiller_control::display_endpoint(socket_info.path.as_path());
             // F-SET-22: AppSettings has no agent_colors column yet, so the
             // persisted choices are overlaid from the session store's
             // key-value table (see SessionStore::load_agent_color_ids)
@@ -13863,6 +14052,7 @@ fn main() {
                 });
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
+                        .with_version(tiller_control::VERSION)
                         .with_browser_origins(browser_origins_for_settings.clone())
                         .with_database_path(database_path_for_settings.clone())
                         .on_install_skill({
@@ -14041,7 +14231,7 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
@@ -19871,6 +20061,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn stale_copy_test_files(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-tillerctl-stale-copy-{}-{}-{}",
+            name,
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create stale-copy fixture");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        (root, source, destination)
+    }
+
+    fn set_modified(path: &Path, seconds: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open fixture for timestamp update")
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::UNIX_EPOCH + Duration::from_secs(seconds),
+                ),
+            )
+            .expect("set fixture timestamp");
+    }
+
+    #[test]
+    fn installed_copy_same_size_and_newer_destination_is_not_stale() {
+        let (root, source, destination) = stale_copy_test_files("same-size-newer-destination");
+        std::fs::write(&source, b"source").expect("write source fixture");
+        std::fs::write(&destination, b"copy!!").expect("write destination fixture");
+        set_modified(&source, 1);
+        set_modified(&destination, 2);
+
+        assert!(!installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_copy_different_size_is_stale() {
+        let (root, source, destination) = stale_copy_test_files("different-size");
+        std::fs::write(&source, b"new source").expect("write source fixture");
+        std::fs::write(&destination, b"old").expect("write destination fixture");
+
+        assert!(installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_copy_same_size_with_newer_source_is_stale() {
+        let (root, source, destination) = stale_copy_test_files("same-size-newer-source");
+        std::fs::write(&source, b"source").expect("write source fixture");
+        std::fs::write(&destination, b"copy!!").expect("write destination fixture");
+        set_modified(&destination, 1);
+        set_modified(&source, 2);
+
+        assert!(installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_copy_with_missing_destination_is_stale() {
+        let (root, source, destination) = stale_copy_test_files("missing-destination");
+        std::fs::write(&source, b"source").expect("write source fixture");
+
+        assert!(installed_copy_is_stale(&source, &destination));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn absent_appimage_selects_a_tillerctl_symlink() {
+        let environment = BTreeMap::new();
+
+        assert_eq!(
+            tillerctl_install_kind(&environment),
+            TillerctlInstallKind::Symlink
+        );
+    }
+
+    #[test]
+    fn non_empty_appimage_selects_a_tillerctl_copy() {
+        let environment = BTreeMap::from([(
+            String::from("APPIMAGE"),
+            String::from("/tmp/Tiller.AppImage"),
+        )]);
+
+        assert_eq!(
+            tillerctl_install_kind(&environment),
+            TillerctlInstallKind::Copy
+        );
+    }
+
+    #[test]
+    fn empty_appimage_selects_a_tillerctl_symlink() {
+        let environment = BTreeMap::from([(String::from("APPIMAGE"), String::new())]);
+
+        assert_eq!(
+            tillerctl_install_kind(&environment),
+            TillerctlInstallKind::Symlink
+        );
+    }
+
     #[test]
     fn tillerctl_resolver_installs_the_sibling_binary_in_xdg_data_bin() {
         // The fixture names the binary exactly the way the platform ships
@@ -21112,6 +21405,14 @@ mod tests {
             .and_then(|result| result.get("methods"))
             .and_then(|json| tiller_control::protocol::rows::decode(json))
             .expect("capability rows");
+        assert!(
+            capabilities
+                .result
+                .as_ref()
+                .and_then(|result| result.get("version"))
+                .is_some_and(|version| !version.is_empty()),
+            "capabilities must report the running Tiller version"
+        );
         let advertised: Vec<_> = methods
             .iter()
             .filter_map(|row| row.get("method").map(String::as_str))
@@ -21371,6 +21672,30 @@ mod tests {
         );
         assert!(cx.debug_bounds("shell-left-panel-focus-ring").is_none());
         assert!(cx.debug_bounds("shell-left-panel").is_some());
+    }
+
+    #[gpui::test]
+    async fn center_panel_never_shows_the_keyboard_focus_ring(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        cx.simulate_keystrokes("tab");
+        let center_focus = workspace.update(&mut cx, |workspace, _| {
+            workspace.center_panel_focus.clone()
+        });
+        cx.update(|window, app| center_focus.focus(window, app));
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("shell-center-panel-focus-ring").is_none());
+        assert!(cx.debug_bounds("shell-center-panel").is_some());
     }
 
     #[gpui::test]
@@ -22252,6 +22577,420 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn workspace_list_encodes_paths_without_the_verbatim_prefix() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: vec![ControlWorkspace {
+                    id: "workspace-1".into(),
+                    project: "project".into(),
+                    branch: "main".into(),
+                    path: r"\\?\D:\x\y".into(),
+                    selected: true,
+                    mounted: true,
+                    comment: String::new(),
+                    session: None,
+                }],
+                current: Some(0),
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-workspace-list-path-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::workspace_list());
+        assert!(response.ok, "workspace.list failed: {:?}", response.error);
+        let rows = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("workspaces"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("workspace rows");
+        assert_eq!(
+            rows.first().and_then(|row| row.get("path")).map(String::as_str),
+            Some(r"D:\x\y"),
+            "workspace.list must return a pasteable path without the verbatim prefix"
+        );
+    }
+
+    /// #113: `workspace.current` builds its reply by hand instead of going
+    /// through `workspace_rows`, so #106's fix skipped it and the two commands
+    /// disagreed about one workspace's path. The assertion is over the whole
+    /// response rather than the one field, so the next hand-built reply cannot
+    /// reintroduce a verbatim path somewhere else in it.
+    #[cfg(windows)]
+    #[test]
+    fn no_workspace_command_serves_a_verbatim_path() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: vec![ControlWorkspace {
+                    id: "workspace-1".into(),
+                    project: "project".into(),
+                    branch: "main".into(),
+                    path: r"\\?\D:\x\y".into(),
+                    selected: true,
+                    mounted: true,
+                    comment: String::new(),
+                    session: None,
+                }],
+                current: Some(0),
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-workspace-current-path-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::workspace_current());
+        assert!(response.ok, "workspace.current failed: {:?}", response.error);
+        let result = response.result.as_ref().expect("workspace.current result");
+        assert_eq!(
+            result.get("path").map(String::as_str),
+            Some(r"D:\x\y"),
+            "workspace.current must agree with workspace.list about the path"
+        );
+        for (field, value) in result {
+            assert!(
+                !value.contains(r"\\?\"),
+                "workspace.current field {field} still carries the verbatim prefix: {value}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    const VERBATIM_PATH: &str = r"\\?\D:\x\y";
+    #[cfg(windows)]
+    const VERBATIM_PREFIX: &str = r"\\?\";
+
+    #[cfg(windows)]
+    fn find_verbatim_path(value: &serde_json::Value) -> Option<String> {
+        match value {
+            serde_json::Value::String(text) => {
+                if text.contains(VERBATIM_PREFIX) {
+                    Some(text.clone())
+                } else {
+                    serde_json::from_str::<serde_json::Value>(text)
+                        .ok()
+                        .and_then(|nested| find_verbatim_path(&nested))
+                }
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(find_verbatim_path),
+            serde_json::Value::Object(values) => values.values().find_map(find_verbatim_path),
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                None
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn response_verbatim_path(response: &ControlResponse) -> Option<String> {
+        serde_json::to_value(response)
+            .ok()
+            .and_then(|value| find_verbatim_path(&value))
+    }
+
+    #[cfg(windows)]
+    fn respond_to_control_action(action: ControlAction) {
+        match action {
+            ControlAction::Quit { reply }
+            | ControlAction::SelectWorktree { reply, .. }
+            | ControlAction::TrayJump { reply, .. }
+            | ControlAction::AddProject { reply, .. }
+            | ControlAction::CreateWorkspace { reply, .. }
+            | ControlAction::CloseWorkspace { reply, .. }
+            | ControlAction::RestoreSession { reply }
+            | ControlAction::OpenChanges { reply, .. }
+            | ControlAction::ReadChanges { reply }
+            | ControlAction::OpenSettings { reply, .. }
+            | ControlAction::SelectSettings { reply, .. }
+            | ControlAction::ReadSettings { reply }
+            | ControlAction::AddAgentAccount { reply, .. }
+            | ControlAction::SelectAgentAccount { reply, .. }
+            | ControlAction::ReadPane { reply, .. }
+            | ControlAction::FocusPane { reply, .. }
+            | ControlAction::SplitPane { reply, .. }
+            | ControlAction::ClosePane { reply }
+            | ControlAction::CycleTab { reply, .. }
+            | ControlAction::SelectTab { reply, .. }
+            | ControlAction::Browser { reply, .. }
+            | ControlAction::Chat { reply, .. } => {
+                let _ = reply.send(Ok(Vec::new()));
+            }
+            ControlAction::Notify { .. }
+            | ControlAction::UpdateEvent(_)
+            | ControlAction::RefreshSidebar => {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn handle_with_control_action_drain(
+        handler: &AppControlHandler,
+        control_actions: Arc<Mutex<Vec<ControlAction>>>,
+        request: ControlRequest,
+    ) -> ControlResponse {
+        let finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = finished.clone();
+        let worker = std::thread::spawn(move || {
+            while !worker_finished.load(Ordering::SeqCst) {
+                if let Some(action) = control_actions
+                    .lock()
+                    .expect("control action queue")
+                    .pop()
+                {
+                    respond_to_control_action(action);
+                    return;
+                }
+                std::thread::yield_now();
+            }
+        });
+        let response = handler.handle(&request);
+        finished.store(true, Ordering::SeqCst);
+        worker.join().expect("control action drain did not panic");
+        response
+    }
+
+    #[cfg(windows)]
+    fn request_with_params(method: &str, params: &[(&str, &str)]) -> ControlRequest {
+        ControlRequest {
+            id: method.to_string(),
+            method: method.to_string(),
+            params: params
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn request_for_control_method(method: &str) -> ControlRequest {
+        use tiller_control::protocol::request;
+
+        let mut request = match method {
+            "system.ping" => request::system_ping(),
+            "system.capabilities" => request::system_capabilities(),
+            "system.identify" => request::system_identify(None, None),
+            "system.quit" => request::system_quit(),
+            "project.list" => request::project_list(),
+            "project.add" => request::project_add(VERBATIM_PATH),
+            "workspace.list" => request::workspace_list(),
+            "workspace.create" => request::workspace_create("project", Some("branch")),
+            "workspace.select" => request::workspace_select("workspace-1"),
+            "tray.jump" => request_with_params(method, &[("workspace", "workspace-1")]),
+            "workspace.current" => request::workspace_current(),
+            "workspace.close" => request::workspace_close("workspace-1"),
+            "worktree.set" => request::worktree_set("workspace-1", Some("comment"), None),
+            "notify" => request::notify("pane-1", "done", None),
+            "update.event" => request_with_params(method, &[("event", "reset")]),
+            "panel.create" => request_with_params(method, &[]),
+            "panel.split" => request_with_params(method, &[]),
+            "panel.list" => request::panel_list(None),
+            "panel.write" => request_with_params(method, &[]),
+            "panel.key" => request_with_params(method, &[]),
+            "panel.read" => request_with_params(method, &[]),
+            "panel.state" => request_with_params(method, &[]),
+            "panel.scrollback" => request_with_params(method, &[]),
+            "panel.wait" => request_with_params(method, &[]),
+            "panel.focus" => request_with_params(method, &[]),
+            "panel.close" => request_with_params(method, &[]),
+            "pane.split" => request_with_params(method, &[]),
+            "pane.focus" => request_with_params(method, &[]),
+            "pane.close" => request::pane_close(),
+            "tab.cycle" => request_with_params(method, &[]),
+            "tab.select" => request_with_params(method, &[]),
+            "notification.create" => {
+                request::notification_create("title", Some("subtitle"), "body")
+            }
+            "notification.list" => request::notification_list(),
+            "notification.clear" => request::notification_clear(),
+            "session.ref" => request::session_ref("pane-1", "agent-1"),
+            "session.restore" => request::session_restore(),
+            "session.transcript" => request_with_params(method, &[]),
+            "surface.changes.open" => request::changes_open(Some("workspace-1")),
+            "surface.changes.read" => request::changes_read(),
+            "surface.changes.stage" => {
+                request::changes_stage(VERBATIM_PATH, Some("workspace-1"))
+            }
+            "surface.changes.unstage" => {
+                request::changes_unstage(VERBATIM_PATH, Some("workspace-1"))
+            }
+            "surface.changes.discard" => {
+                request::changes_discard(VERBATIM_PATH, Some("workspace-1"))
+            }
+            "surface.changes.stage_all" => request::changes_stage_all(Some("workspace-1")),
+            "surface.changes.discard_all" => request::changes_discard_all(Some("workspace-1")),
+            "git.branches" => request_with_params(method, &[]),
+            "surface.settings.open" => request::settings_open(None),
+            "surface.settings.select" => request_with_params(method, &[]),
+            "surface.settings.read" => request::settings_read(),
+            "settings.account.add" => request_with_params(
+                method,
+                &[("provider", "claude"), ("label", "test")],
+            ),
+            "settings.account.select" => request_with_params(method, &[]),
+            "surface.chat.open" => request::chat_open(Some("workspace-1")),
+            "surface.chat.send" => request_with_params(method, &[]),
+            "surface.chat.compose" => request_with_params(method, &[]),
+            "surface.chat.permission" => request_with_params(method, &[]),
+            "surface.chat.stop" => request_with_params(method, &[]),
+            "surface.chat.read" => request_with_params(method, &[]),
+            "browser.open"
+            | "browser.navigate"
+            | "browser.act"
+            | "browser.get"
+            | "browser.wait"
+            | "browser.eval"
+            | "browser.console"
+            | "browser.snapshot"
+            | "browser.permission" => request_with_params(method, &[]),
+            _ => panic!(
+                "system.capabilities advertised {method}, but the enforcement test has no request"
+            ),
+        };
+        request.id = format!("path-scan-{method}");
+        request
+    }
+
+    #[cfg(windows)]
+    fn verbatim_changes_response(id: &str) -> ControlResponse {
+        let file = || tiller_ui::changes::ChangesFileReport {
+            path: PathBuf::from(VERBATIM_PATH),
+            additions: 0,
+            deletions: 0,
+            is_binary: false,
+        };
+        let report = ChangesReport {
+            repo_root: PathBuf::from(VERBATIM_PATH),
+            sections: vec![
+                tiller_ui::changes::ChangesSectionReport {
+                    name: "Staged",
+                    count: 1,
+                    files: vec![file()],
+                },
+                tiller_ui::changes::ChangesSectionReport {
+                    name: "Changed",
+                    count: 1,
+                    files: vec![file()],
+                },
+                tiller_ui::changes::ChangesSectionReport {
+                    name: "Untracked",
+                    count: 1,
+                    files: vec![file()],
+                },
+            ],
+            loading: false,
+            error: None,
+        };
+        ControlResponse::success(
+            id,
+            changes_report_pairs(0, &report)
+                .expect("complete changes report")
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn every_control_response_hides_verbatim_paths() {
+        let raw_path = PathBuf::from(VERBATIM_PATH);
+        let catalog_project = session::CatalogProject {
+            id: "project".into(),
+            name: "project".into(),
+            root_path: raw_path.clone(),
+            is_git: true,
+            worktrees: vec![session::CatalogWorktree {
+                branch: "main".into(),
+                path: raw_path.clone(),
+                is_primary: true,
+            }],
+        };
+        let handler_actions = Arc::new(Mutex::new(Vec::new()));
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: vec![catalog_project],
+                project_settings: BTreeMap::new(),
+                workspaces: vec![ControlWorkspace {
+                    id: "workspace-1".into(),
+                    project: "project".into(),
+                    branch: "main".into(),
+                    path: VERBATIM_PATH.into(),
+                    selected: true,
+                    mounted: true,
+                    comment: String::new(),
+                    session: None,
+                }],
+                current: Some(0),
+            })),
+            handler_actions.clone(),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(raw_path.join("control.sock")),
+        );
+
+        let capabilities = handler.handle(&tiller_control::protocol::request::system_capabilities());
+        let methods = capabilities
+            .result
+            .as_ref()
+            .and_then(|result| result.get("methods"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("system.capabilities method rows");
+        assert!(!methods.is_empty(), "capabilities must advertise methods");
+
+        let mut leaks = Vec::new();
+        for row in methods {
+            let method = row
+                .get("method")
+                .cloned()
+                .expect("every capability row must name a method");
+            let request = request_for_control_method(&method);
+            let response =
+                handle_with_control_action_drain(&handler, handler_actions.clone(), request.clone());
+            if let Some(value) = response_verbatim_path(&response) {
+                leaks.push(format!("{method}: {value}"));
+            }
+
+            // These methods' final responses are produced by GPUI-thread
+            // actions, which a handler-only unit test cannot run. Exercise
+            // their shared response builders directly as well, without
+            // silently omitting the advertised methods from the dispatch pass.
+            let response = match method.as_str() {
+                "surface.changes.stage"
+                | "surface.changes.unstage"
+                | "surface.changes.discard" => {
+                    handler.run_changes_path_action(&request, |_, _| Ok(()))
+                }
+                "surface.changes.stage_all" | "surface.changes.discard_all" => {
+                    handler.run_changes_all_action(&request, |_| Ok(()))
+                }
+                "surface.changes.open" | "surface.changes.read" => {
+                    verbatim_changes_response(&request.id)
+                }
+                _ => continue,
+            };
+            if let Some(value) = response_verbatim_path(&response) {
+                leaks.push(format!("{method}: {value}"));
+            }
+        }
+
+        assert!(
+            leaks.is_empty(),
+            "control responses exposed Windows verbatim paths:\n{}",
+            leaks.join("\n")
+        );
+    }
+
     #[test]
     fn project_list_is_an_observable_empty_state() {
         let handler = AppControlHandler::new(
@@ -22759,7 +23498,116 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn drawn_changes_open_diff_action_opens_a_diff_tab_in_the_workspace(
+    fn opening_changes_again_reveals_the_existing_worktree_tab(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let repo = test_repo("changes-reveal-existing");
+            let mut workspace = test_workspace_for_repo(cx, repo, false);
+            workspace.add_changes_tab(None, cx);
+            let first_count = workspace.tabs.len();
+            workspace.active_tab = 0;
+
+            workspace.add_changes_tab(None, cx);
+
+            let second_count = workspace.tabs.len();
+            assert_eq!(
+                second_count, first_count,
+                "opening Changes again must keep the first count ({first_count}), not add a tab (second count: {second_count})"
+            );
+            let changes_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::Diff)
+                .expect("the existing Changes tab remains present");
+            assert_eq!(
+                workspace.active_tab, changes_index,
+                "reopening Changes must reveal the existing tab"
+            );
+            workspace
+        });
+
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().filter(|tab| tab.kind == TabKind::Diff).count(),
+                1,
+                "one worktree must have one Changes tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn opening_changes_without_an_existing_tab_creates_one(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let repo = test_repo("changes-reveal-create");
+            test_workspace_for_repo(cx, repo, false)
+        });
+
+        let (before, after, changes_count) = workspace.update(cx, |workspace, cx| {
+            let before = workspace.tabs.len();
+            workspace.add_changes_tab(None, cx);
+            let after = workspace.tabs.len();
+            let changes_count = workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.kind == TabKind::Diff)
+                .count();
+            (before, after, changes_count)
+        });
+        assert_eq!(before, 1, "the fixture starts with only its terminal tab");
+        assert_eq!(after, 2, "opening Changes creates one tab");
+        assert_eq!(changes_count, 1, "the new tab is a Changes surface");
+    }
+
+    #[gpui::test]
+    async fn opening_changes_with_a_path_reveals_and_focuses_existing_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = changed_test_repo("changes-reveal-focus");
+        let window = cx.add_window({
+            let repo = repo.clone();
+            move |_window, cx| test_workspace_for_repo(cx, repo, true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        wait_for_drawn(&mut cx, "changes-file-row");
+        assert!(
+            cx.debug_bounds("changes-open-diff").is_none(),
+            "the existing Changes tab starts with its file collapsed"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.active_tab = 0;
+            workspace.add_changes_tab(Some(PathBuf::from("changed.md")), cx);
+        });
+        wait_for_drawn(&mut cx, "changes-open-diff");
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.iter().filter(|tab| tab.kind == TabKind::Diff).count(),
+                1,
+                "focusing a file in Changes must not add a second surface"
+            );
+            let changes_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.kind == TabKind::Diff)
+                .expect("the existing Changes tab remains present");
+            assert_eq!(
+                workspace.active_tab, changes_index,
+                "OpenDiff must reveal the existing Changes tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn drawn_changes_open_diff_action_reveals_the_existing_diff_tab(
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
@@ -22790,8 +23638,8 @@ mod tests {
                     .filter(|tab| tab.kind == TabKind::Diff)
                     .count()
             }),
-            2,
-            "the host subscriber opens a new Diff tab after the drawn action"
+            1,
+            "the host subscriber reveals the existing Diff tab after the drawn action"
         );
     }
 
