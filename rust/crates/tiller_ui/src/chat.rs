@@ -46,8 +46,9 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 /// assistant-authored chat prose.
 pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
-/// The transcript's content column — waku's measured `CONTENT_MAX_WIDTH`
-/// 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` §A.2).
+/// The transcript's content column maximum — waku's measured
+/// `CONTENT_MAX_WIDTH` 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md`
+/// §A.2); below that limit, the column takes the pane's width.
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
@@ -5789,6 +5790,7 @@ impl Chat {
         let mode_selectable = self.has_completed_turn && self.mode_catalog.is_some();
         let status_pill = div()
             .flex()
+            .flex_none()
             .items_center()
             .gap(px(6.0))
             .h(px(24.0))
@@ -5864,6 +5866,8 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
+                .flex_1()
+                .min_w_0()
                 .hover(|style| style.bg(colors.chat_row_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
@@ -5873,6 +5877,9 @@ impl Chat {
                     div()
                         .id(model_selection_id.clone())
                         .debug_selector(move || model_selection_id)
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
                         .text_color(colors.title)
                         .child(selected_model_name.clone()),
                 )
@@ -5899,7 +5906,16 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
-                .child(div().text_color(colors.title).child(selected_model_name))
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(colors.title)
+                        .child(selected_model_name),
+                )
         };
 
         let model_picker = if self.model_picker_open {
@@ -6739,6 +6755,7 @@ impl Chat {
             .debug_selector(|| "attach-image".into())
             .w(px(24.0))
             .h(px(24.0))
+            .flex_none()
             .rounded(theme.radii.control)
             .flex()
             .items_center()
@@ -6754,6 +6771,7 @@ impl Chat {
             .debug_selector(|| "composer-overflow".into())
             .w(px(24.0))
             .h(px(24.0))
+            .flex_none()
             .rounded(theme.radii.control)
             .flex()
             .items_center()
@@ -6949,7 +6967,8 @@ impl Chat {
             .relative()
             .when(self.streaming, |this| this.w_full())
             .when(!self.streaming, |this| {
-                this.w(px(TRANSCRIPT_WIDTH))
+                this.w_full()
+                    .max_w(px(TRANSCRIPT_WIDTH))
                     .border_1()
                     .border_color(if focused {
                         colors.accent
@@ -7047,11 +7066,11 @@ impl Chat {
                     .child(attach_button)
                     .child(status_pill)
                     .child(model_control)
-                    .child(div().flex_1())
                     .child(overflow_button)
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap(px(6.0))
                             .h(px(24.0))
@@ -7072,6 +7091,7 @@ impl Chat {
                             .debug_selector(|| "send".into())
                             .w(px(26.0))
                             .h(px(26.0))
+                            .flex_none()
                             .rounded_full()
                             .flex()
                             .items_center()
@@ -7131,7 +7151,8 @@ impl Chat {
             div()
                 .id("composer-streaming-border")
                 .debug_selector(|| "composer-streaming-border".into())
-                .w(px(TRANSCRIPT_WIDTH))
+                .w_full()
+                .max_w(px(TRANSCRIPT_WIDTH))
                 .rounded(theme.radii.composer)
                 .p(px(1.0))
                 .child(composer)
@@ -7304,7 +7325,8 @@ impl Render for Chat {
                 div()
                     .id("chat-transcript")
                     .debug_selector(|| "chat-transcript".into())
-                    .w(px(TRANSCRIPT_WIDTH))
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_WIDTH))
                     .pt(px(22.0))
                     .flex_1()
                     .flex()
@@ -7333,7 +7355,8 @@ impl Render for Chat {
                                     TurnRowRole::Fold { turn_id, label, at } => {
                                         return div()
                                             .id(("chat-entry", entry_index))
-                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .w_full()
+                                            .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(8.0))
                                             .child(Chat::render_turn_fold_row(
                                                 turn_id,
@@ -7358,7 +7381,8 @@ impl Render for Chat {
                                             .unwrap_or(0);
                                         return div()
                                             .id(("chat-entry", entry_index))
-                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .w_full()
+                                            .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(8.0))
                                             .child(
                                                 div()
@@ -7429,7 +7453,8 @@ impl Render for Chat {
                                     );
                                     return div()
                                         .id(("chat-entry", entry_index))
-                                        .w(px(TRANSCRIPT_WIDTH))
+                                        .w_full()
+                                        .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
                                         .child(Chat::render_tool_call_group(
                                             members,
@@ -7451,7 +7476,8 @@ impl Render for Chat {
                                     .map(|entry| {
                                         div()
                                             .id(("chat-entry", entry_index))
-                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .w_full()
+                                            .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(8.0))
                                             .child(Chat::render_entry(
                                                 entry,
@@ -7492,7 +7518,8 @@ impl Render for Chat {
                             div()
                                 .id("pending-question-bar")
                                 .debug_selector(|| "pending-question-bar".into())
-                                .w(px(TRANSCRIPT_WIDTH))
+                                .w_full()
+                                .max_w(px(TRANSCRIPT_WIDTH))
                                 .mb(px(8.0))
                                 .flex()
                                 .items_center()
@@ -8192,7 +8219,7 @@ fn split_diff_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext, size};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -8353,6 +8380,53 @@ mod tests {
         assert!(
             cx.debug_bounds("composer-streaming-border").is_none(),
             "the static border returns the moment streaming ends"
+        );
+    }
+
+    #[gpui::test]
+    async fn narrow_composer_stays_inside_chat_pane_and_keeps_send_reachable(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(595.0), px(600.0)));
+        refresh_frame(cx);
+
+        let pane = cx
+            .debug_bounds("chat-root")
+            .expect("the chat pane is drawn");
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
+        let send = cx.debug_bounds("send").expect("the send control is drawn");
+        assert!(
+            card.left() >= pane.left(),
+            "the composer must not overflow the pane's left edge: pane={pane:?} card={card:?}"
+        );
+        assert!(
+            card.right() <= pane.right(),
+            "the composer must not overflow the pane's right edge: pane={pane:?} card={card:?}"
+        );
+        assert!(
+            send.left() >= card.left() && send.right() <= card.right(),
+            "the send control must be fully inside the composer: card={card:?} send={send:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn wide_composer_remains_capped_at_transcript_maximum(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(1140.0), px(600.0)));
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
+        assert_eq!(
+            card.size.width,
+            px(TRANSCRIPT_WIDTH),
+            "the composer stays capped below a wider pane: card={card:?}"
         );
     }
 
