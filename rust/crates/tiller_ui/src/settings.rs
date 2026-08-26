@@ -3466,7 +3466,7 @@ impl Settings {
                     .text_size(theme.typography.caption2)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.title)
-                    .bg(theme.primary_pill_bg)
+                    .bg(theme.primary_action_bg)
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, cx| {
                         install_entity.update(cx, |_, cx| {
