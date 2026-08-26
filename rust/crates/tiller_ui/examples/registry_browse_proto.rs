@@ -27,6 +27,184 @@ struct RegistryAgent {
     distribution: Value,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemoUpdateState {
+    UpToDate,
+    UpdateAvailableVerified,
+    UpdateAvailableUnverifiable,
+    InFlight,
+    UpdateFailed,
+    InstallFailed,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DemoInstalledAgent {
+    registry_id: &'static str,
+    installed_version: Option<&'static str>,
+    state: DemoUpdateState,
+    reason: Option<&'static str>,
+    unverified: bool,
+}
+
+const DEMO_PATH_COLUMN_WIDTH: f32 = 220.0;
+const DEMO_VERSION_COLUMN_WIDTH: f32 = 150.0;
+const DEMO_COLUMN_GAP: f32 = 8.0;
+
+fn demo_fixed_slot(width: f32) -> Div {
+    div().w(px(width)).min_w(px(width)).flex_none()
+}
+
+fn demo_version_slot() -> Div {
+    demo_fixed_slot(DEMO_VERSION_COLUMN_WIDTH).ml(px(DEMO_COLUMN_GAP))
+}
+
+const DEMO_INSTALLED_AGENTS: [DemoInstalledAgent; 6] = [
+    DemoInstalledAgent {
+        registry_id: "amp-acp",
+        installed_version: Some("0.9.0"),
+        state: DemoUpdateState::UpToDate,
+        reason: None,
+        unverified: true,
+    },
+    DemoInstalledAgent {
+        registry_id: "kilo",
+        installed_version: Some("7.4.0"),
+        state: DemoUpdateState::UpdateAvailableVerified,
+        reason: None,
+        unverified: false,
+    },
+    DemoInstalledAgent {
+        registry_id: "antigravity-acp",
+        installed_version: Some("0.9.0"),
+        state: DemoUpdateState::UpdateAvailableUnverifiable,
+        reason: None,
+        unverified: false,
+    },
+    DemoInstalledAgent {
+        registry_id: "goose",
+        installed_version: Some("1.46.0"),
+        state: DemoUpdateState::InFlight,
+        reason: None,
+        unverified: false,
+    },
+    DemoInstalledAgent {
+        registry_id: "harn",
+        installed_version: Some("0.10.115"),
+        state: DemoUpdateState::UpdateFailed,
+        reason: Some("The archive download was interrupted."),
+        unverified: false,
+    },
+    DemoInstalledAgent {
+        registry_id: "qwen-code",
+        installed_version: None,
+        state: DemoUpdateState::InstallFailed,
+        reason: Some("The package manager could not install v0.22.1."),
+        unverified: false,
+    },
+];
+
+fn demo_version_text(
+    demo: &DemoInstalledAgent,
+    agent: &RegistryAgent,
+) -> Option<String> {
+    let installed_version = demo.installed_version?;
+    if matches!(
+        demo.state,
+        DemoUpdateState::UpdateAvailableVerified
+            | DemoUpdateState::UpdateAvailableUnverifiable
+            | DemoUpdateState::InFlight
+            | DemoUpdateState::UpdateFailed
+    ) {
+        Some(format!("v{installed_version} → v{}", agent.version))
+    } else {
+        Some(format!("v{installed_version}"))
+    }
+}
+
+fn demo_action_label(state: DemoUpdateState) -> Option<&'static str> {
+    match state {
+        DemoUpdateState::UpToDate => Some("Installed"),
+        DemoUpdateState::UpdateAvailableVerified => Some("Update"),
+        DemoUpdateState::UpdateAvailableUnverifiable | DemoUpdateState::InFlight => None,
+        DemoUpdateState::UpdateFailed | DemoUpdateState::InstallFailed => Some("Retry"),
+    }
+}
+
+fn demo_status_lines(demo: &DemoInstalledAgent, agent: &RegistryAgent) -> Vec<String> {
+    let latest = format!("v{}", agent.version);
+    match demo.state {
+        DemoUpdateState::UpdateAvailableVerified
+        | DemoUpdateState::UpdateAvailableUnverifiable => vec![format!(
+            "v{} stays in use until you relaunch · restored if the update fails",
+            demo.installed_version
+                .expect("update demo has an old version")
+        )],
+        DemoUpdateState::InFlight => vec![
+            format!("Updating to {latest}…"),
+            format!(
+                "v{} stays in use until you relaunch",
+                demo.installed_version.expect("in-flight demo has an old version")
+            ),
+        ],
+        DemoUpdateState::UpdateFailed => vec![
+            format!(
+                "Update to {latest} failed — v{} is still installed and working.",
+                demo.installed_version
+                    .expect("failed update demo has an old version")
+            ),
+            demo.reason.expect("failed update demo has a reason").to_owned(),
+        ],
+        DemoUpdateState::InstallFailed => vec![
+            "Install failed.".to_owned(),
+            demo.reason.expect("failed install demo has a reason").to_owned(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn demo_path_text(demo: &DemoInstalledAgent) -> Option<String> {
+    demo.installed_version?;
+    Some(if cfg!(windows) {
+        format!(r"%LOCALAPPDATA%\Tiller\agents\{}\bin", demo.registry_id)
+    } else {
+        format!("~/.local/share/tiller/agents/{}/bin", demo.registry_id)
+    })
+}
+
+fn demo_version_marker(demo: &DemoInstalledAgent) -> Option<&'static str> {
+    if demo.unverified {
+        Some("unverified")
+    } else if demo.state == DemoUpdateState::UpdateFailed {
+        Some("failed")
+    } else {
+        None
+    }
+}
+
+fn unverifiable_confirmation_heading(agent_name: &str, latest_version: &str) -> String {
+    format!("No checksum for {agent_name} v{latest_version}")
+}
+
+fn unverifiable_confirmation_body() -> &'static str {
+    "Its publisher does not publish checksums and Tiller found none from any other source, so it cannot tell whether the file it downloaded from releases.antigravity.dev is the one they built. If it was tampered with, Tiller will run it with your permissions."
+}
+
+fn unverifiable_confirmation_survival(installed_version: &str) -> String {
+    format!("v{installed_version} is restored if the update fails — not after it succeeds.")
+}
+
+fn confirmation_primary_label() -> &'static str {
+    "Install unverified v1.0.0"
+}
+
+fn confirmation_secondary_label() -> &'static str {
+    "Keep v0.9.0"
+}
+
+fn confirmation_default_focus() -> &'static str {
+    confirmation_secondary_label()
+}
+
 /// Decode only the fields this prototype needs. The URL-valued icon is
 /// intentionally not rendered: a remote icon would make a network-free
 /// prototype pretend it can provide something it cannot.
@@ -179,7 +357,7 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
         .py(px(3.0))
         .rounded(theme.radii.row_card)
         .overflow_hidden()
-        .text_ellipsis()
+        .text_ellipsis_start()
         .text_size(theme.typography.caption2)
         .font_weight(if danger {
             FontWeight::SEMIBOLD
@@ -349,6 +527,8 @@ struct RegistryBrowseProto {
     builtins: Vec<AgentAvailability>,
     search: String,
     search_focus: FocusHandle,
+    confirmation_focus: FocusHandle,
+    confirmation_focus_requested: bool,
     notice: Option<String>,
 }
 
@@ -362,6 +542,8 @@ impl RegistryBrowseProto {
                 .collect(),
             search: String::new(),
             search_focus: cx.focus_handle(),
+            confirmation_focus: cx.focus_handle().tab_stop(true),
+            confirmation_focus_requested: false,
             notice: None,
         }
     }
@@ -445,55 +627,223 @@ impl RegistryBrowseProto {
         row_shell(index, row)
     }
 
-    fn render_installed_demo_row(
+    fn render_unverifiable_confirmation(
         &self,
-        index: usize,
+        demo: &DemoInstalledAgent,
         agent: &RegistryAgent,
         theme: Theme,
         entity: Entity<Self>,
+        window: &Window,
     ) -> impl IntoElement {
-        let path = if cfg!(windows) {
-            r"%LOCALAPPDATA%\Tiller\agents\amp-acp\0.9.0\amp-acp.exe".to_owned()
-        } else {
-            "~/.local/share/tiller/agents/amp-acp/0.9.0/amp-acp".to_owned()
+        let install_entity = entity.clone();
+        let keep_entity = entity;
+        let keep_focused = self.confirmation_focus.is_focused(window);
+        let install = div()
+            .id("registry-confirm-unverified")
+            .debug_selector(|| "registry-confirm-unverified".to_owned())
+            .px(px(10.0))
+            .py(px(3.0))
+            .rounded(theme.radii.control)
+            .border_1()
+            .border_color(theme.hairline)
+            .text_size(theme.typography.caption2)
+            .text_color(theme.title)
+            .hover(|style| style.bg(theme.row_hover))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(move |_, _, cx| {
+                install_entity.update(cx, |prototype, cx| {
+                    prototype.notice = Some(
+                        "Install unverified is not wired in this prototype.".to_owned(),
+                    );
+                    cx.notify();
+                });
+            })
+            .child(confirmation_primary_label());
+        let keep = div()
+            .id("registry-confirm-keep")
+            .debug_selector(|| "registry-confirm-keep".to_owned())
+            .track_focus(&self.confirmation_focus)
+            .focusable()
+            .tab_stop(true)
+            .px(px(10.0))
+            .py(px(3.0))
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.caption2)
+            .text_color(theme.title)
+            .bg(theme.selected_fill)
+            .border_1()
+            .hover(|style| style.bg(theme.row_hover))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(move |_, _, cx| {
+                keep_entity.update(cx, |prototype, cx| {
+                    prototype.notice = Some("Keeping the installed version.".to_owned());
+                    cx.notify();
+                });
+            })
+            .border_color(if keep_focused {
+                theme.selection_ring
+            } else {
+                theme.selected_fill
+            })
+            .child(confirmation_default_focus());
+        div()
+            .id("registry-unverifiable-confirmation")
+            .debug_selector(|| "registry-unverifiable-confirmation".to_owned())
+            .mx(px(36.0))
+            .mb(px(8.0))
+            .p(px(12.0))
+            .rounded(theme.radii.control)
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.hairline)
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .text_size(theme.typography.footnote)
+            .text_color(theme.subtitle)
+            .child(
+                div()
+                    .text_size(theme.typography.headline)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child(unverifiable_confirmation_heading(
+                        &agent.name,
+                        &agent.version,
+                    )),
+            )
+            .child(unverifiable_confirmation_body())
+            .child(unverifiable_confirmation_survival(
+                demo.installed_version
+                    .expect("unverifiable update has an old version"),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(install)
+                    .child(keep),
+            )
+    }
+
+    fn render_demo_registry_row(
+        &self,
+        index: usize,
+        demo: &DemoInstalledAgent,
+        agent: &RegistryAgent,
+        theme: Theme,
+        entity: Entity<Self>,
+        window: &Window,
+    ) -> impl IntoElement {
+        let mut path_slot = demo_fixed_slot(DEMO_PATH_COLUMN_WIDTH)
+            .flex()
+            .justify_end();
+        if let Some(path) = demo_path_text(demo) {
+            path_slot = path_slot.child(pill(
+                format!("your-agent-path-{index}"),
+                path,
+                theme,
+                false,
+            ));
+        }
+
+        let mut version_slot = demo_version_slot().flex()
+            .items_center()
+            .justify_end()
+            .gap(px(4.0));
+        if let Some(version) = demo_version_text(demo, agent) {
+            version_slot = version_slot.child(
+                div()
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.meta)
+                    .child(version),
+            );
+        }
+        if let Some(marker) = demo_version_marker(demo) {
+            version_slot = version_slot.child(
+                div()
+                    .text_size(theme.typography.caption2)
+                    .text_color(if marker == "failed" {
+                        theme.tab_error
+                    } else {
+                        theme.tab_needs_input
+                    })
+                    .child(marker),
+            );
+        }
+
+        let status_lines = demo_status_lines(demo, agent);
+        let action = match demo_action_label(demo.state) {
+            Some("Installed") => pill(
+                format!("your-agent-state-{index}"),
+                "Installed".to_owned(),
+                theme,
+                false,
+            )
+            .into_any_element(),
+            Some("Update") => action_affordance(
+                format!("your-agent-update-{index}"),
+                "Update",
+                theme,
+                entity.clone(),
+                format!("Update is not wired in this prototype ({})", agent.name),
+            )
+            .into_any_element(),
+            Some("Retry") => action_affordance(
+                format!("your-agent-retry-{index}"),
+                "Retry",
+                theme,
+                entity.clone(),
+                format!("Retry is not wired in this prototype ({})", agent.name),
+            )
+            .into_any_element(),
+            None if demo.state == DemoUpdateState::UpdateAvailableUnverifiable => {
+                div().flex_none().into_any_element()
+            }
+            None => {
+                let mut status = div()
+                    .flex_none()
+                    .max_w(px(300.0))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(2.0));
+                for (line_index, line) in status_lines.iter().enumerate() {
+                    status = status.child(
+                        div()
+                            .text_size(theme.typography.footnote)
+                            .text_color(if line_index == 0 {
+                                theme.title
+                            } else {
+                                theme.subtitle
+                            })
+                            .child(line.clone()),
+                    );
+                }
+                status.into_any_element()
+            }
+            _ => unreachable!("unknown demo action label"),
         };
-        let uninstall = action_affordance(
-            "your-agent-uninstall-amp".to_owned(),
-            "Uninstall",
-            theme,
-            entity,
-            "Uninstall is not wired in this prototype.".to_owned(),
-        );
         let trailing = div()
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .child(pill(
-                "your-agent-installed-path".to_owned(),
-                path,
-                theme,
-                false,
-            ))
-            .child(version_label(
-                "your-agent-installed-version".to_owned(),
-                Some(agent.version.as_str()),
-                theme,
-            ))
-            .child(pill(
-                "your-agent-installed-state".to_owned(),
-                "Installed".to_owned(),
-                theme,
-                false,
-            ))
-            .child(uninstall);
+            .gap(px(DEMO_COLUMN_GAP))
+            .child(path_slot)
+            .child(version_slot)
+            .child(action);
         let row = controls::row_view(
             agent_label(
                 Icon::Sparkles,
                 theme.meta,
                 agent.name.clone(),
                 None,
-                "Installed by Tiller from the ACP registry.".to_owned(),
+                if demo.state == DemoUpdateState::InstallFailed {
+                    "Install requested from the ACP registry.".to_owned()
+                } else {
+                    "Installed by Tiller from the ACP registry.".to_owned()
+                },
                 None,
                 true,
                 theme,
@@ -501,10 +851,33 @@ impl RegistryBrowseProto {
             trailing_column(trailing),
             theme,
         );
-        row_shell(index, row)
+        let mut row_container = div().w_full().flex().flex_col().child(row);
+        if demo.state != DemoUpdateState::InFlight {
+            for line in status_lines {
+                row_container = row_container.child(
+                    div()
+                        .pl(px(42.0))
+                        .pr(px(12.0))
+                        .text_size(theme.typography.footnote)
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(theme.subtitle)
+                        .child(line),
+                );
+            }
+        }
+        if demo.state == DemoUpdateState::UpdateAvailableUnverifiable {
+            row_container = row_container.child(self.render_unverifiable_confirmation(
+                demo,
+                agent,
+                theme,
+                entity,
+                window,
+            ));
+        }
+        row_shell(index, row_container)
     }
 
-    fn render_your_agents(&self, theme: Theme, entity: Entity<Self>) -> Div {
+    fn render_your_agents(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> Div {
         let mut card = controls::card(theme);
         for (index, availability) in self.builtins.iter().enumerate() {
             if index > 0 {
@@ -512,14 +885,22 @@ impl RegistryBrowseProto {
             }
             card = card.child(self.render_builtin_row(index, availability, theme));
         }
-        if let Some(agent) = self.registry.iter().find(|agent| agent.id == INSTALLED_DEMO_ID) {
-            card = card.child(controls::separator(theme));
-            card = card.child(self.render_installed_demo_row(
-                self.builtins.len(),
-                agent,
-                theme,
-                entity,
-            ));
+        for (demo_index, demo) in DEMO_INSTALLED_AGENTS.iter().enumerate() {
+            if let Some(agent) = self
+                .registry
+                .iter()
+                .find(|agent| agent.id == demo.registry_id)
+            {
+                card = card.child(controls::separator(theme));
+                card = card.child(self.render_demo_registry_row(
+                    self.builtins.len() + demo_index,
+                    demo,
+                    agent,
+                    theme,
+                    entity.clone(),
+                    window,
+                ));
+            }
         }
         card
     }
@@ -662,6 +1043,11 @@ impl Render for RegistryBrowseProto {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let entity = cx.entity();
+        if !self.confirmation_focus_requested {
+            self.confirmation_focus_requested = true;
+            let focus = self.confirmation_focus.clone();
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        }
         div()
             .id("registry-browse-proto")
             .size_full()
@@ -692,7 +1078,7 @@ impl Render for RegistryBrowseProto {
                     })
                     .child(controls::section(
                         "Your agents",
-                        self.render_your_agents(theme, entity.clone()),
+                        self.render_your_agents(theme, entity.clone(), window),
                         theme,
                     ))
                     .child(controls::section(
@@ -858,6 +1244,166 @@ mod tests {
     fn missing_versions_render_no_placeholder_text() {
         assert_eq!(version_text(None), None);
         assert_eq!(version_text(Some("1.2.3")), Some("v1.2.3".to_owned()));
+    }
+
+    #[test]
+    fn update_demo_rows_cover_every_requested_state() {
+        assert_eq!(DEMO_INSTALLED_AGENTS.len(), 6);
+        assert_eq!(
+            DEMO_INSTALLED_AGENTS
+                .iter()
+                .map(|demo| demo.state)
+                .collect::<Vec<_>>(),
+            vec![
+                DemoUpdateState::UpToDate,
+                DemoUpdateState::UpdateAvailableVerified,
+                DemoUpdateState::UpdateAvailableUnverifiable,
+                DemoUpdateState::InFlight,
+                DemoUpdateState::UpdateFailed,
+                DemoUpdateState::InstallFailed,
+            ]
+        );
+        assert!(DEMO_INSTALLED_AGENTS[0].unverified);
+        assert_eq!(demo_action_label(DemoUpdateState::UpdateAvailableUnverifiable), None);
+    }
+
+    #[test]
+    fn update_rows_show_old_and_new_versions_and_the_right_gesture() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let demo = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.registry_id == "kilo")
+            .unwrap();
+        let agent = registry
+            .iter()
+            .find(|agent| agent.id == demo.registry_id)
+            .unwrap();
+        assert_eq!(
+            demo_version_text(demo, agent),
+            Some("v7.4.0 → v7.4.23".to_owned())
+        );
+        assert_eq!(demo_action_label(demo.state), Some("Update"));
+        assert_eq!(
+            demo_status_lines(demo, agent),
+            vec!["v7.4.0 stays in use until you relaunch · restored if the update fails".to_owned()]
+        );
+    }
+
+    #[test]
+    fn unverifiable_update_names_the_agent_version_and_unchecked_executable_risk() {
+        assert_eq!(
+            unverifiable_confirmation_heading("Google Antigravity", "1.0.0"),
+            "No checksum for Google Antigravity v1.0.0"
+        );
+        assert_eq!(
+            unverifiable_confirmation_body(),
+            "Its publisher does not publish checksums and Tiller found none from any other source, so it cannot tell whether the file it downloaded from releases.antigravity.dev is the one they built. If it was tampered with, Tiller will run it with your permissions."
+        );
+        assert_eq!(
+            unverifiable_confirmation_survival("0.9.0"),
+            "v0.9.0 is restored if the update fails — not after it succeeds."
+        );
+        assert_eq!(confirmation_primary_label(), "Install unverified v1.0.0");
+        assert_eq!(confirmation_secondary_label(), "Keep v0.9.0");
+        assert_eq!(confirmation_default_focus(), "Keep v0.9.0");
+    }
+
+    #[test]
+    fn update_in_flight_and_failure_copy_preserve_the_old_agent_state() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let updating = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::InFlight)
+            .unwrap();
+        let updating_agent = registry
+            .iter()
+            .find(|agent| agent.id == updating.registry_id)
+            .unwrap();
+        assert_eq!(
+            demo_status_lines(updating, updating_agent),
+            vec![
+                "Updating to v1.47.0…".to_owned(),
+                "v1.46.0 stays in use until you relaunch".to_owned(),
+            ]
+        );
+
+        let failed = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::UpdateFailed)
+            .unwrap();
+        let failed_agent = registry
+            .iter()
+            .find(|agent| agent.id == failed.registry_id)
+            .unwrap();
+        assert_eq!(
+            demo_status_lines(failed, failed_agent),
+            vec![
+                "Update to v0.10.116 failed — v0.10.115 is still installed and working.".to_owned(),
+                "The archive download was interrupted.".to_owned(),
+            ]
+        );
+        assert_eq!(demo_action_label(failed.state), Some("Retry"));
+    }
+
+    #[test]
+    fn failed_install_has_no_false_reassurance_and_can_retry() {
+        let registry = parse_registry(include_str!("registry-sample.json"));
+        let demo = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::InstallFailed)
+            .unwrap();
+        let agent = registry
+            .iter()
+            .find(|agent| agent.id == demo.registry_id)
+            .unwrap();
+        assert_eq!(demo_version_text(demo, agent), None);
+        assert_eq!(
+            demo_status_lines(demo, agent),
+            vec![
+                "Install failed.".to_owned(),
+                "The package manager could not install v0.22.1.".to_owned(),
+            ]
+        );
+        assert_eq!(demo_action_label(demo.state), Some("Retry"));
+    }
+
+    #[test]
+    fn paths_keep_the_distinguishing_suffix_and_columns_stay_fixed() {
+        let kilo = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.registry_id == "kilo")
+            .unwrap();
+        assert_eq!(
+            demo_path_text(kilo),
+            Some(r"%LOCALAPPDATA%\Tiller\agents\kilo\bin".to_owned())
+        );
+        let qwen = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.registry_id == "qwen-code")
+            .unwrap();
+        assert_eq!(demo_path_text(qwen), None);
+        assert_eq!(DEMO_PATH_COLUMN_WIDTH, 220.0);
+        assert_eq!(DEMO_VERSION_COLUMN_WIDTH, 150.0);
+        assert_eq!(demo_version_marker(&DEMO_INSTALLED_AGENTS[0]), Some("unverified"));
+        let failed = DEMO_INSTALLED_AGENTS
+            .iter()
+            .find(|demo| demo.state == DemoUpdateState::UpdateFailed)
+            .unwrap();
+        assert_eq!(demo_version_marker(failed), Some("failed"));
+    }
+
+    #[test]
+    fn demo_columns_have_non_collapsing_slots_and_a_real_gap() {
+        use gpui::Styled;
+
+        let mut path_slot = demo_fixed_slot(DEMO_PATH_COLUMN_WIDTH);
+        let mut version_slot = demo_version_slot();
+        assert!(Styled::style(&mut path_slot).min_size.width.is_some());
+        assert!(Styled::style(&mut version_slot).min_size.width.is_some());
+        assert!(Styled::style(&mut version_slot).margin.left.is_some());
+        assert_eq!(Styled::style(&mut path_slot).flex_shrink, Some(0.0));
+        assert_eq!(Styled::style(&mut version_slot).flex_shrink, Some(0.0));
+        assert!(DEMO_COLUMN_GAP > 0.0);
     }
 
     #[test]
