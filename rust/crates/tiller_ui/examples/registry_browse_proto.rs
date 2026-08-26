@@ -48,6 +48,11 @@ struct DemoInstalledAgent {
 
 const DEMO_PATH_COLUMN_WIDTH: f32 = 220.0;
 const DEMO_VERSION_COLUMN_WIDTH: f32 = 150.0;
+const DEMO_COLUMN_GAP: f32 = 8.0;
+
+fn demo_fixed_slot(width: f32) -> Div {
+    div().w(px(width)).min_w(px(width)).flex_none()
+}
 
 const DEMO_INSTALLED_AGENTS: [DemoInstalledAgent; 6] = [
     DemoInstalledAgent {
@@ -727,9 +732,7 @@ impl RegistryBrowseProto {
         entity: Entity<Self>,
         window: &Window,
     ) -> impl IntoElement {
-        let mut path_slot = div()
-            .w(px(DEMO_PATH_COLUMN_WIDTH))
-            .flex_none()
+        let mut path_slot = demo_fixed_slot(DEMO_PATH_COLUMN_WIDTH)
             .flex()
             .justify_end();
         if let Some(path) = demo_path_text(demo) {
@@ -741,9 +744,7 @@ impl RegistryBrowseProto {
             ));
         }
 
-        let mut version_slot = div()
-            .w(px(DEMO_VERSION_COLUMN_WIDTH))
-            .flex_none()
+        let mut version_slot = demo_fixed_slot(DEMO_VERSION_COLUMN_WIDTH)
             .flex()
             .items_center()
             .justify_end()
@@ -825,7 +826,7 @@ impl RegistryBrowseProto {
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(DEMO_COLUMN_GAP))
             .child(path_slot)
             .child(version_slot)
             .child(action);
@@ -1386,6 +1387,19 @@ mod tests {
             .find(|demo| demo.state == DemoUpdateState::UpdateFailed)
             .unwrap();
         assert_eq!(demo_version_marker(failed), Some("failed"));
+    }
+
+    #[test]
+    fn demo_columns_have_non_collapsing_slots_and_a_real_gap() {
+        use gpui::Styled;
+
+        let mut path_slot = demo_fixed_slot(DEMO_PATH_COLUMN_WIDTH);
+        let mut version_slot = demo_fixed_slot(DEMO_VERSION_COLUMN_WIDTH);
+        assert!(Styled::style(&mut path_slot).min_size.width.is_some());
+        assert!(Styled::style(&mut version_slot).min_size.width.is_some());
+        assert_eq!(Styled::style(&mut path_slot).flex_shrink, Some(0.0));
+        assert_eq!(Styled::style(&mut version_slot).flex_shrink, Some(0.0));
+        assert!(DEMO_COLUMN_GAP > 0.0);
     }
 
     #[test]
