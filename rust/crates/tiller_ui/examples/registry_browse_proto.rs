@@ -74,6 +74,10 @@ fn is_installable(agent: &RegistryAgent) -> bool {
     has_binary || has_npx
 }
 
+fn builtin_state_margin_right(available: bool) -> gpui::Pixels {
+    if available { px(0.0) } else { px(8.0) }
+}
+
 fn requirements_line(agent: &RegistryAgent) -> &'static str {
     if agent
         .distribution
@@ -296,13 +300,13 @@ fn row_shell(index: usize, row: Div) -> impl IntoElement {
 }
 
 fn action_button_shell(label: &'static str, theme: Theme) -> Div {
-    let spacing = theme.cosmic.spacing;
     div()
         .flex_none()
-        .px(px(spacing.xs as f32))
-        .py(px(spacing.xxxs as f32))
-        .rounded(theme.radii.control)
-        .text_size(theme.typography.callout)
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(theme.radii.row_card)
+        .text_size(theme.typography.caption2)
+        .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.title)
         .bg(theme.primary_pill_bg)
         .child(label)
@@ -409,16 +413,20 @@ impl RegistryBrowseProto {
                 version,
                 theme,
             ))
-            .child(pill(
-                format!("your-agent-state-{index}"),
-                if available {
-                    "Available".to_owned()
-                } else {
-                    "Not found on PATH".to_owned()
-                },
-                theme,
-                !available,
-            ));
+            .child(
+                div()
+                    .mr(builtin_state_margin_right(available))
+                    .child(pill(
+                        format!("your-agent-state-{index}"),
+                        if available {
+                            "Available".to_owned()
+                        } else {
+                            "Not found on PATH".to_owned()
+                        },
+                        theme,
+                        !available,
+                    )),
+            );
 
         let row = controls::row_view(
             agent_label(
@@ -854,7 +862,7 @@ mod tests {
 
     #[test]
     fn browse_controls_are_right_aligned_and_use_install_button_chrome() {
-        use gpui::{JustifyContent, Styled};
+        use gpui::{FontWeight, JustifyContent, Styled};
 
         let theme = Theme::dark();
         let mut trailing = trailing_column(div().child("Install"));
@@ -866,6 +874,9 @@ mod tests {
         let mut button = action_button_shell("Install", theme);
         let style = Styled::style(&mut button);
         assert_eq!(style.background, Some(theme.primary_pill_bg.into()));
-        assert_eq!(style.text.font_size, Some(theme.typography.callout.into()));
+        assert_eq!(style.text.font_size, Some(theme.typography.caption2.into()));
+        assert_eq!(style.text.font_weight, Some(FontWeight::SEMIBOLD));
+        assert_eq!(builtin_state_margin_right(false), px(8.0));
+        assert_eq!(builtin_state_margin_right(true), px(0.0));
     }
 }
