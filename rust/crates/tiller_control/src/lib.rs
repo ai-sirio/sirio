@@ -18,6 +18,15 @@
 //! `current-workspace`, `close-workspace`, `notify`, `session-ref`,
 //! `list-notifications`, `clear-notifications`.
 
+/// The version reported by the Tiller app and `tillerctl`.
+///
+/// This is the single runtime version source and reads the `[workspace.package]`
+/// `version` field through this crate's `version.workspace = true` declaration.
+/// That declaration matters because this crate ships beside `tiller`; moving
+/// this constant to a crate with its own version would silently change what it
+/// reports.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod client;
 pub mod extract;
 pub mod panel;
@@ -40,3 +49,18 @@ pub use protocol::{
     encode_line,
 };
 pub use server::{ControlHandler, ControlServer, ServerError};
+
+#[cfg(test)]
+mod tests {
+    use super::VERSION;
+
+    #[test]
+    fn version_is_a_non_empty_semantic_version() {
+        assert!(!VERSION.is_empty());
+        let components: Vec<_> = VERSION.split('.').collect();
+        assert_eq!(components.len(), 3);
+        assert!(components.iter().all(|component| {
+            !component.is_empty() && component.parse::<u64>().is_ok()
+        }));
+    }
+}
