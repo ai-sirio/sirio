@@ -7013,7 +7013,7 @@ dependencies = [
 
 [[package]]
 name = "tiller"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -7040,7 +7040,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_acp"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -7066,7 +7066,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_control"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -7104,7 +7104,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_project"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "serde",
@@ -7113,7 +7113,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_registry"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -7128,7 +7128,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_terminal"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -7144,7 +7144,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_theme"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -7154,7 +7154,7 @@ dependencies = [
 
 [[package]]
 name = "tiller_ui"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

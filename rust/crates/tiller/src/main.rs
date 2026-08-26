@@ -1550,6 +1550,10 @@ impl ControlHandler for AppControlHandler {
                             tiller_control::protocol::rows::encode(&rows),
                         ),
                         (
+                            "version".to_string(),
+                            tiller_control::VERSION.to_string(),
+                        ),
+                        (
                             "socketEnabled".to_string(),
                             self.socket_info.enabled().to_string(),
                         ),
@@ -13850,6 +13854,7 @@ fn main() {
                 });
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
+                        .with_version(tiller_control::VERSION)
                         .with_browser_origins(browser_origins_for_settings.clone())
                         .with_database_path(database_path_for_settings.clone())
                         .on_install_skill({
@@ -21099,6 +21104,14 @@ mod tests {
             .and_then(|result| result.get("methods"))
             .and_then(|json| tiller_control::protocol::rows::decode(json))
             .expect("capability rows");
+        assert!(
+            capabilities
+                .result
+                .as_ref()
+                .and_then(|result| result.get("version"))
+                .is_some_and(|version| !version.is_empty()),
+            "capabilities must report the running Tiller version"
+        );
         let advertised: Vec<_> = methods
             .iter()
             .filter_map(|row| row.get("method").map(String::as_str))

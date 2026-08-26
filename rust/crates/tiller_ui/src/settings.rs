@@ -961,6 +961,9 @@ pub struct Settings {
     summarizer_agent: SummarizerChoice,
     control_socket_enabled: bool,
     socket_path: String,
+    /// The host-supplied app version shown in General settings. The UI crate
+    /// deliberately does not depend on `tiller_control` for this fact.
+    version: String,
     /// Whether the summarizer picker's agent menu is open (F-SET-05).
     summarizer_popover_open: bool,
     /// Focus handle for the picker menu, so Escape closes the menu alone:
@@ -1203,6 +1206,7 @@ impl Settings {
             // on this machine — never a fixed list of "Active" claims.
             provider_accounts: ProviderAccountStates::discovered(),
             socket_path: initial.socket_path,
+            version: String::new(),
             summarizer_popover_open: false,
             summarizer_focus: cx.focus_handle(),
             surface_focus: cx.focus_handle(),
@@ -1252,6 +1256,14 @@ impl Settings {
             active_claude_account_id: None,
             active_codex_account_id: None,
         }
+    }
+
+    /// Supplies the host's compiled app version for the General settings row.
+    /// The host owns the value so this UI crate stays independent of
+    /// `tiller_control`.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 
     /// Wires the durable account-identity cache (F-PERSIST-DB-06). Call
@@ -3826,7 +3838,7 @@ impl Settings {
                 .debug_selector(|| "settings-version".into())
                 .text_size(theme.typography.callout)
                 .text_color(theme.subtitle)
-                .child(text!("0.1.0")),
+                .child(text!(self.version.clone())),
             theme,
         ));
 
@@ -6839,8 +6851,9 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_version("test-version")
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -6855,6 +6868,16 @@ mod tests {
             cx.debug_bounds("settings-version").is_some(),
             "the app version is stated in General settings"
         );
+        let version = cx.update(|window, app| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(app)
+                .version
+                .clone()
+        });
+        assert_eq!(version, "test-version");
         assert!(
             cx.debug_bounds("settings-control-socket-row").is_some(),
             "the tillerctl card renders"
