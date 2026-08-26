@@ -51,6 +51,24 @@ pub fn format_version_json(cli_version: &str, app_version: Option<&str>) -> Stri
     .to_string()
 }
 
+/// Returns the address users can act on for the control transport.
+pub fn display_endpoint(path: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        display_endpoint_from(path, windows_pipe::pipe_name_for_path(path))
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.display().to_string()
+    }
+}
+
+#[cfg(windows)]
+fn display_endpoint_from(path: &std::path::Path, endpoint: Result<String, String>) -> String {
+    endpoint.unwrap_or_else(|_| path.display().to_string())
+}
+
 pub mod client;
 pub mod extract;
 pub mod panel;
@@ -77,6 +95,40 @@ pub use server::{ControlHandler, ControlServer, ServerError};
 #[cfg(test)]
 mod tests {
     use super::{VERSION, format_version_json, format_version_lines};
+    use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn display_endpoint_on_unix_is_the_path() {
+        let path = Path::new("/run/user/1000/TillerRust/control.sock");
+        assert_eq!(super::display_endpoint(path), path.display().to_string());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_endpoint_on_windows_is_the_pipe_name() {
+        let endpoint = super::display_endpoint(Path::new(
+            r"C:\Users\alice\AppData\Local\TillerRust\control.sock",
+        ));
+        assert!(endpoint.starts_with(r"\\.\pipe\"), "{endpoint}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_endpoint_preserves_an_explicit_pipe_name() {
+        let path = Path::new(r"\\.\pipe\custom");
+        assert_eq!(super::display_endpoint(path), path.display().to_string());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn display_endpoint_falls_back_to_the_path_when_pipe_derivation_fails() {
+        let path = Path::new(r"C:\Users\alice\control.sock");
+        assert_eq!(
+            super::display_endpoint_from(path, Err("test failure".to_string())),
+            path.display().to_string()
+        );
+    }
 
     #[test]
     fn version_is_a_non_empty_semantic_version() {
