@@ -31,7 +31,7 @@ use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatSessionSummary, ChatTranscript, ChatTurn,
 };
-use tiller_project::display_path;
+use tiller_project::{display_absolute_path, display_path};
 use tiller_theme::Theme;
 
 use crate::caret;
@@ -8224,9 +8224,12 @@ fn collapsed_tool_row_text(
         return base;
     };
 
-    let relative = location
-        .path
-        .strip_prefix(cwd)
+    // Both sides go through `display_absolute_path` so a verbatim `\\?\`
+    // prefix never survives the comparison — after stripping, the strings
+    // compare component-for-component against a plain cwd.
+    let location_string = display_absolute_path(&location.path);
+    let relative = Path::new(&location_string)
+        .strip_prefix(display_absolute_path(cwd))
         .ok()
         .filter(|path| !path.as_os_str().is_empty());
     let target = relative
@@ -10744,6 +10747,44 @@ mod tests {
 
         assert!(!row.contains(r"\\?\"), "collapsed row leaked {row}");
         assert!(row.contains(r"D:\outside\file.rs"), "row = {row}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collapsed_tool_row_text_shortens_a_verbatim_location_against_a_plain_cwd() {
+        let locations = vec![ToolCallLocationInfo {
+            path: PathBuf::from(r"\\?\D:\workspace\src\main.rs"),
+            line: None,
+        }];
+
+        assert_eq!(
+            collapsed_tool_row_text(
+                "Completed",
+                "read",
+                &locations,
+                Path::new(r"D:\workspace"),
+            ),
+            format!("Completed · read src{}main.rs", std::path::MAIN_SEPARATOR),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collapsed_tool_row_text_shortens_a_plain_location_against_a_verbatim_cwd() {
+        let locations = vec![ToolCallLocationInfo {
+            path: PathBuf::from(r"D:\workspace\src\main.rs"),
+            line: None,
+        }];
+
+        assert_eq!(
+            collapsed_tool_row_text(
+                "Completed",
+                "read",
+                &locations,
+                Path::new(r"\\?\D:\workspace"),
+            ),
+            format!("Completed · read src{}main.rs", std::path::MAIN_SEPARATOR),
+        );
     }
 
     #[test]
