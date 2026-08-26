@@ -91,7 +91,10 @@ const QUIT_TILLER_LABEL: &str = "Quit Tiller";
 #[cfg(target_os = "linux")]
 const NORMAL_ICON_NAME: &str = "utilities-terminal";
 #[cfg(target_os = "linux")]
-const ATTENTION_ICON_NAME: &str = "dialog-warning";
+// `dialog-question` is the freedesktop mark for an unanswered question,
+// matching `NeedsInput` instead of implying that something is broken. If a
+// theme lacks it, the host degrades to no overlay rather than a wrong icon.
+const ATTENTION_ICON_NAME: &str = "dialog-question";
 
 fn roster_menu_label(entry: &TrayRosterEntry) -> String {
     format!(
@@ -224,9 +227,8 @@ impl ksni::Tray for AgentRosterTray {
             .unwrap_or(TrayIconKind::Normal);
         if kind == TrayIconKind::Attention {
             // ksni 0.3 exposes OverlayIconName, which keeps the base icon
-            // recognisable. `dialog-warning` is a stock freedesktop icon-theme
-            // name; if a theme lacks it, the host shows no overlay rather than
-            // substituting an unrelated icon.
+            // recognisable while the question mark signals that an agent is
+            // waiting for an answer.
             ATTENTION_ICON_NAME.into()
         } else {
             String::new()
