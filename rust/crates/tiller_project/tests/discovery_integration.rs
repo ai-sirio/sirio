@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tiller_project::{
     Workspace, current_branch, discover_project, discover_worktrees, is_git_repository,
-    parse_worktree_list,
+    parse_worktree_list, read_head_label,
 };
 
 /// A throwaway directory, removed on drop.
@@ -264,4 +264,81 @@ fn load_project_wires_a_real_repo_into_the_workspace() {
     assert_eq!(filtered.projects.len(), 1);
     assert_eq!(filtered.projects[0].worktrees.len(), 1);
     assert_eq!(filtered.projects[0].worktrees[0].tabs[0].tab.id, tab_id);
+}
+
+#[test]
+fn read_head_label_tracks_a_real_checkout_when_the_branch_changes_under_it() {
+    let repo = make_git_repo();
+
+    assert_eq!(
+        read_head_label(repo.path()),
+        Some("main".to_string()),
+        "a fresh read must report the checkout's real current branch"
+    );
+
+    // The #114 scenario: the branch flips outside the app while it runs.
+    // Nothing restarts; a fresh file read is all it takes.
+    git(repo.path(), &["checkout", "-b", "other"]);
+    assert_eq!(
+        read_head_label(repo.path()),
+        Some("other".to_string()),
+        "after a branch switch under the app the next read follows HEAD"
+    );
+}
+
+#[test]
+fn read_head_label_keeps_a_slashed_branch_whole() {
+    let repo = make_git_repo();
+    git(repo.path(), &["checkout", "-b", "feature/login"]);
+
+    assert_eq!(
+        read_head_label(repo.path()),
+        Some("feature/login".to_string()),
+        "everything after 'refs/heads/' is the branch name; slashes are \
+         ordinary characters inside one"
+    );
+}
+
+#[test]
+fn read_head_label_reads_a_linked_worktrees_own_head() {
+    let repo = make_git_repo();
+    let linked = repo.path().with_extension("wt-slashed");
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "fix/113-branch", linked.to_str().unwrap()],
+    );
+
+    assert_eq!(
+        read_head_label(&linked),
+        Some("fix/113-branch".to_string()),
+        "the linked worktree's `.git` is a file; resolving it to the shared \
+         gitdir and reading its own HEAD yields ITS branch, slashed name intact"
+    );
+    assert_eq!(
+        read_head_label(repo.path()),
+        Some("main".to_string()),
+        "the primary checkout keeps reporting its own branch"
+    );
+}
+
+#[test]
+fn read_head_label_reports_a_short_sha_for_a_detached_head() {
+    let repo = make_git_repo();
+    git(repo.path(), &["checkout", "--detach", "HEAD"]);
+    let full = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+
+    let label = read_head_label(repo.path()).expect("detached HEAD still labels");
+    assert_eq!(
+        label,
+        full.trim().chars().take(7).collect::<String>(),
+        "a detached HEAD labels by short sha, matching short_head's convention"
+    );
+    assert_eq!(label.len(), 7);
+}
+
+#[test]
+fn read_head_label_of_a_non_repository_is_none() {
+    let dir = TempDir::new();
+
+    assert_eq!(read_head_label(dir.path()), None);
 }

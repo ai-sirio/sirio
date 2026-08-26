@@ -97,7 +97,7 @@ mod worktree;
 pub use create::{ProjectCreationError, create_project};
 pub use discovery::{
     DiscoveredProject, DiscoveredWorktree, current_branch, discover_project, discover_worktrees,
-    is_git_repository, parse_worktree_list,
+    is_git_repository, parse_worktree_list, read_head_label,
 };
 pub use domain::{
     AutoNamingThrottle, OnceGate, default_project_base, display_absolute_path, display_path,

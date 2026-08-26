@@ -11,6 +11,9 @@
 //!   line; `locked` and `prunable` entries carry optional reasons.
 //! - [`current_branch`] answers "what branch is this checkout on right now"
 //!   for any checkout path, returning `None` for a detached HEAD.
+//! - [`read_head_label`] answers the same question without spawning `git`
+//!   at all — one read of the checkout's resolved `HEAD` file — so live
+//!   branch labels stay affordable on small machines.
 
 use std::path::Path;
 
@@ -95,6 +98,62 @@ pub fn current_branch(path: &Path) -> Result<Option<String>, GitError> {
     } else {
         Some(branch.to_string())
     })
+}
+
+/// Answers what label this checkout shows right now, by reading its git
+/// directory's `HEAD` file directly.
+///
+/// The git directory is resolved the way git itself lays it out: a `.git`
+/// directory beside the checkout *is* it (`<path>/.git`), while a linked
+/// worktree instead carries a `.git` **file** whose body is
+/// `gitdir: <path to that worktree's admin directory>` — absolute, or
+/// relative to the checkout itself. Branch HEAD (`ref: refs/heads/<name>`)
+/// yields everything after the prefix, trimmed — a branch name may contain
+/// slashes and arrives whole. A raw commit id (detached HEAD) yields its
+/// first seven characters, matching `short_head`'s detached convention in
+/// the app shell.
+///
+/// This is the process-free half of keeping branch labels live (#114):
+/// unlike [`current_branch`] it never spawns `git`, so affording one file
+/// read per row at rare, user-driven moments stays within a Raspberry Pi
+/// 5's budget. Anything missing, unreadable or unparseable is `None` —
+/// never a process, never a guess, never a blanked label.
+pub fn read_head_label(path: &Path) -> Option<String> {
+    let dot_git = path.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let link = std::fs::read_to_string(&dot_git).ok()?;
+        let target = link.strip_prefix("gitdir:")?.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let target = Path::new(target);
+        if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            path.join(target)
+        }
+    };
+
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        let branch = branch.trim();
+        if branch.is_empty() {
+            return None;
+        }
+        Some(branch.to_string())
+    } else {
+        // Not a branch ref: only a raw commit id counts. Anything else
+        // (another ref namespace, garbage) is unparseable here.
+        let sha = head.trim();
+        let bytes = sha.as_bytes();
+        if bytes.len() >= 7 && bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+            Some(sha[..7].to_string())
+        } else {
+            None
+        }
+    }
 }
 
 /// Parses the machine-readable output of `git worktree list --porcelain`.
