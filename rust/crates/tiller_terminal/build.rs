@@ -54,9 +54,19 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         static_lib.parent().expect("static lib has a parent").display()
     );
-    // The real static archive...
+    // The real static archive, put on the link line beside the import library
+    // the `-sys` crate already named.
+    //
+    // #179: this crate cannot do more than that. It used to also emit
+    // `cargo:rustc-link-arg=/NODEFAULTLIB:ghostty-vt.lib`, which was inert
+    // twice over — `rustc-link-arg` applies only to the crate being built and
+    // a library crate has no link step, and `/NODEFAULTLIB` suppresses only
+    // libraries named by `/DEFAULTLIB` directives in object files, never one
+    // rustc passes explicitly. With no working exclusion, which archive won
+    // was left to the linker's tie-break; debug happened to pick this one and
+    // release did not, shipping a binary that could not start.
+    //
+    // The exclusion now lives in `tiller/build.rs`, the crate that actually
+    // links, as `/WHOLEARCHIVE:ghostty-vt-static.lib`. See the comment there.
     println!("cargo:rustc-link-lib=static=ghostty-vt-static");
-    // ...and the import library the -sys crate linked, removed so no
-    // ghostty-vt.dll load-time dependency survives.
-    println!("cargo:rustc-link-arg=/NODEFAULTLIB:ghostty-vt.lib");
 }
