@@ -6253,12 +6253,16 @@ impl Chat {
                                 option_entity
                                     .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
                             })
-                            .child(div().flex_1().child(option_name))
+                            // The name yields to the badge rather than pushing
+                            // it past the popup's fixed width — `min_w_0` is
+                            // what lets it shrink below its own text at all.
+                            .child(div().flex_1().min_w_0().text_ellipsis().child(option_name))
                             .when(is_recommended, |this| {
                                 this.child(
                                     div()
                                         .id("model-option-recommended")
                                         .debug_selector(|| "model-option-recommended".into())
+                                        .flex_shrink_0()
                                         .px(px(5.0))
                                         .rounded(px(4.0))
                                         .text_size(typography.caption2)
@@ -6325,7 +6329,12 @@ impl Chat {
                                     .flex_col()
                                     .gap(px(4.0))
                                     .children(children)
-                                    .child(div().flex().gap(px(4.0)).children(choices)),
+                                    // `flex_wrap` because the row is as wide as
+                                    // the agent's own choice count — six of them
+                                    // (Claude Code) exceed the picker's fixed
+                                    // 245px and would otherwise be drawn over
+                                    // the composer behind it, same as F-PRJ-13.
+                                    .child(div().flex().flex_wrap().gap(px(4.0)).children(choices)),
                             )
                     }),
             )
@@ -11906,6 +11915,91 @@ mod tests {
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
             "backspace inside the search field must not have eaten composer text"
+        );
+    }
+
+    /// F-CHAT-16: the picker is a fixed-width popup, so everything it draws
+    /// has to fit inside it. Two rows are sized by the agent, not by us: the
+    /// effort selector is as wide as the number of choices reported (Claude
+    /// Code reports six), and a model row is as wide as its name plus the
+    /// "Recommended" badge. Neither wraps or truncates on its own, so both
+    /// used to be painted straight over the composer behind the popup.
+    #[gpui::test]
+    async fn model_picker_rows_stay_inside_the_popup(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = vec![
+                ModelOption {
+                    id: "default".into(),
+                    name: "Default (recommended)".into(),
+                    description: None,
+                },
+                ModelOption {
+                    id: "opus".into(),
+                    name: "Opus (1M context)".into(),
+                    description: None,
+                },
+            ];
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some("high".into()),
+                choices: ["Default", "Low", "Medium", "High", "Xhigh", "Max"]
+                    .into_iter()
+                    .map(|name| tiller_acp::EffortChoice {
+                        value: name.to_lowercase(),
+                        name: name.to_string(),
+                    })
+                    .collect(),
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("model chip is rendered");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let picker = cx
+            .debug_bounds("model-picker")
+            .expect("the model picker is drawn");
+        for selector in [
+            "effort-option-default",
+            "effort-option-low",
+            "effort-option-medium",
+            "effort-option-high",
+            "effort-option-xhigh",
+            "effort-option-max",
+        ] {
+            let choice = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"));
+            assert!(
+                choice.left() >= picker.left() && choice.right() <= picker.right(),
+                "{selector} must stay inside the picker: \
+                 picker={picker:?} choice={choice:?}"
+            );
+        }
+
+        let badge = cx
+            .debug_bounds("model-option-recommended")
+            .expect("the Recommended badge is drawn");
+        assert!(
+            badge.right() <= picker.right(),
+            "the Recommended badge must stay inside the picker: \
+             picker={picker:?} badge={badge:?}"
         );
     }
 
