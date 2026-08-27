@@ -1134,12 +1134,18 @@ impl BrowserSurface {
                         .await;
                     if this
                         .update(cx, |surface, cx| {
-                            surface.pump_web_events();
+                            // #195: the GTK iteration must keep running --
+                            // it is what drives the webview at all -- but
+                            // the repaint is only owed when the page has
+                            // actually done something.
+                            let drained = surface.pump_web_events();
                             #[cfg(target_os = "linux")]
                             while gtk::events_pending() {
                                 gtk::main_iteration_do(false);
                             }
-                            cx.notify();
+                            if drained {
+                                cx.notify();
+                            }
                         })
                         .is_err()
                     {
@@ -1158,8 +1164,12 @@ impl BrowserSurface {
                         .await;
                     if this
                         .update(cx, |surface, cx| {
-                            surface.pump_web_events();
-                            cx.notify();
+                            // #195: a 60 Hz unconditional notify repainted
+                            // the whole window for as long as any browser
+                            // surface existed.
+                            if surface.pump_web_events() {
+                                cx.notify();
+                            }
                         })
                         .is_err()
                     {
@@ -1488,8 +1498,20 @@ impl BrowserSurface {
         self.address_dragging = false;
     }
 
-    fn pump_web_events(&mut self) {
+    /// Drains the queue the webview callbacks push into, and reports
+    /// whether there was anything in it (#195).
+    ///
+    /// The return value is what decides whether the pump notifies. The
+    /// pump runs at 60 Hz, and it used to notify on every one of those
+    /// ticks whether or not the page had done anything, which forced a
+    /// full repaint sixty times a second for as long as any browser
+    /// surface existed. Measured on Windows against a static local page
+    /// with no scripts, no animation and no timers, that cost 27.6% of a
+    /// core against a 5.8% baseline, and backgrounding the tab saved
+    /// nothing.
+    fn pump_web_events(&mut self) -> bool {
         let pending = std::mem::take(&mut *self.web_events.borrow_mut());
+        let drained = !pending.is_empty();
         for event in pending {
             match event {
                 WebEvent::NavigationRequested(url) => {
@@ -1528,6 +1550,7 @@ impl BrowserSurface {
                 }
             }
         }
+        drained
     }
 
     fn render_toolbar(&self, theme: Theme, entity: gpui::Entity<Self>) -> impl IntoElement {
