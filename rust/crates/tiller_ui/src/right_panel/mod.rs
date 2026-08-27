@@ -496,7 +496,7 @@ impl RightPanel {
             return changes;
         }
         let repo_root = self.repo_root.clone();
-        let changes = cx.new(|cx| crate::changes::ChangesTab::new(repo_root, cx));
+        let changes = cx.new(|cx| crate::changes::ChangesTab::in_right_panel(repo_root, cx));
         self.changes_subscriptions = vec![
             cx.subscribe(&changes, |_, _, event: &ChangesTabEvent, cx| match event {
                 ChangesTabEvent::OpenFile(path) => cx.emit(RightPanelEvent::OpenFile(path.clone())),
