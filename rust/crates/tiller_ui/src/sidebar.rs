@@ -3038,11 +3038,20 @@ impl Sidebar {
                             sidebar.on_display_name_key(event, window, cx);
                         });
                     })
-                    .child(if display_name.trim().is_empty() {
-                        "Display name".to_owned()
-                    } else {
-                        display_name
-                    })
+                    // #212: shrink and ellipsise inside the field; must not grow, or the caret leaves the text.
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("sidebar-display-name-text")
+                            .debug_selector(|| "sidebar-display-name-text".to_owned())
+                            .min_w_0()
+                            .text_ellipsis()
+                            .child(if display_name.trim().is_empty() {
+                                "Display name".to_owned()
+                            } else {
+                                display_name
+                            }),
+                    )
                     .when(name_focused, |this| {
                         this.child(caret::bar(px(14.0), theme.accent, caret_visible))
                     }),
@@ -3265,11 +3274,20 @@ impl Sidebar {
                             sidebar.on_worktree_base_key(event, window, cx);
                         });
                     })
-                    .child(if draft.trim().is_empty() {
-                        "Search branches by name…".to_owned()
-                    } else {
-                        draft
-                    })
+                    // #212: see the field above.
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("sidebar-branch-search-text")
+                            .debug_selector(|| "sidebar-branch-search-text".to_owned())
+                            .min_w_0()
+                            .text_ellipsis()
+                            .child(if draft.trim().is_empty() {
+                                "Search branches by name…".to_owned()
+                            } else {
+                                draft
+                            }),
+                    )
                     .when(focused, |this| {
                         this.child(caret::bar(px(14.0), theme.accent, caret_visible))
                     }),
@@ -3352,11 +3370,20 @@ impl Sidebar {
                                     sidebar.on_worktree_location_key(event, window, cx);
                                 });
                             })
-                            .child(if has_override {
-                                draft
-                            } else {
-                                default_location.clone()
-                            })
+                            // #212: this one renders a filesystem path, so it is the likeliest to overflow.
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("sidebar-location-override-text")
+                                    .debug_selector(|| "sidebar-location-override-text".to_owned())
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .child(if has_override {
+                                        draft
+                                    } else {
+                                        default_location.clone()
+                                    }),
+                            )
                             .when(focused, |this| {
                                 this.child(caret::bar(px(14.0), theme.accent, caret_visible))
                             }),
