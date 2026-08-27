@@ -25,6 +25,7 @@ tiller_control.workspace = true
 tiller_git.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The window icon (`WindowOptions.icon`): decoded once at startup from the
 # embedded PNG. Same crate and version family gpui itself uses, so the
 # `Arc<RgbaImage>` type is the same instance gpui_linux reads into

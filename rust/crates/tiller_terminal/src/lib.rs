@@ -452,6 +452,39 @@ fn default_system_shell() -> (String, Vec<String>) {
     (program, Vec::new())
 }
 
+/// Program and arguments a [`TerminalShell::System`] pane spawns.
+///
+/// The single source of truth. The spawn path and the UI breadcrumb both read
+/// this, so what the user is told cannot drift from what is actually running —
+/// the drift is what #230 was.
+#[cfg(not(windows))]
+fn system_pane_shell() -> (String, Vec<String>) {
+    match std::env::var("SHELL") {
+        Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
+        _ => default_system_shell(),
+    }
+}
+
+/// `$SHELL` and `-il` are POSIX notions. A value inherited from Git Bash is an
+/// MSYS path (`/bin/bash.exe`) that `CreateProcessW` cannot resolve, so
+/// honouring it made every pane fail to start with os error 3 (#230). Windows
+/// resolves its own interpreter from `COMSPEC` instead.
+#[cfg(windows)]
+fn system_pane_shell() -> (String, Vec<String>) {
+    default_system_shell()
+}
+
+/// The display name of the shell a System pane runs: the file stem of
+/// [`system_pane_shell`]'s program, for UI that names the shell to the user.
+pub fn system_shell_display_name() -> String {
+    let (program, _) = system_pane_shell();
+    std::path::Path::new(&program)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(program)
+}
+
 /// Program and arguments that run one command string through the user's shell.
 ///
 /// Callers that want to run a command — an agent's launch line, an install
@@ -475,19 +508,12 @@ pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
 /// The shell this user runs: `$SHELL` when they set it — they meant it — and
 /// the platform's own default only as a floor. Every site that needs to name
 /// a shell asks here, so no call site spells a path of its own.
-#[cfg(not(windows))]
+///
+/// This used to be two `cfg` arms; the Windows/POSIX split moved one level
+/// down into [`system_pane_shell`], whose program each arm already computed
+/// exactly, so the function is now shared and ungated.
 fn user_shell_program() -> String {
-    match std::env::var("SHELL") {
-        Ok(value) if !value.is_empty() => value,
-        _ => default_system_shell().0,
-    }
-}
-
-/// `$SHELL` is not a Windows notion, so the interpreter is whatever
-/// [`default_system_shell`] resolved from `COMSPEC`.
-#[cfg(windows)]
-fn user_shell_program() -> String {
-    default_system_shell().0
+    system_pane_shell().0
 }
 
 /// See the POSIX arm. `$SHELL` is not a Windows notion, so the interpreter
@@ -967,10 +993,7 @@ impl TerminalHandle {
             .context("creating terminal PTY")?;
 
         let (program, args) = match shell {
-            TerminalShell::System => match std::env::var("SHELL") {
-                Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
-                _ => default_system_shell(),
-            },
+            TerminalShell::System => system_pane_shell(),
             TerminalShell::WithArguments { program, args } => {
                 (program.clone(), args.clone())
             }
@@ -5601,6 +5624,61 @@ mod view_tests {
                  fallback ({program}), but it failed: {error:#}"
             ),
         }
+    }
+
+    /// The UI names the System pane's shell via `system_shell_display_name`,
+    /// so whatever it returns is shown to the user as if it were a program
+    /// name: it must be a bare file name on every platform, never an
+    /// unresolvable POSIX path or a Windows path fragment.
+    #[test]
+    fn system_shell_display_name_is_a_bare_file_name() {
+        let name = system_shell_display_name();
+        assert!(!name.is_empty(), "the display name must not be empty");
+        assert!(
+            !name.contains('/') && !name.contains('\\'),
+            "the display name must be a bare file name, got: {name:?}"
+        );
+    }
+
+    /// #230: Git Bash exports `$SHELL=/bin/bash.exe`, an MSYS path that
+    /// `CreateProcessW` cannot resolve — every System pane failed with os
+    /// error 3. On Windows the POSIX variable must be ignored entirely and the
+    /// resolved program must exist on this machine's disk.
+    #[cfg(windows)]
+    #[test]
+    fn a_posix_shell_value_is_ignored_on_windows() {
+        const POSIX_VALUE: &str = "/bin/bash.exe";
+        let previous = std::env::var_os("SHELL");
+        unsafe { std::env::set_var("SHELL", POSIX_VALUE) };
+
+        let (program, _args) = system_pane_shell();
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("SHELL", value) },
+            None => unsafe { std::env::remove_var("SHELL") },
+        }
+
+        assert_ne!(
+            program, POSIX_VALUE,
+            "a POSIX $SHELL value must not be honoured on Windows"
+        );
+        assert!(
+            std::path::Path::new(&program).exists(),
+            "the resolved program must exist on disk, got: {program}"
+        );
+    }
+
+    /// `"zsh"` was the hardcoded display fallback of the old breadcrumb code;
+    /// on Windows nothing named zsh is running, and naming it lied to the user.
+    #[cfg(windows)]
+    #[test]
+    fn the_display_name_is_not_the_hardcoded_zsh_fallback() {
+        assert_ne!(
+            system_shell_display_name(),
+            "zsh",
+            "the display name must come from the shell actually resolved, \
+             not the old hardcoded zsh fallback"
+        );
     }
 
     /// Every "run this command" call site funnels through
