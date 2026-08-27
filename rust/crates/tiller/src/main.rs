@@ -436,6 +436,20 @@ const BROWSER_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((() => {
 
 type ControlReply = Sender<Result<Vec<(String, String)>, String>>;
 
+/// Whether a `browser.*` method was answered by starting a script (#142).
+///
+/// `NotApplicable` covers every method answered synchronously, so the
+/// dispatcher falls through to the unchanged path.
+#[cfg(not(target_os = "linux"))]
+enum AsyncScriptStart {
+    /// The engine will call back; `reply` has been handed to it.
+    Started,
+    /// The script could not be started, and this is the caller's error.
+    Failed(String),
+    /// Not a script method — answer it synchronously.
+    NotApplicable,
+}
+
 fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Option<String> {
     if !BROWSER_CAPABILITIES.contains(&method) {
         return Some(format!(
@@ -4163,9 +4177,9 @@ impl TillerWorkspace {
                                     params,
                                     reply,
                                 } => {
-                                    let result = workspace
-                                        .handle_browser_action(&method, &params, window, cx);
-                                    let _ = reply.send(result);
+                                    workspace.dispatch_browser_action(
+                                        &method, &params, reply, window, cx,
+                                    );
                                 }
                                 ControlAction::Chat { action, reply } => {
                                     let result = workspace.handle_chat_action(
@@ -8151,6 +8165,122 @@ impl TillerWorkspace {
             }
         }
         browser
+    }
+
+    /// Answers a `browser.*` control action, **either now or later** (#142).
+    ///
+    /// The four script-based methods — `eval`, `console`, `snapshot`, `act` —
+    /// cannot be answered synchronously off Linux: waiting on the result
+    /// blocks the very thread the engine needs in order to deliver it, so the
+    /// script runs and the answer never arrives. Off Linux they hand `reply`
+    /// to the engine's completion callback and this returns immediately;
+    /// `queue_action` is already waiting on that channel from the socket
+    /// thread, so a late answer needs nothing new from the protocol.
+    ///
+    /// Linux keeps its GTK pump and the synchronous path unchanged, until the
+    /// async one is proven on hardware there.
+    fn dispatch_browser_action(
+        &mut self,
+        method: &str,
+        params: &BTreeMap<String, String>,
+        reply: ControlReply,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(not(target_os = "linux"))]
+        match self.start_async_browser_script(method, params, &reply, cx) {
+            AsyncScriptStart::Started => return,
+            AsyncScriptStart::Failed(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+            AsyncScriptStart::NotApplicable => {}
+        }
+
+        let result = self.handle_browser_action(method, params, window, cx);
+        let _ = reply.send(result);
+    }
+
+    /// Starts one of the four script-based methods without waiting for it
+    /// (#142). `NotApplicable` means this method is answered synchronously —
+    /// either it runs no script at all, or it is `browser.act`'s
+    /// `driving` sub-branch, which only flips a flag.
+    #[cfg(not(target_os = "linux"))]
+    fn start_async_browser_script(
+        &mut self,
+        method: &str,
+        params: &BTreeMap<String, String>,
+        reply: &ControlReply,
+        cx: &mut Context<Self>,
+    ) -> AsyncScriptStart {
+        // The same validation the synchronous arms do, kept ahead of dispatch
+        // so a bad request still fails with its own message rather than
+        // reaching the engine.
+        let (script, key) = match method {
+            "browser.eval" => {
+                let Some(script) = params
+                    .get("script")
+                    .or_else(|| params.get("expression"))
+                    .filter(|script| !script.trim().is_empty())
+                else {
+                    return AsyncScriptStart::Failed(
+                        "browser.eval requires a non-empty script".to_string(),
+                    );
+                };
+                (script.clone(), "result")
+            }
+            "browser.console" => (
+                "JSON.stringify(window.__tillerConsole || [])".to_string(),
+                "messages",
+            ),
+            "browser.snapshot" => (BROWSER_SNAPSHOT_SCRIPT.to_string(), "snapshot"),
+            "browser.act" => {
+                if params
+                    .get("driving")
+                    .or_else(|| params.get("agentDriving"))
+                    .is_some()
+                {
+                    return AsyncScriptStart::NotApplicable;
+                }
+                let verb = params.get("verb").map(String::as_str).unwrap_or_default();
+                let selector = params.get("selector").map(String::as_str);
+                let text = params
+                    .get("text")
+                    .or_else(|| params.get("value"))
+                    .map(String::as_str);
+                match browser_act_script(verb, selector, text) {
+                    Ok(script) => (script, "verb"),
+                    Err(error) => {
+                        return AsyncScriptStart::Failed(format!("{method} failed: {error}"));
+                    }
+                }
+            }
+            _ => return AsyncScriptStart::NotApplicable,
+        };
+
+        let Some(browser) = self.browser_surface() else {
+            return AsyncScriptStart::Failed(format!("{method} failed: no browser surface"));
+        };
+
+        // `browser.act` answers with the verb it performed, not with whatever
+        // the script evaluated to.
+        let verb_payload = (method == "browser.act")
+            .then(|| params.get("verb").cloned().unwrap_or_default());
+        let reply = reply.clone();
+        let started = browser.update(cx, |surface, _| {
+            surface.evaluate_script_async(&script, move |value| {
+                let payload = match verb_payload {
+                    Some(verb) => vec![("verb".to_string(), verb)],
+                    None => vec![(key.to_string(), value)],
+                };
+                let _ = reply.send(Ok(payload));
+            })
+        });
+
+        match started {
+            Ok(()) => AsyncScriptStart::Started,
+            Err(error) => AsyncScriptStart::Failed(format!("{method} failed: {error}")),
+        }
     }
 
     fn handle_browser_action(
