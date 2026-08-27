@@ -7963,12 +7963,32 @@ fn finish_mention_matches(mut relative_paths: Vec<String>, query: &str) -> Vec<S
     ranked
 }
 
+/// The size a markdown heading renders at, on its own scale rather than the
+/// UI type scale (#216).
+///
+/// Six heading levels needing monotonic separation from body text is a
+/// different problem from six UI roles, and reusing one scale for the other is
+/// what put `####` at exactly the body size: `title3` and `headline` are the
+/// same 15px, so a heading and a bold paragraph became indistinguishable.
+/// `tiller_theme`'s own doc comment on `headline` already records that
+/// collision. `###` fared little better at one pixel above body.
+///
+/// The top four levels are therefore derived from the body size — what
+/// [`Block::Paragraph`] renders at — using the ratios Zed's markdown renderer
+/// uses (`text_3xl`/`2xl`/`xl`/`lg` against `text_base`). Deriving rather than
+/// hardcoding matters: [`tiller_theme::Typography::for_base_size`] builds the
+/// whole scale as an offset from 13.5, so fixed pixel values would freeze the
+/// headings while the Settings font-size control grew the text under them.
+///
+/// Levels 5 and 6 are deliberately left alone. Sitting at and just below body
+/// size is what Zed does (`text_base`, `text_sm`) and what HTML's own default
+/// scale does, so they were never the defect.
 fn markdown_heading_size(level: u8, typography: tiller_theme::Typography) -> gpui::Pixels {
     match level {
-        1 => typography.large_title,
-        2 => typography.title,
-        3 => typography.title2,
-        4 => typography.title3,
+        1 => typography.headline * 1.875,
+        2 => typography.headline * 1.5,
+        3 => typography.headline * 1.25,
+        4 => typography.headline * 1.125,
         5 => typography.headline,
         _ => typography.callout,
     }
@@ -8527,6 +8547,76 @@ mod tests {
         assert_eq!(streaming_border_angle(0.0), 0.0);
         assert_eq!(streaming_border_angle(0.5), 180.0);
         assert_eq!(streaming_border_angle(1.0), 360.0);
+    }
+
+    /// #216: a strict `>` is not enough here. The reported symptom was `###`
+    /// at 16px against a 15px body — one pixel, visually indistinguishable
+    /// from a bold paragraph, yet it satisfies `>`. The floor is the decided
+    /// ratio for each level minus a small tolerance, so the test fails on the
+    /// separation a reader can actually see rather than on bare ordering.
+    #[test]
+    fn every_heading_above_level_five_clears_body_text() {
+        let typography = tiller_theme::Typography::default_scale();
+        let body = f32::from(typography.headline);
+        for (level, ratio) in [(1u8, 1.875f32), (2, 1.5), (3, 1.25), (4, 1.125)] {
+            let size = f32::from(markdown_heading_size(level, typography));
+            let floor = body * (ratio - 0.05);
+            assert!(
+                size >= floor,
+                "h{level} renders at {size}px against a {body}px body — \
+                 {:.2}x, below the {ratio}x this level owes",
+                size / body
+            );
+        }
+    }
+
+    #[test]
+    fn heading_sizes_descend_monotonically() {
+        let typography = tiller_theme::Typography::default_scale();
+        let sizes: Vec<gpui::Pixels> = (1u8..=6)
+            .map(|level| markdown_heading_size(level, typography))
+            .collect();
+        for (index, pair) in sizes.windows(2).enumerate() {
+            assert!(
+                pair[0] > pair[1],
+                "h{} ({:?}) not above h{} ({:?})",
+                index + 1,
+                pair[0],
+                index + 2,
+                pair[1]
+            );
+        }
+    }
+
+    /// The guard against over-correcting: Zed's h5 is body-sized and its h6
+    /// sits below body, and Tiller's already matched — levels 5 and 6 must
+    /// not move.
+    #[test]
+    fn the_bottom_two_levels_keep_their_current_sizes() {
+        let typography = tiller_theme::Typography::default_scale();
+        assert_eq!(markdown_heading_size(5, typography), typography.headline);
+        assert_eq!(markdown_heading_size(6, typography), typography.callout);
+    }
+
+    /// Regression guard for hardcoding: every level 1-4 must grow when the
+    /// Settings font-size base grows, and still clear that scale's own body.
+    #[test]
+    fn heading_sizes_follow_the_body_size_setting() {
+        let typography = tiller_theme::Typography::default_scale();
+        let larger = tiller_theme::Typography::for_base_size(f32::from(typography.base_size) + 6.0);
+        for level in 1u8..=4 {
+            let before = markdown_heading_size(level, typography);
+            let after = markdown_heading_size(level, larger);
+            assert!(
+                after > before,
+                "h{level} renders at {after:?}, did not grow from {before:?}"
+            );
+            assert!(
+                after > larger.headline,
+                "h{level} renders at {after:?}, does not clear larger body at {:?}",
+                larger.headline
+            );
+        }
     }
 
     const CHAT_FIXTURE: &str = concat!(
