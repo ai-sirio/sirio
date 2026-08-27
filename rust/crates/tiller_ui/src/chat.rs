@@ -6171,6 +6171,10 @@ impl Chat {
                     .right(px(42.0))
                     .bottom(px(43.0))
                     .w(px(245.0))
+                    // #233: defence in depth — anything a future layout
+                    // change overflows the fixed popup clips at the border
+                    // instead of painting over the composer behind it.
+                    .overflow_hidden()
                     .p(px(8.0))
                     .rounded(theme.radii.toast)
                     .bg(colors.card_fill)
@@ -6253,12 +6257,13 @@ impl Chat {
                                 option_entity
                                     .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
                             })
-                            .child(div().flex_1().child(option_name))
+                            .child(div().flex_1().min_w_0().text_ellipsis().child(option_name))
                             .when(is_recommended, |this| {
                                 this.child(
                                     div()
                                         .id("model-option-recommended")
                                         .debug_selector(|| "model-option-recommended".into())
+                                        .flex_shrink_0()
                                         .px(px(5.0))
                                         .rounded(px(4.0))
                                         .text_size(typography.caption2)
@@ -6325,7 +6330,18 @@ impl Chat {
                                     .flex_col()
                                     .gap(px(4.0))
                                     .children(children)
-                                    .child(div().flex().gap(px(4.0)).children(choices)),
+                                    .child(
+                                        // #233: the choice count is agent-reported
+                                        // and not under the picker's control (Claude
+                                        // Code advertises six, whose chips plus gaps
+                                        // exceed the popup's usable width), so the
+                                        // row wraps onto a second line instead of
+                                        // painting chips outside the picker border —
+                                        // same shape as the colour swatch row's
+                                        // `flex_wrap` in `controls::color_picker`
+                                        // (F-PRJ-13).
+                                        div().flex().flex_wrap().gap(px(4.0)).children(choices),
+                                    ),
                             )
                     }),
             )
@@ -8501,6 +8517,7 @@ fn split_diff_lines(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext, size};
+    use tiller_acp::EffortChoice;
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -11906,6 +11923,141 @@ mod tests {
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
             "backspace inside the search field must not have eaten composer text"
+        );
+    }
+
+    /// #233: the effort row is a plain flex row inside a fixed 245px popup,
+    /// and the choice count is agent-reported (Claude Code advertises six,
+    /// whose chips plus gaps exceed the popup's usable width), so the row
+    /// must wrap like the colour swatch row in `controls::color_picker`
+    /// (F-PRJ-13) instead of painting chips outside the picker border. The
+    /// popup is fixed-width regardless of window size, so these bounds
+    /// assertions are deterministic.
+    #[gpui::test]
+    async fn every_effort_chip_stays_inside_the_picker_border(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = vec![ModelOption {
+                id: "opus".into(),
+                name: "Opus".into(),
+                description: None,
+            }];
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some("medium".into()),
+                choices: [
+                    ("default", "Default"),
+                    ("low", "Low"),
+                    ("medium", "Medium"),
+                    ("high", "High"),
+                    ("xhigh", "Xhigh"),
+                    ("max", "Max"),
+                ]
+                .iter()
+                .map(|(value, name)| EffortChoice {
+                    value: (*value).into(),
+                    name: (*name).into(),
+                })
+                .collect(),
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("model chip is rendered");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let picker = cx
+            .debug_bounds("model-picker")
+            .expect("model picker is rendered");
+        for (selector, name) in [
+            ("effort-option-default", "Default"),
+            ("effort-option-low", "Low"),
+            ("effort-option-medium", "Medium"),
+            ("effort-option-high", "High"),
+            ("effort-option-xhigh", "Xhigh"),
+            ("effort-option-max", "Max"),
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("effort chip {name} ({selector}) is rendered"));
+            assert!(
+                bounds.right() <= picker.right() && bounds.left() >= picker.left(),
+                "effort chip {name} ({selector}) overflows the picker border: \
+                 chip [{}, {}] vs picker right {} / picker left {}",
+                bounds.right(),
+                bounds.left(),
+                picker.right(),
+                picker.left(),
+            );
+        }
+    }
+
+    /// #233: the model name in an option row never shrinks below
+    /// min-content, so a long agent-advertised name pushes the "Recommended"
+    /// badge past the fixed picker border. The name must truncate (the
+    /// agent-badge pattern: `flex_1` + `min_w_0` + `text_ellipsis`, with a
+    /// `flex_shrink_0` badge) instead of overflowing. The name is chosen
+    /// far past the popup's usable width so font-metric drift cannot
+    /// silently un-reproduce the bug.
+    #[gpui::test]
+    async fn a_long_model_name_does_not_push_the_recommended_badge_outside(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = vec![ModelOption {
+                id: "long".into(),
+                name: "claude-sonnet-4-5-20250929-with-a-very-long-suffix-string-0123456789abcdef"
+                    .into(),
+                description: None,
+            }];
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("model chip is rendered");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let picker = cx
+            .debug_bounds("model-picker")
+            .expect("model picker is rendered");
+        let badge = cx
+            .debug_bounds("model-option-recommended")
+            .expect("the first-listed model is badged Recommended");
+        assert!(
+            badge.right() <= picker.right(),
+            "Recommended badge overflows the picker border: \
+             badge right {} vs picker right {}",
+            badge.right(),
+            picker.right(),
         );
     }
 
