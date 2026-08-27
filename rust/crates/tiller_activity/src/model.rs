@@ -504,11 +504,24 @@ impl AgentActivityModel {
     /// Age of the same pane whose status [`Self::status_for_panes`] selects.
     /// The caller supplies `now` so this remains deterministic in tests.
     pub fn status_age_for_panes(&self, pane_ids: &[&str], now: Instant) -> Option<Duration> {
+        now.checked_duration_since(self.status_changed_at_for_panes(pane_ids)?)
+    }
+
+    /// *When* the status [`Self::status_for_panes`] selects last changed,
+    /// rather than how long ago (#187).
+    ///
+    /// Anything that keeps a roster entry around across ticks wants this
+    /// one, not [`Self::status_age_for_panes`]: an elapsed duration is
+    /// recomputed against a fresh `now` on every read, so a value derived
+    /// from it differs every time even when nothing moved -- which silently
+    /// defeats any equality check used to detect change. An `Instant` is
+    /// stable until the status actually moves.
+    pub fn status_changed_at_for_panes(&self, pane_ids: &[&str]) -> Option<Instant> {
         let status = self.status_for_panes(pane_ids)?;
         let pane_id = pane_ids
             .iter()
             .find(|id| self.resolved(id) == Some(status))?;
-        now.checked_duration_since(*self.status_changed_at.get(*pane_id)?)
+        self.status_changed_at.get(*pane_id).copied()
     }
 
     /// Agent id of the most relevant pane among the given pane ids (same
