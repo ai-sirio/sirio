@@ -198,6 +198,30 @@ pub struct RightPanel {
     walk_generation: u64,
     /// One polling loop per panel, armed on first render.
     refresh_loop_started: bool,
+    /// Counts frames this panel has actually been drawn in (#189).
+    ///
+    /// `ensure_tree_refresh`'s tick does two walks that both scale with the
+    /// repository -- git's `--untracked-files=all` scan and `read_tree`'s
+    /// recursive descent -- and neither is worth doing when nothing is
+    /// drawing the panel. This counter is what "nothing is drawing it"
+    /// means, and it is deliberately not `Window::is_window_active()`:
+    /// measured on Windows, that reads `true` for a *minimised* window,
+    /// because `render` stops being called and the last polled value simply
+    /// goes stale. A count of real draws cannot go stale that way.
+    ///
+    /// It cannot deadlock either, which a naive "have we drawn lately"
+    /// guard would: while minimised, the walk's own `cx.notify()` was
+    /// observed to produce no draw at all, so suspending the walk removes
+    /// no draw that would otherwise have happened. When the window comes
+    /// back, GPUI resumes drawing on its own and the next tick sees the
+    /// count move.
+    renders: u64,
+    /// The `renders` value the previous tick saw. Equal means no draw
+    /// happened in between, so this tick skips both walks.
+    renders_at_last_tick: u64,
+    /// Set when a tick skipped the walks, so the resumed panel refreshes at
+    /// once rather than showing a stale tree for up to a second.
+    refresh_suspended: bool,
     file_context_menu: Option<files::FileContextMenu>,
     /// Built on first selection of the Diff view, dropped when the checkout
     /// changes. A user who never opens Diff never pays for a git status here.
@@ -230,6 +254,9 @@ impl RightPanel {
             file_focus: None,
             walk_generation: 0,
             refresh_loop_started: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
             file_context_menu: None,
             changes: None,
             changes_subscriptions: Vec::new(),
@@ -525,8 +552,15 @@ impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 impl Render for RightPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
+        // #189: incremented here and nowhere else -- being *in* a drawn
+        // frame is the whole signal.
+        self.renders = self.renders.wrapping_add(1);
         if self.worktree_selected {
             self.ensure_tree_refresh(cx);
+            if self.refresh_suspended {
+                self.refresh_suspended = false;
+                self.refresh(cx);
+            }
         }
         if self.worktree_selected && self.file_focus.is_none() {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
