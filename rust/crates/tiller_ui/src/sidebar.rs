@@ -2702,11 +2702,30 @@ impl Sidebar {
                     cx.notify();
                 });
             })
-            .child(if value.is_empty() {
-                placeholder.to_owned()
-            } else {
-                value.to_owned()
-            })
+            // #208: the text shrinks and ellipsises rather than laying out
+            // at its natural width and spilling past the field's own
+            // border. It must shrink *without* growing -- `flex_1` here
+            // would stretch a short value to the full width and push the
+            // end-of-text caret below to the far right, which is the one
+            // thing this row's geometry means.
+            //
+            // These placeholders are not fixed strings: a pinned location
+            // interpolates a filesystem path into
+            // "optional -- defaults to the pinned location ({location})",
+            // so the overflow is bounded only by how deep the path is.
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("worktree-prompt-field-text")
+                    .debug_selector(move || format!("{id}-text"))
+                    .min_w_0()
+                    .text_ellipsis()
+                    .child(if value.is_empty() {
+                        placeholder.to_owned()
+                    } else {
+                        value.to_owned()
+                    }),
+            )
             // End-of-text insertion caret; these compact single-line fields
             // always append. `caret_shown` already folds in the field being
             // focused and the blink phase.
@@ -4974,6 +4993,54 @@ mod tests {
                 .any(|row| row.kind == RowKind::Worktree && row.title == "to-remove")
         })
         .await;
+    }
+
+    /// #208: a prompt field's text must stay inside the field.
+    ///
+    /// The row is a flex line holding the text and, after it, the
+    /// end-of-text caret. The text was a bare string with no `min_w_0` and
+    /// no ellipsis, so it laid out at its natural width and drew straight
+    /// past the field's own rounded border onto the popover behind it --
+    /// "location (optional, defaults next to project)" spilled its last
+    /// word at the default 13pt, and interface font size is a user setting
+    /// that goes up from there.
+    ///
+    /// These placeholders are not fixed strings either: a pinned location
+    /// interpolates a filesystem path, so the overflow is bounded only by
+    /// how deep that path happens to be.
+    ///
+    /// Geometry, not text, is the assertion -- it is what the defect was.
+    #[gpui::test]
+    async fn prompt_field_text_stays_inside_its_field(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("field-overflow");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the New Worktree row is rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // The longest of the three placeholders, and the one that spilled.
+        let field = cx
+            .debug_bounds("worktree-prompt-location")
+            .expect("the location field is drawn");
+        let text = cx
+            .debug_bounds("worktree-prompt-location-text")
+            .expect("the location field's text is drawn");
+
+        assert!(
+            text.right() <= field.right(),
+            "the field's text must not draw past the field's own right edge:              text={text:?} field={field:?}"
+        );
+        assert!(
+            text.left() >= field.left(),
+            "nor past its left edge: text={text:?} field={field:?}"
+        );
     }
 
     #[gpui::test]
