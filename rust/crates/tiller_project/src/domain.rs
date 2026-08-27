@@ -8,14 +8,14 @@ pub fn default_project_base() -> PathBuf {
         return PathBuf::from(path);
     }
     if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(data).join("Tiller/projects");
+        return PathBuf::from(data).join("Tiller").join("projects");
     }
     // A native Windows launch has no HOME, so XDG's data fallback must
     // resolve through USERPROFILE — otherwise the base silently degrades
     // to a RELATIVE "Tiller/projects" under the current directory.
     home_dir()
-        .map(|home| home.join("Tiller/projects"))
-        .unwrap_or_else(|| PathBuf::from("Tiller/projects"))
+        .map(|home| home.join("Tiller").join("projects"))
+        .unwrap_or_else(|| PathBuf::from("Tiller").join("projects"))
 }
 
 /// The user's home directory, or `None` when the environment offers no
@@ -226,6 +226,38 @@ impl OnceGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #210: the default base must not mix path separators.
+    ///
+    /// `default_project_base` built its tail with `join("Tiller/projects")`
+    /// -- one string holding a separator. On Windows `PathBuf` keeps that
+    /// slash verbatim in the path's *text*, so the value rendered as
+    /// `C:\Users\...\Tiller/projects`, and the clone form showed exactly
+    /// that to the user at the moment it asks them to confirm where their
+    /// repository will land.
+    ///
+    /// The assertion is on the string, deliberately. `components()` cannot
+    /// see this: Rust's Windows path parser accepts `/` as a separator too,
+    /// so it normalises the mixed form into the same components as the
+    /// correct one, and a `components()`-based test passes on the broken
+    /// code. I wrote that test first, and it did.
+    ///
+    /// Honest about its reach: on unix the two expressions are identical,
+    /// so this only has teeth on Windows -- which is where the defect was.
+    #[test]
+    fn the_default_base_does_not_mix_path_separators() {
+        let text = default_project_base().to_string_lossy().into_owned();
+        let foreign = if std::path::MAIN_SEPARATOR == '/' {
+            '\u{5C}'
+        } else {
+            '/'
+        };
+        assert!(
+            !text.contains(foreign),
+            "the default project base must use only this platform's \
+             separator, got {text:?}"
+        );
+    }
 
     #[test]
     fn defaults_prefer_explicit_values_then_primary_and_sibling() {
