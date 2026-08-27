@@ -4165,11 +4165,20 @@ impl TillerWorkspace {
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::CycleTab { forward, reply } => {
-                                    workspace.cycle_tab(forward, cx);
+                                    // #220: the socket asking to switch
+                                    // tabs means the same thing the
+                                    // keyboard does, so it focuses the
+                                    // same way -- as `select_worktree`
+                                    // in this loop already does.
+                                    workspace.cycle_tab(forward, Some(&mut *window), cx);
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::SelectTab { position, reply } => {
-                                    workspace.select_tab_position(position, cx);
+                                    workspace.select_tab_position(
+                                        position,
+                                        Some(&mut *window),
+                                        cx,
+                                    );
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::Browser {
@@ -4269,7 +4278,7 @@ impl TillerWorkspace {
             |workspace, _, event: &SidebarEvent, cx| match event {
                 SidebarEvent::AddProject(path) => workspace.add_project(path.clone(), cx),
                 SidebarEvent::RemoveProject(id) => workspace.remove_project(id, cx),
-                SidebarEvent::SelectTab(id) => workspace.select_tab(*id, cx),
+                SidebarEvent::SelectTab(id) => workspace.select_tab(*id, None, cx),
                 SidebarEvent::SelectWorktree(path) => {
                     // No `&mut Window` reaches an entity-event `cx.subscribe`
                     // callback -- `restore_tabs` tolerates `None` the same
@@ -5863,7 +5872,7 @@ impl TillerWorkspace {
             .find(|tab| tab.id == id)
             .map(|tab| tab.title.clone())
             .unwrap_or_default();
-        self.select_tab(id, cx);
+        self.select_tab(id, None, cx);
         Ok(Some((id, title)))
     }
 
@@ -6988,11 +6997,24 @@ impl TillerWorkspace {
         Self::tab_width_for_title(tab.kind, &tab.title, tab_has_file(tab))
     }
 
-    fn select_tab(&mut self, id: usize, cx: &mut Context<Self>) {
+    /// Activates a tab, and — when a window is supplied — hands keyboard
+    /// focus to the pane that tab had focused (#220).
+    ///
+    /// Without the window this can only update the logical selection,
+    /// which is what it did: switching to a terminal left focus
+    /// wherever it was, so the next thing typed went nowhere. Same
+    /// mechanism as #218, one path along. `Option` rather than
+    /// mandatory for the same reason `select_pane` and
+    /// `select_worktree` take it that way: some callers legitimately
+    /// have no window, and restoring a session should not seize focus.
+    fn select_tab(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             self.active_tab = index;
             let group_id = self.tabs[index].group_id;
             self.tab_machinery.select_tab(group_id, id);
+            if let Some(window) = window {
+                self.focus_active_pane(window, cx);
+            }
             self.schedule_save(cx);
             self.sync_activity(cx);
             cx.notify();
@@ -9088,7 +9110,7 @@ impl TillerWorkspace {
         }
     }
 
-    fn cycle_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
+    fn cycle_tab(&mut self, forward: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         let ids = self
             .tab_machinery
             .group_tabs(self.tab_machinery.active_group())
@@ -9105,7 +9127,7 @@ impl TillerWorkspace {
         };
         let next = selection.cycle(forward).active();
         let id = ids[next];
-        self.select_tab(id, cx);
+        self.select_tab(id, window, cx);
     }
 
     /// F-CORE-DOM-06: routes the numeric tab chords (and `tab.select` off
@@ -9114,7 +9136,12 @@ impl TillerWorkspace {
     /// cannot drift apart. `position` beyond `u8::MAX` cannot name any real
     /// chord or a sane control-socket index either, so it is treated the
     /// same as any other out-of-range position: rejected, not clamped.
-    fn select_tab_position(&mut self, position: usize, cx: &mut Context<Self>) {
+    fn select_tab_position(
+        &mut self,
+        position: usize,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let ids = self
             .tab_machinery
             .group_tabs(self.tab_machinery.active_group())
@@ -9126,7 +9153,7 @@ impl TillerWorkspace {
             return;
         };
         let id = ids[index];
-        self.select_tab(id, cx);
+        self.select_tab(id, window, cx);
     }
 
     fn split_focused_terminal(
@@ -10079,7 +10106,7 @@ impl TillerWorkspace {
                     if click_count >= 2 {
                         this.begin_tab_rename(id, window, cx);
                     } else {
-                        this.select_tab(id, cx);
+                        this.select_tab(id, Some(window), cx);
                     }
                 });
             })
@@ -10988,9 +11015,9 @@ impl TillerWorkspace {
                 .text_size(theme.typography.footnote)
                 .text_color(if active { theme.title } else { theme.subtitle })
                 .hover(|style| style.bg(theme.row_hover))
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     select_entity.update(cx, |workspace, cx| {
-                        workspace.select_tab(id, cx);
+                        workspace.select_tab(id, Some(window), cx);
                         workspace.overflow_menu_open = false;
                         cx.notify();
                     });
@@ -11684,23 +11711,28 @@ impl TillerWorkspace {
     fn handle_cycle_tab_forward(
         &mut self,
         _: &CycleTabForward,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cycle_tab(true, cx);
+        self.cycle_tab(true, Some(window), cx);
     }
 
     fn handle_cycle_tab_backward(
         &mut self,
         _: &CycleTabBackward,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cycle_tab(false, cx);
+        self.cycle_tab(false, Some(window), cx);
     }
 
-    fn handle_jump_to_tab(&mut self, position: usize, _: &mut Window, cx: &mut Context<Self>) {
-        self.select_tab_position(position, cx);
+    fn handle_jump_to_tab(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_tab_position(position, Some(window), cx);
     }
 
     fn handle_jump_to_tab_1(
@@ -25295,6 +25327,83 @@ mod tests {
         });
     }
 
+    /// #220: switching to an existing tab must restore its keyboard focus.
+    ///
+    /// #218 fixed this for a pane that was just created. Activating a tab
+    /// that already exists went through `select_tab`, which had the same
+    /// shape of defect -- no `Window`, so it could update `active_tab` and
+    /// nothing else -- and it is the more frequent gesture of the two.
+    ///
+    /// Measured before the fix by driving the app: open a second terminal,
+    /// type into it (that part worked, thanks to #218), then click the first
+    /// terminal's *tab* and type again. The second text was lost, while the
+    /// first was still sitting in the other terminal -- so nothing was
+    /// swallowing keystrokes generally; the activated tab simply had no
+    /// focus.
+    ///
+    /// The assertion is on the window's focus, for the same reason as #218:
+    /// `active_tab` and `focused_pane` were already correct while the defect
+    /// was live.
+    #[gpui::test]
+    async fn switching_to_an_existing_tab_restores_its_keyboard_focus(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        cx.run_until_parked();
+
+        // Two terminals; the second one holds focus when it opens (#218).
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_action(NewTabAction::NewTerminal, window, cx);
+                workspace.open_action(NewTabAction::NewTerminal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let (first_id, first_focus) = cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            let tab = workspace
+                .tabs
+                .iter()
+                .rev()
+                .nth(1)
+                .expect("two terminal tabs were opened");
+            let mut handle = None;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    handle = Some(view.focus_handle(cx));
+                }
+            });
+            (tab.id, handle.expect("the earlier tab holds a terminal"))
+        });
+
+        assert!(
+            !cx.update(|window, _| first_focus.is_focused(window)),
+            "precondition: the *second* terminal holds focus, so the \
+             assertion below is about the switch and not about it already \
+             being focused"
+        );
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.select_tab(first_id, Some(window), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|window, _| first_focus.is_focused(window)),
+            "activating an existing tab must hand focus to the pane it had \
+             focused, or the next thing typed goes nowhere"
+        );
+    }
+
     /// #218: a pane opened by a user action must be able to receive typing.
     ///
     /// `insert_terminal_tab_with_agent` sets `focused_pane` and `active_tab`,
@@ -25562,20 +25671,20 @@ mod tests {
         });
 
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.select_tab_position(5, cx);
+            workspace.select_tab_position(5, None, cx);
             assert_eq!(
                 workspace.active_tab, 4,
                 "position 5 selects the fifth tab (0-based index 4)"
             );
 
-            workspace.select_tab_position(9, cx);
+            workspace.select_tab_position(9, None, cx);
             assert_eq!(
                 workspace.active_tab, 9,
                 "with ten tabs open, position 9 must still land on the last \
                  tab, not the literal ninth"
             );
 
-            workspace.select_tab_position(15, cx);
+            workspace.select_tab_position(15, None, cx);
             assert_eq!(
                 workspace.active_tab, 9,
                 "a position beyond the group is rejected, not clamped -- the \
