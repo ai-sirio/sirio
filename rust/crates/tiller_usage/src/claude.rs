@@ -475,7 +475,9 @@ impl ClaudeUsageFetcher {
 
     /// Windows stub: no ConPTY-backed fetch is implemented yet (see the doc comment on
     /// the `#[cfg(unix)]` twin above for the intended counterpart). Reports honestly as
-    /// `Unavailable(Error)` rather than pretending to have tried.
+    /// `Unavailable(Unsupported)` rather than pretending to have tried -- and as
+    /// `Unsupported` rather than `Error`, because nothing was attempted and nothing
+    /// is wrong with this machine (#199).
     #[cfg(not(unix))]
     pub fn fetch_with_env(
         _settle: Duration,
@@ -483,7 +485,7 @@ impl ClaudeUsageFetcher {
         _timeout: Duration,
         _envs: &[(&str, &str)],
     ) -> UsageFetchOutcome {
-        UsageFetchOutcome::Unavailable(UsageReason::Error)
+        UsageFetchOutcome::Unavailable(UsageReason::Unsupported)
     }
 }
 

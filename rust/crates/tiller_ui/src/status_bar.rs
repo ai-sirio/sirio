@@ -328,6 +328,12 @@ impl StatusBar {
                     UsageReason::TokenRevoked => "token revoked",
                     UsageReason::TokenExpired => "token expired",
                     UsageReason::TimedOut => "timed out",
+                    // #199: not a fault -- there is no implementation on
+                    // this platform to have failed. "error" sent the user
+                    // looking for a problem with their own machine, next
+                    // to a settings surface reporting the same provider
+                    // as signed in.
+                    UsageReason::Unsupported => "not supported here",
                     UsageReason::Error => "error",
                 };
                 format!("{display_name} {reason_text}")
@@ -538,6 +544,49 @@ mod tests {
     use super::*;
     use gpui::VisualTestContext;
     use tiller_usage::{ProviderUsage, UsageWindow};
+
+    /// #199: "not implemented on this platform" is a different fact from
+    /// "the provider could not be read", and the bar must not say the
+    /// second when it means the first.
+    ///
+    /// On Windows the Claude fetch is a deliberate stub -- there is no
+    /// ConPTY-backed implementation to run -- and it reported
+    /// `UsageReason::Error` for want of anywhere better to go. The bar
+    /// therefore said "Claude error", permanently, next to a settings
+    /// surface reporting the very same provider as signed in with an
+    /// account address. "error" sends a user looking for a fault on their
+    /// own machine; there is none to find.
+    ///
+    /// This is the same collapse F-CORE-USG-06 and F-SET-11 already undid
+    /// once for the token-failure reasons: every distinct fact keeps its
+    /// own name, or the one piece of data that separates them is lost.
+    #[test]
+    fn an_unsupported_platform_does_not_report_itself_as_an_error() {
+        use tiller_usage::UsageReason;
+
+        let unsupported = StatusBar::segment_text(
+            "Claude",
+            &ProviderUsageState::Unavailable(UsageReason::Unsupported),
+        );
+        let errored = StatusBar::segment_text(
+            "Claude",
+            &ProviderUsageState::Unavailable(UsageReason::Error),
+        );
+
+        assert_ne!(
+            unsupported, errored,
+            "a platform with no implementation must not be indistinguishable              from a provider that genuinely failed to read"
+        );
+        assert!(
+            !unsupported.contains("error"),
+            "the word that sends a user hunting for a fault is the one thing              this state must not say; got {unsupported:?}"
+        );
+        assert_eq!(unsupported, "Claude not supported here");
+        assert_eq!(
+            errored, "Claude error",
+            "the genuine read failure keeps its own wording, unchanged"
+        );
+    }
 
     /// P58, F-SET-10: the usage bar consumes the settings surface's
     /// visibility toggles and refresh interval. A provider hidden in
