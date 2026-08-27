@@ -5785,7 +5785,6 @@ impl TillerWorkspace {
             .control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Instant::now();
         let mut entries = Vec::new();
         for workspace in &state.workspaces {
             let Ok(panes) = self.panes.list_for(Path::new(&workspace.path)) else {
@@ -5801,7 +5800,7 @@ impl TillerWorkspace {
                 branch: workspace.branch.clone(),
                 project_name: workspace.project.clone(),
                 status,
-                status_since: self.activity.status_age_for_panes(&refs, now),
+                status_changed_at: self.activity.status_changed_at_for_panes(&refs),
             });
         }
         tiller_activity::AttentionSort::sorted(&entries, |entry| Some(entry.status))
@@ -25266,6 +25265,92 @@ mod tests {
                 ],
                 "gamma (no notified status) is absent; beta (Error) outranks \
                  alpha (Done) despite being added second"
+            );
+        });
+    }
+
+    /// #187: the 40 ms poll loop compares each tick's roster snapshot with
+    /// the previous tick's so that it only pays `TrayHandle::nudge` when
+    /// something actually moved -- on Linux an unguarded
+    /// `ksni::blocking::Handle::update`, the synchronous round trip that
+    /// makes ksni rebuild its cached menu tree and announce `LayoutUpdated`
+    /// over D-Bus.
+    ///
+    /// That guard is only worth anything if a snapshot is *stable* while
+    /// nothing moves. It used to carry elapsed time (`status_since`), which
+    /// grows on its own, so every tick compared unequal and the guard never
+    /// once held while an agent was live: ~25 D-Bus announcements a second,
+    /// driving a label (`format_status_age`) that changes at most once a
+    /// second, and after the first minute at most once a minute.
+    ///
+    /// So: two snapshots taken at different instants, with nothing touched
+    /// in between, must be equal. The wall-clock sleep is the point of the
+    /// test, not incidental to it -- it is what the old field responded to.
+    #[gpui::test]
+    async fn a_tray_roster_snapshot_is_stable_while_nothing_moves(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, _cx| {
+            let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "tiller-tray-stable-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create fixture worktree");
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "tray-stable-project".into(),
+                    name: "Tray Stable Project".into(),
+                    root_path: path.clone(),
+                    is_git: true,
+                    worktrees: vec![session::CatalogWorktree {
+                        branch: "branch-0".into(),
+                        path: path.clone(),
+                        is_primary: true,
+                    }],
+                }]);
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &path,
+            )));
+            workspace
+                .panes
+                .set_external(
+                    &path,
+                    vec![PaneInfo {
+                        id: "pane-stable".into(),
+                        tab: "control".into(),
+                        title: "shell".into(),
+                        agent: String::new(),
+                        active: true,
+                    }],
+                )
+                .expect("register pane");
+            // A *live* status is the case that matters: an entry only
+            // reaches the roster at all once its pane reports one, and the
+            // elapsed-time field was only ever populated for such an entry.
+            workspace
+                .activity
+                .notify("pane-stable", AgentStatus::Running, Instant::now());
+
+            let first = workspace.tray_roster_snapshot();
+            assert_eq!(first.len(), 1, "the fixture worktree reaches the roster");
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            let second = workspace.tray_roster_snapshot();
+
+            // `TrayRosterEntry` is deliberately not `Debug`, so this cannot
+            // be `assert_eq!`.
+            assert!(
+                first == second,
+                "a roster snapshot must not differ from one taken moments                  earlier when nothing moved -- otherwise the poll loop's                  change guard never holds and every 40 ms tick nudges the tray"
             );
         });
     }
