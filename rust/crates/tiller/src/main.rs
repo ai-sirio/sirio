@@ -8319,14 +8319,31 @@ impl TillerWorkspace {
             normalize_address(initial_url)
                 .map_err(|error| format!("browser.open failed: {error}"))?;
             let (surface_id, browser) = self.add_browser_tab(initial_url, window, cx);
-            return Ok(browser.update(cx, |surface, _| {
+            // #131: a surface whose webview could not be created must answer
+            // `ok:false`. It used to answer `ok:true` with a surface id for a
+            // dead surface, which is the worst of both: an agent is told it
+            // has a browser, and every method it then calls fails one at a
+            // time with no way to tell "this call failed" from "there was
+            // never a browser here".
+            //
+            // The tab is still opened, and still explains the cause in place
+            // — that is the standing rule for this surface, and the reason
+            // "New Browser" is never disabled ahead of time. Only the control
+            // answer changes.
+            //
+            // This is a contract change on Linux too, where the same path
+            // reported success for a dead surface.
+            return browser.update(cx, |surface, _| {
+                if let Some(error) = surface.startup_error() {
+                    return Err(format!("browser.open failed: {error}"));
+                }
                 let state = surface.state();
-                vec![
+                Ok(vec![
                     ("surface".to_string(), surface_id),
                     ("url".to_string(), state.address().to_string()),
                     ("title".to_string(), state.page_title().to_string()),
-                ]
-            }));
+                ])
+            });
         }
 
         let browser = self

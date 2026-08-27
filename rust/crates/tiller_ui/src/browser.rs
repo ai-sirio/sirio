@@ -1015,14 +1015,39 @@ fn build_production_webview_for_platform(
     build_production_webview_for_macos(window, initial_url, events)
 }
 
+/// The engine this platform actually hosts, for error text (#131, #144).
+///
+/// The non-Linux path is named for macOS throughout, and its failures said
+/// "WKWebView child failed" on Windows too, where the engine is WebView2 — so
+/// a user was told the wrong component had failed. #131 asked for
+/// per-platform engine names.
+///
+/// Renaming the functions belongs with the Windows branch #145 introduces;
+/// this fixes what the user is shown.
+#[cfg(not(target_os = "linux"))]
+const NATIVE_ENGINE: &str = if cfg!(target_os = "windows") {
+    "WebView2"
+} else {
+    "WKWebView"
+};
+
+/// What GPUI failed to hand us, named for the platform's own window type.
+#[cfg(not(target_os = "linux"))]
+const NATIVE_WINDOW_HANDLE: &str = if cfg!(target_os = "windows") {
+    "Win32"
+} else {
+    "AppKit"
+};
+
 #[cfg(not(target_os = "linux"))]
 fn build_webview_for_macos<W: HasWindowHandle>(parent: &W) -> Result<WebView, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_webview(parent))) {
         Ok(Ok(webview)) => Ok(webview),
-        Ok(Err(error)) => Err(format!("WKWebView child failed: {error}")),
-        Err(_) => Err(
-            "WKWebView child failed: GPUI did not expose a usable AppKit window handle".to_string(),
-        ),
+        Ok(Err(error)) => Err(format!("{NATIVE_ENGINE} child failed: {error}")),
+        Err(_) => Err(format!(
+            "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
+             {NATIVE_WINDOW_HANDLE} window handle"
+        )),
     }
 }
 
@@ -1036,10 +1061,11 @@ fn build_production_webview_for_macos(
         build_production_webview(window, initial_url, events)
     })) {
         Ok(Ok(webview)) => Ok(webview),
-        Ok(Err(error)) => Err(format!("WKWebView child failed: {error}")),
-        Err(_) => Err(
-            "WKWebView child failed: GPUI did not expose a usable AppKit window handle".to_string(),
-        ),
+        Ok(Err(error)) => Err(format!("{NATIVE_ENGINE} child failed: {error}")),
+        Err(_) => Err(format!(
+            "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
+             {NATIVE_WINDOW_HANDLE} window handle"
+        )),
     }
 }
 
