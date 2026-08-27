@@ -380,7 +380,19 @@ impl Render for CloneForm {
                         cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
                     )
                     .on_key_down(cx.listener(Self::on_url_key))
-                    .child(url_value)
+                    // #212: shrink and ellipsise inside the field rather than
+                    // laying out at natural width and drawing past its border.
+                    // Must shrink without growing: `flex_1` would push the
+                    // end-of-text caret below to the far right.
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("clone-url-field-text")
+                            .debug_selector(|| "clone-url-field-text".to_owned())
+                            .min_w_0()
+                            .text_ellipsis()
+                            .child(url_value),
+                    )
                     .when(field_focused, |this| {
                         this.child(caret::bar(px(16.0), theme.accent, caret_visible))
                     }),
@@ -705,7 +717,19 @@ impl Render for CreateForm {
                         cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
                     )
                     .on_key_down(cx.listener(Self::on_name_key))
-                    .child(name_value)
+                    // #212: shrink and ellipsise inside the field rather than
+                    // laying out at natural width and drawing past its border.
+                    // Must shrink without growing: `flex_1` would push the
+                    // end-of-text caret below to the far right.
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id("create-name-field-text")
+                            .debug_selector(|| "create-name-field-text".to_owned())
+                            .min_w_0()
+                            .text_ellipsis()
+                            .child(name_value),
+                    )
                     .when(field_focused, |this| {
                         this.child(caret::bar(px(16.0), theme.accent, caret_visible))
                     }),
@@ -874,6 +898,56 @@ mod tests {
     /// `submit()` call deterministically sees `Running` and no-ops; a
     /// broken guard would instead race two real `git clone` processes into
     /// the same destination folder and surface as a `Failed` status.
+    /// #212: a value must stay inside its field. This is the clone URL box,
+    /// where long values are the norm rather than an edge case.
+    ///
+    /// Nine input fields in this app are hand-rolled from the same shape --
+    /// a flex row holding the text and, after it, the caret -- and all nine
+    /// had the text as a bare child, so it laid out at its natural width and
+    /// drew across whatever was behind the field. #208 fixed the first; this
+    /// covers the one guaranteed to hit it in ordinary use.
+    ///
+    /// The fixture's URL is absurdly long on purpose. The harness window is
+    /// wider than the real sidebar, so a merely realistic URL fits inside it
+    /// and the test passes against the broken code -- I wrote that version
+    /// first and it did. The invariant is that *any* value stays inside, so
+    /// the fixture picks one that cannot fit at any plausible width.
+    ///
+    /// Geometry, not text, because geometry is what the defect was.
+    #[gpui::test]
+    async fn a_long_url_stays_inside_the_clone_url_field(cx: &mut TestAppContext) {
+        let parent = TempDir::new("clone-layout");
+        let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| window.root::<CloneForm>().flatten().expect("form root"));
+
+        form.update(&mut cx.cx, |form, cx| {
+            form.set_url(
+                "https://gitlab.example.com/organisation/subgroup/team-tools/a-very-long-repository-name.git"
+                    .repeat(8),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("clone-url-field")
+            .expect("the URL field is drawn");
+        let text = cx
+            .debug_bounds("clone-url-field-text")
+            .expect("the URL field's text is drawn");
+
+        assert!(
+            text.right() <= field.right(),
+            "a typed URL must not draw past the field's own right edge: \
+             text={text:?} field={field:?}"
+        );
+        assert!(
+            text.left() >= field.left(),
+            "nor past its left edge: text={text:?} field={field:?}"
+        );
+    }
+
     #[gpui::test]
     async fn the_drawn_clone_button_cannot_start_a_second_clone(cx: &mut TestAppContext) {
         let source = TempDir::new("clone-source");
