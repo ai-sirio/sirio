@@ -129,7 +129,13 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-7", JumpToTab7, None),
         KeyBinding::new("ctrl-8", JumpToTab8, None),
         KeyBinding::new("ctrl-9", JumpToTab9, None),
-        KeyBinding::new("ctrl-w", CloseTab, None),
+        // #226: ctrl-w must reach the shell (readline delete-word) when a
+        // terminal is focused, so the binding is scoped to !Terminal. The
+        // close chord from inside a terminal is ctrl-shift-w, one line below.
+        // Mirrored in main.rs TillerWorkspace::new -- keep both in sync.
+        KeyBinding::new("ctrl-w", CloseTab, Some("!Terminal")),
+        // #226: the close chord that survives inside a terminal.
+        KeyBinding::new("ctrl-shift-w", CloseTab, None),
     ]);
 }
 

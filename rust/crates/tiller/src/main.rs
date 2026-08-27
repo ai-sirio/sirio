@@ -1,8 +1,9 @@
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton,
-    PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, Task, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
+    FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, Modifiers,
+    MouseButton, PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred, div, point,
+    prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -312,6 +313,32 @@ fn bind_window_keys(cx: &mut App) {
             )))
             .collect::<Vec<_>>(),
     );
+}
+
+/// Whether the shell's capture-phase fallback should close a tab for this
+/// keystroke. Pure so both platform arms are testable off-platform: the
+/// Linux `ctrl-w` arm must yield to a focused terminal (#226), while the
+/// macOS/`platform` arm is the OS close convention and never does.
+fn close_tab_fallback_fires(
+    key: &str,
+    modifiers: Modifiers,
+    is_linux: bool,
+    terminal_focused: bool,
+) -> bool {
+    if key != "w" {
+        return false;
+    }
+    // The close convention of the OS itself -- cmd-w on macOS, not a
+    // readline key -- so it never yields to a focused terminal.
+    if modifiers.platform {
+        return true;
+    }
+    // #226: on Linux ctrl-w is readline delete-word inside a terminal, so
+    // the capture-phase fallback must yield and let the `!Terminal`-scoped
+    // binding decide. ctrl-shift-w is the close chord that survives inside
+    // a terminal, carried by its own unscoped binding (panes.rs bind_keys);
+    // this branch must not claim it.
+    is_linux && modifiers.control && !modifiers.shift && !terminal_focused
 }
 
 /// Fixed panel geometry, measured off the frozen reference shots — see
@@ -3894,8 +3921,13 @@ impl TillerWorkspace {
     ) -> Self {
         panes::bind_keys(cx);
         cx.bind_keys([
+            // cmd-w is the macOS close convention, not a readline key, so it
+            // stays unguarded.
             KeyBinding::new("cmd-w", CloseTab, None),
-            KeyBinding::new("ctrl-w", CloseTab, None),
+            // #226: ctrl-w must reach the shell (readline delete-word) when a
+            // terminal is focused, so the binding is scoped to !Terminal.
+            // Mirrored in panes.rs bind_keys -- keep both in sync.
+            KeyBinding::new("ctrl-w", CloseTab, Some("!Terminal")),
         ]);
         bind_window_keys(cx);
         // These UI callbacks predate an App-aware callback API. Polling this
@@ -12000,8 +12032,12 @@ impl TillerWorkspace {
         // macOS and the Super key on Linux. The universal palette chord is
         // intercepted at the app boundary; this capture-phase handler keeps
         // the fallback for surfaces whose focus is still inside the shell.
-        let close_tab_chord =
-            modifiers.platform || (cfg!(target_os = "linux") && modifiers.control);
+        let close_tab_chord = close_tab_fallback_fires(
+            key,
+            modifiers,
+            cfg!(target_os = "linux"),
+            self.focused_terminal(window, cx),
+        );
         if !self.show_settings && key == "w" && close_tab_chord {
             self.handle_close_tab(&CloseTab, window, cx);
             return;
@@ -12812,6 +12848,12 @@ impl Render for TillerWorkspace {
                 .size_full()
                 .bg(frame_fill)
                 .font_family(theme.typography.ui_family)
+                // #226: the ctrl-w binding's `!Terminal` scope can only be
+                // evaluated against a non-empty context stack (gpui disables
+                // any scoped binding on a context-less dispatch path), so the
+                // shell root must publish a context for surfaces like the
+                // sidebar that carry none of their own.
+                .key_context("Workspace")
                 .track_focus(&self.root_focus)
                 .capture_key_down(cx.listener(Self::handle_root_key_down))
                 .on_action(cx.listener(Self::handle_close_settings_surface))
@@ -12876,6 +12918,12 @@ impl Render for TillerWorkspace {
             .size_full()
             .bg(frame_fill)
             .font_family(theme.typography.ui_family)
+            // #226: the ctrl-w binding's `!Terminal` scope can only be
+            // evaluated against a non-empty context stack (gpui disables
+            // any scoped binding on a context-less dispatch path), so the
+            // shell root must publish a context for surfaces like the
+            // sidebar that carry none of their own.
+            .key_context("Workspace")
             .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::handle_root_key_down))
             .on_action(cx.listener(Self::handle_new_terminal_tab))
@@ -14877,6 +14925,45 @@ mod tests {
                         .push(WindowCommand::FocusAddressBar);
                 }))
                 .child("window command fixture")
+        }
+    }
+
+    /// #226 harness: installs the production `panes::bind_keys` and mirrors
+    /// the real dispatch-path shape -- a shell root carrying the `CloseTab`
+    /// handler (as the workspace shell frame does) with a focusable child
+    /// publishing the same `Terminal` key context as `TerminalView`.
+    struct TerminalChordFixture {
+        fired: Rc<RefCell<Vec<&'static str>>>,
+        shell_focus: FocusHandle,
+        terminal_focus: FocusHandle,
+    }
+
+    impl TerminalChordFixture {
+        fn new(fired: Rc<RefCell<Vec<&'static str>>>, cx: &mut Context<Self>) -> Self {
+            panes::bind_keys(cx);
+            Self {
+                fired,
+                shell_focus: cx.focus_handle(),
+                terminal_focus: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl Render for TerminalChordFixture {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let close_tab = self.fired.clone();
+            div()
+                .key_context("TerminalChordShell")
+                .track_focus(&self.shell_focus)
+                .on_action(cx.listener(move |_, _: &CloseTab, _, _| {
+                    close_tab.borrow_mut().push("close-tab");
+                }))
+                .child(
+                    div()
+                        .key_context("Terminal")
+                        .track_focus(&self.terminal_focus)
+                        .child("terminal chord fixture"),
+                )
         }
     }
 
@@ -19017,6 +19104,148 @@ mod tests {
         cx.simulate_keystrokes("ctrl-w");
         cx.run_until_parked();
         assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.is_empty()));
+    }
+
+    #[gpui::test]
+    async fn ctrl_w_does_not_close_a_tab_while_a_terminal_is_focused(cx: &mut TestAppContext) {
+        let fired = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window(|_window, cx| TerminalChordFixture::new(fired.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<TerminalChordFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let focus = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal_focus.clone());
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-w");
+        cx.run_until_parked();
+
+        assert!(
+            fired.borrow().is_empty(),
+            "ctrl-w must reach the shell (readline delete-word) when a terminal \
+             is focused, so no CloseTab may dispatch"
+        );
+    }
+
+    #[gpui::test]
+    async fn ctrl_shift_w_closes_a_tab_even_from_a_terminal(cx: &mut TestAppContext) {
+        let fired = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window(|_window, cx| TerminalChordFixture::new(fired.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<TerminalChordFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let focus = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal_focus.clone());
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-shift-w");
+        cx.run_until_parked();
+
+        assert_eq!(
+            fired.borrow().as_slice(),
+            &["close-tab"],
+            "ctrl-shift-w must close the tab even while a terminal is focused"
+        );
+    }
+
+    #[gpui::test]
+    async fn ctrl_w_still_closes_a_tab_when_no_terminal_is_focused(cx: &mut TestAppContext) {
+        let fired = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window(|_window, cx| TerminalChordFixture::new(fired.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<TerminalChordFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let focus = fixture.read_with(&cx.cx, |fixture, _| fixture.shell_focus.clone());
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-w");
+        cx.run_until_parked();
+
+        assert_eq!(
+            fired.borrow().as_slice(),
+            &["close-tab"],
+            "outside a terminal ctrl-w must keep closing the tab"
+        );
+    }
+
+    // #226, second half: the dispatch-path tests above exercise the
+    // `!Terminal`-scoped binding, but `handle_root_key_down`'s capture-phase
+    // fallback runs BEFORE binding dispatch and only consults
+    // `cfg!(target_os = "linux")` at compile time -- so no fixture test on
+    // this Windows host can reach its Linux arm. These four pin the fallback
+    // decision itself, extracted into the pure
+    // `close_tab_fallback_fires` so both platform arms are exercisable here.
+    #[test]
+    fn linux_ctrl_w_yields_to_a_focused_terminal() {
+        let modifiers = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert!(
+            !close_tab_fallback_fires("w", modifiers, true, true),
+            "on Linux ctrl-w is readline delete-word: the capture-phase \
+             fallback must yield to a focused terminal (#226)"
+        );
+    }
+
+    #[test]
+    fn linux_ctrl_w_still_closes_a_tab_outside_a_terminal() {
+        let modifiers = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert!(
+            close_tab_fallback_fires("w", modifiers, true, false),
+            "outside a terminal the Linux ctrl-w fallback must keep closing \
+             the tab"
+        );
+    }
+
+    #[test]
+    fn the_platform_close_chord_ignores_terminal_focus() {
+        let modifiers = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        for is_linux in [false, true] {
+            assert!(
+                close_tab_fallback_fires("w", modifiers, is_linux, true),
+                "the platform close chord is the OS close convention (cmd-w \
+                 on macOS), not a readline key, so terminal focus must not \
+                 suppress it (is_linux = {is_linux})"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_shift_w_is_not_claimed_by_the_fallback() {
+        let modifiers = Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert!(
+            !close_tab_fallback_fires("w", modifiers, true, false),
+            "ctrl-shift-w is the close chord that survives inside a terminal \
+             and is dispatched by the unscoped binding; the capture-phase \
+             fallback must not preempt it"
+        );
     }
 
     #[gpui::test]
