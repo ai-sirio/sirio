@@ -17,14 +17,16 @@ pub(crate) fn resolve_material(
     }
 }
 
+/// Whether this platform can actually paint a blurred window background.
+///
+/// Windows used to be on this list and is not any more (#144/#145, ADR 0002).
+/// Tiller disables GPUI's DirectComposition on Windows so the Browser
+/// surface's child HWND composes at all, and the fallback HWND path is
+/// `DXGI_ALPHA_MODE_IGNORE` — the window is opaque no matter what is asked
+/// for. Claiming blur here would leave the setting looking honoured while
+/// nothing changed on screen.
 pub(crate) fn current_platform_material(translucency_enabled: bool) -> ShellMaterial {
-    resolve_material(
-        translucency_enabled,
-        cfg!(all(
-            not(test),
-            any(target_os = "macos", target_os = "windows")
-        )),
-    )
+    resolve_material(translucency_enabled, cfg!(all(not(test), target_os = "macos")))
 }
 
 impl ShellMaterial {

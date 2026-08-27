@@ -13919,6 +13919,36 @@ fn main() {
     #[cfg(target_os = "linux")]
     display_backend::prepare_environment();
 
+    // #144/#145: same rule, same reason, for Windows. GPUI composes through a
+    // DirectComposition visual tree by default, and such a tree does not
+    // present ordinary child HWNDs — so the Browser surface's WebView2 child
+    // is created, navigated, correctly positioned and fully painted into its
+    // own surface, and never reaches the screen. Proven by detaching the
+    // child to a top-level window, whereupon it painted immediately with
+    // nothing else changed.
+    //
+    // Visual hosting is the destination but not the route: wry 0.56.1 has no
+    // composition support and GPUI's `DirectComposition` is private, so it
+    // needs two upstream changes. Disabling direct composition keeps the
+    // child-window path working today. GPUI reads this once in
+    // `WindowsPlatform::new`, so it has to be set before `application()` —
+    // per-window or per-tab toggling was never possible.
+    //
+    // The cost is real and recorded in ADR 0002: translucency is dropped on
+    // Windows (the HWND path is `DXGI_ALPHA_MODE_IGNORE`), which is why
+    // `current_platform_material` no longer claims native blur there.
+    #[cfg(target_os = "windows")]
+    {
+        // An explicit setting wins: someone debugging composition can still
+        // ask for it, and will get a Browser tab that does not paint.
+        if std::env::var_os("GPUI_DISABLE_DIRECT_COMPOSITION").is_none() {
+            // SAFETY: first statements of `main`, before any thread in this
+            // process exists, so nothing can be reading the environment
+            // concurrently — the same argument `prepare_environment` makes.
+            unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
+        }
+    }
+
     application().run(|cx: &mut App| {
         Theme::init(cx);
 
