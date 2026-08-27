@@ -3483,24 +3483,16 @@ fn short_head(path: &Path) -> Option<String> {
         .filter(|commit| !commit.is_empty())
 }
 
+/// The terminal overlay's "in <shell> at <time>".
+///
+/// The shell name comes from `tiller_terminal` rather than being re-derived
+/// here: this used to read `$SHELL` with a hardcoded `"zsh"` fallback and so
+/// named a shell Tiller was not running (#230). The time is read in-process —
+/// it used to shell out to `date`, which does not exist as a program on
+/// Windows, and which cost a fork+exec per worktree selection everywhere else.
 fn shell_breadcrumb() -> String {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .and_then(|path| {
-            Path::new(&path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .filter(|shell| !shell.is_empty())
-        .unwrap_or_else(|| "zsh".to_string());
-    let time = Command::new("date")
-        .arg("+%H:%M:%S")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|time| !time.is_empty())
-        .unwrap_or_else(|| "--:--:--".to_string());
+    let shell = tiller_terminal::system_shell_display_name();
+    let time = chrono::Local::now().format("%H:%M:%S");
     format!("in {shell} at {time}")
 }
 
@@ -14674,6 +14666,35 @@ mod tests {
             agent_command_for(&source).is_none(),
             "no fallback to another agent's server, and no invented program name"
         );
+    }
+
+    /// The worktree terminal overlay's breadcrumb names the shell Tiller is
+    /// actually running and a time read in-process. The old body re-derived
+    /// the shell from `$SHELL` with a hardcoded `"zsh"` fallback, and read the
+    /// clock by spawning `date` — not a program that exists on Windows, so
+    /// there the overlay rendered `in zsh at --:--:--` (#230).
+    #[test]
+    fn shell_breadcrumb_names_a_real_shell_and_a_real_time() {
+        let breadcrumb = shell_breadcrumb();
+        assert!(
+            breadcrumb.starts_with("in "),
+            "the breadcrumb must start with \"in \", got: {breadcrumb:?}"
+        );
+        assert!(
+            !breadcrumb.contains("--:--:--"),
+            "the clock must not fall back to the missing-`date` placeholder, \
+             got: {breadcrumb:?}"
+        );
+        // The suffix is the clock read, always exactly `HH:MM:SS`.
+        let time = &breadcrumb[breadcrumb.len() - 8..];
+        for index in [0, 1, 3, 4, 6, 7] {
+            assert!(
+                time.as_bytes()[index].is_ascii_digit(),
+                "the time must read HH:MM:SS, got {time:?} in {breadcrumb:?}"
+            );
+        }
+        assert_eq!(&time[2..3], ":", "the time must read HH:MM:SS, got {time:?}");
+        assert_eq!(&time[5..6], ":", "the time must read HH:MM:SS, got {time:?}");
     }
 
     #[test]
