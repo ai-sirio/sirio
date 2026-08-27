@@ -81,6 +81,16 @@ pub enum UsageReason {
     /// The bounded usage fetch exceeded its time budget before any value was
     /// available to keep as stale data.
     TimedOut,
+    /// This platform has no implementation of this provider's fetch, so
+    /// nothing was attempted (#199).
+    ///
+    /// Distinct from [`Self::Error`] on purpose. `Error` means the provider
+    /// exists and could not be read, which invites the user to go and find
+    /// the fault; this means there was never anything to run here, which is
+    /// not a fault and not actionable. Windows reported the Claude fetch as
+    /// `Error` for want of this variant, so the status bar said "Claude
+    /// error" beside a settings surface saying "Signed in".
+    Unsupported,
     /// The provider exists but could not be read.
     Error,
 }
