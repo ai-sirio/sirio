@@ -4286,7 +4286,7 @@ impl TillerWorkspace {
                     // tabs. See `select_worktree`'s doc comment.
                     let _ = workspace.select_worktree(path.clone(), None, cx);
                 }
-                SidebarEvent::CloseTab(id) => workspace.close_tab_by_id(*id, cx),
+                SidebarEvent::CloseTab(id) => workspace.close_tab_by_id(*id, None, cx),
                 SidebarEvent::OpenProjectSettings(id) => {
                     workspace
                         .sidebar
@@ -5702,7 +5702,7 @@ impl TillerWorkspace {
             cx.notify();
             return;
         }
-        self.close_tab(index, cx);
+        self.close_tab(index, None, cx);
     }
 
     /// F-CORE-WSP-05: `window` (available from the "Close Anyway" banner's
@@ -5712,7 +5712,7 @@ impl TillerWorkspace {
     fn confirm_pending_pane_close(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(pending) = self.pending_pane_close.take() {
             if pending.whole_tab {
-                self.close_tab_by_id(pending.tab_id, cx);
+                self.close_tab_by_id(pending.tab_id, window, cx);
             } else {
                 self.close_terminal_at(pending.tab_id, pending.pane_id, window, cx);
             }
@@ -6458,7 +6458,7 @@ impl TillerWorkspace {
         }
         if was_current {
             for index in (0..self.tabs.len()).rev() {
-                self.close_tab(index, cx);
+                self.close_tab(index, None, cx);
             }
             if let Err(error) = self.panes.set_external(&path, Vec::new()) {
                 eprintln!("[control] failed to clear closed worktree panes: {error}");
@@ -7322,7 +7322,7 @@ impl TillerWorkspace {
         }
     }
 
-    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn close_tab(&mut self, index: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
@@ -7382,6 +7382,9 @@ impl TillerWorkspace {
             self.retained_chats.push(retained_chat);
         }
         self.apply_tab_machinery(machinery, true);
+        if let Some(window) = window {
+            self.focus_active_pane(window, cx);
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7414,7 +7417,7 @@ impl TillerWorkspace {
         if !dirty {
             for tab_id in ids {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
-                    self.close_tab(index, cx);
+                    self.close_tab(index, None, cx);
                 }
             }
             return;
@@ -7438,9 +7441,9 @@ impl TillerWorkspace {
             if answer.await.unwrap_or(1) != 0 {
                 return;
             }
-            let _ = this.update(cx, |workspace, cx| {
+            let _ = this.update_in(cx, |workspace, window, cx| {
                 for tab_id in ids {
-                    workspace.close_tab_by_id(tab_id, cx);
+                    workspace.close_tab_by_id(tab_id, Some(&mut *window), cx);
                 }
             });
         })
@@ -10238,9 +10241,9 @@ impl TillerWorkspace {
             })
     }
 
-    fn close_tab_by_id(&mut self, id: usize, cx: &mut Context<Self>) {
+    fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
-            self.close_tab(index, cx);
+            self.close_tab(index, window, cx);
         }
     }
 
@@ -10271,7 +10274,7 @@ impl TillerWorkspace {
         };
         let dirty = self.tab_is_dirty(&self.tabs[index], cx);
         if !dirty {
-            self.close_tab(index, cx);
+            self.close_tab(index, Some(window), cx);
             return;
         }
 
@@ -10287,8 +10290,8 @@ impl TillerWorkspace {
             if answer.await.unwrap_or(1) != 0 {
                 return;
             }
-            let _ = this.update(cx, |workspace, cx| {
-                workspace.close_tab_by_id(id, cx);
+            let _ = this.update_in(cx, |workspace, window, cx| {
+                workspace.close_tab_by_id(id, Some(window), cx);
             });
         })
         .detach();
@@ -19421,7 +19424,7 @@ mod tests {
             workspace.next_tab_id = 2;
             workspace.next_pane_id = 2;
             workspace.rebuild_tab_machinery();
-            workspace.close_tab(1, cx);
+            workspace.close_tab(1, None, cx);
             workspace.tab_menu_tab = Some(0);
             workspace.tab_menu_open = true;
             cx.notify();
@@ -19466,7 +19469,7 @@ mod tests {
                 .iter()
                 .position(|tab| tab.title == "Resumed chat")
             {
-                workspace.close_tab(index, cx);
+                workspace.close_tab(index, None, cx);
             }
         });
         drop(resumed_chat);
@@ -25325,6 +25328,80 @@ mod tests {
                  alpha (Done) despite being added second"
             );
         });
+    }
+
+    /// #222: closing a tab must focus whichever tab becomes active.
+    ///
+    /// Third of the same shape as #218 and #220. Measured by driving the
+    /// app: with two terminals open, `ctrl+w` closed the active one -- so
+    /// the keyboard was reaching the workspace perfectly well -- and the
+    /// next thing typed went nowhere, until the remaining pane was clicked.
+    ///
+    /// `request_close_tab_by_id` had a window the whole time. It uses one
+    /// for the dirty-tab prompt, and dropped it for the close itself.
+    ///
+    /// The focus has to happen *after* `apply_tab_machinery`, since which
+    /// tab becomes active is not known before it. Asserting the window's
+    /// focus rather than `active_tab`: the latter was already right while
+    /// the defect was live.
+    #[gpui::test]
+    async fn closing_a_tab_focuses_the_one_that_becomes_active(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_action(NewTabAction::NewTerminal, window, cx);
+                workspace.open_action(NewTabAction::NewTerminal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let survivor_focus = cx.update(|_, cx| {
+            let workspace = workspace.read(cx);
+            let tab = workspace
+                .tabs
+                .iter()
+                .rev()
+                .nth(1)
+                .expect("two terminal tabs were opened");
+            let mut handle = None;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    handle = Some(view.focus_handle(cx));
+                }
+            });
+            handle.expect("the earlier tab holds a terminal")
+        });
+
+        assert!(
+            !cx.update(|window, _| survivor_focus.is_focused(window)),
+            "precondition: focus is on the tab about to be closed, so the \
+             assertion below is about the close and not about it already \
+             being focused"
+        );
+
+        let doomed = cx.update(|_, cx| workspace.read(cx).active_tab);
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_tab(doomed, Some(window), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|window, _| survivor_focus.is_focused(window)),
+            "closing a tab must hand focus to the pane of whichever tab \
+             becomes active, or the next thing typed goes nowhere"
+        );
     }
 
     /// #220: switching to an existing tab must restore its keyboard focus.
