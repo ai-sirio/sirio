@@ -2479,21 +2479,18 @@ impl Settings {
 
         let interface_card =
             controls::card(theme).child(div().id("settings-interface-font-size-row").child(
-                controls::row(
-                    "Font size",
-                    Some(format!("{} pt", self.interface_font_size)),
-                    interface_stepper,
-                    theme,
-                ),
+                // #201: no subtitle. `controls::stepper` is given the
+                // value *and* the unit, so it already reads "13 pt"; a
+                // subtitle repeating it left the row saying the number
+                // twice and saying nothing about the setting. The
+                // comparable stepper row, "Keep chats per worktree",
+                // passes `None` here for the same reason.
+                controls::row("Font size", None, interface_stepper, theme),
             ));
         let terminal_card =
             controls::card(theme).child(div().id("settings-terminal-font-size-row").child(
-                controls::row(
-                    "Font size",
-                    Some(format!("{} pt", self.terminal_font_size)),
-                    terminal_stepper,
-                    theme,
-                ),
+                // #201: see the interface row above.
+                controls::row("Font size", None, terminal_stepper, theme),
             ));
 
         let file_entity = entity.clone();
