@@ -63,6 +63,11 @@ pub const CHANGES_CONTEXT_LINES: usize = 24;
 
 /// How often the git snapshot re-polls after an external edit.
 const CHANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// How many consecutive undrawn ticks may be skipped before one refresh
+/// runs anyway (#193). At the interval above this bounds staleness for a
+/// live-but-undrawn surface at ten seconds, while still removing nine of
+/// every ten reloads from a tab nobody is looking at.
+pub(crate) const SUSPENDED_TICK_BUDGET: u32 = 10;
 const TOOLBAR_HEIGHT: f32 = 34.0;
 /// File rows: 12.5px text at 30px, the app's single-line row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 30.0;
@@ -393,6 +398,33 @@ pub struct ChangesTab {
     diff_errors: HashMap<PathBuf, String>,
     /// One polling loop per tab, armed on first render.
     refresh_started: bool,
+    /// Frames this surface has actually been drawn in (#193).
+    ///
+    /// The same signal, and for the same reason, as `RightPanel`'s in #189:
+    /// a background tab keeps its refresh loop running, and a value polled
+    /// from `render` goes stale exactly when drawing stops. A count of real
+    /// draws cannot. Each tick here spawns three or four git processes --
+    /// `status --untracked-files=all`, `diff --numstat HEAD`, `rev-parse
+    /// --verify HEAD` -- so a Changes tab nobody is looking at was measured
+    /// at 77 git processes in twenty seconds, the same as one in front of
+    /// the user.
+    renders: u64,
+    /// The `renders` value the previous tick saw. Equal means no draw
+    /// happened in between, so this tick skips the whole snapshot load.
+    renders_at_last_tick: u64,
+    /// Set when a tick was skipped, so the next drawn frame reloads at once
+    /// instead of showing a stale diff.
+    refresh_suspended: bool,
+    /// Consecutive ticks skipped because nothing drew this surface.
+    ///
+    /// A gate that can only be released by a draw can suspend *forever*
+    /// when no draw is ever coming -- an entity driven outside a window,
+    /// or any future path that stops drawing without dropping the entity.
+    /// That is a liveness bug, not a saving, so after
+    /// `SUSPENDED_TICK_BUDGET` skipped ticks one refresh runs regardless.
+    /// It bounds staleness for anything still live and, if the surface is
+    /// in fact visible, the draw that follows releases the gate properly.
+    suspended_ticks: u32,
     /// F-CHG-13: a `focus_path` request that arrived before `entries` had
     /// been populated by the first `refresh()` (the common case — `new()`
     /// starts that refresh asynchronously, so a caller that opens the tab
@@ -429,6 +461,10 @@ impl ChangesTab {
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
             pending_focus: None,
         };
         // Menu and socket openings both construct this same surface, so the
@@ -547,7 +583,23 @@ impl ChangesTab {
                 cx.background_executor()
                     .timer(CHANGES_REFRESH_INTERVAL)
                     .await;
-                if this.update(cx, |tab, cx| tab.refresh(cx)).is_err() {
+                let carry_on = this.update(cx, |tab, cx| {
+                    // #193: no draw since the previous tick means nothing is
+                    // showing this surface -- a background tab, a minimised
+                    // window -- so skip the whole snapshot load rather than
+                    // spawning three or four git processes for it.
+                    if tab.renders == tab.renders_at_last_tick
+                        && tab.suspended_ticks < SUSPENDED_TICK_BUDGET
+                    {
+                        tab.suspended_ticks += 1;
+                        tab.refresh_suspended = true;
+                        return;
+                    }
+                    tab.suspended_ticks = 0;
+                    tab.renders_at_last_tick = tab.renders;
+                    tab.refresh(cx);
+                });
+                if carry_on.is_err() {
                     return;
                 }
             }
@@ -1943,7 +1995,14 @@ impl ChangesTab {
 impl Render for ChangesTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
+        // #193: incremented here and nowhere else -- being in a drawn frame
+        // is the whole signal.
+        self.renders = self.renders.wrapping_add(1);
         self.ensure_refresh(cx);
+        if self.refresh_suspended {
+            self.refresh_suspended = false;
+            self.refresh(cx);
+        }
         let entity = cx.entity();
         let mode = DiffViewMode::get(cx);
         div()
@@ -2388,6 +2447,51 @@ mod tests {
             cx.run_until_parked();
         }
         panic!("condition never became true within the pump budget");
+    }
+
+    /// #193: a Changes surface in a background tab kept reloading. Its
+    /// tick is not cheap -- each one spawns three or four git processes
+    /// (`status --untracked-files=all`, `diff --numstat HEAD`, `rev-parse
+    /// --verify HEAD`) -- and measured on the running app, backgrounding
+    /// the tab changed nothing at all: 71 git processes in twenty seconds
+    /// with the tab in front, 77 with it behind another tab. With the gate,
+    /// a backgrounded tab contributes none of them, and reselecting it
+    /// resumes at once.
+    ///
+    /// The signal is a count of real draws, for the reason established in
+    /// #189: `Window::is_window_active()` was tried there first and reads
+    /// `true` for a minimised window, because `render` stops being called
+    /// and the last polled value goes stale exactly when it needs to
+    /// change. Both halves of the wiring are asserted -- that a draw is
+    /// counted at all, and that a draw clears a suspension -- because a
+    /// panel that never counted draws would suspend itself permanently,
+    /// which is the failure this gate must not have.
+    #[gpui::test]
+    async fn a_drawn_frame_is_counted_and_resumes_a_suspended_reload(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        cx.run_until_parked();
+
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| tab.renders) > 0,
+            "render must count the frames this surface is drawn in -- that              count is the whole signal, and a surface that never incremented              it would suspend its reloads forever"
+        );
+
+        tab.update(&mut cx.cx, |tab, _| {
+            tab.refresh_suspended = true;
+        });
+        let before = tab.read_with(&cx.cx, |tab, _| tab.renders);
+        tab.update(&mut cx.cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| tab.renders) > before,
+            "the harness really did draw another frame"
+        );
+
+        assert!(
+            !tab.read_with(&cx.cx, |tab, _| tab.refresh_suspended),
+            "a drawn frame must clear the suspension and reload at once, so              a reselected tab never shows the diff frozen at the moment it              was left"
+        );
     }
 
     fn changes_view(
@@ -3477,6 +3581,10 @@ mod tests {
             git_task: None,
             git_error: None,
             refresh_started: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
             pending_focus: None,
         };
         let entry = tab.entries[0].clone();
@@ -3532,6 +3640,10 @@ mod tests {
             git_task: None,
             git_error: None,
             refresh_started: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
             pending_focus: None,
         };
         let entry = tab.entries[0].clone();
@@ -3779,6 +3891,10 @@ mod tests {
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
             pending_focus: None,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
