@@ -557,7 +557,11 @@ impl Render for RightPanel {
         self.renders = self.renders.wrapping_add(1);
         if self.worktree_selected {
             self.ensure_tree_refresh(cx);
-            if self.refresh_suspended {
+            // #191: resume only into the view the tree is actually for.
+            // Without this clause the gate below would be undone on the
+            // very next frame, because a panel showing History is still a
+            // panel being drawn.
+            if self.refresh_suspended && PanelView::get(cx) == PanelView::Files {
                 self.refresh_suspended = false;
                 self.refresh(cx);
             }
