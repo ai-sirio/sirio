@@ -222,6 +222,17 @@ pub struct RightPanel {
     /// Set when a tick skipped the walks, so the resumed panel refreshes at
     /// once rather than showing a stale tree for up to a second.
     refresh_suspended: bool,
+    /// Consecutive ticks skipped because nothing drew this panel (#193).
+    ///
+    /// A gate that can only be released by a draw can suspend *forever*
+    /// when no draw is ever coming -- a panel driven outside a window, or
+    /// any future path that stops drawing without dropping the entity. That
+    /// is a liveness bug, not a saving, and the sibling gate on the Changes
+    /// surface hit exactly it: a test driving that loop with no window at
+    /// all never refreshed again. After `SUSPENDED_TICK_BUDGET` skipped
+    /// ticks one walk runs regardless, bounding staleness for anything
+    /// still live.
+    suspended_ticks: u32,
     file_context_menu: Option<files::FileContextMenu>,
     /// Built on first selection of the Diff view, dropped when the checkout
     /// changes. A user who never opens Diff never pays for a git status here.
@@ -257,6 +268,7 @@ impl RightPanel {
             renders: 0,
             renders_at_last_tick: 0,
             refresh_suspended: false,
+            suspended_ticks: 0,
             file_context_menu: None,
             changes: None,
             changes_subscriptions: Vec::new(),

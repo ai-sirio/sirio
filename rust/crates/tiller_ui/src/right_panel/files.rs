@@ -181,7 +181,11 @@ impl RightPanel {
                         // nothing is showing this panel -- minimised,
                         // collapsed, whatever the reason -- so skip both
                         // repository-sized walks.
-                        if panel.renders == panel.renders_at_last_tick {
+                        if panel.renders == panel.renders_at_last_tick
+                            && panel.suspended_ticks
+                                < crate::changes::SUSPENDED_TICK_BUDGET
+                        {
+                            panel.suspended_ticks += 1;
                             panel.refresh_suspended = true;
                             return;
                         }
@@ -195,6 +199,7 @@ impl RightPanel {
                             panel.refresh_suspended = true;
                             return;
                         }
+                        panel.suspended_ticks = 0;
                         panel.renders_at_last_tick = panel.renders;
                         panel.refresh(cx);
                     })
