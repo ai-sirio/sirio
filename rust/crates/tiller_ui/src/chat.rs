@@ -1127,6 +1127,20 @@ impl Chat {
         self.agent_name = Some(name.into());
     }
 
+    /// What the composer's agent badge shows (#206).
+    ///
+    /// It names the *agent*, so it reads `agent_name` -- not
+    /// `selected_model_name`, whose fallback is the literal "Claude Code".
+    /// Reading the model there named the wrong agent for every agent that
+    /// is not Claude Code until models arrived, and named an agent at all
+    /// for a restored chat whose banner says the agent is unknowable.
+    /// `agent_name` is `None` in exactly that case.
+    fn agent_badge_name(&self) -> String {
+        self.agent_name
+            .clone()
+            .unwrap_or_else(|| "Unknown agent".into())
+    }
+
     fn default_placeholder(&self) -> String {
         let head = self
             .agent_name
@@ -6094,6 +6108,15 @@ impl Chat {
                 })
                 .child(div().text_color(colors.meta).child("⌄"))
         } else {
+            // #206: this badge names the *agent*, so it reads the agent.
+            // It used to render `selected_model_name`, a model variable
+            // whose fallback is the literal "Claude Code" -- so it named
+            // the wrong agent for every other one until models arrived,
+            // and named an agent at all for a chat whose banner two
+            // inches above says the agent is unknowable. `agent_name` is
+            // `None` in exactly that case, which is the case the banner
+            // is about.
+            let agent_badge_name = self.agent_badge_name();
             div()
                 .id("agent-badge")
                 .debug_selector(|| "agent-badge".into())
@@ -6113,7 +6136,7 @@ impl Chat {
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(colors.title)
-                        .child(selected_model_name),
+                        .child(agent_badge_name),
                 )
         };
 
@@ -10918,6 +10941,47 @@ mod tests {
             cost: None,
             ..Default::default()
         });
+    }
+
+    /// #206: the composer's agent badge must name the agent it is for.
+    ///
+    /// It rendered `selected_model_name` instead, whose fallback is a
+    /// hardcoded "Claude Code", so a Codex chat badged itself "Claude Code"
+    /// until Codex reported its models -- naming a *different* agent, not
+    /// merely omitting one.
+    #[gpui::test]
+    fn the_agent_badge_names_the_chats_own_agent(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.set_agent_name("Codex");
+            chat
+        });
+
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.agent_badge_name()),
+            "Codex"
+        );
+    }
+
+    /// #206: and when there is no agent to name, it must not invent one.
+    ///
+    /// This is the case the restored-chat banner is about -- "saved before
+    /// Tiller recorded which agent it belonged to, so there is no way to
+    /// tell which one to reopen it with" -- which the badge underneath was
+    /// flatly contradicting by printing "Claude Code".
+    #[gpui::test]
+    fn an_unknown_agent_is_not_silently_named_claude_code(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) =
+            cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+
+        let badge = chat.read_with(cx, |chat, _| chat.agent_badge_name());
+        assert_ne!(
+            badge, "Claude Code",
+            "a chat with no recorded agent must not name one -- the banner              above this badge says the agent is unknowable"
+        );
+        assert_eq!(badge, "Unknown agent");
     }
 
     #[gpui::test]
