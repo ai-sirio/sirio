@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -49,7 +49,14 @@ pub struct TrayRosterEntry {
     pub branch: String,
     pub project_name: String,
     pub status: AgentStatus,
-    pub status_since: Option<Duration>,
+    /// *When* this entry's status last changed -- never how long ago
+    /// (#187). The poll loop in `main.rs` keeps the previous tick's
+    /// snapshot and only nudges the tray when the two differ, so every
+    /// field here is part of that change key. An elapsed `Duration` grows
+    /// on its own, so it made every tick compare unequal and the guard
+    /// never held. The age is computed where it is rendered, by
+    /// [`roster_menu_label`], which is also fresher.
+    pub status_changed_at: Option<Instant>,
 }
 
 /// What a tray click asks the app to do next. Drained by the same 40ms
@@ -109,12 +116,19 @@ fn format_status_age(age: Duration) -> String {
     }
 }
 
-fn roster_menu_label(entry: &TrayRosterEntry) -> String {
+/// The caller supplies `now` for the same reason
+/// `AgentActivityModel::status_age_for_panes` does: it keeps this
+/// deterministic in tests. Production callers pass `Instant::now()` at the
+/// moment the menu is actually drawn (#187).
+fn roster_menu_label(entry: &TrayRosterEntry, now: Instant) -> String {
     let status = entry.status.human_label();
-    let status = entry.status_since.map_or_else(
-        || status.to_string(),
-        |age| format!("{status} · {}", format_status_age(age)),
-    );
+    let status = entry
+        .status_changed_at
+        .and_then(|changed_at| now.checked_duration_since(changed_at))
+        .map_or_else(
+            || status.to_string(),
+            |age| format!("{status} · {}", format_status_age(age)),
+        );
     format!("{} — {} ({status})", entry.branch, entry.project_name)
 }
 
@@ -278,7 +292,7 @@ impl ksni::Tray for AgentRosterTray {
         } else {
             for entry in entries {
                 let path = entry.path.clone();
-                let label = roster_menu_label(&entry);
+                let label = roster_menu_label(&entry, Instant::now());
                 items.push(
                     StandardItem {
                         label,
@@ -434,7 +448,7 @@ fn show_windows_menu(hwnd: HWND, state: &WindowsTrayState) {
         };
     } else {
         for (index, entry) in entries.iter().enumerate() {
-            let label = wide(&roster_menu_label(entry));
+            let label = wide(&roster_menu_label(entry, Instant::now()));
             let command = WINDOWS_TRAY_FIRST_ROSTER_COMMAND + index as u32;
             // `label` remains allocated while AppendMenuW copies its text.
             let _ = unsafe { AppendMenuW(menu, MF_STRING, command as usize, label.as_ptr()) };
@@ -745,10 +759,13 @@ mod tests {
             branch: "feature".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::NeedsInput,
-            status_since: None,
+            status_changed_at: None,
         };
 
-        assert_eq!(roster_menu_label(&entry), "feature — Tiller (needs input)");
+        assert_eq!(
+            roster_menu_label(&entry, Instant::now()),
+            "feature — Tiller (needs input)"
+        );
     }
 
     #[test]
@@ -774,16 +791,20 @@ mod tests {
 
     #[test]
     fn roster_menu_label_includes_status_age_when_present() {
+        // #187: the age is derived at label time from an absolute instant,
+        // so the fixture states *when* the status changed and hands the
+        // same `now` to the formatter.
+        let now = Instant::now();
         let entry = TrayRosterEntry {
             path: PathBuf::from("/worktrees/feature"),
             branch: "feature/login".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::NeedsInput,
-            status_since: Some(std::time::Duration::from_secs(4 * 60)),
+            status_changed_at: now.checked_sub(std::time::Duration::from_secs(4 * 60)),
         };
 
         assert_eq!(
-            roster_menu_label(&entry),
+            roster_menu_label(&entry, now),
             "feature/login — Tiller (needs input · 4m)"
         );
     }
@@ -802,14 +823,14 @@ mod tests {
             branch: "normal".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::Running,
-            status_since: None,
+            status_changed_at: None,
         };
         let waiting = TrayRosterEntry {
             path: PathBuf::from("/worktrees/waiting"),
             branch: "waiting".into(),
             project_name: "Tiller".into(),
             status: AgentStatus::NeedsInput,
-            status_since: None,
+            status_changed_at: None,
         };
 
         assert_eq!(
@@ -835,14 +856,14 @@ mod tests {
                 branch: "running".into(),
                 project_name: "Tiller".into(),
                 status: AgentStatus::Running,
-                status_since: None,
+                status_changed_at: None,
             },
             TrayRosterEntry {
                 path: PathBuf::from("/worktrees/done"),
                 branch: "done".into(),
                 project_name: "Tiller".into(),
                 status: AgentStatus::Done,
-                status_since: None,
+                status_changed_at: None,
             },
         ];
 
