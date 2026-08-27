@@ -1299,6 +1299,51 @@ impl BrowserSurface {
         wait_for_script_result(receiver, timeout)
     }
 
+    /// Runs `script` and hands its result to `on_result` when the engine
+    /// delivers it, **without blocking the calling thread** (#142).
+    ///
+    /// This exists because [`Self::evaluate_script`] cannot work off Linux.
+    /// There it ends in `receiver.recv_timeout`, which blocks the very thread
+    /// the engine needs in order to deliver the completion — WKWebView's on
+    /// macOS, WebView2's STA on Windows — so the result can never arrive and
+    /// every call burns exactly its timeout. The script itself runs fine: a
+    /// probe that set `document.title` had the new title reach the chrome
+    /// while the call was still timing out. It is a delivery failure, not an
+    /// execution one.
+    ///
+    /// Pumping the platform's event loop instead is specifically ruled out:
+    /// on macOS that re-enters GPUI while the workspace entity is mutably
+    /// borrowed. The caller keeps its own reply channel and answers late.
+    ///
+    /// `Err` here means the script could not be *started*; a script that runs
+    /// and fails reports through `on_result`.
+    pub fn evaluate_script_async(
+        &self,
+        script: &str,
+        on_result: impl FnOnce(String) + Send + 'static,
+    ) -> Result<(), String> {
+        let webview_ref = self.webview.borrow();
+        let webview = webview_ref
+            .as_ref()
+            .ok_or_else(|| "Browser child is unavailable".to_string())?;
+        // wry hands us an `Fn`, but the caller's answer may only be sent once
+        // — a reply channel is consumed by sending. Hold it in a `Mutex` and
+        // take it on the first call, so a duplicate completion is ignored
+        // rather than panicking or answering twice.
+        let on_result = std::sync::Mutex::new(Some(on_result));
+        webview
+            .evaluate_script_with_callback(script, move |value| {
+                let taken = on_result
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(on_result) = taken {
+                    on_result(value);
+                }
+            })
+            .map_err(|error| format!("evaluate_script failed: {error}"))
+    }
+
     fn load_url(&mut self, address: &str) -> Result<(), BrowserError> {
         if let Some(webview) = self.webview.borrow().as_ref() {
             webview
