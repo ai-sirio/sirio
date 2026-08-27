@@ -2940,11 +2940,22 @@ impl Settings {
             })
             .text_size(theme.typography.callout)
             .text_color(if is_empty { theme.meta } else { theme.title })
-            .child(text!(if is_empty {
-                placeholder.to_string()
-            } else {
-                display_text
-            }))
+            // #212: shrink and ellipsise inside the field rather than
+            // drawing past its border. Must shrink without growing:
+            // `flex_1` would push the end-of-text caret to the far right.
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("settings-text-field-text")
+                    .debug_selector(|| "settings-text-field-text".to_owned())
+                    .min_w_0()
+                    .text_ellipsis()
+                    .child(text!(if is_empty {
+                        placeholder.to_string()
+                    } else {
+                        display_text
+                    })),
+            )
             // The field's insertion caret: end-of-text, since these compact
             // single-line fields always append. Invisible (but still laid
             // out) while unfocused so the bar never shifts the text.
@@ -3604,11 +3615,22 @@ impl Settings {
                             } else {
                                 theme.title
                             })
-                            .child(text!(if search_text.is_empty() {
-                                "Search agents".to_string()
-                            } else {
-                                search_text
-                            }))
+                            // #212: see the field above.
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("settings-agent-search-text")
+                                    .debug_selector(|| {
+                                        "settings-agent-search-text".to_owned()
+                                    })
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .child(text!(if search_text.is_empty() {
+                                        "Search agents".to_string()
+                                    } else {
+                                        search_text
+                                    })),
+                            )
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
                                     px(16.0),
