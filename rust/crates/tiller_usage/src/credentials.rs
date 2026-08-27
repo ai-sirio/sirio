@@ -32,8 +32,9 @@ pub enum CredentialStoreError {
         /// The underlying filesystem error.
         source: std::io::Error,
     },
-    /// No `TILLER_CREDENTIALS`, no `XDG_DATA_HOME` and no `HOME`: there is
-    /// nowhere to put the store.
+    /// No `TILLER_CREDENTIALS`, no `XDG_DATA_HOME` and no platform fallback
+    /// (`LOCALAPPDATA` on Windows, `HOME` on POSIX): there is nowhere to put
+    /// the store.
     NoHome,
 }
 
@@ -43,7 +44,13 @@ impl std::fmt::Display for CredentialStoreError {
             Self::Io { path, source } => {
                 write!(f, "could not update {}: {source}", path.display())
             }
-            Self::NoHome => write!(f, "no HOME or XDG_DATA_HOME to place the credential store"),
+            Self::NoHome => {
+                #[cfg(windows)]
+                let message = "no LOCALAPPDATA or XDG_DATA_HOME to place the credential store";
+                #[cfg(not(windows))]
+                let message = "no HOME or XDG_DATA_HOME to place the credential store";
+                write!(f, "{message}")
+            }
         }
     }
 }
@@ -73,13 +80,16 @@ impl CredentialStore {
     }
 
     /// The store at the environment's path: `$TILLER_CREDENTIALS` if set,
-    /// else `$XDG_DATA_HOME/tiller/credentials.json`, else
-    /// `$HOME/.local/share/tiller/credentials.json`.
+    /// else `$XDG_DATA_HOME/tiller/credentials.json`, else the platform
+    /// fallback — `%LOCALAPPDATA%\Tiller\credentials.json` on Windows
+    /// (where `HOME` is ignored entirely), `$HOME/.local/share/tiller/credentials.json`
+    /// on POSIX.
     pub fn from_env() -> Result<Self, CredentialStoreError> {
         resolve_store_path(
             std::env::var_os("TILLER_CREDENTIALS").as_deref(),
             std::env::var_os("XDG_DATA_HOME").as_deref(),
             std::env::var_os("HOME").as_deref(),
+            std::env::var_os("LOCALAPPDATA").as_deref(),
         )
         .map(Self::at)
     }
@@ -186,10 +196,19 @@ impl CredentialStore {
 /// Pure path resolution, separated from the process environment so the
 /// precedence is testable without mutating env vars (which are process
 /// global while tests run in parallel).
+///
+/// Precedence: `explicit`, then `xdg_data_home`, then the platform
+/// fallback — `local_app_data` under `Tiller/credentials.json` on Windows,
+/// `home` under `.local/share/tiller/credentials.json` on POSIX. On Windows
+/// `home` is ignored entirely: Git Bash exports an MSYS `HOME` whose drive
+/// form would resolve to a bogus drive-root path, the #230 class of bug.
 fn resolve_store_path(
     explicit: Option<&std::ffi::OsStr>,
     xdg_data_home: Option<&std::ffi::OsStr>,
-    home: Option<&std::ffi::OsStr>,
+    #[cfg(windows)] _home: Option<&std::ffi::OsStr>,
+    #[cfg(not(windows))] home: Option<&std::ffi::OsStr>,
+    #[cfg(windows)] local_app_data: Option<&std::ffi::OsStr>,
+    #[cfg(not(windows))] _local_app_data: Option<&std::ffi::OsStr>,
 ) -> Result<PathBuf, CredentialStoreError> {
     if let Some(path) = explicit.filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
@@ -197,8 +216,17 @@ fn resolve_store_path(
     if let Some(data) = xdg_data_home.filter(|data| !data.is_empty()) {
         return Ok(Path::new(data).join("tiller/credentials.json"));
     }
-    if let Some(home) = home.filter(|home| !home.is_empty()) {
-        return Ok(Path::new(home).join(".local/share/tiller/credentials.json"));
+    #[cfg(windows)]
+    {
+        if let Some(root) = local_app_data.filter(|root| !root.is_empty()) {
+            return Ok(Path::new(root).join("Tiller").join("credentials.json"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = home.filter(|home| !home.is_empty()) {
+            return Ok(Path::new(home).join(".local/share/tiller/credentials.json"));
+        }
     }
     Err(CredentialStoreError::NoHome)
 }
@@ -316,30 +344,103 @@ mod tests {
     #[test]
     fn store_path_precedence_is_explicit_then_xdg_then_home() {
         use std::ffi::OsStr;
+        let local = OsStr::new(r"C:\Users\u\AppData\Local");
 
         assert_eq!(
             resolve_store_path(
                 Some(OsStr::new("/tmp/x.json")),
                 Some(OsStr::new("/xdg")),
-                Some(OsStr::new("/home/u"))
+                Some(OsStr::new("/home/u")),
+                Some(local),
             )
             .unwrap(),
             PathBuf::from("/tmp/x.json"),
             "TILLER_CREDENTIALS wins"
         );
         assert_eq!(
-            resolve_store_path(None, Some(OsStr::new("/xdg")), Some(OsStr::new("/home/u")))
-                .unwrap(),
+            resolve_store_path(
+                None,
+                Some(OsStr::new("/xdg")),
+                Some(OsStr::new("/home/u")),
+                Some(local),
+            )
+            .unwrap(),
             PathBuf::from("/xdg/tiller/credentials.json")
         );
-        assert_eq!(
-            resolve_store_path(Some(OsStr::new("")), None, Some(OsStr::new("/home/u"))).unwrap(),
-            PathBuf::from("/home/u/.local/share/tiller/credentials.json"),
-            "an empty override is no override"
-        );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                resolve_store_path(Some(OsStr::new("")), None, Some(OsStr::new("/home/u")), None)
+                    .unwrap(),
+                PathBuf::from("/home/u/.local/share/tiller/credentials.json"),
+                "an empty override is no override"
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                resolve_store_path(Some(OsStr::new("")), None, None, Some(local)).unwrap(),
+                PathBuf::from(r"C:\Users\u\AppData\Local\Tiller\credentials.json"),
+                "an empty override is no override"
+            );
+        }
         assert!(matches!(
-            resolve_store_path(None, None, None),
+            resolve_store_path(None, None, None, None),
             Err(CredentialStoreError::NoHome)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_store_resolves_under_local_app_data_on_windows() {
+        use std::ffi::OsStr;
+
+        let root = OsStr::new(r"C:\Users\x\AppData\Local");
+        let path = resolve_store_path(None, None, None, Some(root))
+            .expect("LOCALAPPDATA is a valid Windows fallback");
+        assert!(
+            path.starts_with(r"C:\Users\x\AppData\Local"),
+            "the store lives under the given LOCALAPPDATA root: {}",
+            path.display()
+        );
+        assert!(
+            path.ends_with(r"Tiller\credentials.json"),
+            "the store is Tiller\\credentials.json under that root: {}",
+            path.display()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_posix_home_is_ignored_on_windows() {
+        use std::ffi::OsStr;
+
+        let path = resolve_store_path(
+            None,
+            None,
+            Some(OsStr::new("/c/Users/x")),
+            Some(OsStr::new(r"C:\Users\x\AppData\Local")),
+        )
+        .expect("LOCALAPPDATA wins over the MSYS HOME that Git Bash exports");
+        let text = path.to_string_lossy();
+        assert!(
+            text.starts_with(r"C:\Users\x\AppData\Local"),
+            "the store resolves under LOCALAPPDATA, not the MSYS home: {text}"
+        );
+        assert!(
+            !text.contains(".local"),
+            "no POSIX .local layout leaks into the Windows path: {text}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_posix_layout_is_unchanged() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            resolve_store_path(None, None, Some(OsStr::new("/home/u")), None).unwrap(),
+            PathBuf::from("/home/u/.local/share/tiller/credentials.json")
+        );
     }
 }
