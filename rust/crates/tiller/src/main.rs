@@ -6679,10 +6679,17 @@ impl TillerWorkspace {
         // the tab bar and the Activity panel just rendered from above —
         // one collection, three views, so they cannot disagree the way the
         // sidebar's own fixture rows used to.
+        //
+        // #125/#130: filtered by `TabKind::appears_in_sidebar`, because a
+        // Browser tab is a tab like any other up there and never a row down
+        // here. `enumerate` runs *before* the filter so `selected` keeps
+        // comparing against `self.active_tab`'s real index — filtering first
+        // would renumber the rows and mark the wrong one.
         let sidebar_tabs: Vec<SidebarTab> = self
             .tabs
             .iter()
             .enumerate()
+            .filter(|(_, tab)| tab.kind.appears_in_sidebar())
             .map(|(index, tab)| SidebarTab {
                 id: tab.id,
                 title: tab.title.clone(),
