@@ -412,6 +412,14 @@ pub struct ChangesTab {
     /// The `renders` value the previous tick saw. Equal means no draw
     /// happened in between, so this tick skips the whole snapshot load.
     renders_at_last_tick: u64,
+    /// Whether this surface is the right panel's Diff view rather than the
+    /// Changes tab itself.
+    ///
+    /// Only the panel draws `Open diff`: the action reveals the Changes tab
+    /// and focuses the path, which is a move from the panel and a no-op
+    /// from inside the tab, where the row is already expanded by the time
+    /// the control is visible at all (#217).
+    embedded_in_panel: bool,
     /// Set when a tick was skipped, so the next drawn frame reloads at once
     /// instead of showing a stale diff.
     refresh_suspended: bool,
@@ -447,6 +455,15 @@ impl ChangesTab {
         Self::with_source(repo_root, ChangesSource::Commit(sha), cx)
     }
 
+    /// Creates the surface the right panel's Diff view embeds. Identical to
+    /// `new` except that it draws `Open diff`, which reveals the Changes tab
+    /// — something only a host that is not that tab can ask for (#217).
+    pub fn in_right_panel(repo_root: PathBuf, cx: &mut Context<Self>) -> Self {
+        let mut tab = Self::with_source(repo_root, ChangesSource::WorkingTree, cx);
+        tab.embedded_in_panel = true;
+        tab
+    }
+
     fn with_source(repo_root: PathBuf, source: ChangesSource, cx: &mut Context<Self>) -> Self {
         let mut tab = Self {
             repo_root,
@@ -461,6 +478,7 @@ impl ChangesTab {
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
+            embedded_in_panel: false,
             renders: 0,
             renders_at_last_tick: 0,
             refresh_suspended: false,
@@ -1045,6 +1063,7 @@ impl ChangesTab {
     fn render_change_row(
         row: ChangeRow,
         allows_staging: bool,
+        draws_open_diff: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -1062,6 +1081,7 @@ impl ChangesTab {
                 drag_payload,
                 expanded,
                 allows_staging,
+                draws_open_diff,
                 entity,
                 theme,
             )
@@ -1269,6 +1289,7 @@ impl ChangesTab {
         drag_payload: Option<DiffPayload>,
         expanded: bool,
         allows_staging: bool,
+        draws_open_diff: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -1398,18 +1419,23 @@ impl ChangesTab {
                                 },
                             ))
                         })
-                        .child(action_text_button(
-                            "Open diff",
-                            format!("changes-open-diff-{}-{}", section.slug(), path.display()),
-                            theme,
-                            move |cx| {
-                                entity_for_open_diff.update(cx, |_, cx| {
-                                    cx.emit(ChangesTabActionEvent::OpenDiff(
-                                        open_diff_path.clone(),
-                                    ));
-                                });
-                            },
-                        ))
+                        // Only where the event can act: from the tab itself
+                        // it reveals the tab you are already in, and expands
+                        // the row it is drawn inside (#217).
+                        .when(draws_open_diff, |this| {
+                            this.child(action_text_button(
+                                "Open diff",
+                                format!("changes-open-diff-{}-{}", section.slug(), path.display()),
+                                theme,
+                                move |cx| {
+                                    entity_for_open_diff.update(cx, |_, cx| {
+                                        cx.emit(ChangesTabActionEvent::OpenDiff(
+                                            open_diff_path.clone(),
+                                        ));
+                                    });
+                                },
+                            ))
+                        })
                         .when(entry.is_conflicted(), |this| {
                             this.child(action_text_button(
                                 "Resolve in terminal",
@@ -1914,6 +1940,7 @@ impl ChangesTab {
         }
         let row_entity = entity;
         let allows_staging = self.allows_staging();
+        let draws_open_diff = self.embedded_in_panel;
         // Both modes render into exactly the width the surface was given —
         // see `SPLIT_DIVIDER_WIDTH` for the two attempts at doing otherwise
         // and what each one cost. `min_w(px(0.0))` stays because a scroll
@@ -1946,6 +1973,7 @@ impl ChangesTab {
                     elements.push(Self::render_change_row(
                         row,
                         allows_staging,
+                        draws_open_diff,
                         row_entity.clone(),
                         theme,
                     ));
@@ -2492,6 +2520,24 @@ mod tests {
             !tab.read_with(&cx.cx, |tab, _| tab.refresh_suspended),
             "a drawn frame must clear the suspension and reload at once, so              a reselected tab never shows the diff frozen at the moment it              was left"
         );
+    }
+
+    /// The same surface as `changes_view`, built the way the right panel's
+    /// Diff view builds it — the one host `Open diff` can leave.
+    fn panel_changes_view(
+        cx: &mut TestAppContext,
+        repo_root: PathBuf,
+    ) -> (VisualTestContext, gpui::Entity<ChangesTab>) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| ChangesTab::in_right_panel(repo_root.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+        (cx, tab)
     }
 
     fn changes_view(
@@ -3581,6 +3627,7 @@ mod tests {
             git_task: None,
             git_error: None,
             refresh_started: false,
+            embedded_in_panel: false,
             renders: 0,
             renders_at_last_tick: 0,
             refresh_suspended: false,
@@ -3640,6 +3687,7 @@ mod tests {
             git_task: None,
             git_error: None,
             refresh_started: false,
+            embedded_in_panel: false,
             renders: 0,
             renders_at_last_tick: 0,
             refresh_suspended: false,
@@ -3831,7 +3879,7 @@ mod tests {
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify file");
 
-        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        let (mut cx, tab) = panel_changes_view(cx, dir.0.clone());
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let collected = events.clone();
         cx.update(|_, app| {
@@ -3859,6 +3907,36 @@ mod tests {
                 "tracked.txt"
             ))],
             "Open diff emits the repo-relative changed path"
+        );
+    }
+
+    /// F-CHG-13: and it is drawn *only* where that event can do something.
+    /// Inside the Changes tab, `OpenDiff` reveals the Changes tab and
+    /// expands a row that — being the row the control is drawn in — is
+    /// already expanded, so the control had no effect it could still have
+    /// (#217).
+    #[gpui::test]
+    async fn the_changes_tab_draws_no_open_diff_action_of_its_own(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("changes-stage").is_some(),
+            "the expanded row still draws the actions that do act on it"
+        );
+        assert!(
+            cx.debug_bounds("changes-open-diff").is_none(),
+            "Open diff is not drawn in the surface it cannot leave"
         );
     }
 
@@ -3891,6 +3969,7 @@ mod tests {
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
+            embedded_in_panel: false,
             renders: 0,
             renders_at_last_tick: 0,
             refresh_suspended: false,
