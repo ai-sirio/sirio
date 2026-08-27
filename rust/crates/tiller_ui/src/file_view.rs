@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 use tiller_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
-use tiller_project::resolve_file_link;
+use tiller_project::{display_absolute_path, resolve_file_link};
 use tiller_theme::Theme;
 
 use crate::caret;
@@ -229,6 +229,16 @@ impl FileView {
         if event.path == self.path {
             self.check_external(cx);
         }
+    }
+
+    /// The path as the editor header shows it (#214).
+    ///
+    /// Rendered through `display_absolute_path`, not `Path::display`:
+    /// the verbatim prefix is stripped from the *string only*, so
+    /// `self.path` keeps the long-path capability every filesystem
+    /// call in this view depends on.
+    fn breadcrumb_text(&self) -> String {
+        display_absolute_path(&self.path)
     }
 
     fn poll_file_system_events(&mut self, cx: &mut Context<Self>) {
@@ -662,7 +672,12 @@ impl FileView {
             .gap(px(8.0))
             .text_size(theme.typography.footnote)
             .text_color(theme.meta)
-            .child(self.path.display().to_string())
+            // #214: rendered through the helper written for this, not
+            // `Path::display`, which put a verbatim `\\?\` prefix on
+            // screen. The prefix is stripped from the *string only* --
+            // `self.path` is untouched, so every filesystem call this
+            // view makes keeps its long-path capability.
+            .child(self.breadcrumb_text())
             .when(dirty, |this| {
                 this.child(
                     div()
@@ -1727,9 +1742,55 @@ fn next_char_boundary(buffer: &str, position: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use gpui::{Modifiers, VisualTestContext};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tiller_markdown::{Block, Inline};
+
+    /// #214: the breadcrumb must not put a verbatim prefix on screen.
+    ///
+    /// It rendered `self.path.display()` raw, so opening a file showed
+    /// `\?\D:\Progetti\tiller\tiller\README.md` in the editor header --
+    /// the same leak #118/#121 closed "across the control surface", in a
+    /// surface that was not part of it.
+    ///
+    /// The `Path` itself is deliberately left verbatim here, and the test
+    /// asserts that too: stripping the prefix from the value rather than
+    /// from the rendered string would cost the long-path capability every
+    /// filesystem call this view makes depends on.
+    ///
+    /// Windows-only, because the prefix only exists there.
+    #[cfg(windows)]
+    #[gpui::test]
+    async fn the_breadcrumb_does_not_show_a_verbatim_prefix(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::new("verbatim-breadcrumb", "hello\n");
+        let verbatim = PathBuf::from(format!(r"\\?\{}", file.path().display()));
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| FileView::new(verbatim.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = cx
+            .update(|window, _| window.root::<FileView>().flatten().expect("view root"));
+        cx.run_until_parked();
+
+        let shown = view.read_with(&cx.cx, |view, _| view.breadcrumb_text());
+        assert!(
+            !shown.starts_with(r"\\?\"),
+            "the breadcrumb must not show the verbatim prefix, got {shown:?}"
+        );
+        assert!(
+            shown.ends_with("verbatim-breadcrumb")
+                || shown.contains("verbatim-breadcrumb"),
+            "and it must still name the file, got {shown:?}"
+        );
+        assert!(
+            view.read_with(&cx.cx, |view, _| {
+                view.path.to_string_lossy().starts_with(r"\\?\")
+            }),
+            "the Path itself stays verbatim -- only the rendered string is \
+             stripped, or the view loses long-path capability"
+        );
+    }
 
     struct TempFile(PathBuf);
 
