@@ -4155,13 +4155,24 @@ impl TillerWorkspace {
                                     placement,
                                     reply,
                                 } => {
+                                    // #224: the socket asking to split a
+                                    // pane means the same thing the
+                                    // keyboard does, and the keyboard
+                                    // path focuses the new pane. Same
+                                    // reasoning as #220 for tab.select,
+                                    // and `select_worktree` a few arms
+                                    // above already passes its window.
                                     workspace.split_focused_terminal_with_placement(
-                                        direction, placement, None, cx,
+                                        direction,
+                                        placement,
+                                        Some(&mut *window),
+                                        cx,
                                     );
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::ClosePane { reply } => {
-                                    workspace.close_focused_pane(None, cx);
+                                    // #224: see the split above.
+                                    workspace.close_focused_pane(Some(&mut *window), cx);
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::CycleTab { forward, reply } => {
