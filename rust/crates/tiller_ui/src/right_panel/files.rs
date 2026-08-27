@@ -177,6 +177,15 @@ impl RightPanel {
                 // beyond the one background walk it already runs each tick.
                 if this
                     .update(cx, |panel, cx| {
+                        // #189: no draw since the previous tick means
+                        // nothing is showing this panel -- minimised,
+                        // collapsed, whatever the reason -- so skip both
+                        // repository-sized walks.
+                        if panel.renders == panel.renders_at_last_tick {
+                            panel.refresh_suspended = true;
+                            return;
+                        }
+                        panel.renders_at_last_tick = panel.renders;
                         panel.refresh(cx);
                     })
                     .is_err()
@@ -2398,6 +2407,56 @@ mod tests {
         assert!(
             cx.debug_bounds("file-directory-row").is_some(),
             "the tree survives the refresh the menu triggered"
+        );
+    }
+
+    /// #189: `ensure_tree_refresh`'s 1 s tick runs two walks that both
+    /// scale with the repository -- git's `--untracked-files=all` scan and
+    /// `read_tree`'s recursive descent -- and nothing gated them on the
+    /// panel being drawn at all. Measured against this repo on Windows,
+    /// minimising the window changed nothing: 0.65 git processes a second
+    /// while minimised, against 0.45 while visible. With the gate, a
+    /// minimised window runs **zero** in twenty seconds and returns to
+    /// 0.75/s the moment it is restored.
+    ///
+    /// The signal is a count of real draws, and deliberately not
+    /// `Window::is_window_active()`: that was tried first and reads `true`
+    /// for a minimised window, because `render` stops being called and the
+    /// last polled value simply goes stale. Instrumenting the running app
+    /// showed the draw count freezing (11, 11, 11, …) while the flag stayed
+    /// `true` throughout.
+    ///
+    /// Both halves of the wiring are asserted here: that a draw is counted
+    /// at all, and that a draw clears a suspension. A panel that never
+    /// counted draws leaves the first at zero; a resume path that was never
+    /// wired leaves the second suspended.
+    #[gpui::test]
+    async fn a_drawn_frame_is_counted_and_resumes_a_suspended_walk(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("visible.txt"), "x").expect("seed file");
+
+        let (mut cx, panel) = settled_panel(cx, dir.0.clone());
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| panel.renders) > 0,
+            "render must count the frames this panel is drawn in -- that              count is the whole signal, and a panel that never incremented              it would suspend its walks forever"
+        );
+
+        panel.update(&mut cx.cx, |panel, _| {
+            panel.refresh_suspended = true;
+        });
+        // Force a genuinely new frame: `debug_bounds` reports on the last
+        // one drawn, it does not draw another.
+        let before = panel.read_with(&cx.cx, |panel, _| panel.renders);
+        panel.update(&mut cx.cx, |_, cx| cx.notify());
+        cx.cx.run_until_parked();
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| panel.renders) > before,
+            "the harness really did draw another frame"
+        );
+
+        assert!(
+            !panel.read_with(&cx.cx, |panel, _| panel.refresh_suspended),
+            "a drawn frame must clear the suspension and refresh at once,              so a restored window never shows a tree frozen at the moment it              was hidden"
         );
     }
 
