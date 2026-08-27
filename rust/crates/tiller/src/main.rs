@@ -8679,7 +8679,10 @@ impl TillerWorkspace {
     fn open_action(&mut self, action: NewTabAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             NewTabAction::NewChat => self.add_chat_tab(window, None, cx),
-            NewTabAction::NewTerminal => self.add_terminal_tab("Terminal", cx),
+            NewTabAction::NewTerminal => {
+                self.add_terminal_tab("Terminal", cx);
+                self.focus_active_pane(window, cx);
+            }
             NewTabAction::NewChanges => self.add_changes_tab(None, cx),
             NewTabAction::ClaudeCode
             | NewTabAction::Codex
@@ -8696,6 +8699,7 @@ impl TillerWorkspace {
                     return;
                 };
                 self.add_agent_tab(*adapter, agent_icon, cx);
+                self.focus_active_pane(window, cx);
             }
             NewTabAction::SplitClaudeCode => {
                 self.split_focused_agent("claude", SplitDirection::Horizontal, None, cx);
@@ -9044,6 +9048,28 @@ impl TillerWorkspace {
             self.sync_control_panes(cx);
             cx.notify();
         }
+    }
+
+    /// Hands keyboard focus to the pane a freshly created tab just
+    /// selected (#218).
+    ///
+    /// `insert_terminal_tab_with_agent` sets `focused_pane` and
+    /// `active_tab`, but that is only the logical selection: moving
+    /// real keyboard focus needs a `Window`, and none of the
+    /// `add_terminal_tab*` chain takes one. So a new pane drew, and
+    /// swallowed every keystroke until it was clicked -- worst on an
+    /// agent pane, whose whole purpose is to be typed into and which
+    /// often opens straight into a CLI question.
+    ///
+    /// Called from `open_action`, which has the window already and
+    /// used to drop it. Deliberately not called from session
+    /// restore: reopening tabs at launch should not seize focus.
+    fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.focused_pane)
+        else {
+            return;
+        };
+        self.select_pane(pane_id, Some(window), cx);
     }
 
     fn focus_neighbor(
@@ -25267,6 +25293,63 @@ mod tests {
                  alpha (Done) despite being added second"
             );
         });
+    }
+
+    /// #218: a pane opened by a user action must be able to receive typing.
+    ///
+    /// `insert_terminal_tab_with_agent` sets `focused_pane` and `active_tab`,
+    /// but that is only the logical selection. Real keyboard focus needs a
+    /// `Window`, and none of the `add_terminal_tab*` chain takes one -- so a
+    /// new pane drew, and swallowed every keystroke until it was clicked.
+    /// `open_action` had the window in hand the whole time and dropped it.
+    ///
+    /// Measured before the fix by driving the app: `+ -> New Terminal`, then
+    /// typing `echo focus-probe` with the window foregrounded and no click,
+    /// left the prompt bare. One click into the pane, same keystrokes, and
+    /// the text appeared. Worst on an agent pane, which opens straight into
+    /// a CLI question and is the one surface whose entire purpose is typing.
+    ///
+    /// The assertion is on the window's own focus, not on `focused_pane` --
+    /// the latter was already correct while the defect was live, so asserting
+    /// it would prove nothing.
+    #[gpui::test]
+    async fn a_new_terminal_pane_takes_keyboard_focus(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_action(NewTabAction::NewTerminal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let terminal_focus = cx.update(|_, cx| {
+            workspace.read(cx).tabs.last().and_then(|tab| {
+                let mut handle = None;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        handle = Some(view.focus_handle(cx));
+                    }
+                });
+                handle
+            })
+        });
+        let terminal_focus = terminal_focus.expect("the new tab holds a terminal pane");
+
+        assert!(
+            cx.update(|window, _| terminal_focus.is_focused(window)),
+            "a terminal opened by a user action must hold keyboard focus, or \
+             it silently swallows everything typed at it until it is clicked"
+        );
     }
 
     /// #187: the 40 ms poll loop compares each tick's roster snapshot with
