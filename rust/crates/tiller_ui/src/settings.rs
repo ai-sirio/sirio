@@ -3494,7 +3494,17 @@ impl Settings {
                                 .text_color(theme.meta)
                                 .child(text!(
                                     id = ("settings-agent-version", index),
-                                    format!("v{version}")
+                                    // #197: name the subject. This is the
+                                    // ACP server package's version, from
+                                    // `tiller_registry` -- the same thing
+                                    // the badge and Install button beside
+                                    // it are about. Bare, it sat next to
+                                    // the CLI's path in the same colour at
+                                    // the same size and read as that
+                                    // binary's version, which it never was:
+                                    // this row said "v0.70.0" beside a
+                                    // claude.exe reporting 2.1.247.
+                                    format!("ACP v{version}")
                                 ))
                         }))
                         .child(Self::render_acp_badge(
@@ -5513,6 +5523,73 @@ mod tests {
         };
         let source = LaunchSource::Installable { agent };
         assert_eq!(launch_badge_label(&source), "Available to install");
+    }
+
+    /// #197: the version in an agent row belongs to the **ACP server
+    /// package**, never to the CLI whose path sits beside it. Rendered bare
+    /// as `v0.70.0`, in the same colour and size as that path and six pixels
+    /// from it, it read as the binary's own version -- and was wrong every
+    /// time. On the machine this was found, the row said `v0.70.0` next to a
+    /// `claude.exe` reporting `2.1.247`.
+    ///
+    /// The fixture makes the two disagree on purpose, which is what stops
+    /// this from being a restatement of the match arms: the executable is a
+    /// claude binary and the launch source is a package at an unrelated
+    /// version, and the row must report the package's.
+    #[test]
+    fn the_row_version_describes_the_acp_package_not_the_cli() {
+        use tiller_registry::{Distribution, LaunchSource, RegistryAgent};
+
+        let availability = AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/home/u/.local/bin/claude")),
+        };
+        let source = LaunchSource::Installable {
+            agent: RegistryAgent {
+                id: "claude-code-acp".into(),
+                name: "Claude Code ACP".into(),
+                version: "0.70.0".into(),
+                description: None,
+                repository: None,
+                website: None,
+                license: None,
+                icon: None,
+                distributions: vec![Distribution::Binary(Default::default())],
+            },
+        };
+
+        let row = provider_row(&availability, Some(&source));
+        assert_eq!(
+            row.version.as_deref(),
+            Some("0.70.0"),
+            "the version tracks the ACP launch source, not the binary --              which is exactly why the rendered string has to name its subject"
+        );
+        assert_eq!(
+            row.status,
+            ProviderStatus::Installed(PathBuf::from("/home/u/.local/bin/claude")),
+            "the path in the same row is the CLI's, so the two sit together              describing different artifacts"
+        );
+    }
+
+    /// A `Builtin` source carries no package, so the column simply vanishes
+    /// -- OpenCode was the tell that the number never belonged to the
+    /// binary, since it showed a path and no version at all (#197).
+    #[test]
+    fn a_builtin_row_has_no_acp_version_to_show() {
+        use tiller_registry::LaunchSource;
+
+        let availability = AgentAvailability {
+            id: "opencode",
+            display_name: "OpenCode",
+            executable: Some(PathBuf::from("/home/u/.opencode/bin/opencode")),
+        };
+        let source = LaunchSource::Builtin {
+            program: "opencode".into(),
+            args: vec!["acp".into()],
+        };
+
+        assert_eq!(provider_row(&availability, Some(&source)).version, None);
     }
 
     #[test]
