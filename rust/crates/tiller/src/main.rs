@@ -11577,6 +11577,14 @@ impl TillerWorkspace {
             window_command_availability(WindowCommand::FocusAddressBar, active_tab_kind),
             WindowCommandAvailability::Enabled
         ) {
+            // #227: `cx.propagate()`, not a bare `return`. GPUI stops
+            // bubble-phase dispatch as soon as a listener for the action
+            // exists on the path, whatever its body does -- the
+            // mechanism spelled out on `handle_close_settings_surface`.
+            // So returning here ate `ctrl-l` outright: the command is
+            // disabled without a browser tab, and the focused terminal
+            // never saw the key it uses to clear the screen.
+            cx.propagate();
             return;
         }
         if let Some(browser) = self.active_browser_surface() {
@@ -11640,6 +11648,10 @@ impl TillerWorkspace {
             window_command_availability(WindowCommand::SaveFile, active_tab_kind),
             WindowCommandAvailability::Enabled
         ) {
+            // #227: see `handle_focus_address_bar`. With no editor tab
+            // this command has no claim on `ctrl-s`, which is XOFF in a
+            // terminal and ForwardSearchHistory under PSReadLine.
+            cx.propagate();
             return;
         }
         let views = self
