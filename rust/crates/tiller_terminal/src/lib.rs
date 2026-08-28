@@ -4037,6 +4037,46 @@ mod tests {
         assert!(TerminalView::selection_gesture_wanted(false, true));
     }
 
+    /// #264 (part of #263): does libghostty-vt answer the Kitty graphics
+    /// query itself, or must the pane compose the reply?
+    ///
+    /// This is the pivot the whole ticket turns on. Both Pi and omp probe
+    /// actively and stay silent until answered, so if the crate replies the
+    /// remaining work is only rendering; if it does not, the pane owes a
+    /// reply it currently has no idea how to build.
+    ///
+    /// The query is Kitty's own support probe -- a 1x1 RGB image with
+    /// `a=q` (query, do not store) -- and a terminal that supports the
+    /// protocol answers `_Gi=<id>;OK`.
+    #[test]
+    fn kitty_graphics_query_answer_comes_from_the_crate_or_not_at_all() {
+        let replies = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
+        let sink = replies.clone();
+        let mut term = headless_term(80, 24);
+        term.on_pty_write(move |_term, data: &[u8]| {
+            sink.borrow_mut().extend_from_slice(data);
+        })
+        .expect("register the pty-write callback");
+
+        // A control first: DSR-CPR is a query the crate is known to answer,
+        // so an empty result below means "no Kitty reply", not "the callback
+        // was never wired".
+        advance_headless(&mut term, b"[6n");
+        let cursor_reply = String::from_utf8_lossy(&replies.borrow()).into_owned();
+        assert!(
+            cursor_reply.contains('R'),
+            "control: the crate answers DSR-CPR, so the callback is live: {cursor_reply:?}"
+        );
+        replies.borrow_mut().clear();
+
+        advance_headless(&mut term, b"_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\");
+        let answer = String::from_utf8_lossy(&replies.borrow()).into_owned();
+        assert_eq!(
+            answer, "_Gi=31;OK\\",
+            "libghostty-vt answers the Kitty graphics query itself; if this              ever fails, the pane owes the reply and #263's scope grows"
+        );
+    }
+
     /// #259: a selection spanning lines is linewise, not rectangular.
     #[test]
     fn a_multi_line_selection_takes_whole_lines_between_its_ends() {
