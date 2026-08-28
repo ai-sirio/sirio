@@ -4584,9 +4584,14 @@ impl TillerWorkspace {
                             TabContent::Chat(chat) => {
                                 state.chat_draft = chat.read(cx).draft_text();
                             }
-                            TabContent::File { .. }
-                            | TabContent::Changes(_)
-                            | TabContent::Browser(_) => {}
+                            // #125 (spec R6.5): read live at save time, the
+                            // same pattern as the scrollback and draft arms
+                            // above, so the address survives a restart.
+                            TabContent::Browser(browser) => {
+                                state.browser_url =
+                                    browser.read(cx).state().address().to_string();
+                            }
+                            TabContent::File { .. } | TabContent::Changes(_) => {}
                         }
                     });
                     state
@@ -13491,7 +13496,8 @@ fn restore_tabs(
                 let Some(window) = window.as_deref_mut() else {
                     continue;
                 };
-                let browser = cx.new(|cx| BrowserSurface::new("https://example.com", window, cx));
+                let address = restored_browser_url(&tab_state).to_string();
+                let browser = cx.new(|cx| BrowserSurface::new(&address, window, cx));
                 TabContent::Browser(browser)
             }
             "file" => {
@@ -13559,6 +13565,19 @@ fn restore_tabs(
         }
     }
     (tabs, active)
+}
+
+/// #125 (spec R6.5): the address a restored Browser tab opens at.
+///
+/// What was captured at save time, or the fallback page when the session
+/// predates the capture or the tab never carried an address. Both restore
+/// paths go through here so the fallback is spelled once.
+fn restored_browser_url(state: &SessionTabState) -> &str {
+    if state.browser_url.is_empty() {
+        "https://example.com"
+    } else {
+        &state.browser_url
+    }
 }
 
 fn restore_tabs_in_workspace(
@@ -13699,9 +13718,10 @@ fn restore_tabs_in_workspace(
             "diff" => TabContent::Changes(
                 cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
             ),
-            "browser" => TabContent::Browser(
-                cx.new(|cx| BrowserSurface::new("https://example.com", window, cx)),
-            ),
+            "browser" => {
+                let address = restored_browser_url(&tab_state).to_string();
+                TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
+            }
             _ => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
@@ -25223,6 +25243,7 @@ mod tests {
                 pane_events: Vec::new(),
                 scrollback: std::collections::BTreeMap::new(),
                 chat_draft: "an idea I never sent".into(),
+                browser_url: String::new(),
             }],
             diagnostics: Vec::new(),
         };
@@ -25251,6 +25272,115 @@ mod tests {
         assert_eq!(draft, "an idea I never sent");
     }
 
+    /// #125 (spec R6.5): the fallback is spelled once, and only stands in for
+    /// a session that carries no address.
+    #[test]
+    fn restored_browser_url_falls_back_only_when_nothing_was_captured() {
+        let mut state = session::SessionTabState::with_root(0);
+        assert_eq!(
+            restored_browser_url(&state),
+            "https://example.com",
+            "a session with no captured address opens the fallback page"
+        );
+        state.browser_url = "https://example.org/probe".into();
+        assert_eq!(restored_browser_url(&state), "https://example.org/probe");
+    }
+
+    /// #125 (spec R6.5), the save half: a browser tab's live address is read
+    /// into the session snapshot, the way the draft and scrollback arms are.
+    #[gpui::test]
+    async fn layout_captures_the_live_browser_address(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let browser = cx.new(|cx| BrowserSurface::new("https://example.org/probe", window, cx));
+            workspace.tabs[0] = OpenTab {
+                id: 0,
+                persistence_id: "test-browser".into(),
+                group_id: 0,
+                title: "Browser".into(),
+                kind: TabKind::Browser,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(0),
+                panes: PaneNode::leaf(0, TabContent::Browser(browser)),
+                focused_pane: 0,
+                title_is_auto_named: true,
+            };
+            workspace.rebuild_tab_machinery();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let captured = workspace.update(&mut cx, |workspace, cx| {
+            workspace.layout(cx).tab_states[0].browser_url.clone()
+        });
+        assert_eq!(
+            captured, "https://example.org/probe",
+            "the live address must reach the session snapshot, not the fallback"
+        );
+    }
+
+    /// #125 (spec R6.5), the restore half: the captured address is what the
+    /// rebuilt surface opens at.
+    #[gpui::test]
+    async fn a_restored_browser_tab_reopens_its_saved_address(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::current_dir().expect("current directory");
+        let restored = session::RestoredSession {
+            working_directory: working_directory.clone(),
+            tabs: vec![session::SessionTab {
+                id: "restored-browser".into(),
+                title: "Browser".into(),
+                kind: "browser".into(),
+                agent_id: None,
+                active: true,
+            }],
+            tab_states: vec![session::SessionTabState {
+                root_id: Some(0),
+                pane_events: Vec::new(),
+                scrollback: std::collections::BTreeMap::new(),
+                chat_draft: String::new(),
+                browser_url: "https://example.org/probe".into(),
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let address = cx.update(|window, cx| {
+            let mut activity = AgentActivityModel::new();
+            let (tabs, _) = restore_tabs(
+                &restored,
+                &working_directory,
+                Some(window),
+                &mut activity,
+                &BTreeMap::new(),
+                cx,
+            );
+            let mut address = None;
+            tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Browser(browser) = content {
+                    address = Some(browser.read(cx).state().address().to_string());
+                }
+            });
+            address.expect("restored browser tab has a browser pane")
+        });
+        assert_eq!(
+            address, "https://example.org/probe",
+            "a restored Browser tab must reopen where the user left it"
+        );
+    }
+
     #[gpui::test]
     async fn restore_replays_persisted_terminal_scrollback(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -25271,6 +25401,7 @@ mod tests {
                 pane_events: Vec::new(),
                 scrollback: std::collections::BTreeMap::from([(0, nonce.clone())]),
                 chat_draft: String::new(),
+                browser_url: String::new(),
             }],
             diagnostics: Vec::new(),
         };
