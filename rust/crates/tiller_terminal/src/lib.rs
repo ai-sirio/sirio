@@ -615,10 +615,20 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
 
         let mut last_title = String::new();
         let mut child_exit_reported = false;
+        // #229: whether the guest has asked for win32-input-mode, and the tail
+        // carried between reads so the request is still seen when it straddles
+        // a chunk boundary.
+        let mut win32_input_mode = false;
+        let mut win32_tail: Vec<u8> = Vec::new();
         loop {
             // 1. Drain whatever the PTY produced into the parser.
             let mut had_output = false;
             while let Ok(chunk) = bytes_rx.try_recv() {
+                win32_input_mode = scan_win32_input_mode_streaming(
+                    &chunk,
+                    &mut win32_tail,
+                    win32_input_mode,
+                );
                 terminal.vt_write(&chunk);
                 had_output = true;
             }
@@ -641,7 +651,19 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         let _ = writer.flush();
                     }
                     TerminalCommand::Key(input) => {
-                        if let Ok(bytes) = encode_key_input(&terminal, &mut key_encoder, input) {
+                        // #229: under win32-input-mode the guest wants a key
+                        // record, not the bare control byte -- see
+                        // `encode_win32_key`. Keys that path does not handle
+                        // still go through the normal VT encoder.
+                        let win32 = win32_input_mode
+                            .then(|| encode_win32_key(&input))
+                            .flatten();
+                        if let Some(bytes) = win32 {
+                            let _ = writer.write_all(&bytes);
+                            let _ = writer.flush();
+                        } else if let Ok(bytes) =
+                            encode_key_input(&terminal, &mut key_encoder, input)
+                        {
                             let _ = writer.write_all(&bytes);
                             let _ = writer.flush();
                         }
@@ -3374,6 +3396,99 @@ fn character_key(character: char) -> key::Key {
     }
 }
 
+/// #229: `ESC [ ? 9001 h` / `l` -- the guest turning win32-input-mode on or off.
+///
+/// ConPTY writes this request as its first act after the startup DSR, and then
+/// expects structured key records back. Without them a bare control byte
+/// reaches the console host as a *character* with no `LEFT_CTRL_PRESSED` flag,
+/// which is why PSReadLine inserts `^U` instead of discarding the line.
+///
+/// Gating on the mode rather than on `cfg(windows)` is deliberate: nothing on
+/// Linux ever asks for 9001, so this stays inert there on its own, and the
+/// tests run on every platform rather than only the one that needs the fix.
+fn scan_win32_input_mode(chunk: &[u8], current: bool) -> bool {
+    const ON: &[u8] = b"[?9001h";
+    const OFF: &[u8] = b"[?9001l";
+    let mut state = current;
+    let mut index = 0;
+    while index + ON.len() <= chunk.len() {
+        let window = &chunk[index..index + ON.len()];
+        if window == ON {
+            state = true;
+            index += ON.len();
+        } else if window == OFF {
+            state = false;
+            index += OFF.len();
+        } else {
+            index += 1;
+        }
+    }
+    state
+}
+
+/// [`scan_win32_input_mode`] across chunk boundaries.
+///
+/// The request is nine bytes and a PTY read can split it anywhere, so the tail
+/// of each chunk is carried forward and prepended to the next one. Eight bytes
+/// is the most that can be pending without the sequence already being complete.
+fn scan_win32_input_mode_streaming(chunk: &[u8], tail: &mut Vec<u8>, current: bool) -> bool {
+    const CARRY: usize = 8;
+    let mut combined = std::mem::take(tail);
+    combined.extend_from_slice(chunk);
+    let state = scan_win32_input_mode(&combined, current);
+    let keep = combined.len().saturating_sub(CARRY);
+    tail.clear();
+    tail.extend_from_slice(&combined[keep..]);
+    state
+}
+
+/// #229: one key as a win32-input-mode record pair.
+///
+/// `ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, key-down then key-up. ConPTY turns
+/// each of these back into an `INPUT_RECORD` carrying the control-key state,
+/// which is the flag PSReadLine dispatches its bindings on and the one thing
+/// the bare control byte cannot express.
+///
+/// Returns `None` for anything this path does not model, so the caller falls
+/// back to the normal VT encoder rather than dropping the key. The scope is
+/// deliberately the keys that are actually broken -- `ctrl` plus an
+/// alphanumeric -- because every other key already survives ConPTY's own
+/// translation, and re-encoding those would be risk without a defect behind it.
+fn encode_win32_key(input: &KeyInput) -> Option<Vec<u8>> {
+    const LEFT_ALT_PRESSED: u32 = 0x0002;
+    const LEFT_CTRL_PRESSED: u32 = 0x0008;
+    const SHIFT_PRESSED: u32 = 0x0010;
+
+    if !input.mods.contains(key::Mods::CTRL) {
+        return None;
+    }
+    let codepoint = input.unshifted_codepoint?;
+    if !codepoint.is_ascii_alphanumeric() {
+        return None;
+    }
+
+    let virtual_key = codepoint.to_ascii_uppercase() as u32;
+    // Windows puts the control character in the record's unicode field for
+    // ctrl+letter; digits carry none.
+    let unicode = if codepoint.is_ascii_alphabetic() {
+        u32::from(codepoint.to_ascii_lowercase() as u8 - b'a' + 1)
+    } else {
+        0
+    };
+    let mut control_state = LEFT_CTRL_PRESSED;
+    if input.mods.contains(key::Mods::SHIFT) {
+        control_state |= SHIFT_PRESSED;
+    }
+    if input.mods.contains(key::Mods::ALT) {
+        control_state |= LEFT_ALT_PRESSED;
+    }
+
+    let record = |down: u32| {
+        format!("[{virtual_key};0;{unicode};{down};{control_state};1_")
+    };
+    Some(format!("{}{}", record(1), record(0)).into_bytes())
+}
+
 fn encode_key_input(
     terminal: &Terminal<'_, '_>,
     encoder: &mut key::Encoder<'_>,
@@ -3624,6 +3739,84 @@ mod tests {
         let input = key_input(event).expect("guest-bound key");
         let mut encoder = key::Encoder::new().expect("key encoder");
         encode_key_input(term, &mut encoder, input).expect("encode key")
+    }
+
+    /// #229: the guest's request must be seen, in either direction, and an
+    /// unrelated chunk must not disturb whatever was already decided.
+    #[test]
+    fn win32_input_mode_follows_the_guest_request() {
+        assert!(scan_win32_input_mode(b"[?9001h", false));
+        assert!(!scan_win32_input_mode(b"[?9001l", true));
+        assert!(scan_win32_input_mode(b"hello world", true));
+        assert!(!scan_win32_input_mode(b"hello world", false));
+        // The real ConPTY handshake: DSR, then the request, then other modes.
+        assert!(scan_win32_input_mode(
+            b"[6n[?9001h[?1004h[m",
+            false
+        ));
+        // Last one wins when a chunk carries both.
+        assert!(!scan_win32_input_mode(b"[?9001h[?9001l", false));
+        assert!(scan_win32_input_mode(b"[?9001l[?9001h", true));
+    }
+
+    /// A PTY read can split the request anywhere; the tail has to carry it.
+    #[test]
+    fn win32_input_mode_survives_a_split_chunk() {
+        let mut tail = Vec::new();
+        assert!(!scan_win32_input_mode_streaming(b"[?90", &mut tail, false));
+        assert!(scan_win32_input_mode_streaming(b"01h", &mut tail, false));
+
+        // Byte at a time, the worst case.
+        let mut tail = Vec::new();
+        let mut state = false;
+        for byte in b"[?9001h" {
+            state = scan_win32_input_mode_streaming(&[*byte], &mut tail, state);
+        }
+        assert!(state);
+    }
+
+    /// The record ConPTY needs, for the key the issue was filed about.
+    #[test]
+    fn win32_encoding_gives_ctrl_u_a_key_record() {
+        let ctrl = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let input = key_input(&key_event("u", None, ctrl)).expect("guest-bound key");
+        let encoded = encode_win32_key(&input).expect("ctrl-u is encodable");
+        // Vk 85 ('U'), Uc 21 (0x15), down then up, Cs 8 = LEFT_CTRL_PRESSED.
+        assert_eq!(encoded, b"[85;0;21;1;8;1_[85;0;21;0;8;1_");
+    }
+
+    /// Shift and alt ride along in the control-key state.
+    #[test]
+    fn win32_encoding_carries_the_other_modifiers() {
+        let ctrl_shift = gpui::Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        };
+        let input = key_input(&key_event("k", None, ctrl_shift)).expect("guest-bound key");
+        let encoded = encode_win32_key(&input).expect("ctrl-shift-k is encodable");
+        let text = String::from_utf8(encoded).expect("ascii");
+        // 0x08 | 0x10 == 24.
+        assert!(text.starts_with("[75;0;11;1;24;1_"), "{text:?}");
+    }
+
+    /// Everything this path does not model must fall through to the VT encoder
+    /// rather than be swallowed -- returning `None` is what makes that happen.
+    #[test]
+    fn win32_encoding_declines_what_it_does_not_model() {
+        let plain = gpui::Modifiers::default();
+        let unmodified = key_input(&key_event("u", None, plain)).expect("guest-bound key");
+        assert!(encode_win32_key(&unmodified).is_none());
+
+        let ctrl = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let named = key_input(&key_event("left", None, ctrl)).expect("guest-bound key");
+        assert!(encode_win32_key(&named).is_none());
     }
 
     #[test]
