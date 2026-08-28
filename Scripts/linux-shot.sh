@@ -34,7 +34,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/artifacts/shot.png}"
 SETTLE="${2:-6}"
 DISP="${3:-:1}"
-BIN="$ROOT/rust/target/debug/tiller"
+BIN="$ROOT/rust/target/debug/sirio"
 LOG="${OUT%.png}.log"
 MIN_COLORS=200          # a real UI frame has thousands; a dropped-frame capture has 1
 

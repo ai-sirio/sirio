@@ -1,4 +1,4 @@
-# Piano 001: migliorare performance e fluidità di Tiller
+# Piano 001: migliorare performance e fluidità di Sirio
 
 > **Istruzioni per l'esecutore**: seguire il piano fase per fase. Eseguire ogni
 > verifica e confermare il risultato atteso prima di continuare. Se si verifica
@@ -29,7 +29,7 @@
 
 ## Perché è importante
 
-Tiller ha già risolto diversi costi strutturali della pipeline terminale, ma
+Sirio ha già risolto diversi costi strutturali della pipeline terminale, ma
 durante lo streaming ACP continua a ricostruire l'intero messaggio Markdown e
 il relativo layout TextKit sul `MainActor`. Con transcript lunghi, la
 persistenza codifica e riscrive inoltre l'intera conversazione in modo
@@ -46,18 +46,18 @@ completate mantengono l'attuale resa Markdown.
 
 ### Ottimizzazioni già presenti e da conservare
 
-- `Packages/TillerTerminal/Sources/TillerTerminal/PtyProcess.swift` usa già un
+- `Packages/SirioTerminal/Sources/SirioTerminal/PtyProcess.swift` usa già un
   buffer di lettura PTY riutilizzabile da 64 KB.
-- `Packages/TillerTerminal/Sources/TillerTerminal/PtyTerminalPane.swift`
+- `Packages/SirioTerminal/Sources/SirioTerminal/PtyTerminalPane.swift`
   estrae soltanto gli ultimi 10 KB per il content signal.
-- `Packages/TillerTerminal/Sources/TillerTerminal/SurfaceVisibility.swift`
+- `Packages/SirioTerminal/Sources/SirioTerminal/SurfaceVisibility.swift`
   propaga la visibilità alla superficie libghostty e ferma il display link dei
   pane nascosti.
 - `App/Chat/AgentMarkdownTextView.swift` memorizza l'altezza TextKit per testo e
   larghezza invariati.
 - `App/Chat/ChatController.swift` raggruppa gli eventi ACP e applica
   backpressure con un intervallo adattivo di 40-500 ms.
-- `Packages/TillerTerminal/Sources/TillerTerminal/ScrollbackBuffer.swift`
+- `Packages/SirioTerminal/Sources/SirioTerminal/ScrollbackBuffer.swift`
   limita lo scrollback ausiliario a 256 KB.
 
 Queste soluzioni non devono essere rimosse o reimplementate durante le fasi
@@ -73,12 +73,12 @@ seguenti.
    highlighting sul `MainActor`.
 3. `App/Chat/ChatController.swift:persist` chiama sincronicamente
    `ChatSessionStore.saveTranscript` dal `MainActor`.
-4. `Packages/TillerACP/Sources/TillerACP/ChatSessionStore.swift:saveTranscript`
+4. `Packages/SirioACP/Sources/SirioACP/ChatSessionStore.swift:saveTranscript`
    ricodifica tutti gli item, cancella tutte le righe della sessione e le
    reinserisce una alla volta.
-5. `Packages/TillerTerminal/Sources/TillerTerminal/PtyTerminalPane.swift`
+5. `Packages/SirioTerminal/Sources/SirioTerminal/PtyTerminalPane.swift`
    crea un `Task` verso `ScrollbackBuffer` per ogni chunk PTY.
-6. `Packages/TillerTerminal/Sources/TillerTerminal/ScrollbackBuffer.swift:append`
+6. `Packages/SirioTerminal/Sources/SirioTerminal/ScrollbackBuffer.swift:append`
    inserisce i byte individualmente con un'operazione modulo per byte.
 7. `App/AppModel.swift:handleContentSignal` può invocare due volte
    `checkForegroundAgent` per lo stesso segnale di un pane process-owned.
@@ -95,12 +95,12 @@ seguenti.
 
 | Scopo | Comando | Risultato atteso |
 |---|---|---|
-| Test ACP | `cd Packages/TillerACP && swift test` | exit 0, tutti i test passano |
-| Test terminale | `cd Packages/TillerTerminal && swift test` | exit 0, tutti i test passano |
+| Test ACP | `cd Packages/SirioACP && swift test` | exit 0, tutti i test passano |
+| Test terminale | `cd Packages/SirioTerminal && swift test` | exit 0, tutti i test passano |
 | Test core | `cd Packages/TillerCore && swift test` | exit 0, tutti i test passano |
-| Test Git | `cd Packages/TillerGit && swift test` | exit 0, tutti i test passano |
+| Test Git | `cd Packages/SirioGit && swift test` | exit 0, tutti i test passano |
 | Rigenerazione progetto | `xcodegen generate` | exit 0 |
-| Test App | `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO -only-testing:TillerTests` | exit 0, tutti i test passano |
+| Test App | `xcodebuild test -project Sirio.xcodeproj -scheme Sirio -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO -only-testing:SirioTests` | exit 0, tutti i test passano |
 | Gate repository | `Scripts/ci.sh` | exit 0, ultima riga `CI OK` |
 
 Usare test focalizzati durante ogni fase. Eseguire il gate completo soltanto
@@ -180,7 +180,7 @@ fixture e lo stesso hardware prima e dopo.
 
 - Eseguire le fixture due volte: devono produrre lo stesso numero di eventi,
   byte, elementi e refresh.
-- `defaults read dev.tiller debug.signpostMetrics` assente o falso deve lasciare
+- `defaults read dev.sirio debug.signpostMetrics` assente o falso deve lasciare
   i signpost disabilitati.
 - Le etichette dei signpost non devono includere testo terminale, prompt,
   comandi, percorsi o identità.

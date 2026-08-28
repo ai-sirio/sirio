@@ -5,9 +5,9 @@
 # Both halves matter. The first is the leak this test was written for: under
 # TILLER_WL_KEEP, cleanup() returns early by design, so the only thing that ever
 # removes a helper is the *next* invocation's startup reap. Before 2026-08-19
-# that reap covered tiller and sway and nothing else, and a KEEP-mode critic
+# that reap covered sirio and sway and nothing else, and a KEEP-mode critic
 # driving one fixed label accumulated 20 dbus-daemons, 18 virtual-pointers and
-# 13 wtypes in twenty minutes against exactly one tiller and one sway.
+# 13 wtypes in twenty minutes against exactly one sirio and one sway.
 #
 # The second half is why the reap cannot simply match on process name: several
 # critics drive their own lanes in parallel on this machine, and killing by comm

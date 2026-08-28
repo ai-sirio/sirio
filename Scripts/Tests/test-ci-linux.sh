@@ -28,7 +28,7 @@ required_markers=(
     'cargo fmt'
     'cargo clippy'
     'cargo build'
-    'tiller_control'
+    'sirio_control'
     'cargo test --workspace'
     'TILLER_ACP_REAL'
     # Anchored on the invocation, not the bare name. `real_claude` alone is also present in
@@ -36,7 +36,7 @@ required_markers=(
     # left this marker green -- the check passed on the strength of prose rather than of the
     # command actually run. Verified by negative control: 's/--test real_claude/--test other/'
     # now fails, where 'real_claude' did not.
-    '-p tiller_acp --test real_claude'
+    '-p sirio_acp --test real_claude'
     'test-crash-supervise.py'
     'test-crash-freeze-supervise.py'
     'test-visual-sweep.sh'
@@ -66,7 +66,7 @@ required_markers=(
     'CI OK'
 )
 for marker in "${required_markers[@]}"; do
-    # `--` is required: markers may begin with a dash (e.g. '-p tiller_acp --test
+    # `--` is required: markers may begin with a dash (e.g. '-p sirio_acp --test
     # real_claude'), which grep would otherwise parse as its own options.
     grep -Fq -- "$marker" "$SCRIPT" || {
         echo "FAIL: gate is missing required marker: $marker" >&2
@@ -145,8 +145,8 @@ grep -Fq 'not a code regression' "$SCRIPT" || {
     exit 1
 }
 
-if grep -Fq -- '-p tillerctl' "$SCRIPT"; then
-    echo "FAIL: gate builds the nonexistent tillerctl package" >&2
+if grep -Fq -- '-p sirioctl' "$SCRIPT"; then
+    echo "FAIL: gate builds the nonexistent sirioctl package" >&2
     exit 1
 fi
 if grep -Fq 'mktemp -u' "$SCRIPT"; then
@@ -171,12 +171,12 @@ grep -Fq -- '-D warnings' "$SCRIPT" || {
     echo "FAIL: owned-crate clippy must fail on the first warning" >&2
     exit 1
 }
-grep -Fq -- '--exclude tiller' "$SCRIPT" || {
-    echo "FAIL: clippy must leave the tiller main owner boundary untouched" >&2
+grep -Fq -- '--exclude sirio' "$SCRIPT" || {
+    echo "FAIL: clippy must leave the sirio main owner boundary untouched" >&2
     exit 1
 }
-grep -Fq -- '--exclude tiller_ui' "$SCRIPT" || {
-    echo "FAIL: clippy must leave the tiller_ui owner boundary untouched" >&2
+grep -Fq -- '--exclude sirio_ui' "$SCRIPT" || {
+    echo "FAIL: clippy must leave the sirio_ui owner boundary untouched" >&2
     exit 1
 }
 

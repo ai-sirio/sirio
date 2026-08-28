@@ -1,6 +1,6 @@
 # Code signing and notarization: requirements and costs (macOS, Windows)
 
-This document answers one question — **what do macOS notarization and Windows code signing actually require of us, and what do they cost?** — for Tiller's planned release on Windows, Linux and macOS with an in-app auto-updater. It is a record of *facts with sources*, not a recommendation: the choice of which certificate, which CA, and whether to sign at all is a separate decision for a human to make against these facts. Every figure below is dated and attributed to the page it was taken from. Facts were gathered on **2026-08-23**; prices and CA/Browser Forum rules both change, and several of the numbers here have a stated effective date in 2026, so re-verify before committing money.
+This document answers one question — **what do macOS notarization and Windows code signing actually require of us, and what do they cost?** — for Sirio's planned release on Windows, Linux and macOS with an in-app auto-updater. It is a record of *facts with sources*, not a recommendation: the choice of which certificate, which CA, and whether to sign at all is a separate decision for a human to make against these facts. Every figure below is dated and attributed to the page it was taken from. Facts were gathered on **2026-08-23**; prices and CA/Browser Forum rules both change, and several of the numbers here have a stated effective date in 2026, so re-verify before committing money.
 
 ## Source discipline used here
 
@@ -19,7 +19,7 @@ The fee is the same whether you enrol as an individual or as an organization.
 > "The Apple Developer Program annual fee is 99 USD and the Apple Developer Enterprise Program annual fee is 299 USD, in local currency where available. Prices may vary by region and are listed in local currency during the enrollment process."
 > — <https://developer.apple.com/support/enrollment/> (read 2026-08-23)
 
-The Apple Developer Program page states the same figure as "$99 annual membership" (<https://developer.apple.com/programs/>). The **Enterprise Program at 299 USD is not the relevant product** for Tiller — it exists for in-house distribution to employees, not public distribution — so the number to plan against is **99 USD/year**.
+The Apple Developer Program page states the same figure as "$99 annual membership" (<https://developer.apple.com/programs/>). The **Enterprise Program at 299 USD is not the relevant product** for Sirio — it exists for in-house distribution to employees, not public distribution — so the number to plan against is **99 USD/year**.
 
 **Individual / sole proprietor enrolment** requires the person's legal name; Apple's enrolment page notes that a sole proprietor or single-person business enrols as an individual, and that the personal legal name is what gets listed as the seller. No D-U-N-S number is involved.
 
@@ -47,7 +47,7 @@ They are not interchangeable, and this is enforced at the notary service, not me
 > "Use a 'Developer ID' application, kernel extension, system extension, or installer certificate for your code-signing signature. (Don't use a Mac Distribution, ad hoc, Apple Developer, or local development certificate.)"
 > — <https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution>
 
-There is also a **Developer ID Installer** certificate for signing `.pkg` installer packages distributed outside the store. If Tiller ships a `.pkg` (as opposed to a `.dmg` containing a `.app`), both certificate types are needed.
+There is also a **Developer ID Installer** certificate for signing `.pkg` installer packages distributed outside the store. If Sirio ships a `.pkg` (as opposed to a `.dmg` containing a `.app`), both certificate types are needed.
 
 Two operational facts from Apple's certificates page:
 
@@ -314,7 +314,7 @@ Key storage is priced separately and is not optional in substance (see §2.2):
 - **Bring your own cloud HSM** attracts a one-time attestation fee: AWS CloudHSM **$1,500**, Google Cloud HSM **$500** (the eSigner page shows $1,500 for Google — ⚠️ a second internal disagreement), Azure Dedicated HSM **$500.00**.
 - Expedited validation +$599.00.
 
-SSL.com also warns on its EV page that "YubiKey tokens are fully suitable for OV code signing. If you require EV code signing, particularly for kernel-mode driver signing (Microsoft HLK), a YubiKey may not meet those requirements." Not relevant to Tiller (no kernel driver) but relevant to anyone reusing this note.
+SSL.com also warns on its EV page that "YubiKey tokens are fully suitable for OV code signing. If you require EV code signing, particularly for kernel-mode driver signing (Microsoft HLK), a YubiKey may not meet those requirements." Not relevant to Sirio (no kernel driver) but relevant to anyone reusing this note.
 
 **Certum** — <https://shop.certum.eu/code-signing.html>, prices in EUR, "gross" and "net" shown as equal on the listing
 
@@ -418,7 +418,7 @@ That third one deserves emphasis given §2.1: certificates now expire in ≤460 
 
 Features Microsoft lists, verbatim: "Provides zero-touch certificate lifecycle management inside FIPS 140-3 level 3 certified HSMs"; "Integrates with leading developer toolsets"; "Supports Public Trust, Private Trust, virtualization-based security (VBS) enclave, code integrity (CI) policy, and test signing scenarios"; "Supports integration with external timestamping services"; "Offers content-confidential signing. Your file never leaves your endpoint, and you get digest signing that is fast and reliable."
 
-For Tiller the relevant profile type is **Public Trust** — chained to a publicly trusted root, which is what a downloaded `.exe` needs.
+For Sirio the relevant profile type is **Public Trust** — chained to a publicly trusted root, which is what a downloaded `.exe` needs.
 
 ⚠️ The docs are internally inconsistent about the HSM certification level: the overview and FAQ say **FIPS 140-3 Level 3**, while a note on the certificate management page says "All certificates and keys that you use in Artifact Signing are managed inside FIPS 140-2 Level 3 operated hardware crypto modules." Either satisfies CSBR §6.2.7.4.1, so it doesn't change the answer, but the docs disagree with themselves.
 
@@ -521,7 +521,7 @@ The RBAC role needed to sign is **Artifact Signing Certificate Profile Signer**;
 
 | Secret | What it is | Blast radius if leaked |
 | --- | --- | --- |
-| **Developer ID Application `.p12`** (certificate + private key) + its export passphrase | The actual signing key. Apple's model is a file on disk, imported into a temporary keychain on the runner. | **Worst case on either platform.** An attacker can sign arbitrary Mac software as us. Malware signed with our identity would pass the Developer ID check. Remediation is revocation — and per Apple, "Any Developer ID app signed with a certificate that has been revoked can no longer be installed nor launch if it's already installed." **Revoking kills every already-shipped Tiller build in the field, not just the malicious one.** |
+| **Developer ID Application `.p12`** (certificate + private key) + its export passphrase | The actual signing key. Apple's model is a file on disk, imported into a temporary keychain on the runner. | **Worst case on either platform.** An attacker can sign arbitrary Mac software as us. Malware signed with our identity would pass the Developer ID check. Remediation is revocation — and per Apple, "Any Developer ID app signed with a certificate that has been revoked can no longer be installed nor launch if it's already installed." **Revoking kills every already-shipped Sirio build in the field, not just the malicious one.** |
 | **App Store Connect API key `.p8`** + Key ID + Issuer ID (must be a **Team** key) | Notarization credential. Downloadable once only; Apple keeps no copy. | An attacker can submit software for notarization *under our team*. They cannot sign — notarization requires an already-Developer-ID-signed binary — so on its own this is a reputational/abuse exposure rather than a signing compromise. Apple: "If you suspect a private key is compromised, immediately revoke the key in App Store Connect." Revocation here is cheap; it does not touch shipped builds. |
 | *or* **Apple ID + app-specific password + Team ID** | Alternative notarization credential. | Scoped to the Apple Account. Cap of 25 active; individually revocable. Note the operational hazard: changing the primary Apple Account password auto-revokes all of them and breaks the pipeline. |
 
@@ -599,7 +599,7 @@ The certificates reference page says the same: "If your certificate expires, use
 
 This is more severe than the Windows equivalent: no revocation-date time-binding is documented, and it reaches *already-installed* copies, not just new downloads. Apple's end-user article confirms the user-visible consequence: "If macOS detects that software has malicious content or its authorization has been revoked for any reason, your Mac notifies you that the app will damage your computer."
 
-**One asymmetry to watch if Tiller ever uses a Developer ID provisioning profile** (needed only for advanced capabilities such as CloudKit or Push): Gatekeeper then "will evaluate the validity of your Developer ID provisioning profile at every app launch" and "if your Developer ID provisioning profile expires, the app will no longer launch." Profiles generated after 2017-02-22 are valid for 18 years, so this is a long fuse rather than an annual one — but it is a per-launch check, unlike the certificate's install-time check. Tiller has no current need for such capabilities; if that changes, this becomes a live constraint.
+**One asymmetry to watch if Sirio ever uses a Developer ID provisioning profile** (needed only for advanced capabilities such as CloudKit or Push): Gatekeeper then "will evaluate the validity of your Developer ID provisioning profile at every app launch" and "if your Developer ID provisioning profile expires, the app will no longer launch." Profiles generated after 2017-02-22 are valid for 18 years, so this is a long fuse rather than an annual one — but it is a per-launch check, unlike the certificate's install-time check. Sirio has no current need for such capabilities; if that changes, this becomes a live constraint.
 
 ### Renewal cadence, side by side
 

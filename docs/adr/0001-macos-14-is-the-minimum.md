@@ -1,4 +1,4 @@
-# 1. macOS 14 is Tiller's minimum supported version
+# 1. macOS 14 is Sirio's minimum supported version
 
 Date: 2026-08-26
 
@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-Tiller keeps one shared browser profile, and that profile must be isolated per
+Sirio keeps one shared browser profile, and that profile must be isolated per
 binary checkout in development so two builds cannot write each other's state —
 the same rule the session database already follows (`session.rs:140-160`).
 
@@ -26,7 +26,7 @@ The repository declared no minimum macOS version before this decision.
 
 ## Decision
 
-Tiller supports **macOS 14 and later**.
+Sirio supports **macOS 14 and later**.
 
 ## Consequences
 
@@ -44,4 +44,4 @@ This is a product decision reached from a narrow cause. It was taken knowingly:
 the alternative considered was to treat pre-14 as unsupported *for isolation only*
 while the app kept running there, which confines the impact to development
 machines but leaves a silently shared store in the field. That alternative was
-rejected in [#140](https://github.com/tillerai/tiller/issues/140).
+rejected in [#140](https://github.com/tillerai/sirio/issues/140).

@@ -41,27 +41,27 @@
 |---|---|---|
 | `WorkspaceContentRef` | `Packages/TillerCore/Sources/TillerCore/Workspace/WorkspaceContentRef.swift:14` | Fase 2 aggiunge `.browser` |
 | `WorkspaceIDs.swift` | `Packages/TillerCore/…/Workspace/WorkspaceIDs.swift` | Fase 2 aggiunge `BrowserContentID` |
-| `AppDatabase.makeMigrator` ultima migrazione `v17` | `Packages/TillerPersistence/…/AppDatabase.swift:283` | Fase 2 aggiunge `v18` |
+| `AppDatabase.makeMigrator` ultima migrazione `v17` | `Packages/SirioPersistence/…/AppDatabase.swift:283` | Fase 2 aggiunge `v18` |
 | `workspaceTab` con `contentKind`/`contentId` + unique | `AppDatabase.swift:245` (`v16`) | **Non cambia**: `"browser"` è un nuovo valore |
 | `WorkspaceSnapshot.materialize()` con `.terminal(...)` hardcoded | `Packages/TillerCore/…/WorkspaceSnapshot.swift:60` | Fase 2 aggiunge il test di non-regressione |
 | `SQLiteWorkspacePersistence` chiamanti di `materialize()` | `App/Workspace/SQLiteWorkspacePersistence.swift:140`, `:255` | Solo validazione strutturale: non toccare |
 | `SplitContentMenuAction` (enum chiuso) | `App/Workspace/SplitContentMenu.swift:24` | Fase 3 aggiunge `newBrowser` |
-| `SplitEligibility.check` (solo geometria) | `Packages/TillerWorkspace/…/SplitEligibility.swift:14` | Nessuna modifica: conferma che lo split è agnostico |
+| `SplitEligibility.check` (solo geometria) | `Packages/SirioWorkspace/…/SplitEligibility.swift:14` | Nessuna modifica: conferma che lo split è agnostico |
 | `WorkspaceLayoutEngine.splitGroup` / `SplitContentPayload` | `Packages/TillerCore/…/WorkspaceLayoutEngine.swift:256` | Nessuna modifica |
-| `TerminalOpenURLRouter.route` | `Packages/TillerTerminal/…/TerminalOpenURLRouter.swift:20` | Fase 5: punto di innesto già esistente |
+| `TerminalOpenURLRouter.route` | `Packages/SirioTerminal/…/TerminalOpenURLRouter.swift:20` | Fase 5: punto di innesto già esistente |
 | `AppModel.handleTerminalOpenURL` | `App/AppModel.swift:2391` | Fase 5: qui si biforca http(s) → surface interna |
-| `ControlServer` + `TillerctlRequestBuilder` | `Packages/TillerControl/Sources/TillerControl/` | Fase 4/6: verbi `browser.*` e CLI |
+| `ControlServer` + `SirioctlRequestBuilder` | `Packages/SirioControl/Sources/SirioControl/` | Fase 4/6: verbi `browser.*` e CLI |
 | `App/AppModel+Control.swift` | — | Fase 4/6: dispatch |
 | `project.yml` | — | Fase 1: nuovo package + target di test |
 
-## Fase 1 — package `TillerBrowser`, navigazione minima
+## Fase 1 — package `SirioBrowser`, navigazione minima
 
 **Obiettivo**: un motore WKWebView headless-testabile che apre un URL e sa dire
 `url`, `title`, `text`, `html`. Nessuna UI, nessun socket.
 
-**File nuovi**: `Packages/TillerBrowser/Package.swift`,
-`Sources/TillerBrowser/{BrowserEngine,BrowserSurface,BrowserCommand,BrowserError,UserAgentPolicy}.swift`,
-`Tests/TillerBrowserTests/`.
+**File nuovi**: `Packages/SirioBrowser/Package.swift`,
+`Sources/SirioBrowser/{BrowserEngine,BrowserSurface,BrowserCommand,BrowserError,UserAgentPolicy}.swift`,
+`Tests/SirioBrowserTests/`.
 
 **Passi**
 1. Package leaf: dipendenze **solo** Foundation + WebKit. Non importare
@@ -81,7 +81,7 @@
 
 **Verifica**
 ```bash
-cd Packages/TillerBrowser && swift test
+cd Packages/SirioBrowser && swift test
 ```
 Test attesi: apre un `file://` di fixture e legge `url`/`title`/`text`; `reload`
 non cambia l'URL; `back` senza history restituisce un errore, non un crash;
@@ -118,7 +118,7 @@ restaura. Nessuna UI ancora.
 **Verifica**
 ```bash
 cd Packages/TillerCore && swift test
-cd Packages/TillerPersistence && swift test
+cd Packages/SirioPersistence && swift test
 ```
 Più un test di round-trip: crea worktree con un tab browser, `flush`, `restore`,
 URL e titolo tornano identici.
@@ -134,7 +134,7 @@ siti prima di procedere.
 
 **Passi**
 1. `App/Browser/BrowserPaneView.swift`: `NSViewRepresentable` sulla surface di
-   `TillerBrowser` + barra back/forward/reload/URL/stop (D13). Stringhe in
+   `SirioBrowser` + barra back/forward/reload/URL/stop (D13). Stringhe in
    inglese.
 2. Cablare il pane nel renderer di contenuto accanto a terminal/chat/document.
 3. **`SplitContentMenuAction.newBrowser`** in `App/Workspace/SplitContentMenu.swift`
@@ -158,7 +158,7 @@ siti prima di procedere.
    persistence.
 
 **Verifica**
-- `cd Packages/TillerWorkspace && swift test` (regressioni layout).
+- `cd Packages/SirioWorkspace && swift test` (regressioni layout).
 - Manuale: apri browser, naviga, titolo e favicon corretti; **splittalo**
   (menu → new browser in split); trascina il tab in un altro pane; nessuna
   finestra di rename automatico compare.
@@ -174,19 +174,19 @@ lavoro) — riferire prima di aggiungere codice altrove.
 
 **Passi**
 1. `browser.open`, `browser.navigate`, `browser.get`, `browser.screenshot` nel
-   protocollo `TillerControl`; dispatch in `App/AppModel+Control.swift`.
+   protocollo `SirioControl`; dispatch in `App/AppModel+Control.swift`.
 2. Targeting implicito: se `workspace`/`window` mancano, la surface nasce nel
    worktree del pane chiamante (come cmux con `CMUX_WORKSPACE_ID`).
 3. Resolver ref brevi `surface:N ↔ UUID` **solo per il namespace `browser`**
    (D14): accetta entrambi in input, emette UUID salvo `--id-format`.
-4. Comandi `tillerctl browser <surface> <verb>` in `TillerctlRequestBuilder`,
+4. Comandi `sirioctl browser <surface> <verb>` in `SirioctlRequestBuilder`,
    nomi identici a cmux.
 
 **Verifica**
 ```bash
-cd Packages/TillerControl && swift test
+cd Packages/SirioControl && swift test
 ```
-Più uno smoke via socket: `tillerctl browser open http://127.0.0.1:PORT` (server
+Più uno smoke via socket: `sirioctl browser open http://127.0.0.1:PORT` (server
 di fixture locale) → ritorna un `surface:N`; `get url` lo conferma.
 
 **STOP** se il resolver richiede di cambiare la forma di richieste esistenti:
@@ -223,7 +223,7 @@ resolver al namespace nuovo o fermarsi.
 **Obiettivo**: `snapshot → ref → act → wait → re-snapshot` funzionante.
 
 **Passi**
-1. `SnapshotBuilder` in `TillerBrowser`: `WKUserScript` che marca gli elementi
+1. `SnapshotBuilder` in `SirioBrowser`: `WKUserScript` che marca gli elementi
    interattivi e restituisce `{generation, nodes:[{ref, role, name, value?, box}]}`.
    Ref `e1`, `e2`, … stabili **dentro** una generation.
 2. `generation` incrementata a ogni navigazione committata e a ogni snapshot;
@@ -255,7 +255,7 @@ resolver al namespace nuovo o fermarsi.
 
 **Verifica**
 ```bash
-cd Packages/TillerBrowser && swift test
+cd Packages/SirioBrowser && swift test
 ```
 E2E via socket contro un server **locale** di fixture (nessuna rete esterna,
 D21): pagina con form → `snapshot` → `fill e1` → `click e2` → `wait --text` →
@@ -273,7 +273,7 @@ un `localhost` reale: riferire l'errore esatto, non allargare il JS a tentativi.
 **Passi**
 1. `WKWebsiteDataStore` persistente **per worktree** (D8), directory dedicata
    sotto Application Support.
-2. `OriginPolicy` in `TillerBrowser` (puro, zero WebKit): classifica
+2. `OriginPolicy` in `SirioBrowser` (puro, zero WebKit): classifica
    `localhost`/`127.0.0.1`/`::1`/`*.local` come locali → `eval`/`cookies`/`storage`
    liberi; ogni altra origine richiede una concessione `(worktree, origine)`.
 3. Concessione: prompt utente alla prima invocazione, memorizzata, revocabile
@@ -283,7 +283,7 @@ un `localhost` reale: riferire l'errore esatto, non allargare il JS a tentativi.
 
 **Verifica**
 ```bash
-cd Packages/TillerBrowser && swift test   # OriginPolicy: tabella origini → decisione
+cd Packages/SirioBrowser && swift test   # OriginPolicy: tabella origini → decisione
 ```
 Manuale: `eval` su `localhost` passa senza prompt; `eval` su un dominio esterno
 chiede conferma una volta e poi ricorda; revoca dalle Settings ripristina il
@@ -307,7 +307,7 @@ prompt; il badge appare durante un comando agente e scompare dopo.
 **Verifica**
 - Misura memoria: 5 tab browser di cui 2 visibili → surface vive ≤ 5, nessuna
   visibile smontata; confronto IOSurface prima/dopo con la metodologia già
-  documentata (gate su bundle id `dev.tiller.Tiller`, `log show --signpost`,
+  documentata (gate su bundle id `dev.sirio.Sirio`, `log show --signpost`,
   A/B interlacciato).
 - Gate finale (**solo orchestratore**): `Scripts/ci.sh` deve stampare `CI OK`
   oppure fallire **esattamente** sulle 4 suite della baseline rossa del
@@ -328,7 +328,7 @@ prompt; il badge appare durante un comando agente e scompare dopo.
 7. Titolo tab = titolo pagina, con favicon; nessun rename automatico.
 8. Riavvio dell'app: il tab browser torna sull'URL giusto.
 9. Split con 4 browser visibili: nessuno si smonta.
-10. `tillerctl browser open` da un terminale dentro Tiller crea la surface nel
+10. `sirioctl browser open` da un terminale dentro Sirio crea la surface nel
     worktree di quel terminale.
 11. Loop completo agente su un dev server locale: snapshot, fill, click, wait,
     get text.

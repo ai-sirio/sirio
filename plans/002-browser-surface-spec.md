@@ -1,4 +1,4 @@
-# Spec 002: browser surface in Tiller (parità cmux)
+# Spec 002: browser surface in Sirio (parità cmux)
 
 > Documento di **decisioni e contratto**. L'esecuzione è in
 > [`002-browser-surface-plan.md`](./002-browser-surface-plan.md). Questo file non
@@ -17,19 +17,19 @@
 
 ## Perché
 
-Gli agenti che girano in Tiller modificano applicazioni web e non hanno modo di
+Gli agenti che girano in Sirio modificano applicazioni web e non hanno modo di
 verificare il risultato: l'unica strada oggi è chiedere all'umano di guardare.
 cmux ha risolto lo stesso problema con una browser surface pilotabile dal
 control socket, e gli agenti che usiamo (Claude Code, Codex, OpenCode) sono
 letteralmente gli stessi. Copiare il contratto significa che la loro skill
-`cmux-browser` funziona in Tiller quasi senza modifiche.
+`cmux-browser` funziona in Sirio quasi senza modifiche.
 
 Secondo motivo, più banale ma quotidiano: `cmd+click` su un `http://localhost:5173`
 in un terminale oggi apre Safari e ti sposta fuori dall'app.
 
 ## Precedente: cosa fa cmux (verificato, non dedotto)
 
-Repo `manaflow-ai/cmux`, Swift + libghostty, stessa famiglia di Tiller.
+Repo `manaflow-ai/cmux`, Swift + libghostty, stessa famiglia di Sirio.
 
 | Fatto | Evidenza |
 |---|---|
@@ -47,22 +47,22 @@ Repo `manaflow-ai/cmux`, Swift + libghostty, stessa famiglia di Tiller.
 Helium, uBlock Origin, GPL-3) come browser standalone futuro. Non è il pane
 in-app e non ci riguarda.
 
-## Stato di Tiller rilevante (verificato su `d161896`)
+## Stato di Sirio rilevante (verificato su `d161896`)
 
 | Fatto | File |
 |---|---|
 | `WorkspaceContentRef` ha 3 casi: `.terminal`, `.chat`, `.document(_, editor:)` | `Packages/TillerCore/Sources/TillerCore/Workspace/WorkspaceContentRef.swift:14` |
-| `cmd+click` sui link terminale già instradato ad AppModel | `Packages/TillerTerminal/…/TerminalOpenURLRouter.swift:20` → `App/AppModel.swift:2391` (`handleTerminalOpenURL` → `openFileReference`, non-file → apertura di sistema) |
+| `cmd+click` sui link terminale già instradato ad AppModel | `Packages/SirioTerminal/…/TerminalOpenURLRouter.swift:20` → `App/AppModel.swift:2391` (`handleTerminalOpenURL` → `openFileReference`, non-file → apertura di sistema) |
 | Zero WebKit nel repo | `grep -rl WKWebView App Packages` → vuoto |
 | Il motore di split **non guarda il kind**: `SplitContentPayload` = `.newTab(WorkspaceTab)` \| `.existingTab(id)` | `Packages/TillerCore/…/WorkspaceLayoutEngine.swift:256` |
-| `SplitEligibility.check` filtra solo geometria + `soleTabOfItsOwnGroup` | `Packages/TillerWorkspace/…/SplitEligibility.swift:14` |
+| `SplitEligibility.check` filtra solo geometria + `soleTabOfItsOwnGroup` | `Packages/SirioWorkspace/…/SplitEligibility.swift:14` |
 | `SplitContentMenuAction` è un **enum chiuso** senza voce browser | `App/Workspace/SplitContentMenu.swift:24` |
 | `WorkspaceSnapshot.materialize()` ricostruisce **ogni** tab come `.terminal(TerminalContentID(tabID.rawValue))`; usato solo come **validatore strutturale** | `Packages/TillerCore/…/WorkspaceSnapshot.swift:60`, chiamanti `App/Workspace/SQLiteWorkspacePersistence.swift:140` e `:255` |
-| `workspaceTab` ha già `contentKind TEXT` + `contentId TEXT` + `uniqueKey(["worktreeId","contentKind","contentId"])` | `Packages/TillerPersistence/…/AppDatabase.swift:245` (migrazione `v16`) |
+| `workspaceTab` ha già `contentKind TEXT` + `contentId TEXT` + `uniqueKey(["worktreeId","contentKind","contentId"])` | `Packages/SirioPersistence/…/AppDatabase.swift:245` (migrazione `v16`) |
 | Ultima migrazione registrata: `v17` | `AppDatabase.swift:283` |
 | `⌘L` e `⌘⇧L` sono **libere**. Occupate: `⌘T`, `⌘W`, `⌘O`, `⌘⇧O`, `⌘S`, `⌘,`, `⌃⌘I`, `⌃⇥`, `⌘⌥`+frecce | `grep keyboardShortcut( App` |
-| Tiller **non è sandboxed**: unico entitlements è `App/InjectDebug.entitlements` (Debug, `disable-library-validation`) | `project.yml:72` |
-| Nessun supporto a ref brevi nel control socket: oggi solo UUID | `grep -rn "surface:\|shortRef\|idFormat" Packages/TillerControl/Sources` → vuoto |
+| Sirio **non è sandboxed**: unico entitlements è `App/InjectDebug.entitlements` (Debug, `disable-library-validation`) | `project.yml:72` |
+| Nessun supporto a ref brevi nel control socket: oggi solo UUID | `grep -rn "surface:\|shortRef\|idFormat" Packages/SirioControl/Sources` → vuoto |
 
 ## Decisioni
 
@@ -74,9 +74,9 @@ in-app e non ci riguarda.
 | D4 | Auto-detect dev server nello scrollback | **No** in V1 | Quando servirà, si aggancia a `ScreenManifest` (Layer C), non a un nuovo scanner |
 | D5 | Link nelle chat | Stessa regola di D3, nessuna eccezione | Due politiche per la stessa azione = nessuno le ricorda |
 | D6 | Verbi V1 | `open`, `back`/`forward`/`reload`, `get url\|text\|html`, `screenshot`, `snapshot --interactive`, `click`, `fill`, `type`, `press`, `wait`, `eval`; poi `console`/`errors` | Sotto questa soglia l'agente non può *verificare* nulla |
-| D7 | CLI | `tillerctl browser <surface> <verb>`, targeting implicito dal pane chiamante | Copia cmux verbatim per riusare la loro skill |
+| D7 | CLI | `sirioctl browser <surface> <verb>`, targeting implicito dal pane chiamante | Copia cmux verbatim per riusare la loro skill |
 | D8 | Sessione | `WKWebsiteDataStore` **persistente per worktree** | Compartimenta il raggio d'azione di un agente compromesso |
-| D9 | Codice | Nuovo package leaf **`TillerBrowser`**, unico a importare WebKit | Il port è logica, non UI: in `App/` finirebbe non testato |
+| D9 | Codice | Nuovo package leaf **`SirioBrowser`**, unico a importare WebKit | Il port è logica, non UI: in `App/` finirebbe non testato |
 | D10 | Budget surface | Tetto **sui soli nascosti**: max 3 vive, la 4ª nascosta si smonta (ricarica per URL al ritorno). **I visibili sono sempre esenti** | Uno split mostra più browser insieme: un tetto globale smonterebbe un pane sotto le mani |
 | D11 | Shortcut | `⌘⇧L` apri browser, `⌘L` address bar | Verificate libere |
 | D12 | Titolo tab | Titolo pagina live + favicon; **auto-rename escluso** per `kind == .browser` | Il titolo pagina è già il nome giusto |
@@ -166,7 +166,7 @@ Regola (D15, **emendata il 2026-08-07 — decisione A**), implementata in
    della pagina* e *guidare la finestra*. Richiedono conferma: `eval`, `act`,
    `get text`, `get html`, `snapshot`, `console`, `wait` (valuta predicati) e
    **`screenshot`**. Non la richiedono: `open`, `navigate`, `get url`, e la
-   lettura di titolo/favicon con cui Tiller disegna il proprio chrome.
+   lettura di titolo/favicon con cui Sirio disegna il proprio chrome.
    La concessione è ricordata per `(worktree, origine)` e revocabile
    dalle Settings.
 3. **Conferma negata o assente** → `origin_denied`. Mai un fallback silenzioso.

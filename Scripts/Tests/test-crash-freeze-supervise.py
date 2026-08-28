@@ -38,7 +38,7 @@ class FreezeDetectorTests(unittest.TestCase):
 class ProcStatTests(unittest.TestCase):
     def test_parse_proc_stat_handles_parentheses_in_command_name(self):
         fields = MODULE.parse_proc_stat(
-            "42 (tiller (renderer)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14"
+            "42 (sirio (renderer)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14"
         )
 
         self.assertEqual(fields.pid, 42)
@@ -48,14 +48,14 @@ class ProcStatTests(unittest.TestCase):
 
 
 class ControlProbeTests(unittest.TestCase):
-    def test_tillerctl_subcommand_precedes_global_socket_option(self):
+    def test_sirioctl_subcommand_precedes_global_socket_option(self):
         command = MODULE.cli_command(
-            pathlib.Path("/bin/tillerctl"), pathlib.Path("/tmp/control.sock"), "ping"
+            pathlib.Path("/bin/sirioctl"), pathlib.Path("/tmp/control.sock"), "ping"
         )
 
         self.assertEqual(
             command,
-            ["/bin/tillerctl", "ping", "--socket", "/tmp/control.sock"],
+            ["/bin/sirioctl", "ping", "--socket", "/tmp/control.sock"],
         )
 
 

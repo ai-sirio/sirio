@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Find code transplanted from the reference implementations.
 
-The project's rule is that every line of Tiller is written from scratch: the references
+The project's rule is that every line of Sirio is written from scratch: the references
 are read for dimensions and behaviour, never copied. This checks that claim mechanically
 so it does not have to be taken on trust.
 
@@ -71,7 +71,7 @@ def shingles(path: Path, n: int) -> dict[tuple[str, ...], int]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("--refs", default="/home/enzopalmisano/Scrivania/Progetti/_tiller-refs")
+    ap.add_argument("--refs", default="/home/enzopalmisano/Scrivania/Progetti/_sirio-refs")
     ap.add_argument("--tree", default="rust/crates")
     ap.add_argument("--min-run", type=int, default=3)
     ap.add_argument("--quiet", action="store_true")

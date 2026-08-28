@@ -1,11 +1,11 @@
 # Browser parity on macOS and Windows
 
 Implementable spec produced by wayfinder map
-[#125](https://github.com/tillerai/tiller/issues/125). Every requirement below
+[#125](https://github.com/tillerai/sirio/issues/125). Every requirement below
 traces to a closed decision ticket; this document assembles them, it does not
 re-decide them.
 
-**Scope.** Host Tiller's existing Browser surface on macOS and Windows at
+**Scope.** Host Sirio's existing Browser surface on macOS and Windows at
 contract parity with the verified Linux one, and make a Browser tab a tab like
 any other — never a sidebar row. The Linux X11 path is not touched.
 
@@ -18,17 +18,17 @@ where they differ.
 
 Everything here was measured on a real build, not inferred. Linux under forced
 X11; macOS on the dev Mac; Windows on the ARM64 VM from
-[#129](https://github.com/tillerai/tiller/issues/129).
+[#129](https://github.com/tillerai/sirio/issues/129).
 
 | | Linux (X11) | macOS | Windows |
 |---|---|---|---|
 | build | ✅ | ✅ | ✅ `aarch64-pc-windows-msvc` |
 | webview attaches | ✅ | ✅ | ✅ |
 | page loads | ✅ | ✅ | ✅ |
-| **page paints** | ✅ | ✅ | ❌ [#144](https://github.com/tillerai/tiller/issues/144) |
-| geometry: resize/clip/tab-switch | ✅ | ✅ [#139](https://github.com/tillerai/tiller/issues/139) | not yet re-tested |
-| geometry: scale change | ✅ | ❌ [#141](https://github.com/tillerai/tiller/issues/141) | ❌ [#146](https://github.com/tillerai/tiller/issues/146) |
-| `eval`/`snapshot`/`act`/`console` | ✅ | ❌ [#135](https://github.com/tillerai/tiller/issues/135) | ❌ [#147](https://github.com/tillerai/tiller/issues/147) |
+| **page paints** | ✅ | ✅ | ❌ [#144](https://github.com/tillerai/sirio/issues/144) |
+| geometry: resize/clip/tab-switch | ✅ | ✅ [#139](https://github.com/tillerai/sirio/issues/139) | not yet re-tested |
+| geometry: scale change | ✅ | ❌ [#141](https://github.com/tillerai/sirio/issues/141) | ❌ [#146](https://github.com/tillerai/sirio/issues/146) |
+| `eval`/`snapshot`/`act`/`console` | ✅ | ❌ [#135](https://github.com/tillerai/sirio/issues/135) | ❌ [#147](https://github.com/tillerai/sirio/issues/147) |
 
 `browser.screenshot` is unsupported everywhere by decision, and `browser.errors`
 has no dispatch arm on any platform — both out of scope, see below.
@@ -45,13 +45,13 @@ has no dispatch arm on any platform — both out of scope, see below.
 - **R1.3** `TabKind::Browser` gets its own icon. It currently falls through
   `sidebar.rs:2606-2610`'s catch-all and draws the chat icon.
 
-### 2. Windows hosting — [#145](https://github.com/tillerai/tiller/issues/145), ADR 0002
+### 2. Windows hosting — [#145](https://github.com/tillerai/sirio/issues/145), ADR 0002
 
 GPUI creates its Windows window with `WS_EX_NOREDIRECTIONBITMAP` and composes
 through DirectComposition, so the DWM never shows an ordinary child HWND — which
 is exactly what wry's `build_as_child` produces.
 
-- **R2.1** Tiller sets `GPUI_DISABLE_DIRECT_COMPOSITION` itself on Windows,
+- **R2.1** Sirio sets `GPUI_DISABLE_DIRECT_COMPOSITION` itself on Windows,
   before GPUI initialises. Not a user setting. GPUI reads it once in
   `WindowsPlatform::new`, so it cannot be deferred to when a browser tab opens.
 - **R2.2** `shell_chrome::current_platform_material` (`shell_chrome.rs:20-28`)
@@ -63,7 +63,7 @@ is exactly what wry's `build_as_child` produces.
   `"WKWebView child failed"`. Two proven divergences make this a pattern, not an
   edge case.
 
-### 3. Geometry — [#141](https://github.com/tillerai/tiller/issues/141)/[#143](https://github.com/tillerai/tiller/issues/143), measured by [#146](https://github.com/tillerai/tiller/issues/146)
+### 3. Geometry — [#141](https://github.com/tillerai/sirio/issues/141)/[#143](https://github.com/tillerai/sirio/issues/143), measured by [#146](https://github.com/tillerai/sirio/issues/146)
 
 `native_webview_rect` (`browser.rs:1971-1988`) is not platform-gated and
 multiplies by `scale_factor` on every platform. That is right for exactly one of
@@ -87,7 +87,7 @@ the three.
   on every platform and so defends the bug.
 - **R3.6** The untested identity requirement gets its own test.
 
-### 4. Scripting — [#135](https://github.com/tillerai/tiller/issues/135)/[#147](https://github.com/tillerai/tiller/issues/147)
+### 4. Scripting — [#135](https://github.com/tillerai/sirio/issues/135)/[#147](https://github.com/tillerai/sirio/issues/147)
 
 `wait_for_script_result` (`browser.rs:897-931`) pumps GTK on Linux and blocks on
 `recv_timeout` everywhere else — on the very thread the engine needs to deliver
@@ -119,12 +119,12 @@ guaranteed timeout.
   currently returns `ok:true` regardless (`main.rs:8086-8093`).
 - **R5.3** Error strings stop saying `"WKWebView child failed"` on Windows.
 
-### 6. Profile and permissions — [#137](https://github.com/tillerai/tiller/issues/137), [#138](https://github.com/tillerai/tiller/issues/138), [#140](https://github.com/tillerai/tiller/issues/140)
+### 6. Profile and permissions — [#137](https://github.com/tillerai/sirio/issues/137), [#138](https://github.com/tillerai/sirio/issues/138), [#140](https://github.com/tillerai/sirio/issues/140)
 
 - **R6.1** One shared profile, not per-worktree, scoped by the session
   database's rule: explicit override → the checkout containing the running
   binary → a stable location when installed.
-- **R6.2** Linux and Windows take a Tiller-owned directory through wry's
+- **R6.2** Linux and Windows take a Sirio-owned directory through wry's
   `WebContext`. macOS has no path setting at all and uses a
   `data_store_identifier` derived from the same criterion — hence **macOS 14 is
   the minimum supported version** (ADR 0001), below which the identifier is
@@ -132,7 +132,7 @@ guaranteed timeout.
 - **R6.3** Windows' default, if nothing is set, is `<exe>.WebView2\EBWebView`
   beside the binary — unwritable under `Program Files`. Setting the directory is
   therefore required on Windows, not merely tidy.
-- **R6.4** **Origin grants** (Tiller's, portable, what `browser.permission`
+- **R6.4** **Origin grants** (Sirio's, portable, what `browser.permission`
   resolves) and **capability permissions** (the engine's) stay distinct — see
   `CONTEXT.md`. Capability permissions remain with the engine.
 - **R6.5** Browser tabs restore with their URL.
@@ -158,8 +158,8 @@ needs hosting, geometry and scripting. They ship independently.
   while every prior Windows document in this repo targets `x86_64`. A GUI
   launched over SSH lands in an invisible window station — use a Scheduled Task
   with `LogonType Interactive`.
-- `tiller_ui` does not depend on `tiller_terminal`, so browser work builds
-  without Zig via `cargo build -p tiller_ui --example …`.
+- `sirio_ui` does not depend on `sirio_terminal`, so browser work builds
+  without Zig via `cargo build -p sirio_ui --example …`.
 
 ## Out of scope
 
@@ -170,6 +170,6 @@ needs hosting, geometry and scripting. They ship independently.
 - **`browser.screenshot`** — unsupported on all platforms by decision.
 - **WebView2 visual hosting** — the architecturally correct answer for Windows,
   but it needs upstream changes to both wry (no composition support in 0.56.1)
-  and GPUI (`DirectComposition` is private). Its own project. Until then Tiller
+  and GPUI (`DirectComposition` is private). Its own project. Until then Sirio
   depends on a GPUI environment variable that upstream treats as a debugging
   escape hatch: if it is removed, the Windows browser goes blank again.

@@ -13,7 +13,7 @@ centrale apre un **tab diff** per quel file. Il tab rende il diff
 - `App/RightPanel/ChangesListView.swift` + `ChangedFileRow.swift`: la riga
   espande in-place e mostra `FileDiffBody`, un diff **unified** numerato con
   syntax highlight (`DiffHighlightCache`). Nessun renderer side-by-side esiste.
-- `Packages/TillerGit/GitDiff.load(entry:in:)` produce `GitFileDiff`
+- `Packages/SirioGit/GitDiff.load(entry:in:)` produce `GitFileDiff`
   (`lines`, `additions`, `deletions`, `isBinary`, `isSubmodule`, `oldText`,
   `newText`). **Non ha `--cached`**: Staged e Changes passano entrambi da
   `git diff HEAD`, solo Untracked usa il ramo `--no-index`. Rinominati sono
@@ -77,7 +77,7 @@ ha già questa cicatrice con `NSTextView`.
 
 ### D5 — Payload: solo UTType custom
 
-La riga di Changes espone **solo** un UTType Tiller dedicato, **non**
+La riga di Changes espone **solo** un UTType Sirio dedicato, **non**
 `public.file-url`.
 
 Motivo: con AppKit vince la view sotto il puntatore. Con `public.file-url` nel
