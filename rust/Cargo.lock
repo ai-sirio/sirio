@@ -7072,6 +7072,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "libc",
+ "portable-pty",
  "serde",
  "serde_json",
  "tiller_acp",
