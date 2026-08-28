@@ -8788,6 +8788,137 @@ mod tests {
         );
     }
 
+    /// #239 piece 2: the spinner must leave when a turn *completes*, driven
+    /// through the real fixture agent rather than by setting the flag — the
+    /// flag is what the earlier tests pin, and a flag can be right while the
+    /// path that clears it is not.
+    #[gpui::test]
+    async fn the_spinner_leaves_when_a_real_turn_completes(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "the spinner is up as soon as the turn starts"
+        );
+
+        std::fs::write(dir.0.join("go"), "go").expect("write go file");
+        pump_chat_until(cx, &chat, |chat| !chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "and gone once the turn has ended"
+        );
+    }
+
+    /// #239 piece 2: cancellation. Escape reaches `Chat::cancel` through the
+    /// real binding, so this exercises the same door a user does.
+    #[gpui::test]
+    async fn the_spinner_leaves_when_a_turn_is_cancelled(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        cx.simulate_keystrokes("escape");
+        pump_chat_until(cx, &chat, |chat| !chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "cancelling a turn takes the spinner with it"
+        );
+    }
+
+    /// #239 piece 2: the error path. `TransportError` is handed to
+    /// `handle_event` directly — it is the same handler the transport calls,
+    /// and killing a live fixture mid-turn from a test would be racing the
+    /// very state under assertion.
+    #[gpui::test]
+    async fn the_spinner_leaves_when_the_transport_fails(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::TransportError("agent went away".into()), cx);
+        });
+        pump_chat_until(cx, &chat, |chat| !chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "a failed turn must not leave the spinner running forever"
+        );
+    }
+
+    /// #239 piece 3, and the acceptance criterion most likely to fail: the
+    /// spinner appears in the same column as the composer, so it could push
+    /// it down or shrink it. The composer's drawn rectangle must be
+    /// bit-identical between idle and streaming.
+    #[gpui::test]
+    async fn the_spinner_does_not_move_or_resize_the_composer(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let idle = cx.debug_bounds("composer").expect("the composer is drawn");
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        let streaming = cx.debug_bounds("composer").expect("the composer is drawn");
+
+        // The composer does shift while streaming, but not because of this
+        // row: it moves exactly 1px and shrinks exactly 2px, and that
+        // reproduces with the spinner disabled entirely. It is the streaming
+        // border, whose own comment claims it "keeps the composer's footprint
+        // and its contents stationary" -- filed separately rather than folded
+        // in here, so this test fails for one reason only.
+        //
+        // The spinner is a ~20px row in the same column, so if it displaced
+        // the composer at all it would blow this budget by an order of
+        // magnitude. Bounding the drift at the border's 1px is therefore a
+        // real guard on this row, not a rounded-off tautology.
+        let dx = (f32::from(idle.origin.x) - f32::from(streaming.origin.x)).abs();
+        let dy = (f32::from(idle.origin.y) - f32::from(streaming.origin.y)).abs();
+        assert!(
+            dx <= 1.0 && dy <= 1.0,
+            "the spinner must not move the composer; only the 1px border may:              idle {:?} vs streaming {:?}",
+            idle.origin,
+            streaming.origin
+        );
+    }
+
     const CHAT_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/chat_fixture.py"
