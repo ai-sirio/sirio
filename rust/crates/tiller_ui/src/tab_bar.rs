@@ -344,6 +344,7 @@ impl TabBar {
         entity: gpui::Entity<Self>,
         theme: Theme,
         chevron: bool,
+        hint: Option<&'static str>,
     ) -> impl IntoElement {
         let (icon, glyph_color) = match label {
             "New Terminal" => (Icon::SquareTerminal, theme.meta),
@@ -385,10 +386,13 @@ impl TabBar {
                 div()
                     .flex()
                     .items_center()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap(px(7.0))
                     .child(
                         div()
                             .w(px(14.0))
+                            .flex_shrink_0()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -401,6 +405,41 @@ impl TabBar {
                     IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.meta),
                 ))
             })
+            // #205: annotate, never disable. The row stays clickable because
+            // availability is probed against Tiller's own PATH while the agent
+            // is launched through a login shell that can resolve more -- so a
+            // gate here would grey out working nvm installs of pi and omp.
+            .when_some(hint, |this, hint| {
+                this.child(
+                    div()
+                        .debug_selector(move || format!("new-tab-hint-{}", menu_selector(label)))
+                        .flex_shrink_0()
+                        .ml(px(8.0))
+                        .text_size(theme.typography.caption2)
+                        .text_color(theme.meta)
+                        .child(hint),
+                )
+            })
+    }
+
+    /// #205: the menu's "not on PATH" note for an agent row, or `None` when
+    /// the binary resolved or the row is not an agent.
+    ///
+    /// Reuses `AgentAvailability::status_label`, the same text Settings shows
+    /// for the same adapter -- the two surfaces disagreeing about one agent is
+    /// what made this worth fixing. "Split Claude Code" launches the same
+    /// binary as "Claude Code", so it borrows that verdict.
+    fn path_hint(&self, label: &'static str) -> Option<&'static str> {
+        let display = if label == "Split Claude Code" {
+            "Claude Code"
+        } else {
+            label
+        };
+        self.chat_agents
+            .iter()
+            .find(|agent| agent.display_name == display)
+            .filter(|agent| !agent.is_available())
+            .map(|agent| agent.status_label())
     }
 
     fn separator(theme: Theme) -> impl IntoElement {
@@ -569,7 +608,10 @@ impl Render for TabBar {
         let menu = div()
             .id("new-tab-menu")
             .debug_selector(|| "new-tab-menu".to_owned())
-            .w(px(170.0))
+            // #205: widened from 170px to fit the "Not found on PATH" note an
+            // agent row can carry. Measured, not guessed: the note overran the
+            // old border by 76px.
+            .w(px(250.0))
             .p(px(6.0))
             .rounded(theme.radii.user_pill)
             .border_1()
@@ -582,6 +624,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                None,
             ))
             .child(Self::render_menu_item(
                 "Changes",
@@ -589,6 +632,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                None,
             ))
             .child(Self::render_menu_item(
                 "New Browser",
@@ -596,6 +640,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                None,
             ))
             .child(Self::separator(theme))
             .child(Self::render_menu_item(
@@ -604,6 +649,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                self.path_hint("Claude Code"),
             ))
             .child(Self::render_menu_item(
                 "Codex",
@@ -611,6 +657,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                self.path_hint("Codex"),
             ))
             .child(Self::render_menu_item(
                 "OpenCode",
@@ -618,6 +665,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                self.path_hint("OpenCode"),
             ))
             .child(Self::render_menu_item(
                 "Pi",
@@ -625,6 +673,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                self.path_hint("Pi"),
             ))
             .child(Self::render_menu_item(
                 "Oh-My-Pi",
@@ -632,6 +681,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                self.path_hint("Oh-My-Pi"),
             ))
             .child(Self::separator(theme))
             .child(Self::render_menu_item(
@@ -640,6 +690,7 @@ impl Render for TabBar {
                 entity.clone(),
                 theme,
                 false,
+                self.path_hint("Split Claude Code"),
             ))
             .child(Self::separator(theme))
             .child(Self::render_new_chat_item(entity, theme, chat_picker_open))
@@ -991,6 +1042,70 @@ mod tests {
             "the open menu must self-heal onto the button's post-resize position within one \
              more delivered frame, not stay pinned to where the button was before the resize \
              forever: button={plus_after:?} menu={menu_after:?}"
+        );
+    }
+
+    /// #205: the `+` menu offered agents the app already knew were missing,
+    /// while Settings said "Not found on PATH" about the same adapter. It is
+    /// annotated rather than disabled, for the reason the issue records: the
+    /// availability probe resolves against Tiller's own PATH, but agents are
+    /// launched through a login shell that can resolve more -- so greying out
+    /// `pi` or `omp` would break working nvm setups. The palette's own comment
+    /// states the same principle: "unavailable operations remain discoverable".
+    #[gpui::test]
+    async fn the_new_tab_menu_marks_agents_that_are_not_on_path(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            TabBar::new(cx).with_chat_agents(vec![
+                available_agent("codex", "Codex"),
+                AgentAvailability {
+                    id: "omp",
+                    display_name: "Oh-My-Pi",
+                    executable: None,
+                },
+            ])
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("new-tab-hint-oh-my-pi").is_some(),
+            "an agent that is not on PATH says so in the menu"
+        );
+        assert!(
+            cx.debug_bounds("new-tab-item-oh-my-pi").is_some(),
+            "and stays clickable -- the login shell may still resolve it"
+        );
+        assert!(
+            cx.debug_bounds("new-tab-hint-codex").is_none(),
+            "an agent that is on PATH carries no hint"
+        );
+
+        // #212's lesson applied: the menu is a fixed width, so the note has to
+        // be shown to FIT, not merely to render. The first attempt overflowed
+        // the border and collided with the label.
+        let menu = cx.debug_bounds("new-tab-menu").expect("the menu is drawn");
+        let hint = cx.debug_bounds("new-tab-hint-oh-my-pi").expect("hint drawn");
+        assert!(
+            hint.right() <= menu.right(),
+            "the note must stay inside the menu: hint right {:?} vs menu right {:?}",
+            hint.right(),
+            menu.right()
+        );
+        assert!(
+            hint.left() >= menu.left(),
+            "and inside its left edge: hint left {:?} vs menu left {:?}",
+            hint.left(),
+            menu.left()
         );
     }
 
