@@ -88,6 +88,14 @@ pub struct SessionTabState {
     /// at restore, so a draft the user never hit Enter on survives a restart.
     #[serde(default)]
     pub chat_draft: String,
+    /// #125 (spec R6.5): a browser tab's live address, captured at save time
+    /// exactly the way `chat_draft` and `scrollback` above are, so a restored
+    /// Browser tab comes back where the user left it rather than at the
+    /// fallback page. Empty means nothing was captured -- a session written
+    /// before this field existed, or a tab that never held a browser -- and
+    /// restore then falls back on its own.
+    #[serde(default)]
+    pub browser_url: String,
 }
 
 impl SessionTabState {
@@ -113,6 +121,7 @@ impl SessionTabState {
                 .map(|(pane_id, bytes)| (*pane_id, Self::bounded_scrollback(bytes)))
                 .collect(),
             chat_draft: self.chat_draft.clone(),
+            browser_url: self.browser_url.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -1806,6 +1815,7 @@ mod tests {
             }],
             scrollback: std::collections::BTreeMap::from([(0, b"P28_SCROLLBACK_NONCE".to_vec())]),
             chat_draft: String::new(),
+            browser_url: String::new(),
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -1834,6 +1844,55 @@ mod tests {
         let restored = restore(&db_path, Path::new("/tmp"));
         assert_eq!(restored.tab_states, vec![state]);
         assert_eq!(restored.tabs[0].title, "Terminal");
+    }
+
+    /// #125 (spec R6.5): the captured address has to survive the write, not
+    /// just the struct. `encode` builds a bounded copy field by field, so a
+    /// field added to the struct and forgotten there is dropped on the way to
+    /// disk with nothing else to notice.
+    #[test]
+    fn a_browser_tabs_address_survives_the_round_trip_to_disk() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("browser-url-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let state = SessionTabState {
+            root_id: Some(0),
+            pane_events: Vec::new(),
+            scrollback: std::collections::BTreeMap::new(),
+            chat_draft: String::new(),
+            browser_url: "https://example.org/probe".into(),
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                id: "browser".into(),
+                title: "Browser".into(),
+                kind: "browser".into(),
+                agent_id: None,
+                active: true,
+            }],
+            tab_states: vec![state.clone()],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let db = AppDatabase::open(&db_path).expect("reopen state database");
+        let worktree_id = catalog_ids_for_path(&working_directory).2;
+        let written = db
+            .tab_states_of_worktree(&worktree_id)
+            .expect("dump written tab state");
+        assert!(
+            written[0].state.contains("example.org/probe"),
+            "the address must reach the stored JSON, not just the in-memory struct: {}",
+            written[0].state
+        );
+
+        let restored = restore(&db_path, Path::new("/tmp"));
+        assert_eq!(restored.tab_states[0].browser_url, "https://example.org/probe");
     }
 
     #[test]
