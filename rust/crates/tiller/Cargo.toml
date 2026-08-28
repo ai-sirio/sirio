@@ -53,6 +53,27 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSStatusItem and its menu for the native macOS tray roster. Same objc2
+# family and versions gpui itself links, so these resolve to the one copy
+# already in the workspace lockfile — an `NSMenu` here is the same type
+# gpui's own AppKit code sees, and no second Objective-C runtime binding
+# enters the build.
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", features = [
+    "NSButton",
+    "NSControl",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+] }
+objc2-foundation = { version = "0.2.2", features = ["NSString"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # F-CTRL-BROWSER-05: browser.wait pumps the same process-global GTK main
 # loop tiller_ui's BrowserSurface drives from its 16ms timer, so a bounded
