@@ -7,20 +7,20 @@ resolver = "2"
 # them as members (which conflicts with their own `[workspace]` tables).
 exclude = ["vendor/gpui_linux", "vendor/gpui_platform"]
 members = [
-    "crates/tiller",
-    "crates/tiller_theme",
-    "crates/tiller_ui",
-    "crates/tiller_terminal",
-    "crates/tiller_acp",
-    "crates/tiller_project",
-    "crates/tiller_git",
-    "crates/tiller_persistence",
-    "crates/tiller_agents",
-    "crates/tiller_control",
-    "crates/tiller_activity",
-    "crates/tiller_markdown",
-    "crates/tiller_usage",
-    "crates/tiller_registry",
+    "crates/sirio",
+    "crates/sirio_theme",
+    "crates/sirio_ui",
+    "crates/sirio_terminal",
+    "crates/sirio_acp",
+    "crates/sirio_project",
+    "crates/sirio_git",
+    "crates/sirio_persistence",
+    "crates/sirio_agents",
+    "crates/sirio_control",
+    "crates/sirio_activity",
+    "crates/sirio_markdown",
+    "crates/sirio_usage",
+    "crates/sirio_registry",
 ]
 
 [workspace.package]
@@ -31,7 +31,7 @@ publish = false
 [workspace.dependencies]
 # GPUI used to be an absolute path into a zed checkout on one particular Mac, which meant the
 # workspace failed to resolve — not to build, to *resolve* — anywhere else, taking all thirteen
-# crates down with it even though only four of them touch GPUI. Now that Tiller targets Linux as
+# crates down with it even though only four of them touch GPUI. Now that Sirio targets Linux as
 # well, a pinned git rev is the only form that works on both machines with no local checkout.
 # Bump the rev deliberately: it is the single knob that moves the GPUI API under the whole UI.
 # gpui's own defaults are ["font-kit", "wayland", "x11", "windows-manifest"], so
@@ -64,19 +64,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
 
-tiller_theme = { path = "crates/tiller_theme" }
-tiller_ui = { path = "crates/tiller_ui" }
-tiller_terminal = { path = "crates/tiller_terminal" }
-tiller_acp = { path = "crates/tiller_acp" }
-tiller_project = { path = "crates/tiller_project" }
-tiller_git = { path = "crates/tiller_git" }
-tiller_persistence = { path = "crates/tiller_persistence" }
-tiller_agents = { path = "crates/tiller_agents" }
-tiller_control = { path = "crates/tiller_control" }
-tiller_activity = { path = "crates/tiller_activity" }
-tiller_markdown = { path = "crates/tiller_markdown" }
-tiller_usage = { path = "crates/tiller_usage" }
-tiller_registry = { path = "crates/tiller_registry" }
+sirio_theme = { path = "crates/sirio_theme" }
+sirio_ui = { path = "crates/sirio_ui" }
+sirio_terminal = { path = "crates/sirio_terminal" }
+sirio_acp = { path = "crates/sirio_acp" }
+sirio_project = { path = "crates/sirio_project" }
+sirio_git = { path = "crates/sirio_git" }
+sirio_persistence = { path = "crates/sirio_persistence" }
+sirio_agents = { path = "crates/sirio_agents" }
+sirio_control = { path = "crates/sirio_control" }
+sirio_activity = { path = "crates/sirio_activity" }
+sirio_markdown = { path = "crates/sirio_markdown" }
+sirio_usage = { path = "crates/sirio_usage" }
+sirio_registry = { path = "crates/sirio_registry" }
 
 # Local override for F-CORE-FILE-03A: upstream `gpui_linux`'s wl_data_device `Drop` handler
 # bails out silently (no `finish()`/`destroy()`, no error, no event delivered to the app) when

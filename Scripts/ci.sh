@@ -12,11 +12,11 @@
 # instance of the app. Two of those checks are not clean on this tree right now, for
 # reasons that have nothing to do with removing the Swift project:
 #
-#   - `cargo fmt --check` currently reports pre-existing drift in crates/tiller,
-#     crates/tiller_agents, crates/tiller_git, crates/tiller_terminal, crates/tiller_theme,
-#     crates/tiller_ui, and crates/tiller_usage.
+#   - `cargo fmt --check` currently reports pre-existing drift in crates/sirio,
+#     crates/sirio_agents, crates/sirio_git, crates/sirio_terminal, crates/sirio_theme,
+#     crates/sirio_ui, and crates/sirio_usage.
 #   - `cargo clippy` is not clean workspace-wide either -- ci-linux.sh's own
-#     `--exclude tiller --exclude tiller_ui` already documents current warnings in those
+#     `--exclude sirio --exclude sirio_ui` already documents current warnings in those
 #     two crates, routed to their current owners rather than gated here.
 #
 # Wiring either check into the one gate every task is told to pass before either is
@@ -38,7 +38,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-# libghostty-vt-sys (a tiller_terminal dependency since #27) shells out to
+# libghostty-vt-sys (a sirio_terminal dependency since #27) shells out to
 # `zig build`, and upstream pins Zig at EXACTLY 0.15.2 -- a newer Zig fails
 # too, so the upgrade reflex makes it worse; 0.15.2 must be installed
 # alongside and found first on PATH. Without this preflight the failure

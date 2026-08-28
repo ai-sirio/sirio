@@ -9,7 +9,7 @@
 #
 # It does not touch DISPLAY=:1, the user's own desktop. It boots its own nested sway (wlroots
 # headless backend, same trick wayland-drive.sh uses) with Xwayland ENABLED instead of disabled,
-# giving Tiller a private `DISPLAY=:N` backed by a real GLES2 renderer against /dev/dri/renderD128
+# giving Sirio a private `DISPLAY=:N` backed by a real GLES2 renderer against /dev/dri/renderD128
 # — that renderer is what makes DRI3 (and therefore the browser's XCB/GLX window handle) work.
 # Read docs/linux-rewrite/X11-NESTED-LANE.md before recording anything from here — especially the
 # renderer trap: WLR_RENDERER=pixman (wayland-drive.sh's choice, correct for THAT lane) kills DRI3
@@ -60,7 +60,7 @@
 #   ' 12
 #
 # Env: TILLER_X11_LABEL   names this instance and all its /tmp paths (default: x11-$$).
-#      TILLER_X11_BIN     drive a specific binary instead of rust/target/debug/tiller — pin a
+#      TILLER_X11_BIN     drive a specific binary instead of rust/target/debug/sirio — pin a
 #                          snapshot the way wayland-drive.sh's TILLER_WL_BIN does, so a builder
 #                          rebuilding the shared target dir mid-drive cannot swap it under a critic.
 #      TILLER_X11_KEEP=1  leave the compositor and app running after the actions finish.
@@ -74,7 +74,7 @@ OUTDIR="${1:?usage: x11-nested-drive.sh <outdir> '<actions>' [settle]}"
 ACTIONS="${2:-}"
 SETTLE="${3:-8}"
 LABEL="${TILLER_X11_LABEL:-x11-$$}"
-BIN="${TILLER_X11_BIN:-$ROOT/rust/target/debug/tiller}"
+BIN="${TILLER_X11_BIN:-$ROOT/rust/target/debug/sirio}"
 MIN_COLORS=200
 
 SWAYSOCK="/tmp/$LABEL-sway.sock"
@@ -86,7 +86,7 @@ DB="/tmp/$LABEL.sqlite"
 WINID=""
 
 mkdir -p "$OUTDIR"
-[ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p tiller)" >&2; exit 2; }
+[ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p sirio)" >&2; exit 2; }
 for tool in xdotool import identify swaymsg sway; do
   command -v "$tool" >/dev/null || { echo "FAIL: $tool is not installed" >&2; exit 2; }
 done
@@ -112,7 +112,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-kill_ours TILLER_SOCKET "$SOCK" tiller
+kill_ours TILLER_SOCKET "$SOCK" sirio
 kill_ours SWAYSOCK "$SWAYSOCK" sway
 
 W1=1280 H1=800          # sizes shot() alternates between to force a repaint (see the note below)
@@ -139,7 +139,7 @@ BEFORE_SOCKS="$(ls /tmp/.X11-unix/ 2>/dev/null)"
 
 # WLR_RENDERER is intentionally left UNSET, not pixman. wayland-drive.sh sets pixman because its
 # app never asks the compositor for a GPU-backed X11 pixmap. Ours does: DRI3 is served out of the
-# COMPOSITOR's renderer, and pixman is software-only, so Tiller's Vulkan init fails at "No DRI3
+# COMPOSITOR's renderer, and pixman is software-only, so Sirio's Vulkan init fails at "No DRI3
 # support detected" — a trap documented in X11-NESTED-LANE.md. Leaving WLR_RENDERER unset lets
 # wlroots auto-select GLES2 against the real DRM render node, which is what DRI3 needs.
 env -u WAYLAND_DISPLAY -u DISPLAY \

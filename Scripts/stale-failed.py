@@ -13,8 +13,8 @@ each when a builder went to build the thing and tripped over it:
 
   F-EDIT-04        "no ⌘S binding"                     -> ⌘S was already wired in main.rs
   F-SET-09         "no skill provisioner in port"      -> skill.rs has a tested provisioner
-  F-AGENT-SAFE-01  "no skill code in the crate"        -> it is in tiller_project, not
-                                                          tiller_agents, which is where the
+  F-AGENT-SAFE-01  "no skill code in the crate"        -> it is in sirio_project, not
+                                                          sirio_agents, which is where the
                                                           search looked
 
 Found by accident, three times, is not a process. Hence this.
@@ -118,7 +118,7 @@ BACKTICKED = re.compile(r"`([^`]+)`")
 PASS_NUM = re.compile(r"pass\s*(\d+)")
 # Bounds the search to somewhere: a crate, a file, "the crate", "in port".
 SCOPED = re.compile(
-    r"\bin the crate\b|\bin port\b|\bin `?tiller_\w+|\bthe \w+ crate\b|\bin `?\w+\.rs",
+    r"\bin the crate\b|\bin port\b|\bin `?sirio_\w+|\bthe \w+ crate\b|\bin `?\w+\.rs",
     re.I,
 )
 SEARCHED = re.compile(r"\bgrep\b|\bany crate\b|\bworkspace\b|\bno crate\b", re.I)

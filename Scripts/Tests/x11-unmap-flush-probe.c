@@ -111,7 +111,7 @@ int main(void) {
     printf("after_unmap=%s\n", server_view_of(probe, child));
 
     /* The recipe from `flush_native_window_ops` in
-     * rust/crates/tiller_ui/src/browser.rs — `gtk::main_iteration_do` /
+     * rust/crates/sirio_ui/src/browser.rs — `gtk::main_iteration_do` /
      * `gtk::events_pending` / `gdk::Display::flush` are these three functions.
      * Kept in the same order and the same two rounds. */
     for (int round = 0; round < 2; round++) {

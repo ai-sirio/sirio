@@ -41,7 +41,7 @@ WHAT A COUNT MEANS HERE (same discipline as dead-models.py)
 -----------------------------------------------------------
 prod   = references in production text (outside #[cfg(test)] and crate tests/), minus
          the defining file's own lines for defined symbols. app>0 marks references in
-         the binary crates (tiller, tillerctl) — the strongest reachability evidence.
+         the binary crates (sirio, sirioctl) — the strongest reachability evidence.
 test   = references inside test regions and tests/ dirs.
 A test-name symbol (defined only in test text) is labelled [test-fn] — it proves the
 test exists, never that the feature is wired. Zeros are questions, not verdicts:
@@ -76,7 +76,7 @@ NOISE = {
     "new", "get", "set", "run", "open", "close", "read", "write", "test", "tests",
     "main", "lib", "mod", "linux", "macos", "cargo", "main.rs", "lib.rs",
 }
-APP_CRATES = {"tiller", "tiller_control"}  # the two product binaries live here
+APP_CRATES = {"sirio", "sirio_control"}  # the two product binaries live here
 
 
 def load_parser():

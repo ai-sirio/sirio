@@ -22,7 +22,7 @@ the capture, so a screenshot can be graded against a known-correct value
 instead of "does this look plausible".
 
 Not a general-purpose ACP mock — kept deliberately smaller than
-`rust/crates/tiller_acp/tests/fixtures/acp_fixture.py`, which several
+`rust/crates/sirio_acp/tests/fixtures/acp_fixture.py`, which several
 integration tests already depend on for its exact MODE surface; this is a
 separate, single-purpose file so neither has to grow to cover the other's
 job.

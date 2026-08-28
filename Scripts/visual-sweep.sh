@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deterministic visual evidence harness for the Linux GPUI build.
 #
-# Normal mode creates a private Git fixture, launches exactly one Tiller
+# Normal mode creates a private Git fixture, launches exactly one Sirio
 # process, drives every state the control socket exposes, and captures only
 # the window whose _NET_WM_PID is that process. --state-only runs the same
 # state setup without a display so the socket transcript can be checked on a
@@ -9,8 +9,8 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/rust/target/debug/tiller"
-CTL="$ROOT/rust/target/debug/tillerctl"
+BIN="$ROOT/rust/target/debug/sirio"
+CTL="$ROOT/rust/target/debug/sirioctl"
 MIN_COLORS=200
 SETTLE_SECONDS=3
 STATE_ONLY=0
@@ -26,7 +26,7 @@ usage() {
     cat <<'EOF'
 Usage: Scripts/visual-sweep.sh [options]
 
-Launch Tiller, drive the control-socket-reachable visual inventory, capture
+Launch Sirio, drive the control-socket-reachable visual inventory, capture
 PID-matched window frames, and write a transcript plus waku comparisons.
 
 Options:
@@ -113,11 +113,11 @@ if [[ "$STATE_ONLY" -eq 0 ]]; then
 fi
 
 [[ -x "$BIN" ]] || die "app binary is missing or not executable: $BIN"
-[[ -x "$CTL" ]] || die "tillerctl binary is missing or not executable: $CTL"
+[[ -x "$CTL" ]] || die "sirioctl binary is missing or not executable: $CTL"
 command -v git >/dev/null || die "git is required to build the fixture repository"
 command -v python3 >/dev/null || die "python3 is required for socket and window inspection"
 
-RUN_DIR="$(mktemp -d /tmp/tiller-visual-sweep-XXXXXX)"
+RUN_DIR="$(mktemp -d /tmp/sirio-visual-sweep-XXXXXX)"
 FIXTURE="$RUN_DIR/fixture"
 SOCKET="$RUN_DIR/control.sock"
 DATABASE="$RUN_DIR/session.sqlite"
@@ -165,7 +165,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 git -C "$FIXTURE" init -q
-git -C "$FIXTURE" config user.name "Tiller visual sweep"
+git -C "$FIXTURE" config user.name "Sirio visual sweep"
 git -C "$FIXTURE" config user.email "visual-sweep@example.invalid"
 printf 'tracked fixture content\n' >"$FIXTURE/tracked.md"
 printf '# Fixture tree\n\nThe visual sweep repository.\n' >"$FIXTURE/README.md"
@@ -218,7 +218,7 @@ done
 
 run_ctl() {
     local output
-    echo "+ tillerctl $*"
+    echo "+ sirioctl $*"
     if ! output="$("$CTL" "$@" 2>&1)"; then
         printf '%s\n' "$output"
         return 1
@@ -433,7 +433,7 @@ if [[ "$STATE_ONLY" -eq 1 ]]; then
 else
     command -v identify >/dev/null || die "capture stage requires ImageMagick identify"
     command -v import >/dev/null || die "capture stage requires ImageMagick import"
-    reference_root="$ROOT/../_tiller-refs/waku/website/public"
+    reference_root="$ROOT/../_sirio-refs/waku/website/public"
     if [[ ! -f "$reference_root/app-screenshot-dark.png" || ! -f "$reference_root/app-screenshot-light.png" ]]; then
         record_gap "comparison: waku reference frames are not present under $reference_root"
     else
@@ -443,11 +443,11 @@ else
             make_comparison \
                 "$reference_root/app-screenshot-dark.png" "$frame" \
                 "$COMPARE_DIR/$name-vs-waku-dark.png" \
-                "waku dark" "tiller $name"
+                "waku dark" "sirio $name"
             make_comparison \
                 "$reference_root/app-screenshot-light.png" "$frame" \
                 "$COMPARE_DIR/$name-vs-waku-light.png" \
-                "waku light" "tiller $name"
+                "waku light" "sirio $name"
         done
     fi
 fi

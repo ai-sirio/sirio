@@ -3,7 +3,7 @@ name = "xdnd-source"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "A real wl_data_device_manager XDND drag SOURCE for driving Tiller's terminal file-drop under Scripts/wayland-drive.sh. Standalone crate, deliberately outside the rust/ workspace so it never touches the app's Cargo.lock or build."
+description = "A real wl_data_device_manager XDND drag SOURCE for driving Sirio's terminal file-drop under Scripts/wayland-drive.sh. Standalone crate, deliberately outside the rust/ workspace so it never touches the app's Cargo.lock or build."
 
 [[bin]]
 name = "xdnd-source"

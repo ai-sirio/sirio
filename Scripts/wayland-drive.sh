@@ -7,7 +7,7 @@
 #     linux-drive.sh   one shared X pointer  -> a global mutex, real clicks, one driver at a time
 #     wayland-drive.sh virtual pointer       -> no lock, socket calls and real input, any number in parallel
 #
-# Pointer and keyboard devices are created BEFORE Tiller connects, then kept alive for the whole
+# Pointer and keyboard devices are created BEFORE Sirio connects, then kept alive for the whole
 # drive. A transient wlrctl/wtype client can send its first event before GPUI has bound the matching
 # wl_pointer/wl_keyboard. Read WAYLAND-LANE.md before recording anything from here — especially the
 # paragraph about which half of a row you proved.
@@ -76,7 +76,7 @@
 #   '
 #
 # Env: TILLER_WL_LABEL  names this instance and all its /tmp paths (default: wl-$$).
-#      TILLER_WL_BIN    drive a specific binary instead of rust/target/debug/tiller. A critic
+#      TILLER_WL_BIN    drive a specific binary instead of rust/target/debug/sirio. A critic
 #      judging one wave must not have the binary swapped under it by a builder rebuilding the
 #      shared target dir mid-drive, so pin a snapshot: cp the binary to /tmp and point here.
 #      TILLER_WL_KEEP=1 leaves the compositor and app running after the actions finish.
@@ -117,7 +117,7 @@ OUTDIR="${1:?usage: wayland-drive.sh <outdir> '<actions>' [settle]}"
 ACTIONS="${2:-}"
 SETTLE="${3:-6}"
 LABEL="${TILLER_WL_LABEL:-wl-$$}"
-BIN="${TILLER_WL_BIN:-$ROOT/rust/target/debug/tiller}"
+BIN="${TILLER_WL_BIN:-$ROOT/rust/target/debug/sirio}"
 # Attach to an already-running TILLER_WL_KEEP=1 session for this label instead of booting a new
 # one. See the header comment above for the full contract; ATTACH short-circuits every boot step
 # below (pre-kill, sway, dbus, the app launch) in favour of finding and verifying what is already
@@ -157,7 +157,7 @@ mkdir -p "$OUTDIR"
 # already-running process by comm — so it need not still exist at this path (the process it
 # named may have been launched from a snapshot that was since cleaned up).
 if [ "$ATTACH" != "1" ]; then
-  [ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p tiller)" >&2; exit 2; }
+  [ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p sirio)" >&2; exit 2; }
 fi
 command -v grim >/dev/null || { echo "FAIL: grim is not installed" >&2; exit 3; }
 
@@ -165,7 +165,7 @@ command -v grim >/dev/null || { echo "FAIL: grim is not installed" >&2; exit 3; 
 # kill other agents' instances — and, on a machine where the user runs a Wayland session, theirs.
 kill_ours() {
   # Linux caps a process's comm at 15 characters and `pgrep -x` matches comm, so a longer name
-  # matches NOTHING and pgrep only warns on stderr. A pinned snapshot called /tmp/L2crit-tiller
+  # matches NOTHING and pgrep only warns on stderr. A pinned snapshot called /tmp/L2crit-sirio
   # therefore leaked past cleanup silently. Truncate the pattern the same way the kernel did.
   local var="$1" want="$2" name="${3:0:15}" p doomed="" waited=0
   for p in $(pgrep -x "$name" 2>/dev/null); do
@@ -204,8 +204,8 @@ find_ours() {
   done
   return 1
 }
-# Everything Tiller spawned in a pane -- the agent CLIs a critic launches over ACP, and whatever
-# those spawn in turn -- inherits Tiller's environment, and an inherited environ SURVIVES
+# Everything Sirio spawned in a pane -- the agent CLIs a critic launches over ACP, and whatever
+# those spawn in turn -- inherits Sirio's environment, and an inherited environ SURVIVES
 # REPARENTING. So `TILLER_SOCKET=$SOCK` in /proc/N/environ identifies this lane's descendants
 # exactly, including the ones whose parent already died and left them on init. A descendant walk
 # (pgrep -P) cannot: reparented children are precisely the ones it loses.
@@ -250,9 +250,9 @@ cleanup() {
   [ -n "${VP_PID:-}" ] && kill "$VP_PID" 2>/dev/null || true
   [ -n "${VK_PID:-}" ] && kill "$VK_PID" 2>/dev/null || true
   kill_lane_descendants
-  # Match the binary's real process name, not the literal "tiller": TILLER_WL_BIN lets a critic
-  # drive a renamed snapshot (/tmp/L3-tiller), and pgrep -x never matched those, so every pinned
-  # instance leaked past cleanup and survived `pkill -x tiller` too.
+  # Match the binary's real process name, not the literal "sirio": TILLER_WL_BIN lets a critic
+  # drive a renamed snapshot (/tmp/L3-sirio), and pgrep -x never matched those, so every pinned
+  # instance leaked past cleanup and survived `pkill -x sirio` too.
   kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
   kill_ours SWAYSOCK "$SWAYSOCK" sway
   # The bus goes last: the portal backends above are its clients and exit when
@@ -268,7 +268,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Same `$(basename "$BIN")` as cleanup() above, and for the same reason: the literal
-# "tiller" never matches a renamed snapshot. This start-of-run pre-kill is the more
+# "sirio" never matches a renamed snapshot. This start-of-run pre-kill is the more
 # important of the two call sites, because cleanup() deliberately does not run under
 # TILLER_WL_KEEP -- so under a KEEP session this is the *only* thing standing between
 # a relaunch and two live instances sharing one database.
@@ -290,7 +290,7 @@ kill_ours SWAYSOCK "$SWAYSOCK" sway
 #
 # Measured 2026-08-19, after about twenty minutes of a KEEP-mode critic driving
 # label `fprjfreshD`: 20 dbus-daemons, 18 virtual-pointers and 13 wtypes alive,
-# against exactly one tiller and one sway. The age histogram of the survivors was
+# against exactly one sirio and one sway. The age histogram of the survivors was
 # a new one every 50-90s — the invocation cadence — which is what identifies this
 # as a per-invocation leak rather than a per-pass one.
 #
@@ -350,7 +350,7 @@ EOF
 # A private session bus, before anything that could use one starts.
 #
 # This lane isolates the display and leaves the bus alone, which is only half a
-# sandbox — and the missing half reaches further than the display does. Tiller's
+# sandbox — and the missing half reaches further than the display does. Sirio's
 # folder picker is `cx.prompt_for_paths` -> ashpd -> an XDG portal call, and a
 # portal call goes wherever DBUS_SESSION_BUS_ADDRESS points. Inherited from a
 # desktop login that is `unix:path=/run/user/$UID/bus`, so the request lands on
@@ -487,7 +487,7 @@ start_virtual_pointer() {
 start_virtual_keyboard() {
   command -v wtype >/dev/null || { echo "FAIL: wtype is required for Wayland keyboard input" >&2; return 1; }
   verify_nested_sway || return 1
-  # The press/release happens before Tiller starts; -s then keeps wtype (and its virtual keyboard)
+  # The press/release happens before Sirio starts; -s then keeps wtype (and its virtual keyboard)
   # connected without leaving Shift held. Later type/key commands use the already-advertised seat.
   #
   # The hold has to outlive the drive. At the old 10 minutes, a TILLER_WL_KEEP session that ran
@@ -599,7 +599,7 @@ LAUNCH_CWD="/tmp/$LABEL-cwd"
 mkdir -p "$LAUNCH_CWD"
 # Same isolation argument as the cwd above, for the other filesystem footprint the
 # app has. Unset, `TILLER_PROJECTS_DIR` falls back to the app's own default of
-# `$HOME/Tiller/projects` -- the user's real home -- so every drive that creates or
+# `$HOME/Sirio/projects` -- the user's real home -- so every drive that creates or
 # clones a project writes there. That is not hypothetical: it is where fifteen
 # directories from earlier verification rounds accumulated over two days, and a clone
 # landed there again on 2026-08-20 when one Bash call started without the override.
@@ -613,7 +613,7 @@ if [ -n "${TILLER_PROJECTS_DIR:-}" ]; then
   echo "NOTE: TILLER_PROJECTS_DIR from the caller: $TILLER_PROJECTS_DIR"
 else
   TILLER_PROJECTS_DIR="/tmp/$LABEL-projects"
-  echo "NOTE: TILLER_PROJECTS_DIR defaulted to $TILLER_PROJECTS_DIR (not \$HOME/Tiller/projects)"
+  echo "NOTE: TILLER_PROJECTS_DIR defaulted to $TILLER_PROJECTS_DIR (not \$HOME/Sirio/projects)"
 fi
 mkdir -p "$TILLER_PROJECTS_DIR"
 ( cd "$LAUNCH_CWD" && exec env -u DISPLAY \
@@ -731,11 +731,11 @@ scroll() { pointer_command scroll "$1" "$2" "$3"; }
 # xdnd <x1> <y1> <x2> <y2> <file1> [file2 ...] [--delay-ms N] — a REAL compositor-delivered XDND
 # drag, not GPUI's own in-process simulated drag (that path was already proven by
 # a_drawn_terminal_accepts_a_real_external_paths_drop_with_several_files in
-# tiller_terminal/src/lib.rs; F-CORE-FILE-03A was open on exactly the gap this closes). Launches
+# sirio_terminal/src/lib.rs; F-CORE-FILE-03A was open on exactly the gap this closes). Launches
 # Scripts/xdnd-source as a second Wayland client on this SAME compositor connection — a real
 # wl_data_device_manager drag SOURCE offering text/uri-list for every <file> (turned into a
 # file:// URI each). It maps a tiny zwlr_layer_shell_v1 overlay surface at (x1,y1) — a layer-shell
-# surface, deliberately not an xdg_toplevel, so sway's tiling never touches Tiller's own window or
+# surface, deliberately not an xdg_toplevel, so sway's tiling never touches Sirio's own window or
 # the coordinate space the rest of this script's actions use.
 #
 # The handshake: xdnd-source prints READY once that overlay is mapped and eligible for pointer
@@ -746,7 +746,7 @@ scroll() { pointer_command scroll "$1" "$2" "$3"; }
 # compositor delivered). xdnd-source prints DRAG_STARTED once that request went out. Only then does
 # this function walk the pointer to (x2,y2) with real intermediate motion and release — the
 # compositor delivers wl_data_device.enter/motion/drop to whatever surface is under the pointer at
-# that point, i.e. Tiller's own window, exactly as dragging out of a real file manager would.
+# that point, i.e. Sirio's own window, exactly as dragging out of a real file manager would.
 #
 # `--delay-ms N` simulates a slow-resolving provider by delaying xdnd-source's write into the
 # offer pipe once the target's `receive()` request triggers its `send` event — see

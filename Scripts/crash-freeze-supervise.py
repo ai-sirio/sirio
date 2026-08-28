@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Supervise Tiller for a frozen window and preserve thread evidence.
+"""Supervise Sirio for a frozen window and preserve thread evidence.
 
 The process is deliberately supervised from this Python process.  A freeze is
 not a process exit: it is a stable window pixmap while the control socket still
@@ -154,8 +154,8 @@ def run_command(command: list[str], timeout: float) -> subprocess.CompletedProce
         return subprocess.CompletedProcess(command, 127, stdout="", stderr=str(error))
 
 
-def cli_command(tillerctl: Path, socket: Path, subcommand: str, *arguments: str) -> list[str]:
-    return [str(tillerctl), subcommand, *arguments, "--socket", str(socket)]
+def cli_command(sirioctl: Path, socket: Path, subcommand: str, *arguments: str) -> list[str]:
+    return [str(sirioctl), subcommand, *arguments, "--socket", str(socket)]
 
 
 def pixel_digest(path: Path) -> str | None:
@@ -195,10 +195,10 @@ def default_socket_path(environment: dict[str, str]) -> Path:
     return root / "TillerRust" / "control.sock"
 
 
-def check_liveness(tillerctl: Path, socket: Path) -> Liveness:
-    ping = run_command(cli_command(tillerctl, socket, "ping"), timeout=5.0)
+def check_liveness(sirioctl: Path, socket: Path) -> Liveness:
+    ping = run_command(cli_command(sirioctl, socket, "ping"), timeout=5.0)
     workspace = run_command(
-        cli_command(tillerctl, socket, "current-workspace", "--json"), timeout=5.0
+        cli_command(sirioctl, socket, "current-workspace", "--json"), timeout=5.0
     )
     workspace_ok = workspace.returncode == 0 and workspace.stdout.strip() not in {"", "[]"}
     if workspace_ok:
@@ -331,7 +331,7 @@ def current_workspace_id(workspace_output: str) -> str | None:
 
 
 def select_current_workspace(
-    tillerctl: Path, socket: Path, workspace_output: str
+    sirioctl: Path, socket: Path, workspace_output: str
 ) -> subprocess.CompletedProcess[str]:
     workspace_id = current_workspace_id(workspace_output)
     if workspace_id is None:
@@ -340,7 +340,7 @@ def select_current_workspace(
         )
     return run_command(
         cli_command(
-            tillerctl,
+            sirioctl,
             socket,
             "select-workspace",
             "--workspace",
@@ -377,7 +377,7 @@ def wait_for_pixel_change(
 def recovery_probe(
     display: str,
     window: tuple[str, tuple[int, int, int, int], str] | None,
-    tillerctl: Path,
+    sirioctl: Path,
     socket: Path,
     workspace_output: str,
     frozen_digest: str,
@@ -402,7 +402,7 @@ def recovery_probe(
         if changed:
             return outcomes
 
-    selected = select_current_workspace(tillerctl, socket, workspace_output)
+    selected = select_current_workspace(sirioctl, socket, workspace_output)
     changed, observations = wait_for_pixel_change(
         display, window, frozen_digest, screenshot, recovery_timeout, interval
     )
@@ -422,7 +422,7 @@ def recovery_probe(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="supervise Tiller for a responsive-socket freeze")
+    parser = argparse.ArgumentParser(description="supervise Sirio for a responsive-socket freeze")
     root = Path(__file__).resolve().parents[1]
     parser.add_argument(
         "--output-dir",
@@ -436,7 +436,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze-after", type=float, default=DEFAULT_FREEZE_THRESHOLD)
     parser.add_argument("--stack-delay", type=float, default=DEFAULT_STACK_DELAY)
     parser.add_argument("--recovery-timeout", type=float, default=DEFAULT_RECOVERY_TIMEOUT)
-    parser.add_argument("--tillerctl", type=Path, default=root / "rust/target/debug/tillerctl")
+    parser.add_argument("--sirioctl", type=Path, default=root / "rust/target/debug/sirioctl")
     parser.add_argument("--socket", type=Path, default=default_socket_path(dict(os.environ)))
     parser.add_argument(
         "--continue-after-freeze",
@@ -448,7 +448,7 @@ def parse_args() -> argparse.Namespace:
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
     if not args.command:
-        args.command = [str(root / "rust/target/debug/tiller")]
+        args.command = [str(root / "rust/target/debug/sirio")]
     if min(args.poll, args.sample, args.freeze_after, args.stack_delay, args.recovery_timeout) <= 0:
         parser.error("timing options must be positive")
     return args
@@ -542,7 +542,7 @@ def run() -> int:
         if candidate is None:
             next_sample = now + args.sample
             return
-        checked = check_liveness(args.tillerctl, args.socket)
+        checked = check_liveness(args.sirioctl, args.socket)
         if not checked.responsive:
             next_sample = now + args.sample
             return
@@ -573,7 +573,7 @@ def run() -> int:
         recovery = recovery_probe(
             args.display,
             current_window,
-            args.tillerctl,
+            args.sirioctl,
             args.socket,
             checked.workspace_output,
             candidate.digest,

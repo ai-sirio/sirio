@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Measures Tiller's theme tokens off waku's published product screenshots.
+"""Measures Sirio's theme tokens off waku's published product screenshots.
 
-Why this exists: the goal freezes waku as Tiller's *visual* bar while
+Why this exists: the goal freezes waku as Sirio's *visual* bar while
 forbidding its code. Those two are only compatible if our palette comes from
 looking at rendered frames. This script is that looking, written down so the
-numbers in `tiller_theme` are auditable instead of asserted — re-run it and you
+numbers in `sirio_theme` are auditable instead of asserted — re-run it and you
 get the table in `docs/linux-rewrite/THEME-PROVENANCE.md` back.
 
 Frames: `app-screenshot-{dark,light}.png` in this directory, waku's own
