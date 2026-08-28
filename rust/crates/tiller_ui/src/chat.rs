@@ -7235,16 +7235,22 @@ impl Chat {
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
-            .when(self.streaming, |this| this.w_full())
-            .when(!self.streaming, |this| {
-                this.w_full()
-                    .max_w(px(TRANSCRIPT_WIDTH))
-                    .border_1()
-                    .border_color(if focused {
-                        colors.accent
-                    } else {
-                        colors.hairline
-                    })
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            // #242: the border is always present, so the card's box is the
+            // same size whether a turn is streaming or not. It used to be
+            // added only when idle, which cost the card 2px of height the
+            // moment a turn began -- invisible in width, where `w_full` pins
+            // it, but a visible twitch in height twice per turn. While
+            // streaming it goes transparent instead of away: the visible rim
+            // is the rotating ring drawn just outside the card.
+            .border_1()
+            .border_color(if self.streaming {
+                colors.hairline.opacity(0.0)
+            } else if focused {
+                colors.accent
+            } else {
+                colors.hairline
             })
             .rounded(theme.radii.composer)
             .bg(colors.composer)
@@ -7437,13 +7443,31 @@ impl Chat {
                     // was streaming, which is why an idle frame looked fine.
                     .w_full()
                     .max_w(px(TRANSCRIPT_WIDTH))
-                    .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
-                    .p(STREAMING_BORDER_WIDTH)
-                    .bg(linear_gradient(
-                        angle as f32,
-                        linear_color_stop(streaming_orange.opacity(0.15), 0.0),
-                        linear_color_stop(streaming_orange, 1.0),
-                    ))
+                    // #242: the ring is drawn AROUND the card, not by padding
+                    // it inward. It used to wrap `composer_card` with
+                    // `.p(STREAMING_BORDER_WIDTH)`, which cost the card 2px in
+                    // each dimension and shifted it 1px down and right every
+                    // time a turn started -- the exact opposite of what
+                    // `STREAMING_BORDER_WIDTH`'s comment promised, and a twitch
+                    // the user saw twice per turn. Positioned absolutely and
+                    // inset by -1px it paints the same rim while taking part
+                    // in no layout at all, so the composer's rectangle is
+                    // identical streaming or idle.
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .top(-STREAMING_BORDER_WIDTH)
+                            .left(-STREAMING_BORDER_WIDTH)
+                            .right(-STREAMING_BORDER_WIDTH)
+                            .bottom(-STREAMING_BORDER_WIDTH)
+                            .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
+                            .bg(linear_gradient(
+                                angle as f32,
+                                linear_color_stop(streaming_orange.opacity(0.15), 0.0),
+                                linear_color_stop(streaming_orange, 1.0),
+                            )),
+                    )
                     .child(composer_card)
                     .into_any_element()
             }
@@ -8898,24 +8922,23 @@ mod tests {
 
         let streaming = cx.debug_bounds("composer").expect("the composer is drawn");
 
-        // The composer does shift while streaming, but not because of this
-        // row: it moves exactly 1px and shrinks exactly 2px, and that
-        // reproduces with the spinner disabled entirely. It is the streaming
-        // border, whose own comment claims it "keeps the composer's footprint
-        // and its contents stationary" -- filed separately rather than folded
-        // in here, so this test fails for one reason only.
+        // #242 fixed: the streaming ring no longer participates in layout,
+        // so the composer's drawn rectangle is identical either way. It used
+        // to move 1px and shrink 2px every time a turn started, because the
+        // ring wrapped the card and padded it inward -- the opposite of what
+        // `STREAMING_BORDER_WIDTH`'s own comment promised.
         //
-        // The spinner is a ~20px row in the same column, so if it displaced
-        // the composer at all it would blow this budget by an order of
-        // magnitude. Bounding the drift at the border's 1px is therefore a
-        // real guard on this row, not a rounded-off tautology.
-        let dx = (f32::from(idle.origin.x) - f32::from(streaming.origin.x)).abs();
-        let dy = (f32::from(idle.origin.y) - f32::from(streaming.origin.y)).abs();
-        assert!(
-            dx <= 1.0 && dy <= 1.0,
-            "the spinner must not move the composer; only the 1px border may:              idle {:?} vs streaming {:?}",
-            idle.origin,
-            streaming.origin
+        // The spinner is a ~20px row in the same column, so this equality is
+        // also what proves the spinner itself displaces nothing.
+        assert_eq!(
+            idle.size, streaming.size,
+            "streaming must not resize the composer: idle {:?} vs streaming {:?}",
+            idle.size, streaming.size
+        );
+        assert_eq!(
+            idle.origin, streaming.origin,
+            "streaming must not move the composer: idle {:?} vs streaming {:?}",
+            idle.origin, streaming.origin
         );
     }
 
