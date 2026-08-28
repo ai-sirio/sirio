@@ -74,10 +74,17 @@ Three consequences that change the map's own framing:
   `TERM_PROGRAM=ghostty` buys pi's `images: "kitty"` branch and buys with it
   every other behaviour a guest keys off "this is ghostty".
 
-  **The first milestone is this one line, not the renderer**: set the
-  environment, run pi, and see whether graphics APCs appear at all. That single
-  experiment also settles whether any guest probes lazily, which is the last
-  question left open on #264.
+  **The first milestone is this one line, not the renderer** — but it needs a
+  discriminating test, and the obvious one is not. Running pi with
+  `TERM_PROGRAM=ghostty` and watching for graphics APCs was measured and gives
+  `APC count: 0`, exactly as it does without the variable: pi emits nothing
+  while idle either way, because the environment decides what it *may* send,
+  not what it *has* to send. A test that returns the same answer whether or not
+  the change worked is not a test.
+
+  The milestone therefore needs **content**: an agent turn that actually
+  produces an image, run once with the variable and once without. That costs a
+  real model turn, which is why it is not done here.
 
 ### 2. Decoding
 
