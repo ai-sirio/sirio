@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Tiller — a native Linux app (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory — see `docs/linux-rewrite/README.md` for the exact retirement commit and how to read the retired source. Terminal rendering is built on `alacritty_terminal`.
+Tiller — a native Linux app (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory — see `docs/linux-rewrite/README.md` for the exact retirement commit and how to read the retired source. Terminal rendering is built on `libghostty-vt`, with `portable-pty` supplying the PTY.
 
 ### External references
 
