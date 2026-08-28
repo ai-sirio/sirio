@@ -18,9 +18,9 @@ use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
     render::{CellIteration, CellIterator, Colors, RowIterator},
     screen::{CellWide, GridRef},
-    selection::{FormatOptions, Selection},
+    selection::{FormatOptions, Selection, SelectLineOptions, SelectWordOptions},
     style::{StyleColor, Underline},
-    terminal::{Mode, Point as GhosttyPoint, PointCoordinate, ScrollViewport},
+    terminal::{Mode, Point as GhosttyPoint, PointCoordinate, PointSpace, ScrollViewport},
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use anyhow::{Context as _, Result};
@@ -284,6 +284,32 @@ impl SnapshotCell {
 /// this channel. Blocking round-trips (Snapshot/Text) wait on a oneshot-ish
 /// reply channel; the owner loop polls with a small sleep so worst-case
 /// command latency is bounded by [`EVENT_POLL_INTERVAL`].
+/// #259: what a repeated click selects around the cell under the pointer.
+///
+/// Resolved by libghostty-vt, not here: word boundaries know about wide
+/// characters and semantic prompt marks, and a line knows whether it was soft
+/// wrapped. Reimplementing either from a cell snapshot gets the easy cases
+/// right and the ones that matter wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickSelection {
+    /// Double click.
+    Word,
+    /// Triple click.
+    Line,
+}
+
+impl ClickSelection {
+    /// GPUI counts clicks for us; anything past three repeats the line, which
+    /// is what a terminal user expects from a fourth click.
+    pub fn for_click_count(count: usize) -> Option<Self> {
+        match count {
+            0 | 1 => None,
+            2 => Some(Self::Word),
+            _ => Some(Self::Line),
+        }
+    }
+}
+
 /// #259: the selected region, in viewport grid coordinates, as plain data.
 ///
 /// libghostty-vt owns the real `Selection` -- it is what `format_selection_alloc`
@@ -413,6 +439,13 @@ enum TerminalCommand {
     /// rather than re-extracted here -- it knows about soft wrapping and
     /// trailing blanks, which slicing a cell snapshot does not.
     SelectionText(SelectedRange, std::sync::mpsc::Sender<String>),
+    /// #259: resolve a double or triple click into a range, using the
+    /// emulator's own word and line rules.
+    ClickSelect(
+        (usize, usize),
+        ClickSelection,
+        std::sync::mpsc::Sender<Option<SelectedRange>>,
+    ),
     Shutdown,
 }
 
@@ -764,6 +797,9 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     }
                     TerminalCommand::Text(reply) => {
                         let _ = reply.send(capture_scrollback_text(&mut terminal));
+                    }
+                    TerminalCommand::ClickSelect(cell, kind, reply) => {
+                        let _ = reply.send(click_selection_range(&terminal, cell, kind));
                     }
                     TerminalCommand::SelectionText(range, reply) => {
                         // Built and consumed inside this one iteration:
@@ -1293,6 +1329,15 @@ impl TerminalHandle {
     /// reads the emulator's complete retained history rather than only the
     /// visible viewport, so a persistence layer can restore what the user
     /// would have found by scrolling up.
+    /// #259: the range a double or triple click selects around a cell.
+    fn click_select(&self, cell: (usize, usize), kind: ClickSelection) -> Option<SelectedRange> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.commands
+            .send(TerminalCommand::ClickSelect(cell, kind, reply_tx))
+            .ok()?;
+        reply_rx.recv().ok().flatten()
+    }
+
     /// #259: the currently selected text, or `None` when nothing is selected.
     fn selected_text(&self) -> Option<String> {
         let range = (*self.selection.lock())?;
@@ -2343,8 +2388,17 @@ impl TerminalView {
             )
         {
             let cell = Self::cell_at(terminal, event.position);
+            // A repeated click selects a word or a line outright; a single one
+            // only anchors, so a plain click clears rather than selecting the
+            // cell under the pointer.
+            let clicked = ClickSelection::for_click_count(event.click_count)
+                .and_then(|kind| terminal.click_select(cell, kind));
             *terminal.selection_anchor.lock() = Some(cell);
-            if terminal.selection.lock().take().is_some() {
+            let mut selection = terminal.selection.lock();
+            let previous = *selection;
+            *selection = clicked;
+            if previous != clicked {
+                drop(selection);
                 cx.notify();
             }
         }
@@ -3600,6 +3654,44 @@ fn selection_text(terminal: &Terminal<'_, '_>, range: SelectedRange) -> Option<S
     Some(String::from_utf8_lossy(bytes.as_ref()).into_owned())
 }
 
+/// #259: the range a double or triple click selects.
+///
+/// `select_word` and `select_line` are the emulator's own, so wide characters,
+/// semantic prompt boundaries and soft-wrapped lines behave the way they do in
+/// Ghostty rather than the way a hand-written boundary scan would. The result
+/// comes back as a `Selection` over `GridRef`s, which
+/// `Terminal::point_from_grid_ref` converts to the viewport coordinates the
+/// paint loop understands -- the inverse of the lookup that produced them.
+///
+/// `None` when the click lands somewhere with no word (blank cells) or the
+/// range cannot be expressed in the viewport, which is what a click into empty
+/// space should do: nothing.
+fn click_selection_range(
+    terminal: &Terminal<'_, '_>,
+    cell: (usize, usize),
+    kind: ClickSelection,
+) -> Option<SelectedRange> {
+    let point = GhosttyPoint::Viewport(PointCoordinate {
+        x: u16::try_from(cell.1).unwrap_or(u16::MAX),
+        y: u32::try_from(cell.0).unwrap_or(u32::MAX),
+    });
+    let grid_ref = terminal.grid_ref(point).ok()?;
+    let selection = match kind {
+        ClickSelection::Word => terminal.select_word(SelectWordOptions::new(grid_ref)).ok()??,
+        ClickSelection::Line => terminal.select_line(SelectLineOptions::new(grid_ref)).ok()??,
+    };
+    let viewport = |grid_ref: &GridRef<'_>| {
+        terminal
+            .point_from_grid_ref(grid_ref, PointSpace::Viewport)
+            .ok()
+            .flatten()
+            .map(|point| (point.y as usize, point.x as usize))
+    };
+    let start = viewport(&selection.start())?;
+    let end = viewport(&selection.end())?;
+    Some(SelectedRange::between(start, end))
+}
+
 fn encode_key_input(
     terminal: &Terminal<'_, '_>,
     encoder: &mut key::Encoder<'_>,
@@ -3766,6 +3858,29 @@ mod tests {
             "tiller-terminal-test-{name}-{}-{serial}",
             std::process::id()
         ))
+    }
+
+    /// #259: how many clicks mean what.
+    ///
+    /// A single click anchors a drag and selects nothing -- selecting the cell
+    /// under the pointer would make every click leave a one-cell highlight.
+    /// Past three, a terminal user expects the line again, not a new mode.
+    #[test]
+    fn click_count_maps_to_word_then_line() {
+        assert_eq!(ClickSelection::for_click_count(0), None);
+        assert_eq!(ClickSelection::for_click_count(1), None);
+        assert_eq!(
+            ClickSelection::for_click_count(2),
+            Some(ClickSelection::Word)
+        );
+        assert_eq!(
+            ClickSelection::for_click_count(3),
+            Some(ClickSelection::Line)
+        );
+        assert_eq!(
+            ClickSelection::for_click_count(4),
+            Some(ClickSelection::Line)
+        );
     }
 
     /// #259: who owns a left drag.
