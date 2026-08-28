@@ -218,12 +218,291 @@ impl Drop for TrayHandle {
     }
 }
 
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_os = "windows"),
+    not(target_os = "macos")
+))]
 pub struct TrayHandle;
 
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_os = "windows"),
+    not(target_os = "macos")
+))]
 impl TrayHandle {
     pub fn nudge(&self) {}
+}
+
+/// The status item and the menu delegate that renders it, both owned for
+/// the process's lifetime.
+///
+/// Unlike Linux's ksni handle and Windows' pump thread, nothing here is
+/// `Send`: `NSStatusItem` is main-thread-only, and every caller is already
+/// on it — `spawn` runs inside `Application::run`'s callback and `nudge` is
+/// called from the workspace's own GPUI update. Keeping the AppKit objects
+/// in the handle rather than behind a channel is what makes that true by
+/// construction instead of by convention.
+#[cfg(target_os = "macos")]
+pub struct TrayHandle {
+    status_item: objc2::rc::Id<objc2_app_kit::NSStatusItem>,
+    /// Retained so the menu's delegate outlives the menu, which holds only
+    /// a weak reference to it.
+    _delegate: objc2::rc::Id<macos::TrayMenuDelegate>,
+    roster: SharedRoster,
+    /// The kind the button currently shows. `nudge` repaints only when this
+    /// changes, which is the contract the Windows port established.
+    shown_kind: std::cell::Cell<TrayIconKind>,
+}
+
+#[cfg(target_os = "macos")]
+impl TrayHandle {
+    pub fn nudge(&self) {
+        let kind = self
+            .roster
+            .lock()
+            .map(|roster| tray_icon_kind(&roster))
+            .unwrap_or(TrayIconKind::Normal);
+        if kind == self.shown_kind.get() {
+            return;
+        }
+        let Some(mtm) = objc2_foundation::MainThreadMarker::new() else {
+            return;
+        };
+        self.shown_kind.set(kind);
+        macos::apply_icon(&self.status_item, kind, mtm);
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::{
+        roster_menu_label, SharedRoster, TrayIconKind, TrayRequest, TrayRequestQueue,
+        NO_ACTIVE_AGENTS_LABEL, OPEN_TILLER_LABEL, QUIT_TILLER_LABEL,
+    };
+    use objc2::rc::Id;
+    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject, Sel};
+    use objc2::{declare_class, msg_send_id, mutability, sel, ClassType, DeclaredClass};
+    use objc2_app_kit::{NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusItem};
+    use objc2_foundation::{ns_string, MainThreadMarker, NSString};
+    use std::time::Instant;
+
+    /// SF Symbols, chosen to say the same thing the freedesktop names on
+    /// Linux do: a terminal at rest, and the mark for an unanswered
+    /// question when an agent needs input — not an error mark, which would
+    /// claim something is broken. Both render as template images, so the
+    /// menu bar tints them for light, dark and "reduce transparency" on its
+    /// own; a coloured badge would be flattened away by exactly that.
+    const NORMAL_SYMBOL: &str = "terminal";
+    const ATTENTION_SYMBOL: &str = "questionmark.circle";
+    /// Drawn instead of an image where the symbol cannot be loaded (macOS
+    /// older than 11, or a future rename): a titled status item is still a
+    /// working roster, where an item with neither image nor title is an
+    /// invisible one.
+    const NORMAL_FALLBACK_TITLE: &str = "T";
+    const ATTENTION_FALLBACK_TITLE: &str = "T?";
+
+    fn symbol_for(kind: TrayIconKind) -> &'static str {
+        match kind {
+            TrayIconKind::Normal => NORMAL_SYMBOL,
+            TrayIconKind::Attention => ATTENTION_SYMBOL,
+        }
+    }
+
+    fn fallback_title_for(kind: TrayIconKind) -> &'static str {
+        match kind {
+            TrayIconKind::Normal => NORMAL_FALLBACK_TITLE,
+            TrayIconKind::Attention => ATTENTION_FALLBACK_TITLE,
+        }
+    }
+
+    /// Points the status item's button at `kind`'s symbol, falling back to a
+    /// title when the symbol does not resolve.
+    pub(super) fn apply_icon(status_item: &NSStatusItem, kind: TrayIconKind, mtm: MainThreadMarker) {
+        let Some(button) = (unsafe { status_item.button(mtm) }) else {
+            return;
+        };
+        let symbol = NSString::from_str(symbol_for(kind));
+        let description = NSString::from_str("Tiller");
+        let image = unsafe {
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &symbol,
+                Some(&description),
+            )
+        };
+        match image {
+            Some(image) => {
+                unsafe { image.setTemplate(true) };
+                unsafe { button.setImage(Some(&image)) };
+                unsafe { button.setTitle(ns_string!("")) };
+            }
+            None => {
+                unsafe { button.setImage(None) };
+                unsafe { button.setTitle(&NSString::from_str(fallback_title_for(kind))) };
+            }
+        }
+    }
+
+    pub(super) struct DelegateState {
+        pub roster: SharedRoster,
+        pub requests: TrayRequestQueue,
+        /// Held rather than re-derived: every method below is called by
+        /// AppKit on the main thread, and carrying the proof from `spawn`
+        /// keeps that a fact of construction instead of a runtime check
+        /// that could only ever fail by being wrong about it.
+        pub mtm: MainThreadMarker,
+    }
+
+    declare_class!(
+        /// Rebuilds the roster menu each time it is about to open, and
+        /// receives its clicks.
+        ///
+        /// The menu is built on open rather than on every roster write for
+        /// the reason `roster_menu_label` documents: the age it renders is
+        /// only correct for the instant it is drawn, and the only instant
+        /// that matters is the one the user is looking at it.
+        pub(super) struct TrayMenuDelegate;
+
+        unsafe impl ClassType for TrayMenuDelegate {
+            type Super = NSObject;
+            type Mutability = mutability::MainThreadOnly;
+            const NAME: &'static str = "TillerTrayMenuDelegate";
+        }
+
+        impl DeclaredClass for TrayMenuDelegate {
+            type Ivars = DelegateState;
+        }
+
+        unsafe impl NSObjectProtocol for TrayMenuDelegate {}
+
+        unsafe impl NSMenuDelegate for TrayMenuDelegate {
+            #[method(menuNeedsUpdate:)]
+            unsafe fn menu_needs_update(&self, menu: &NSMenu) {
+                self.rebuild(menu);
+            }
+        }
+
+        unsafe impl TrayMenuDelegate {
+            /// A roster row. The clicked worktree is carried by the item's
+            /// tag — its index in the roster snapshot the menu was built
+            /// from, resolved back to a path here.
+            #[method(rosterItemClicked:)]
+            unsafe fn roster_item_clicked(&self, sender: &NSMenuItem) {
+                let index = unsafe { sender.tag() };
+                let path = self
+                    .ivars()
+                    .roster
+                    .lock()
+                    .ok()
+                    .and_then(|roster| {
+                        usize::try_from(index)
+                            .ok()
+                            .and_then(|index| roster.get(index).map(|entry| entry.path.clone()))
+                    });
+                match path {
+                    Some(path) => self.push(TrayRequest::SelectWorktree(path)),
+                    // The roster changed between building the menu and the
+                    // click. Showing the window is the honest answer: it is
+                    // what the row would have done first anyway.
+                    None => self.push(TrayRequest::ShowWindow),
+                }
+            }
+
+            #[method(openTillerClicked:)]
+            unsafe fn open_tiller_clicked(&self, _sender: &NSMenuItem) {
+                self.push(TrayRequest::ShowWindow);
+            }
+
+            #[method(quitTillerClicked:)]
+            unsafe fn quit_tiller_clicked(&self, _sender: &NSMenuItem) {
+                self.push(TrayRequest::Quit);
+            }
+        }
+    );
+
+    impl TrayMenuDelegate {
+        pub(super) fn new(
+            mtm: MainThreadMarker,
+            roster: SharedRoster,
+            requests: TrayRequestQueue,
+        ) -> Id<Self> {
+            let this = mtm
+                .alloc::<Self>()
+                .set_ivars(DelegateState { roster, requests, mtm });
+            unsafe { msg_send_id![super(this), init] }
+        }
+
+        fn push(&self, request: TrayRequest) {
+            if let Ok(mut requests) = self.ivars().requests.lock() {
+                requests.push(request);
+            }
+        }
+
+        /// The menu's settled shape: roster rows (or one disabled "No active
+        /// agents"), `Open Tiller`, separator, `Quit Tiller` — with `Open
+        /// Tiller` present so the only enabled action is never the
+        /// destructive one.
+        fn rebuild(&self, menu: &NSMenu) {
+            unsafe { menu.removeAllItems() };
+            let now = Instant::now();
+            let rows: Vec<String> = self
+                .ivars()
+                .roster
+                .lock()
+                .map(|roster| {
+                    roster
+                        .iter()
+                        .map(|entry| roster_menu_label(entry, now))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if rows.is_empty() {
+                let item = self.item(NO_ACTIVE_AGENTS_LABEL, None, -1);
+                unsafe { item.setEnabled(false) };
+                menu.addItem(&item);
+            } else {
+                for (index, label) in rows.into_iter().enumerate() {
+                    let item = self.item(
+                        &label,
+                        Some(sel!(rosterItemClicked:)),
+                        isize::try_from(index).unwrap_or(-1),
+                    );
+                    menu.addItem(&item);
+                }
+            }
+
+            let open = self.item(OPEN_TILLER_LABEL, Some(sel!(openTillerClicked:)), -1);
+            menu.addItem(&open);
+            menu.addItem(&NSMenuItem::separatorItem(self.ivars().mtm));
+            let quit = self.item(QUIT_TILLER_LABEL, Some(sel!(quitTillerClicked:)), -1);
+            menu.addItem(&quit);
+        }
+
+        fn item(&self, label: &str, action: Option<Sel>, tag: isize) -> Id<NSMenuItem> {
+            let title = NSString::from_str(label);
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    self.ivars().mtm.alloc::<NSMenuItem>(),
+                    &title,
+                    action,
+                    ns_string!(""),
+                )
+            };
+            if action.is_some() {
+                unsafe { item.setTarget(Some(self)) };
+            }
+            unsafe { item.setTag(tag) };
+            item
+        }
+    }
+
+    pub(super) fn menu_for(delegate: &TrayMenuDelegate) -> Id<NSMenu> {
+        let menu = NSMenu::new(delegate.ivars().mtm);
+        let protocol: &ProtocolObject<dyn NSMenuDelegate> = ProtocolObject::from_ref(delegate);
+        unsafe { menu.setDelegate(Some(protocol)) };
+        menu
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -738,11 +1017,52 @@ pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
     }
 }
 
-/// No StatusNotifierItem host exists on non-Windows, non-Linux targets (see
-/// the module doc comment and docs/linux-rewrite/PORTABILITY.md). This is not
-/// a fallback that pretends to work: those targets continue to decline rather
+/// Registers the macOS status item, for the process's lifetime (#99).
+///
+/// Unlike Linux (a D-Bus service on its own thread) and Windows (a pump
+/// thread owning a message-only window), this spawns nothing: `NSStatusItem`
+/// and its menu are main-thread-only, and this is already called on the
+/// main thread from inside `Application::run`'s callback, with AppKit's run
+/// loop running under GPUI. A worker thread here would be the one shape
+/// AppKit refuses.
+///
+/// Returns `None` only when there is no main thread to speak for — which
+/// cannot happen from that call site, and declines rather than asserting if
+/// it ever does.
+#[cfg(target_os = "macos")]
+pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
+    use objc2_app_kit::{NSStatusBar, NSVariableStatusItemLength};
+
+    let mtm = objc2_foundation::MainThreadMarker::new()?;
+    let roster: SharedRoster = Arc::new(Mutex::new(Vec::new()));
+    let requests: TrayRequestQueue = Arc::new(Mutex::new(Vec::new()));
+
+    let status_item = unsafe {
+        NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength)
+    };
+    let delegate = macos::TrayMenuDelegate::new(mtm, roster.clone(), requests.clone());
+    let menu = macos::menu_for(&delegate);
+    unsafe { status_item.setMenu(Some(&menu)) };
+    macos::apply_icon(&status_item, TrayIconKind::Normal, mtm);
+
+    let handle = TrayHandle {
+        status_item,
+        _delegate: delegate,
+        roster: roster.clone(),
+        shown_kind: std::cell::Cell::new(TrayIconKind::Normal),
+    };
+    Some((roster, requests, handle))
+}
+
+/// No StatusNotifierItem host exists on the remaining targets (see the
+/// module doc comment and docs/linux-rewrite/PORTABILITY.md). This is not a
+/// fallback that pretends to work: those targets continue to decline rather
 /// than claiming a tray implementation they do not have.
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_os = "windows"),
+    not(target_os = "macos")
+))]
 pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
     eprintln!("[tray] not implemented on this platform, roster disabled");
     None
