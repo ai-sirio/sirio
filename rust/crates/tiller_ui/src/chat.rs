@@ -4259,6 +4259,38 @@ impl Chat {
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
+
+        // Column widths, as flex weights.
+        //
+        // Every cell used to be `flex_1`: an equal share of the row whatever
+        // it held, so a two-column table split 50/50 even when one side was
+        // `[255, 0, 0, 255]` and the other a sentence. A blind review called
+        // the result "two loosely floating text blocks rather than a grid" --
+        // the dead space between a value and its label is what breaks the
+        // row-to-column association once a table is long.
+        //
+        // Equal shares were not arbitrary, though: flex rows lay out
+        // independently, so identical weights are the only reason columns line
+        // up across rows at all. Sizing each cell to its own content would
+        // stagger every row. The weight therefore belongs to the COLUMN, taken
+        // across the header and every row, and applied identically to each
+        // cell in it -- proportional widths that still align.
+        //
+        // Character count is a proxy for rendered width, not a measurement:
+        // proportional text makes `iiii` narrower than `WWWW`. It is the right
+        // proxy here because it needs no text system on the layout path, which
+        // `prepaint` cannot afford, and because the failure it fixes is a
+        // factor-of-several mismatch that no per-glyph accuracy would change.
+        let cell_text =
+            |cell: &tiller_markdown::TableCell| tiller_markdown::Inline::plain_text_all(&cell.inline);
+        let column_weights = markdown_table_column_weights(
+            &header.iter().map(&cell_text).collect::<Vec<_>>(),
+            &rows
+                .iter()
+                .map(|row| row.iter().map(&cell_text).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+        );
+
         let render_row = |cells: Vec<tiller_markdown::TableCell>,
                           row_id: String,
                           header_row: bool,
@@ -4275,12 +4307,21 @@ impl Chat {
                         let alignment = alignment.get(index).copied().unwrap_or(Alignment::None);
                         let cell_text = tiller_markdown::Inline::plain_text_all(&cell.inline);
                         let mut cell_view = div()
-                            .flex_1()
+                            .flex_grow(column_weights.get(index).copied().unwrap_or(1.0))
+                            .flex_basis(px(0.0))
+                            // Without this a long word sets the cell's minimum
+                            // and the weights stop deciding anything.
+                            .min_w_0()
                             .px(px(8.0))
                             .py(px(5.0))
                             .flex()
                             .text_size(typography.callout)
-                            .text_color(colors.title);
+                            .text_color(colors.title)
+                            // The rule the grid was missing. Not on the first
+                            // column, where it would double the table border.
+                            .when(index > 0, |this| {
+                                this.border_l_1().border_color(colors.hairline)
+                            });
                         cell_view = match alignment {
                             Alignment::Center => cell_view.justify_center(),
                             Alignment::Right => cell_view.justify_end(),
@@ -8580,6 +8621,38 @@ impl ToolCallPlainText {
 
 /// Names the first file a collapsed tool call touched, keeping the path
 /// useful without repeating a path already present in the tool title.
+/// Column widths for a markdown table, as flex weights.
+///
+/// One weight per column, taken from the widest cell in that column across the
+/// header and every row, and applied identically to each cell in it. Both
+/// halves matter: proportional so a four-character column stops claiming half
+/// the table, identical down a column so the rows still line up -- flex rows
+/// lay out independently, so per-cell sizing would stagger them.
+///
+/// Character count is a proxy for rendered width, not a measurement, since
+/// proportional text makes `iiii` narrower than `WWWW`. It is the right proxy
+/// here: it needs no text system on the layout path, and the failure it
+/// corrects is a factor-of-several mismatch that per-glyph accuracy would not
+/// change.
+fn markdown_table_column_weights(header: &[String], rows: &[Vec<String>]) -> Vec<f32> {
+    let mut widths: Vec<usize> = Vec::new();
+    for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
+        for (index, text) in row.iter().enumerate() {
+            let len = text.chars().count();
+            match widths.get_mut(index) {
+                Some(slot) => *slot = (*slot).max(len),
+                None => widths.push(len),
+            }
+        }
+    }
+    widths
+        .into_iter()
+        // A floor keeps a column of empty cells from collapsing to a hairline.
+        // The set stays relative, so equal-length columns still split evenly.
+        .map(|len| len.max(3) as f32)
+        .collect()
+}
+
 fn collapsed_tool_row_text(
     status: &str,
     title: &str,
@@ -13931,6 +14004,59 @@ mod tests {
     /// blind review of the composer read it as "a lone chevron floating
     /// mid-row, orphaned from whatever it belongs to", and read the model
     /// value as a caption rather than something clickable.
+    /// A markdown table sizes its columns to their content, and the same
+    /// column gets the same width in every row.
+    ///
+    /// The weights are what make both true at once. Per-cell content sizing
+    /// would stagger the rows -- flex rows lay out independently -- and the
+    /// equal shares this replaced gave a two-column table a 50/50 split
+    /// whatever it held.
+    #[test]
+    fn table_column_weights_follow_content_and_are_shared_down_a_column() {
+        let weights = markdown_table_column_weights(
+            &["id".into(), "what the measurement showed".into()],
+            &[
+                vec!["#268".into(), "BGRA, settled by sampling pixels".into()],
+                vec!["#264".into(), "zero graphics APCs from three CLIs".into()],
+            ],
+        );
+        assert_eq!(weights.len(), 2);
+        assert!(
+            weights[1] > weights[0] * 3.0,
+            "a sentence column must outweigh a four-character one, not tie              with it: {weights:?}"
+        );
+        // The widest cell in a column decides, header included.
+        let header_wins = markdown_table_column_weights(
+            &["a considerably longer header".into(), "b".into()],
+            &[vec!["x".into(), "y".into()]],
+        );
+        assert!(header_wins[0] > header_wins[1]);
+    }
+
+    /// Equal content still splits evenly -- the change is proportional, not a
+    /// new bias.
+    #[test]
+    fn table_columns_of_equal_content_still_split_evenly() {
+        // Genuinely equal: "left"/"same" are both four characters, as are the
+        // body cells. An earlier version of this test used "left"/"right" and
+        // failed on the one-character difference -- which is the rule working.
+        let weights = markdown_table_column_weights(
+            &["left".into(), "same".into()],
+            &[vec!["aaaa".into(), "bbbb".into()]],
+        );
+        assert_eq!(weights[0], weights[1]);
+    }
+
+    /// An empty column keeps a floor rather than collapsing to a hairline.
+    #[test]
+    fn an_empty_table_column_does_not_collapse() {
+        let weights = markdown_table_column_weights(
+            &["".into(), "a much longer column".into()],
+            &[vec!["".into(), "more text here".into()]],
+        );
+        assert!(weights[0] >= 3.0, "{weights:?}");
+    }
+
     #[gpui::test]
     async fn the_model_chips_chevron_stays_beside_the_model_name(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
