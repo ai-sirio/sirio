@@ -38,7 +38,10 @@ mod content;
 mod model;
 mod mount;
 mod notification;
-mod process;
+/// #248: public so the app can take one process snapshot per Layer D tick
+/// and walk every pane against it, instead of each pane enumerating the
+/// machine's processes for itself.
+pub mod process;
 mod rows;
 mod session;
 mod sort;

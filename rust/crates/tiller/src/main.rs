@@ -3920,6 +3920,7 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
+        Self::start_process_signal_polling(cx);
         cx.bind_keys([
             // cmd-w is the macOS close convention, not a readline key, so it
             // stays unguarded.
@@ -4889,7 +4890,6 @@ impl TillerWorkspace {
         Self::subscribe_terminal_link(terminal, pane_id, cx);
         Self::subscribe_terminal_activity(terminal, pane_id, cx);
         Self::subscribe_terminal_drop(terminal, cx);
-        Self::start_process_signal_refresh(terminal, tab_id, pane_id, cx);
     }
 
     fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
@@ -5017,53 +5017,84 @@ impl TillerWorkspace {
         .detach();
     }
 
-    fn start_process_signal_refresh(
-        terminal: &Entity<TerminalView>,
-        tab_id: usize,
-        pane_id: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let terminal = terminal.clone();
-        let workspace = cx.weak_entity();
-        cx.spawn(async move |_this, cx| {
+    /// One Layer D tick for every terminal pane, sharing a single process
+    /// snapshot (#248).
+    ///
+    /// This used to be one loop per terminal, each taking its own whole-system
+    /// process snapshot every 500 ms. On Windows that is
+    /// `CreateToolhelp32Snapshot` over every process on the machine, so the
+    /// idle cost grew with the number of open terminals — measured at about
+    /// 1.95 % of a core per terminal, minimised, where nobody can see it.
+    ///
+    /// The cadence is unchanged and so is the freshness: the snapshot is taken
+    /// at the start of each tick and every pane is walked against it, so no
+    /// pane ever acts on a table older than its own poll. (A TTL cache was
+    /// tried instead and was wrong — it made an exited agent read as running
+    /// for as long as the cache lived.)
+    ///
+    /// The tick cannot be gated on window visibility the way #187/#189/#191/
+    /// #193/#195 gated their loops: Layer D is what lets a *minimised* Tiller
+    /// notice an agent needs input, which is the whole point of the tray.
+    fn start_process_signal_polling(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(panes::PROCESS_SIGNAL_INTERVAL)
                     .await;
 
-                let shell_pid = terminal.read_with(cx, |terminal, _| terminal.shell_pid());
-                let terminal_id = terminal.entity_id();
-                let keep_running = match workspace.update(cx, |workspace, cx| {
-                    let Some(bound_terminal) = workspace.terminal_for_pane(tab_id, pane_id) else {
-                        return false;
-                    };
-                    if bound_terminal.entity_id() != terminal_id {
-                        return false;
-                    }
-                    let Some(shell_pid) = shell_pid else {
-                        return true;
-                    };
-                    match panes::refresh_process_signal(
-                        &mut workspace.activity,
-                        &format!("pane-{pane_id}"),
-                        shell_pid,
-                    ) {
-                        Ok(Some(transition)) => {
-                            workspace.post_activity_notification(&transition);
-                            workspace.request_auto_rename(&transition, cx);
-                            workspace.sync_activity(cx);
-                        }
-                        Ok(None) => workspace.sync_activity(cx),
-                        Err(error) => eprintln!(
-                            "[activity] process refresh failed for pane-{pane_id}: {error}"
-                        ),
-                    }
-                    true
+                let panes = match this.update(cx, |workspace, cx| {
+                    workspace
+                        .terminals_to_poll()
+                        .into_iter()
+                        .filter_map(|(_, pane_id, view)| {
+                            view.read(cx).shell_pid().map(|pid| (pane_id, pid))
+                        })
+                        .collect::<Vec<_>>()
                 }) {
-                    Ok(keep_running) => keep_running,
+                    Ok(panes) => panes,
+                    // The workspace is gone; so is the reason to poll.
                     Err(_) => return,
                 };
-                if !keep_running {
+                if panes.is_empty() {
+                    continue;
+                }
+
+                let snapshot = match tiller_activity::process::take_snapshot() {
+                    Ok(snapshot) => snapshot,
+                    // A snapshot that cannot be taken is not evidence that the
+                    // panes' agents are gone, so nothing is cleared: skip the
+                    // tick and try again on the next one.
+                    Err(error) => {
+                        eprintln!("[activity] process snapshot failed: {error}");
+                        continue;
+                    }
+                };
+
+                if this
+                    .update(cx, |workspace, cx| {
+                        for (pane_id, shell_pid) in panes {
+                            match panes::refresh_process_signal_in(
+                                &mut workspace.activity,
+                                &snapshot,
+                                &format!("pane-{pane_id}"),
+                                shell_pid,
+                            ) {
+                                Ok(Some(transition)) => {
+                                    workspace.post_activity_notification(&transition);
+                                    workspace.request_auto_rename(&transition, cx);
+                                }
+                                Ok(None) => {}
+                                Err(error) => eprintln!(
+                                    "[activity] process refresh failed for pane-{pane_id}: {error}"
+                                ),
+                            }
+                        }
+                        // Once per tick rather than once per pane: the sidebar
+                        // reads the same model either way.
+                        workspace.sync_activity(cx);
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -5071,15 +5102,28 @@ impl TillerWorkspace {
         .detach();
     }
 
-    fn terminal_for_pane(&self, tab_id: usize, pane_id: usize) -> Option<Entity<TerminalView>> {
-        let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
-        let mut terminal = None;
-        tab.panes.for_each(&mut |candidate_pane_id, content| {
-            if candidate_pane_id == pane_id {
-                terminal = content.terminal();
-            }
-        });
-        terminal
+    /// Every terminal pane Layer D has to poll this tick, as
+    /// `(tab id, pane id, terminal)`.
+    ///
+    /// #248: the enumeration the shared-snapshot loop iterates. It is its own
+    /// function because this is where that loop fails silently -- a pane
+    /// missing from this list is simply never polled again, Layer D goes quiet
+    /// for it, and nothing reports the loss. A list is testable; the same walk
+    /// inlined into the loop body is not.
+    ///
+    /// Chat, Changes, Browser and Editor panes are deliberately absent: only a
+    /// terminal has a shell pid to walk.
+    fn terminals_to_poll(&self) -> Vec<(usize, usize, Entity<TerminalView>)> {
+        let mut found = Vec::new();
+        for tab in &self.tabs {
+            let tab_id = tab.id;
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let Some(view) = content.terminal() {
+                    found.push((tab_id, pane_id, view));
+                }
+            });
+        }
+        found
     }
 
     /// F-TERM-05: the terminal context menu's "Set Title…" — opens the
@@ -15545,15 +15589,8 @@ mod tests {
         )
     }
 
-    /// #248: `terminal_for_pane` is the polling loop's entire teardown
-    /// decision -- "is this pane still mine?" -- and it had no test at all.
-    /// That matters because the loop's failure mode is silent: a pane that
-    /// stops being matched simply stops being polled, and Layer D goes quiet
-    /// for it with nothing to report the loss. Sharing one snapshot across
-    /// panes (#248) means rewriting that loop, so this pins the predicate the
-    /// rewrite has to preserve.
     #[gpui::test]
-    async fn terminal_for_pane_finds_a_live_terminal_and_nothing_else(cx: &mut TestAppContext) {
+    async fn terminals_to_poll_lists_every_terminal_and_only_terminals(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -15565,38 +15602,31 @@ mod tests {
                 .expect("workspace root")
         });
 
-        let (tab_id, terminal_pane, chat_pane) = workspace.read_with(&cx.cx, |workspace, _| {
-            let tab = &workspace.tabs[0];
-            let mut terminal_pane = None;
-            let mut chat_pane = None;
-            tab.panes.for_each(&mut |pane_id, content| match content {
-                TabContent::Terminal { .. } => terminal_pane = Some(pane_id),
-                TabContent::Chat(_) => chat_pane = Some(pane_id),
-                _ => {}
-            });
-            (tab.id, terminal_pane, chat_pane)
-        });
-        let terminal_pane = terminal_pane.expect("the palette workspace has a terminal pane");
-
         workspace.read_with(&cx.cx, |workspace, _| {
-            assert!(
-                workspace.terminal_for_pane(tab_id, terminal_pane).is_some(),
-                "a live terminal pane must keep being found, or its poll stops"
-            );
-            assert!(
-                workspace.terminal_for_pane(tab_id + 999, terminal_pane).is_none(),
-                "a pane id from another tab must not match"
-            );
-            assert!(
-                workspace.terminal_for_pane(tab_id, terminal_pane + 999).is_none(),
-                "a pane that no longer exists must not match"
-            );
-            if let Some(chat_pane) = chat_pane {
-                assert!(
-                    workspace.terminal_for_pane(tab_id, chat_pane).is_none(),
-                    "a chat pane is not a terminal: a shared loop must not poll it"
-                );
+            let mut expected = Vec::new();
+            for tab in &workspace.tabs {
+                let tab_id = tab.id;
+                tab.panes.for_each(&mut |pane_id, content| {
+                    if matches!(content, TabContent::Terminal { .. }) {
+                        expected.push((tab_id, pane_id));
+                    }
+                });
             }
+
+            let listed: Vec<(usize, usize)> = workspace
+                .terminals_to_poll()
+                .into_iter()
+                .map(|(tab_id, pane_id, _)| (tab_id, pane_id))
+                .collect();
+
+            assert!(
+                !expected.is_empty(),
+                "the fixture must contain a terminal, or this test proves nothing"
+            );
+            assert_eq!(
+                listed, expected,
+                "every terminal pane must be listed exactly once, and nothing else"
+            );
         });
     }
 

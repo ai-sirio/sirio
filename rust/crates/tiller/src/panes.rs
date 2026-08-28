@@ -57,12 +57,16 @@ pub(crate) fn apply_terminal_activity_event(
 /// Performs one Layer-D refresh for a pane. The caller schedules this once per
 /// terminal at [`PROCESS_SIGNAL_INTERVAL`]; process ownership and clearing
 /// remain inside `AgentActivityModel`.
-pub(crate) fn refresh_process_signal(
+/// The same refresh against a snapshot the tick already took (#248), so one
+/// enumeration of the machine's processes serves every pane instead of one
+/// each.
+pub(crate) fn refresh_process_signal_in(
     activity: &mut AgentActivityModel,
+    snapshot: &tiller_activity::process::ProcessSnapshot,
     pane_id: &str,
     shell_pid: u32,
 ) -> io::Result<Option<Transition>> {
-    activity.refresh_process_signal(pane_id, shell_pid)
+    activity.refresh_process_signal_in(snapshot, pane_id, shell_pid)
 }
 
 fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
@@ -626,7 +630,7 @@ fn remove_node<T>(node: PaneNode<T>, target: usize) -> (Option<PaneNode<T>>, Opt
 mod tests {
     use super::{
         PaneNode, PaneSize, SplitDirection, SplitDisabledReason, SplitPlacement, TabSelection,
-        apply_terminal_activity_event, process_signal_interval, refresh_process_signal,
+        apply_terminal_activity_event, process_signal_interval, refresh_process_signal_in,
         split_disabled_reason,
     };
     use std::time::{Duration, Instant};
@@ -698,7 +702,16 @@ mod tests {
         // The real periodic caller supplies the shell PID to this helper; the
         // process model, not a title or child-exit event, owns the clearing.
         assert_eq!(process_signal_interval(), Duration::from_millis(500));
-        let refresh = refresh_process_signal(&mut activity, "pane-process", std::process::id());
+        // #248: the production path now takes one snapshot per tick and walks
+        // every pane against it, so the test drives that rather than a wrapper
+        // nothing calls.
+        let snapshot = tiller_activity::process::take_snapshot().expect("process snapshot");
+        let refresh = refresh_process_signal_in(
+            &mut activity,
+            &snapshot,
+            "pane-process",
+            std::process::id(),
+        );
         assert!(matches!(refresh, Ok(None)));
         assert_eq!(activity.status("pane-process"), None);
         assert!(!activity.is_process_owned("pane-process"));
