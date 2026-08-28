@@ -7,6 +7,7 @@
 //! The `browser_spike`/`browser_surface` examples and `crates/tiller`'s
 //! panes both use it directly.
 
+use std::path::PathBuf;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeSet,
@@ -31,7 +32,8 @@ use raw_window_handle::HasWindowHandle;
 use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
 use tiller_theme::Theme;
 use wry::{
-    NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder,
+    NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView,
+    WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
 };
 
@@ -930,16 +932,56 @@ fn wait_for_script_result(
     }
 }
 
+/// Where the engine keeps the one shared browser profile (R6.2/R6.3).
+///
+/// Required on Windows rather than tidy: with nothing set, WebView2 writes
+/// `<exe>.WebView2\EBWebView` **beside the binary** — reproduced on this tree,
+/// where opening a webview from an example left
+/// `browser_eval_probe.exe.WebView2/EBWebView` in `target/debug/examples`. An
+/// installed Tiller under `Program Files` cannot create that, so the browser
+/// would fail for exactly the users who installed it properly.
+///
+/// One profile for the whole app, never one per worktree (R6.1).
+///
+/// The location mirrors `tiller::session::app_support_root`'s rule rather than
+/// calling it: `tiller_ui` sits BESIDE `tiller` in the crate layering
+/// (CLAUDE.md), not under it. This is the same tension #230 and #246 record —
+/// if the rule changes there, change it here too. `None` means "let the engine
+/// decide", which is only reached when the profile variables are all absent.
+fn browser_profile_dir() -> Option<PathBuf> {
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+                    .map(|home| home.join(".local").join("share"))
+            }
+        })?;
+    Some(root.join("Tiller").join("browser"))
+}
+
 fn build_production_webview<W: HasWindowHandle>(
     parent: &W,
     initial_url: &str,
     events: &SharedWebEvents,
+    context: &mut WebContext,
 ) -> Result<WebView, wry::Error> {
     let navigation_events = events.clone();
     let window_events = events.clone();
     let page_events = events.clone();
     let title_events = events.clone();
-    WebViewBuilder::new()
+    // R6.2: the profile lives where Tiller says, not beside the binary.
+    WebViewBuilder::new_with_web_context(context)
         .with_url(initial_url)
         // F-CTRL-BROWSER-06: wry exposes no cross-platform console-message
         // hook, so `browser.console` captures by shadowing the console
@@ -985,12 +1027,13 @@ fn build_production_webview_for_platform(
     window: &Window,
     initial_url: &str,
     events: &SharedWebEvents,
+    context: &mut WebContext,
 ) -> Result<WebView, String> {
     match gtk::init() {
-        Ok(()) => match build_production_webview(window, initial_url, events) {
+        Ok(()) => match build_production_webview(window, initial_url, events, context) {
             Ok(webview) => Ok(webview),
             Err(direct_error) => match XlibParent::from_gpui(window) {
-                Ok(parent) => build_production_webview(&parent, initial_url, events).map_err(
+                Ok(parent) => build_production_webview(&parent, initial_url, events, context).map_err(
                     |bridge_error| {
                         format!(
                             "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
@@ -1011,8 +1054,9 @@ fn build_production_webview_for_platform(
     window: &Window,
     initial_url: &str,
     events: &SharedWebEvents,
+    context: &mut WebContext,
 ) -> Result<WebView, String> {
-    build_production_webview_for_macos(window, initial_url, events)
+    build_production_webview_for_macos(window, initial_url, events, context)
 }
 
 /// The engine this platform actually hosts, for error text (#131, #144).
@@ -1056,9 +1100,10 @@ fn build_production_webview_for_macos(
     window: &Window,
     initial_url: &str,
     events: &SharedWebEvents,
+    context: &mut WebContext,
 ) -> Result<WebView, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        build_production_webview(window, initial_url, events)
+        build_production_webview(window, initial_url, events, context)
     })) {
         Ok(Ok(webview)) => Ok(webview),
         Ok(Err(error)) => Err(format!("{NATIVE_ENGINE} child failed: {error}")),
@@ -1082,6 +1127,12 @@ pub struct BrowserSurface {
     /// selection the user is actively editing.
     address_focused: bool,
     webview: SharedWebView,
+    /// R6.2/R6.3: the engine's profile context, held for the surface's life.
+    /// `WebViewBuilder` only borrows it while building, so this is ownership
+    /// rather than a back-reference -- but the engine keeps using the
+    /// directory it names, so dropping it early would pull the profile out
+    /// from under a live webview.
+    _web_context: WebContext,
     /// F-BRW-01: native-side geometry correction, calibrated once against
     /// the child bounds reported by wry; see [`SharedScaleCorrection`].
     webview_scale_correction: SharedScaleCorrection,
@@ -1119,11 +1170,19 @@ impl BrowserSurface {
         };
         let address_editor = AddressEditor::new(state.address());
         let web_events = Rc::new(RefCell::new(Vec::new()));
-        let (webview, startup_error) =
-            match build_production_webview_for_platform(window, state.address(), &web_events) {
-                Ok(webview) => (Some(webview), startup_error),
-                Err(error) => (None, Some(error)),
-            };
+        // R6.3: one shared profile in a Tiller-owned directory. Left unset,
+        // WebView2 writes `<exe>.WebView2\EBWebView` beside the binary, which
+        // an installed Tiller under Program Files cannot create.
+        let mut web_context = WebContext::new(browser_profile_dir());
+        let (webview, startup_error) = match build_production_webview_for_platform(
+            window,
+            state.address(),
+            &web_events,
+            &mut web_context,
+        ) {
+            Ok(webview) => (Some(webview), startup_error),
+            Err(error) => (None, Some(error)),
+        };
         let webview = Rc::new(RefCell::new(webview));
         #[cfg(target_os = "linux")]
         let pump_task = webview.borrow().as_ref().map(|_| {
@@ -1186,6 +1245,7 @@ impl BrowserSurface {
             address_dragging: false,
             address_focused: false,
             webview,
+            _web_context: web_context,
             webview_scale_correction: Rc::new(Cell::new(None)),
             webview_visible: initial_native_visibility(),
             web_events,
