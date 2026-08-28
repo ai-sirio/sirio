@@ -854,6 +854,19 @@ fn flush_native_window_ops() {
 /// Split out from [`BrowserSurface::close_native`] so the cell arithmetic has
 /// somewhere to be tested without a live X11 window; see
 /// `closing_takes_the_child_out_of_the_shared_cell`.
+/// #255: whether [`BrowserSurface::ensure_pump_task`] should arm the pump on
+/// this frame. Split out from the method so the decision is testable without a
+/// window -- constructing a surface means constructing a real WebView2.
+///
+/// Two properties, both load-bearing:
+/// - idempotent, so `render` can call it every frame and get one task;
+/// - silent for a surface with no webview, which is how a *closed* surface
+///   stays closed: `close_native` empties the webview cell, and without this
+///   guard the next frame would arm a pump for a webview that no longer exists.
+fn should_arm_pump(has_task: bool, has_webview: bool) -> bool {
+    !has_task && has_webview
+}
+
 fn close_native_window(webview: &SharedWebView, flag: &SharedNativeVisibility) {
     apply_native_visible(webview, flag, false);
     // Taking the value out of the cell is what destroys the X11 window: the
@@ -1203,9 +1216,53 @@ impl BrowserSurface {
             Err(error) => (None, Some(error)),
         };
         let webview = Rc::new(RefCell::new(webview));
+        // #255: armed on first render, never here -- see `ensure_pump_task`.
+        let pump_task = None;
+
+        Self {
+            state,
+            address_editor,
+            address_focus: cx.focus_handle(),
+            address_dragging: false,
+            address_focused: false,
+            webview,
+            _web_context: web_context,
+            webview_scale_correction: Rc::new(Cell::new(None)),
+            webview_visible: initial_native_visibility(),
+            web_events,
+            events: Vec::new(),
+            pump_task,
+            startup_error,
+        }
+    }
+
+    /// Arms the 16 ms task that drains this surface's web events.
+    ///
+    /// Deliberately armed from `render`, not from `new` (#255). A surface
+    /// built inside an `App::update` -- which is exactly what session restore
+    /// does, building every tab in one update -- would otherwise leave a
+    /// foreground task queued behind it. Constructing the *next* webview
+    /// pumps the platform message loop from inside WebView2's own
+    /// initialisation, that pump runs the queued task, and the task's
+    /// `update` re-enters the borrow the outer `cx.new` is still holding:
+    /// "RefCell already borrowed", with the window never opening at all.
+    /// One Browser tab could not trigger it -- there was no earlier task to
+    /// run -- and two always did.
+    ///
+    /// Arming from render puts the first tick strictly after construction has
+    /// returned. It is the same one-timer-per-surface discipline
+    /// `caret::schedule` and the streaming border already follow, and it
+    /// closes the class rather than the two-tab instance of it.
+    ///
+    /// Idempotent, and it does not resurrect a closed surface: `close_native`
+    /// empties the webview cell, so the guard below stays false afterwards.
+    fn ensure_pump_task(&mut self, cx: &mut Context<Self>) {
+        if !should_arm_pump(self.pump_task.is_some(), self.webview.borrow().is_some()) {
+            return;
+        }
         #[cfg(target_os = "linux")]
-        let pump_task = webview.borrow().as_ref().map(|_| {
-            cx.spawn(async move |this, cx| {
+        {
+            self.pump_task = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
                         .timer(Duration::from_millis(16))
@@ -1230,12 +1287,11 @@ impl BrowserSurface {
                         break;
                     }
                 }
-            })
-        });
-
+            }));
+        }
         #[cfg(not(target_os = "linux"))]
-        let pump_task = webview.borrow().as_ref().map(|_| {
-            cx.spawn(async move |this, cx| {
+        {
+            self.pump_task = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
                         .timer(Duration::from_millis(16))
@@ -1254,23 +1310,7 @@ impl BrowserSurface {
                         break;
                     }
                 }
-            })
-        });
-
-        Self {
-            state,
-            address_editor,
-            address_focus: cx.focus_handle(),
-            address_dragging: false,
-            address_focused: false,
-            webview,
-            _web_context: web_context,
-            webview_scale_correction: Rc::new(Cell::new(None)),
-            webview_visible: initial_native_visibility(),
-            web_events,
-            events: Vec::new(),
-            pump_task,
-            startup_error,
+            }));
         }
     }
 
@@ -1791,6 +1831,8 @@ impl Focusable for BrowserSurface {
 
 impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // #255: the pump belongs here, not in `new`.
+        self.ensure_pump_task(cx);
         let theme = *Theme::get(cx);
         // F-BRW-03: this is the only place a `Window` is available to ask
         // the focus system directly; pump_web_events (a background timer
@@ -2737,6 +2779,28 @@ mod tests {
 
         assert_eq!(editor.text(), "https://www.iana.org");
         assert_eq!(editor.selection(), editor.text().len()..editor.text().len());
+    }
+
+    /// #255: the pump is armed once, only for a live webview.
+    ///
+    /// The "no webview" arm is what keeps a closed surface closed -- `render`
+    /// runs again after `close_native`, and arming there would resurrect a
+    /// 16 ms timer for a webview that has already been dropped.
+    #[test]
+    fn the_pump_is_armed_once_and_never_for_a_dead_webview() {
+        assert!(
+            should_arm_pump(false, true),
+            "a live webview with no task yet must arm the pump"
+        );
+        assert!(
+            !should_arm_pump(true, true),
+            "render runs every frame; a second task must never be armed"
+        );
+        assert!(
+            !should_arm_pump(false, false),
+            "a closed surface has no webview and must stay closed"
+        );
+        assert!(!should_arm_pump(true, false));
     }
 
     #[test]
