@@ -562,6 +562,38 @@ impl TabBar {
     }
 }
 
+impl TabBar {
+    /// The standing route to the agent registry, shown under the agents that
+    /// *are* available.
+    ///
+    /// Deliberately quieter than an agent row -- meta text, no icon -- because
+    /// it is chrome, not a choice among the agents above it. It shares the
+    /// empty state's destination, and carries no "nothing found" caption:
+    /// something was found, which is why this variant exists.
+    fn render_other_agents_link(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
+        div()
+            .id("new-chat-other-agents")
+            .debug_selector(|| "new-chat-other-agents".to_owned())
+            .w_full()
+            .h(px(29.0))
+            .pl(theme.spacing.card_gap)
+            .pr(px(12.0))
+            .mt(theme.spacing.titlebar_control_spacing)
+            .border_t_1()
+            .border_color(theme.hairline)
+            .flex()
+            .items_center()
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.footnote)
+            .text_color(theme.meta)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
+            })
+            .child("Other agents…")
+    }
+}
+
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
@@ -596,6 +628,20 @@ impl Render for TabBar {
         if available_chat_agents.is_empty() {
             chat_agent_menu = chat_agent_menu.child(Self::render_chat_empty(entity.clone(), theme));
         } else {
+            // The way to install another agent used to live ONLY in the empty
+            // state above: it appeared when nothing was available and vanished
+            // the moment one agent worked. That is the empty-state trap --
+            // offered when it is least likely to be wanted, hidden from the
+            // user who already has a working setup and is the one most likely
+            // to want a second agent.
+            //
+            // A blind review of this menu, seeing only the populated case,
+            // reported "no path at all: the menu is a closed list; a user with
+            // an unlisted agent gets no hint where to go". It was right about
+            // what it could see, and what it could see is what a user sees.
+            //
+            // Same destination as the empty state (`emit_open_agent_settings`);
+            // it just no longer disappears once it has company.
             for agent in available_chat_agents {
                 chat_agent_menu = chat_agent_menu.child(Self::render_chat_agent_item(
                     agent,
@@ -603,6 +649,8 @@ impl Render for TabBar {
                     theme,
                 ));
             }
+            chat_agent_menu =
+                chat_agent_menu.child(Self::render_other_agents_link(entity.clone(), theme));
         }
 
         let menu = div()
@@ -1196,6 +1244,68 @@ mod tests {
             selected_agents.borrow().as_slice(),
             &["codex"],
             "choosing a chat provider must carry its stable adapter id"
+        );
+    }
+
+    /// The route to install another agent must survive having agents.
+    ///
+    /// It used to live only in the empty state: offered when nothing was
+    /// available, gone the moment one agent worked -- so the user most likely
+    /// to want a second agent was the one who could no longer find the way to
+    /// get one. A blind review of the populated menu called it "a closed
+    /// list", which is exactly what it was.
+    #[gpui::test]
+    async fn other_agents_stays_reachable_once_an_agent_is_available(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let opened_for_callback = opened.clone();
+        let window = cx.add_window(|_window, cx| {
+            TabBar::new(cx)
+                .with_chat_agents(vec![available_agent("codex", "Codex")])
+                .with_chat_launch_sources(vec![(
+                    "codex".to_string(),
+                    LaunchSource::Builtin {
+                        program: "codex-acp".into(),
+                        args: vec![],
+                    },
+                )])
+                .on_open_agent_settings(move || {
+                    *opened_for_callback.borrow_mut() = true;
+                })
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        let new_chat = cx
+            .debug_bounds("new-tab-item-new-chat")
+            .expect("New Chat is drawn");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("new-tab-chat-agent-codex").is_some(),
+            "the populated case: an agent IS offered"
+        );
+        assert!(
+            cx.debug_bounds("new-chat-empty").is_none(),
+            "and the empty-state card is correctly absent"
+        );
+        let other = cx
+            .debug_bounds("new-chat-other-agents")
+            .expect("the route to more agents survives having one");
+        cx.simulate_click(other.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            *opened.borrow(),
+            "and it reaches the same destination the empty state did"
         );
     }
 
