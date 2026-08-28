@@ -38,9 +38,9 @@ use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fmt;
+#[cfg(unix)]
 use std::fs::File;
 use std::io::Write;
-#[cfg(unix)]
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
@@ -51,8 +51,10 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
 
-#[cfg(unix)]
 const SCROLLBACK_CAPACITY: usize = 256 * 1024;
+// The polite window a unix pane gets between SIGTERM and SIGKILL.
+// Windows has no such two-step: `terminate` there kills the child and
+// waits, so this constant is unix-only (#246).
 #[cfg(unix)]
 const TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
@@ -133,7 +135,22 @@ struct PaneProcess {
     /// session.
     #[cfg(unix)]
     process_group: libc::pid_t,
-    writer: Mutex<File>,
+    /// #246: the ConPTY child, kept so `terminate` can reach it. The unix path
+    /// signals a process *group* by pid and needs no handle; Windows has no
+    /// equivalent, so the handle is the ownership boundary.
+    #[cfg(windows)]
+    child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// The ConPTY master, held for the pane's lifetime. Dropping it at the end
+    /// of `spawn_process` closed the pty under the reader thread: the pane
+    /// spawned and could be killed, but produced no scrollback and never
+    /// reported an exit code, because the reader blocked on a pty that was
+    /// already gone. `tiller_terminal` keeps its master alive on an owner
+    /// thread for the same reason.
+    #[cfg(windows)]
+    _master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+    /// Boxed rather than a `File` so both a unix PTY fd and a ConPTY writer
+    /// fit the same field (#246).
+    writer: Mutex<Box<dyn Write + Send>>,
     state: Mutex<PaneState>,
     exited: Condvar,
 }
@@ -650,21 +667,136 @@ fn checked_directory(path: &Path) -> Result<PathBuf, PaneError> {
     Ok(path)
 }
 
-/// No control-owned PTY backend exists on this platform yet (see the module
-/// doc comment). `create`/`split` are the only callers, so returning an
-/// error here — rather than fabricating a pane that can never produce
-/// output — is what keeps every downstream `PaneRegistry` method honest
-/// instead of silently degrading.
-#[cfg(not(unix))]
+/// The interpreter a control-owned pane runs when no `--cmd` is given.
+///
+/// #246: this duplicates `tiller_terminal::default_system_shell`'s Windows
+/// arm, and that is a real cost rather than an oversight. `tiller_control`
+/// sits BESIDE `tiller_terminal` in the crate layering (CLAUDE.md), not above
+/// it, so the resolved answer cannot be borrowed. #230 was a bug produced by
+/// exactly this kind of duplication drifting apart -- if the rule changes
+/// there, change it here too. `$SHELL` is deliberately NOT consulted: it is a
+/// POSIX notion, and honouring an MSYS value inherited from Git Bash is the
+/// failure #230 fixed.
+#[cfg(windows)]
+const VERBATIM_PREFIX: &str = "\\\\?\\";
+#[cfg(windows)]
+const UNC_PREFIX: &str = "UNC\\";
+#[cfg(windows)]
+const UNC_ROOT: &str = "\\\\";
+
+/// Strips the verbatim `\?\` prefix from a path handed to a child as its
+/// working directory (#246, the same defect as #150).
+///
+/// `checked_directory` canonicalizes, which on Windows yields `\?\D:\...`.
+/// `CreateProcess` accepts that, but `cmd.exe` reads it as UNC, refuses to
+/// keep it as its cwd and silently falls back to the Windows directory, so
+/// every command in the pane would run against the wrong directory. Observed
+/// exactly that before this existed: the pane started and printed
+/// "I percorsi UNC non sono supportati".
+///
+/// A third copy of `tiller_terminal::spawn_cwd`, whose own comment records
+/// that these copies live independently on purpose: the crates sit side by
+/// side, so neither can borrow the other's. Only the child's cwd is stripped;
+/// the stored path keeps its prefix and its long-path capability.
+#[cfg(windows)]
+fn child_cwd(path: &Path) -> PathBuf {
+    let string = path.to_string_lossy();
+    let Some(rest) = string.strip_prefix(VERBATIM_PREFIX) else {
+        return path.to_path_buf();
+    };
+    if let Some(unc) = rest.strip_prefix(UNC_PREFIX) {
+        return PathBuf::from(format!("{}{unc}", UNC_ROOT));
+    }
+    PathBuf::from(rest.to_string())
+}
+
+#[cfg(windows)]
+fn windows_pane_shell() -> String {
+    std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+}
+
+/// #246: control-owned panes on Windows, over ConPTY through `portable-pty` --
+/// the same transport `tiller_terminal` already uses for the UI's own panes.
+///
+/// The contract mirrors the unix arm exactly: an `Arc<PaneProcess>` whose
+/// reader thread accumulates scrollback and whose exit status lands in
+/// `PaneState::exit_code`, so every `PaneRegistry` method above works
+/// unchanged on either platform.
+#[cfg(windows)]
+fn spawn_process(
+    _pane_id: &str,
+    working_directory: &Path,
+    command: Option<&str>,
+) -> Result<Arc<PaneProcess>, PaneError> {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| PaneError::Spawn(error.to_string()))?;
+
+    let shell = windows_pane_shell();
+    let mut builder = CommandBuilder::new(&shell);
+    if let Some(command) = command {
+        // VERBATIM: `CommandBuilder` re-quotes each argument itself
+        // (`append_quoted`). Pre-wrapping the command for `cmd /C` is what
+        // made a pane fail silently in #39 -- it arrived as a quoted program
+        // name rather than a command.
+        builder.arg("/C");
+        builder.arg(command);
+    }
+    builder.cwd(child_cwd(working_directory));
+
+    let child = pair
+        .slave
+        .spawn_command(builder)
+        .map_err(|error| PaneError::Spawn(error.to_string()))?;
+    // The slave is the child's end. Holding it open here would stop the pane
+    // ever reporting EOF when the child exits, so the reader thread would
+    // never reach the exit-status step.
+    drop(pair.slave);
+
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| PaneError::Spawn(error.to_string()))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| PaneError::Spawn(error.to_string()))?;
+
+    let process = Arc::new(PaneProcess {
+        child: Mutex::new(child),
+        _master: Mutex::new(pair.master),
+        writer: Mutex::new(writer),
+        state: Mutex::new(PaneState {
+            output: Vec::new(),
+            exit_code: None,
+        }),
+        exited: Condvar::new(),
+    });
+    let reader_process = Arc::clone(&process);
+    std::thread::spawn(move || read_process_output(reader, reader_process));
+    let waiter_process = Arc::clone(&process);
+    std::thread::spawn(move || watch_process_exit(waiter_process));
+    Ok(process)
+}
+
+/// Neither unix nor Windows: no PTY backend exists here. Returning an error
+/// rather than fabricating a pane that can never produce output keeps every
+/// downstream `PaneRegistry` method honest instead of silently degrading.
+#[cfg(not(any(unix, windows)))]
 fn spawn_process(
     _pane_id: &str,
     _working_directory: &Path,
     _command: Option<&str>,
 ) -> Result<Arc<PaneProcess>, PaneError> {
     Err(PaneError::Unsupported(
-        "control-owned panes have no PTY backend on this platform yet \
-         (Windows counterpart: ConPTY via portable-pty, already used by tiller_terminal on Windows)"
-            .to_string(),
+        "control-owned panes have no PTY backend on this platform".to_string(),
     ))
 }
 
@@ -735,7 +867,7 @@ fn spawn_process(
     let process = Arc::new(PaneProcess {
         pid,
         process_group: pid,
-        writer: Mutex::new(writer),
+        writer: Mutex::new(Box::new(writer)),
         state: Mutex::new(PaneState {
             output: Vec::new(),
             exit_code: None,
@@ -743,7 +875,7 @@ fn spawn_process(
         exited: Condvar::new(),
     });
     let reader_process = Arc::clone(&process);
-    std::thread::spawn(move || read_process_output(reader, reader_process));
+    std::thread::spawn(move || read_process_output(Box::new(reader), reader_process));
     Ok(process)
 }
 
@@ -821,13 +953,39 @@ fn child_exec(
     }
 }
 
-#[cfg(unix)]
-fn read_process_output(mut reader: File, process: Arc<PaneProcess>) {
+/// Answers ConPTY's cursor-position query so the child can start.
+///
+/// #246: ConPTY opens by sending DSR (`ESC [ 6 n`) and **waits for a reply**
+/// before letting the child proceed. A UI pane has an emulator that answers;
+/// a control-owned pane has nobody, so without this the child hangs forever —
+/// the pane spawns and can be killed, but produces no output and never
+/// reports an exit code, which is exactly how this presented.
+///
+/// `ESC [ 1 ; 1 R` is the minimal honest answer: this pane keeps raw
+/// scrollback and tracks no cursor, so row 1 column 1 is all it can truthfully
+/// claim. Nothing downstream reads the position back.
+#[cfg(windows)]
+fn answer_device_status_report(chunk: &[u8], process: &Arc<PaneProcess>) {
+    if !chunk.windows(4).any(|window| window == b"[6n") {
+        return;
+    }
+    if let Ok(mut writer) = process.writer.lock() {
+        let _ = writer.write_all(b"[1;1R");
+        let _ = writer.flush();
+    }
+}
+
+/// Unix PTYs carry no such handshake: the child is not gated on a reply.
+#[cfg(not(windows))]
+fn answer_device_status_report(_chunk: &[u8], _process: &Arc<PaneProcess>) {}
+
+fn read_process_output(mut reader: Box<dyn Read + Send>, process: Arc<PaneProcess>) {
     let mut buffer = [0u8; 8192];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(size) => {
+                answer_device_status_report(&buffer[..size], &process);
                 if let Ok(mut state) = process.state.lock() {
                     state.output.extend_from_slice(&buffer[..size]);
                     if state.output.len() > SCROLLBACK_CAPACITY {
@@ -839,16 +997,61 @@ fn read_process_output(mut reader: File, process: Arc<PaneProcess>) {
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            // A closed PTY master reports EIO on unix rather than EOF.
+            #[cfg(unix)]
             Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
             Err(_) => break,
         }
     }
 
-    let exit_code = reap(process.pid);
-    if let Ok(mut state) = process.state.lock() {
-        state.exit_code = Some(exit_code);
-        process.exited.notify_all();
+    // #246: only unix ends here. On Windows the pane holds the ConPTY master
+    // open for its whole life, so this read loop never sees EOF even after the
+    // child is gone -- exit detection is the waiter thread's job instead.
+    #[cfg(unix)]
+    {
+        let exit_code = exit_code_of(&process);
+        if let Ok(mut state) = process.state.lock() {
+            state.exit_code = Some(exit_code);
+            process.exited.notify_all();
+        }
     }
+}
+
+/// Watches a Windows pane's child and publishes its exit status (#246).
+///
+/// Polls `try_wait` rather than blocking in `wait`: the child lives behind the
+/// same mutex `terminate` needs for `kill`, so a blocking wait would hold that
+/// lock for the child's entire life and deadlock any attempt to close the
+/// pane. Polling holds it only for the length of one non-blocking check.
+#[cfg(windows)]
+fn watch_process_exit(process: Arc<PaneProcess>) {
+    loop {
+        let status = match process.child.lock() {
+            Ok(mut child) => child.try_wait(),
+            Err(_) => return,
+        };
+        match status {
+            Ok(Some(status)) => {
+                if let Ok(mut state) = process.state.lock() {
+                    state.exit_code = Some(status.exit_code() as i32);
+                    process.exited.notify_all();
+                }
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return,
+        }
+    }
+}
+
+/// The child's exit status, once its output stream has ended.
+///
+/// #246: unix reaps by pid; Windows waits on the `Child` handle the ConPTY
+/// spawn kept. Both feed the same `PaneState::exit_code`, so `panel wait` is
+/// unchanged on either platform.
+#[cfg(unix)]
+fn exit_code_of(process: &Arc<PaneProcess>) -> i32 {
+    reap(process.pid)
 }
 
 #[cfg(unix)]
@@ -892,12 +1095,22 @@ fn terminate(process: &PaneProcess) {
     let _ = process_done(process, TERMINATE_GRACE);
 }
 
-/// Unreachable in practice: `spawn_process` on this platform always returns
-/// `Err` before a `PaneEntry`/`PaneProcess` is ever constructed, so no live
-/// pane can reach this. Kept so `close`/`shutdown`/`shutdown_for` — portable,
-/// platform-generic `PaneRegistry` methods — don't need a `cfg` split of
-/// their own just to call it.
-#[cfg(not(unix))]
+/// #246: Windows has no process *group* signal, so the pane's ownership
+/// boundary is the `Child` handle the ConPTY spawn kept. `kill` terminates the
+/// job the child heads; the following `wait` is what makes `shutdown`
+/// synchronous, so app quit cannot leave a pane's process behind — which is
+/// the failure this had to avoid, since `PaneRegistry::shutdown` runs there.
+#[cfg(windows)]
+fn terminate(process: &PaneProcess) {
+    if let Ok(mut child) = process.child.lock() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Neither unix nor Windows: no PTY backend exists, and `spawn_process`
+/// refuses before a `PaneProcess` is ever built, so nothing can reach this.
+#[cfg(not(any(unix, windows)))]
 fn terminate(_process: &PaneProcess) {}
 
 #[cfg(unix)]
@@ -969,17 +1182,119 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     output
 }
 
-#[cfg(all(test, not(unix)))]
-mod tests {
-    use super::spawn_process;
+#[cfg(all(test, windows))]
+mod windows_pane_tests {
+    use super::{PaneRegistry, spawn_process};
+    use std::time::{Duration, Instant};
 
+    /// #246 replaces `unsupported_pane_error_names_no_deleted_pty_backend`,
+    /// which asserted that creation FAILS here. That was true and is now
+    /// deliberately false: Windows has a ConPTY backend. Recorded rather than
+    /// quietly deleted, because a removed test that pinned real behaviour is
+    /// worth explaining.
     #[test]
-    fn unsupported_pane_error_names_no_deleted_pty_backend() {
-        let error = match spawn_process("pane", std::path::Path::new("."), None) {
-            Ok(_) => panic!("control-owned panes are unsupported on this platform"),
-            Err(error) => error,
-        };
+    fn a_control_owned_pane_spawns_on_windows() {
+        let process = spawn_process("pane-spawn", std::path::Path::new("."), None)
+            .expect("Windows has a ConPTY backend for control-owned panes");
+        super::terminate(&process);
+    }
 
-        assert!(!error.to_string().to_lowercase().contains("alacritty"));
+    /// #246/#150: a verbatim path handed to cmd.exe as its cwd is read as
+    /// UNC and silently ignored, so the pane would run every command in the
+    /// Windows directory instead. Observed before this was stripped.
+    #[test]
+    fn a_childs_cwd_carries_no_verbatim_prefix() {
+        use super::child_cwd;
+        use std::path::{Path, PathBuf};
+        assert_eq!(
+            child_cwd(Path::new(r"\\?\D:\Progetti")),
+            PathBuf::from(r"D:\Progetti")
+        );
+        assert_eq!(
+            child_cwd(Path::new(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\server\share")
+        );
+        assert_eq!(
+            child_cwd(Path::new(r"D:\plain")),
+            PathBuf::from(r"D:\plain"),
+            "a plain path is left alone"
+        );
+    }
+
+    /// The command's output has to reach the pane's scrollback, or `panel
+    /// read` is silent and every scripted use of the socket is blind.
+    #[test]
+    fn a_pane_command_reaches_the_panes_scrollback() {
+        let process = spawn_process(
+            "pane-echo",
+            std::path::Path::new("."),
+            Some("echo tiller-246-marker"),
+        )
+        .expect("spawn");
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            if let Ok(state) = process.state.lock() {
+                seen = String::from_utf8_lossy(&state.output).to_string();
+                if seen.contains("tiller-246-marker") {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        super::terminate(&process);
+
+        assert!(
+            seen.contains("tiller-246-marker"),
+            "the command's output must land in the pane's scrollback, got: {seen:?}"
+        );
+    }
+
+    /// A command that ends must report its status through the same
+    /// `PaneState::exit_code` the unix arm feeds, or `panel wait` hangs.
+    #[test]
+    fn a_finished_pane_reports_its_exit_code() {
+        let process = spawn_process("pane-exit", std::path::Path::new("."), Some("exit 3"))
+            .expect("spawn");
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut code = None;
+        while Instant::now() < deadline {
+            if let Ok(state) = process.state.lock() {
+                code = state.exit_code;
+                if code.is_some() {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        super::terminate(&process);
+
+        assert_eq!(
+            code,
+            Some(3),
+            "the child's exit status must reach PaneState::exit_code"
+        );
+    }
+
+    /// The one that matters most: `PaneRegistry::shutdown` runs on app quit,
+    /// so a pane it cannot kill leaks a process per pane for the rest of the
+    /// session. Asserts the child is gone, not merely that shutdown returned.
+    #[test]
+    fn shutdown_kills_a_control_owned_pane() {
+        let registry = PaneRegistry::new();
+        let directory = std::env::temp_dir();
+        let info = registry
+            .create(&directory, None, "pane")
+            .expect("a pane can be created on Windows");
+
+        registry.shutdown();
+
+        let after = registry.state(&info.id);
+        assert!(
+            after.is_err() || after.unwrap().exit_status.is_some(),
+            "after shutdown the pane must be gone or have reported an exit status"
+        );
     }
 }
