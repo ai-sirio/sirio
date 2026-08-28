@@ -22,7 +22,7 @@ grep -Fq -- 'TILLER_SOCKET="$SOCKET"' "$SCRIPT"
 grep -Fq -- 'git -C "$FIXTURE" init -q' "$SCRIPT"
 grep -Fq -- 'no usable X display' "$SCRIPT"
 grep -Fq -- 'distinct colours' "$SCRIPT"
-grep -Fq -- 'reference/sbs.py' "$SCRIPT"
+grep -Fq -- 'Scripts/sbs.py' "$SCRIPT"
 grep -Fq -- 'montage' "$SCRIPT"
 
 echo "visual sweep contract OK"

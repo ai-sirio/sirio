@@ -78,7 +78,7 @@ done
     die "--settle must be a nonnegative number"
 
 if [[ -z "$OUT_DIR" ]]; then
-    OUT_DIR="$ROOT/reference/linux-progress/visual-sweep-$(date +%Y%m%d-%H%M%S)-$$"
+    OUT_DIR="$ROOT/artifacts/visual-sweep-$(date +%Y%m%d-%H%M%S)-$$"
 fi
 mkdir -p "$OUT_DIR"
 FRAME_DIR="$OUT_DIR/frames"
@@ -258,7 +258,7 @@ make_comparison() {
     local reference_label="$4"
     local frame_label="$5"
     if python3 -c 'from PIL import Image' >/dev/null 2>&1; then
-        python3 "$ROOT/reference/sbs.py" \
+        python3 "$ROOT/Scripts/sbs.py" \
             "$reference" "$frame" "$output" \
             --label-left "$reference_label" --label-right "$frame_label"
         return

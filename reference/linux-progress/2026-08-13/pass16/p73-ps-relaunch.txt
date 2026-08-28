@@ -1,6 +1,0 @@
-enzopal+ 2493846  8.5  0.3 1766172 120956 ?      Sl   23:44   0:00 npm exec @agentclientprotocol/claude-agent-acp@latest
-enzopal+ 2493848  8.5  0.3 1766356 120412 ?      Sl   23:44   0:00 npm exec @agentclientprotocol/codex-acp@latest
-enzopal+ 2494640  0.0  0.0   2812  1860 ?        S    23:44   0:00 sh -c 'claude-agent-acp'
-enzopal+ 2494641  0.0  0.0   2812  1856 ?        S    23:44   0:00 sh -c 'codex-acp'
-enzopal+ 2494652  3.4  0.3 1464132 101208 ?      Sl   23:44   0:00 node /home/enzopalmisano/.npm/_npx/a81fa54699a25c5d/node_modules/.bin/codex-acp
-enzopal+ 2494668  7.4  0.4 1624368 145844 ?      Sl   23:44   0:00 node /home/enzopalmisano/.npm/_npx/b555b4fead8494dc/node_modules/.bin/claude-agent-acp

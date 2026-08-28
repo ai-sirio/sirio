@@ -24,9 +24,9 @@
 ---
 
 > Tiller started as a native macOS app (SwiftUI/Swift 6) and has been rewritten in Rust on
-> [gpui](https://github.com/zed-industries/zed) for Linux. The Swift original is retired —
-> see [`docs/linux-rewrite/README.md`](docs/linux-rewrite/README.md) for the exact commit and
-> how to read its source from git history.
+> [gpui](https://github.com/zed-industries/zed) for Linux. The Swift original is retired at
+> commit `5430d7bfdb4a295be8ce072526ae5108259b80f8` — read its source with
+> `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`.
 
 ## Features
 

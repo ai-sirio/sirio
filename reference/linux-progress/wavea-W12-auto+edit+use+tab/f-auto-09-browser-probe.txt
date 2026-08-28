@@ -1,8 +1,0 @@
-browser.open -> {"id":"x","ok":true,"result":{"surface":"surface:2","title":"","url":"https://example.com"}}
-browser.get -> {"id":"x","ok":false,"error":"browser.get is unsupported on Linux: browser automation is not implemented"}
-browser.screenshot -> {"id":"x","ok":false,"error":"browser.screenshot is unsupported on Linux: browser automation is not implemented"}
-browser.snapshot -> {"id":"x","ok":false,"error":"browser.snapshot is unsupported on Linux: browser automation is not implemented"}
-browser.wait -> {"id":"x","ok":false,"error":"browser.wait is unsupported on Linux: browser automation is not implemented"}
-browser.eval -> {"id":"x","ok":false,"error":"browser.eval is unsupported on Linux: browser automation is not implemented"}
-browser.console -> {"id":"x","ok":false,"error":"browser.console is unsupported on Linux: browser automation is not implemented"}
-browser.act -> {"id":"x","ok":false,"error":"browser.act is unsupported on Linux: only the driving flag is implemented"}
