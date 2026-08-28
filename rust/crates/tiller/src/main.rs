@@ -15545,6 +15545,61 @@ mod tests {
         )
     }
 
+    /// #248: `terminal_for_pane` is the polling loop's entire teardown
+    /// decision -- "is this pane still mine?" -- and it had no test at all.
+    /// That matters because the loop's failure mode is silent: a pane that
+    /// stops being matched simply stops being polled, and Layer D goes quiet
+    /// for it with nothing to report the loss. Sharing one snapshot across
+    /// panes (#248) means rewriting that loop, so this pins the predicate the
+    /// rewrite has to preserve.
+    #[gpui::test]
+    async fn terminal_for_pane_finds_a_live_terminal_and_nothing_else(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let (tab_id, terminal_pane, chat_pane) = workspace.read_with(&cx.cx, |workspace, _| {
+            let tab = &workspace.tabs[0];
+            let mut terminal_pane = None;
+            let mut chat_pane = None;
+            tab.panes.for_each(&mut |pane_id, content| match content {
+                TabContent::Terminal { .. } => terminal_pane = Some(pane_id),
+                TabContent::Chat(_) => chat_pane = Some(pane_id),
+                _ => {}
+            });
+            (tab.id, terminal_pane, chat_pane)
+        });
+        let terminal_pane = terminal_pane.expect("the palette workspace has a terminal pane");
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                workspace.terminal_for_pane(tab_id, terminal_pane).is_some(),
+                "a live terminal pane must keep being found, or its poll stops"
+            );
+            assert!(
+                workspace.terminal_for_pane(tab_id + 999, terminal_pane).is_none(),
+                "a pane id from another tab must not match"
+            );
+            assert!(
+                workspace.terminal_for_pane(tab_id, terminal_pane + 999).is_none(),
+                "a pane that no longer exists must not match"
+            );
+            if let Some(chat_pane) = chat_pane {
+                assert!(
+                    workspace.terminal_for_pane(tab_id, chat_pane).is_none(),
+                    "a chat pane is not a terminal: a shared loop must not poll it"
+                );
+            }
+        });
+    }
+
     fn palette_test_terminal_focus(
         workspace: &Entity<TillerWorkspace>,
         cx: &VisualTestContext,
