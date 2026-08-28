@@ -118,7 +118,7 @@ fn build_spike_webview(window: &Window) -> (Option<WebView>, Option<String>) {
 
 #[cfg(not(target_os = "linux"))]
 fn build_spike_webview(window: &Window) -> (Option<WebView>, Option<String>) {
-    match build_webview_for_macos(window) {
+    match build_webview_for_native_child(window) {
         Ok(webview) => (Some(webview), None),
         Err(error) => (None, Some(error)),
     }
@@ -1088,7 +1088,7 @@ fn build_production_webview_for_platform(
     events: &SharedWebEvents,
     context: &mut WebContext,
 ) -> Result<WebView, String> {
-    build_production_webview_for_macos(window, initial_url, events, context)
+    build_production_webview_for_native_child(window, initial_url, events, context)
 }
 
 /// The engine this platform actually hosts, for error text (#131, #144).
@@ -1098,8 +1098,18 @@ fn build_production_webview_for_platform(
 /// a user was told the wrong component had failed. #131 asked for
 /// per-platform engine names.
 ///
-/// Renaming the functions belongs with the Windows branch #145 introduces;
-/// this fixes what the user is shown.
+/// The functions carry the platform-neutral `_for_native_child` name for the
+/// same reason (#125, spec R2.3): they were called `_for_macos` while running
+/// on Windows, and a name that contradicts where the code runs is how a
+/// macOS-only assumption gets added to a shared body without anyone noticing.
+///
+/// The spec also asks for a real `#[cfg(target_os = "windows")]` branch here.
+/// That is deliberately NOT taken: both divergences it was meant to host have
+/// since moved out -- the profile directory arrives through `set_profile_dir`
+/// (spec R6.1) and the geometry lives in `native_webview_rect` (spec R3.3) --
+/// so a Windows arm today would delegate straight back to this body with
+/// nothing in it. An empty branch is a worse lie than a shared one; add it
+/// when there is a divergence to put inside.
 #[cfg(not(target_os = "linux"))]
 const NATIVE_ENGINE: &str = if cfg!(target_os = "windows") {
     "WebView2"
@@ -1116,7 +1126,7 @@ const NATIVE_WINDOW_HANDLE: &str = if cfg!(target_os = "windows") {
 };
 
 #[cfg(not(target_os = "linux"))]
-fn build_webview_for_macos<W: HasWindowHandle>(parent: &W) -> Result<WebView, String> {
+fn build_webview_for_native_child<W: HasWindowHandle>(parent: &W) -> Result<WebView, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_webview(parent))) {
         Ok(Ok(webview)) => Ok(webview),
         Ok(Err(error)) => Err(format!("{NATIVE_ENGINE} child failed: {error}")),
@@ -1128,7 +1138,7 @@ fn build_webview_for_macos<W: HasWindowHandle>(parent: &W) -> Result<WebView, St
 }
 
 #[cfg(not(target_os = "linux"))]
-fn build_production_webview_for_macos(
+fn build_production_webview_for_native_child(
     window: &Window,
     initial_url: &str,
     events: &SharedWebEvents,
