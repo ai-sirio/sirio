@@ -6115,7 +6115,13 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
-                .flex_1()
+                // Sized to its content, not to the row. It used to carry
+                // `flex_1`, which stretched the pill the whole width of the
+                // control row and stranded its own chevron ~200px from the
+                // model name, next to the overflow button -- so the chevron
+                // read as belonging to nothing and the model value read as a
+                // caption rather than a picker. `min_w_0` still lets it
+                // shrink, which is what keeps the name's ellipsis working.
                 .min_w_0()
                 .hover(|style| style.bg(colors.chat_row_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -6126,7 +6132,15 @@ impl Chat {
                     div()
                         .id(model_selection_id.clone())
                         .debug_selector(move || model_selection_id)
-                        .flex_1()
+                        // No `flex_1`. Inert on its own now that the pill
+                        // hugs its content -- there is no slack left inside
+                        // to absorb, and removing it alone does not move the
+                        // chevron, which the test below confirms. It goes
+                        // because the two together are what stranded the
+                        // chevron: restore `flex_1` on the pill and this
+                        // would push it to the far edge again.
+                        // `min_w_0` + `text_ellipsis` do the real work,
+                        // truncating a long name when the row is tight.
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(colors.title)
@@ -6142,7 +6156,14 @@ impl Chat {
                             .child(label),
                     )
                 })
-                .child(div().text_color(colors.meta).child("⌄"))
+                .child(
+                    div()
+                        .id("model-chip-chevron")
+                        .debug_selector(|| "model-chip-chevron".into())
+                        .flex_none()
+                        .text_color(colors.meta)
+                        .child("⌄"),
+                )
         } else {
             // #206: this badge names the *agent*, so it reads the agent.
             // It used to render `selected_model_name`, a model variable
@@ -6164,11 +6185,10 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
-                .flex_1()
+                // Same rule as the chip above: hug the content.
                 .min_w_0()
                 .child(
                     div()
-                        .flex_1()
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(colors.title)
@@ -7359,6 +7379,11 @@ impl Chat {
                     .child(attach_button)
                     .child(status_pill)
                     .child(model_control)
+                    // Splits the row into the two groups it always meant to
+                    // be: what you configure on the left, status and send on
+                    // the right. Without it every control drifts leftward and
+                    // the spacing carries no meaning.
+                    .child(div().flex_1())
                     .child(overflow_button)
                     .child(
                         div()
@@ -13845,6 +13870,55 @@ mod tests {
             events.borrow().len(),
             1,
             "a second location inside the throttle window does not refollow"
+        );
+    }
+
+    /// The chevron has to stay beside the name it qualifies.
+    ///
+    /// The chip used to carry `flex_1`, stretching the pill across the whole
+    /// control row, and the name div carried it too, so the name ate the
+    /// slack and the chip's own chevron landed at the row's right edge --
+    /// next to the overflow button, ~200px from the model it belonged to. A
+    /// blind review of the composer read it as "a lone chevron floating
+    /// mid-row, orphaned from whatever it belongs to", and read the model
+    /// value as a caption rather than something clickable.
+    #[gpui::test]
+    async fn the_model_chips_chevron_stays_beside_the_model_name(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "hi");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        refresh_frame(cx);
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("the model chip is drawn");
+        let chevron = cx
+            .debug_bounds("model-chip-chevron")
+            .expect("the chip's chevron is drawn");
+
+        // The chevron sits inside the pill, near its right edge -- which is
+        // only true when the pill is sized to its content.
+        let trailing_gap = f32::from(chip.right() - chevron.right());
+        assert!(
+            trailing_gap < 24.0,
+            "the chevron must sit at the pill's own right edge, not be stranded              by a stretched pill: gap {trailing_gap}px"
+        );
+
+        // And the pill must not span the control row. The composer is far
+        // wider than a model name; a pill claiming most of it is the bug.
+        let composer = cx
+            .debug_bounds("composer")
+            .expect("the composer is drawn");
+        assert!(
+            f32::from(chip.size.width) < f32::from(composer.size.width) * 0.6,
+            "the pill must hug its content, not the row: pill {}px of {}px",
+            f32::from(chip.size.width),
+            f32::from(composer.size.width)
         );
     }
 
