@@ -6089,7 +6089,11 @@ impl Chat {
                     .find(|choice| choice.value == *current)
                     .map(|choice| choice.name.clone())
                     .unwrap_or_else(|| current.clone());
-                name.to_uppercase()
+                // Not uppercased any more: it used to be a bare caption that
+                // needed to read as chrome, and now it sits beside its own
+                // "Effort" label exactly the way the model value sits beside
+                // "Model".
+                name
             })
         });
         // The picker chip — "Model" in muted chrome text, the value in
@@ -6098,7 +6102,6 @@ impl Chat {
         // models the pill degrades to a plain agent badge (F-CHAT-36): no
         // label, no chevron, no picker.
         let model_control = if self.model_control_visible() {
-            let effort_for_chip = effort_label.clone();
             let model_selection_id = self
                 .selected_model
                 .as_deref()
@@ -6146,16 +6149,6 @@ impl Chat {
                         .text_color(colors.title)
                         .child(selected_model_name.clone()),
                 )
-                .when_some(effort_for_chip, |this, label| {
-                    this.child(
-                        div()
-                            .id("model-effort-label")
-                            .debug_selector(|| "model-effort-label".into())
-                            .text_size(typography.caption2)
-                            .text_color(colors.meta)
-                            .child(label),
-                    )
-                })
                 .child(
                     div()
                         .id("model-chip-chevron")
@@ -6195,6 +6188,44 @@ impl Chat {
                         .child(agent_badge_name),
                 )
         };
+
+        // The effort level is a peer of the model, not a caption inside it:
+        // it is changed about as often, so it belongs at the same depth and
+        // carries its own label. Drawn only when the agent reports a value
+        // AND the picker can actually open, so this is never a click target
+        // that leads nowhere. `flex_none` keeps it intact while the model
+        // pill beside it absorbs the squeeze on a narrow pane.
+        let effort_control = effort_label
+            .filter(|_| self.model_control_visible())
+            .map(|label| {
+                let effort_entity = entity.clone();
+                div()
+                    .id("effort-chip")
+                    .debug_selector(|| "effort-chip".into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(theme.radii.control)
+                    .bg(colors.raised)
+                    .text_size(typography.ui_size)
+                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .on_click(move |_, window, cx| {
+                        effort_entity
+                            .update(cx, |chat, cx| chat.toggle_model_picker(window, cx));
+                    })
+                    .child(div().text_color(colors.meta).child("Effort"))
+                    .child(
+                        div()
+                            .id("model-effort-label")
+                            .debug_selector(|| "model-effort-label".into())
+                            .text_color(colors.title)
+                            .child(label),
+                    )
+                    .child(div().flex_none().text_color(colors.meta).child("⌄"))
+            });
 
         let model_picker = if self.model_picker_open {
             let picker_entity = model_entity.clone();
@@ -7379,6 +7410,7 @@ impl Chat {
                     .child(attach_button)
                     .child(status_pill)
                     .child(model_control)
+                    .children(effort_control)
                     // Splits the row into the two groups it always meant to
                     // be: what you configure on the left, status and send on
                     // the right. Without it every control drifts leftward and
@@ -13969,9 +14001,61 @@ mod tests {
             "choosing an effort updates the selection"
         );
         refresh_frame(cx);
+        // The effort no longer lives inside the model chip -- it is its own
+        // labelled pill beside it, so the old wording here would be wrong.
         assert!(
             cx.debug_bounds("model-effort-label").is_some(),
-            "the model chip shows the selected effort"
+            "the effort pill shows the selected effort"
+        );
+        assert_effort_is_a_peer_of_the_model(cx);
+    }
+
+    /// The effort pill sits beside the model pill, not inside it.
+    ///
+    /// It used to be an uppercased caption with no label and no click target,
+    /// tucked in among the model chip's own children, so changing it meant
+    /// opening the model picker and already knowing the effort lived in
+    /// there. Both pills are peers now, and each says what it is.
+    fn assert_effort_is_a_peer_of_the_model(cx: &mut VisualTestContext) {
+        let model = cx
+            .debug_bounds("model-chip")
+            .expect("the model chip is drawn");
+        let effort = cx
+            .debug_bounds("effort-chip")
+            .expect("the effort pill is drawn");
+        assert!(
+            f32::from(effort.left()) >= f32::from(model.right()),
+            "the effort pill must start at or after the model pill ends, not              be nested inside it: effort left {}px vs model right {}px",
+            f32::from(effort.left()),
+            f32::from(model.right())
+        );
+    }
+
+    /// The effort control is reachable as a peer, and it names itself.
+    #[gpui::test]
+    async fn the_effort_control_is_a_peer_of_the_model_not_a_caption(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "hi");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        refresh_frame(cx);
+
+        assert_effort_is_a_peer_of_the_model(cx);
+
+        // And it opens the picker on its own, rather than being a label the
+        // user has to know is hidden behind the model chip.
+        let effort = cx
+            .debug_bounds("effort-chip")
+            .expect("the effort pill is drawn");
+        cx.simulate_click(effort.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("effort-option-high").is_some(),
+            "clicking the effort pill must reach the effort choices"
         );
     }
 
