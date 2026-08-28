@@ -37,6 +37,14 @@ fn main() {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // #264/R1.4: let a run claim a terminal identity, so the environment
+        // gate pi decides on can be tested without touching Tiller itself.
+        if let Ok(value) = std::env::var("PROBE_TERM_PROGRAM") {
+            cmd.env("TERM_PROGRAM", value);
+        }
+        if let Ok(value) = std::env::var("PROBE_TERM") {
+            cmd.env("TERM", value);
+        }
         let _child = pair.slave.spawn_command(cmd).expect("spawn");
         drop(pair.slave);
 
