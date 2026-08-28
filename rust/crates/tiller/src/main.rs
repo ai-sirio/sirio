@@ -14297,6 +14297,12 @@ fn main() {
         // database logs and falls back to the default layout — the app must
         // never refuse to open because of its own state file.
         let database_path = session::database_path();
+        // #125 (spec R6.1): the browser profile follows the database's own
+        // scoping -- override, then the checkout holding the running binary,
+        // then the stable installed location. Handed to `tiller_ui` here,
+        // before any surface exists, because a WebView2 profile cannot move
+        // once opened.
+        tiller_ui::browser::set_profile_dir(session::browser_profile_path());
         // The working directory can vanish between launches (a terminal
         // whose cwd was deleted): fall back rather than abort before the
         // window exists.

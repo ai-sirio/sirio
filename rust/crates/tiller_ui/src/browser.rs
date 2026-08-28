@@ -948,7 +948,26 @@ fn wait_for_script_result(
 /// (CLAUDE.md), not under it. This is the same tension #230 and #246 record —
 /// if the rule changes there, change it here too. `None` means "let the engine
 /// decide", which is only reached when the profile variables are all absent.
+/// #125 (spec R6.1): the profile directory, handed down by the app at startup.
+///
+/// `tiller_ui` sits beside `tiller` in the crate layering (see CLAUDE.md) and
+/// cannot call `session::browser_profile_path`, so the app pushes the resolved
+/// path in rather than the scoping rule being written twice. Unset -- an
+/// example binary, a test -- falls back to the user-wide location below.
+static PROFILE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Called once by the app before the first browser surface is built.
+///
+/// Later calls are ignored, which is exactly what is wanted: a profile a
+/// running WebView2 has already opened must not move out from under it.
+pub fn set_profile_dir(path: PathBuf) {
+    let _ = PROFILE_DIR.set(path);
+}
+
 fn browser_profile_dir() -> Option<PathBuf> {
+    if let Some(path) = PROFILE_DIR.get() {
+        return Some(path.clone());
+    }
     let root = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

@@ -185,6 +185,30 @@ pub fn database_path() -> PathBuf {
     path
 }
 
+/// #125 (spec R6.1): the browser profile directory, scoped exactly the way the
+/// session database is.
+///
+/// Derived from [`database_path`]'s own directory rather than re-deriving the
+/// rule, so the three cases it already handles -- the `TILLER_DB` override, the
+/// checkout containing the running binary, the stable installed location --
+/// hold here by construction and cannot drift apart later.
+///
+/// Sibling of the database rather than inside it: WebView2 owns everything
+/// under its user-data folder and will happily write locks and caches there.
+pub fn browser_profile_path() -> PathBuf {
+    browser_profile_path_for(&database_path())
+}
+
+/// The profile directory beside one database path. Split out so the rule is
+/// testable without touching the process environment.
+fn browser_profile_path_for(database: &Path) -> PathBuf {
+    database
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("browser")
+}
+
 /// The root under which every TillerRust database lives: the stable
 /// `tiller.sqlite` for installed binaries plus a `checkouts/` subtree with
 /// one directory per development checkout. Linux uses XDG_STATE_HOME (or
@@ -2852,6 +2876,72 @@ mod tests {
                 && path_b.starts_with(dir.0.join("checkouts")),
             "scoped databases live under the app-support checkouts/ dir"
         );
+    }
+
+    /// #125 (spec R6.1): the profile is a sibling of the database, not a
+    /// child of it -- WebView2 owns everything under its user-data folder.
+    #[test]
+    fn the_browser_profile_sits_beside_its_database() {
+        let database = Path::new("/state/checkouts/tiller-abcd1234/tiller.sqlite");
+        assert_eq!(
+            browser_profile_path_for(database),
+            Path::new("/state/checkouts/tiller-abcd1234/browser")
+        );
+    }
+
+    /// The wrapper, not just the rule it delegates to: `browser_profile_path`
+    /// must resolve against the *live* database path, and as its sibling.
+    /// Breaking that -- nesting the profile inside the database's own path --
+    /// is invisible to the tests that call `browser_profile_path_for`
+    /// directly, which is exactly how it would reach a release.
+    #[test]
+    fn the_live_profile_path_is_the_live_databases_sibling() {
+        let database = database_path();
+        let profile = browser_profile_path();
+        assert_eq!(
+            profile.parent(),
+            database.parent(),
+            "the profile must sit beside the database, not inside it"
+        );
+        assert_eq!(profile.file_name(), Some(std::ffi::OsStr::new("browser")));
+    }
+
+    /// #125 (spec R6.1): the profile inherits the database's scoping, so two
+    /// checkouts of the app cannot end up sharing one WebView2 profile
+    /// directory while their session state is correctly separate.
+    #[test]
+    fn two_checkouts_do_not_share_a_browser_profile() {
+        let dir = TempDir::new();
+        let checkout_a = checkout(&dir.0, "tiller-main");
+        let checkout_b = checkout(&dir.0, "tiller-r61-profile");
+        let exe_a = built_binary(&checkout_a);
+        let exe_b = built_binary(&checkout_b);
+
+        let profile_a = browser_profile_path_for(&database_path_for(&dir.0, &exe_a, &dir.0, true));
+        let profile_b = browser_profile_path_for(&database_path_for(&dir.0, &exe_b, &dir.0, true));
+
+        assert_ne!(
+            profile_a, profile_b,
+            "each checkout must own its own browser profile"
+        );
+        assert!(
+            profile_a.starts_with(dir.0.join("checkouts")),
+            "a development checkout's profile is scoped, not user-wide: {}",
+            profile_a.display()
+        );
+    }
+
+    /// The installed case: no checkout, so the profile is the one stable
+    /// user-wide location, beside the one stable database.
+    #[test]
+    fn an_installed_binary_keeps_one_stable_browser_profile() {
+        let dir = TempDir::new();
+        let installed = dir.0.join("Applications").join("tiller");
+        std::fs::create_dir_all(installed.parent().expect("parent")).expect("install dir");
+        std::fs::write(&installed, b"binary").expect("install binary");
+
+        let database = database_path_for(&dir.0, &installed, &dir.0, false);
+        assert_eq!(browser_profile_path_for(&database), dir.0.join("browser"));
     }
 
     #[test]
