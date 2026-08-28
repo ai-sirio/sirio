@@ -2301,6 +2301,26 @@ impl Chat {
         self.transcript_text()
     }
 
+    /// The first thing the user actually asked, for naming the session.
+    ///
+    /// Read from the entries rather than parsed out of `transcript_text`,
+    /// because the transcript is prose: "the first line" is the agent's
+    /// words, or a tool call, depending on where the session was cut.
+    ///
+    /// The entries are the reliable source across both restore paths, but
+    /// not an identical one. A chat reloaded from the database keeps its
+    /// real user turns (`restored_entry` maps `ChatEntry::UserMessage` back
+    /// to `Entry::User`), so this finds the original prompt. A chat brought
+    /// back through `restore_transcript` -- flat retained text, no structure
+    /// -- becomes a single *assistant* entry, and this correctly returns
+    /// `None` rather than offering the agent's words as the user's.
+    pub fn first_user_prompt(&self) -> Option<String> {
+        self.entries.iter().find_map(|entry| match entry {
+            Entry::User(text) if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })
+    }
+
     /// Restores retained transcript text into a fresh chat surface. It is
     /// intentionally rendered as one historical assistant entry: preserving
     /// the exact visible transcript is more important than pretending the
