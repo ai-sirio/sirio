@@ -27,6 +27,8 @@ from reading.
 | Does pi probe for graphics at startup? | **No** — 45s, TUI up, zero graphics APCs | [#264](https://github.com/tillerai/tiller/issues/264) |
 
 | Do codex or opencode probe? | **No** — zero graphics APCs from either | [#264](https://github.com/tillerai/tiller/issues/264) |
+| Does omp probe? | **No** — 2×60s, TUI up, 2.0M and 2.4M bytes captured, zero graphics APCs; unchanged when handed `TERM_PROGRAM=ghostty` and `KITTY_WINDOW_ID` | [#264](https://github.com/tillerai/tiller/issues/264), pty capture with a `cmd.exe` control |
+| What are omp's startup probes, then? | Kitty **keyboard** protocol, OSC 11 background colour, OSC 99 notifications, DECRQM private modes. No graphics query anywhere in `#attachInput` | [#264](https://github.com/tillerai/tiller/issues/264), read from the shipped `@oh-my-pi/pi-tui` source |
 | How does pi decide, then? | **Environment variables only.** `detectCapabilities` reads `TERM_PROGRAM`, `TERM`, `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_PANE`. No terminal query anywhere in it. | [#264](https://github.com/tillerai/tiller/issues/264), read from the shipped bundle |
 
 Three consequences that change the map's own framing:
@@ -85,6 +87,18 @@ Three consequences that change the map's own framing:
   The milestone therefore needs **content**: an agent turn that actually
   produces an image, run once with the variable and once without. That costs a
   real model turn, which is why it is not done here.
+
+  **For omp there is a narrower lever than an identity claim.** Its vendored
+  `pi-tui` reads `PI_FORCE_IMAGE_PROTOCOL` (`kitty` / `iterm2` / `sixel`, plus
+  an `off` kill switch) and treats it as pinning the choice — its own comment
+  says a runtime capability probe must not override it. That turns images on
+  and nothing else on, so it does not buy the rest of "this is ghostty" the way
+  `TERM_PROGRAM` does, and it leaves #86's `ai.tiller.Tiller` identity intact.
+
+  It is **omp-only**, despite the `PI_` prefix: the variable is absent from
+  pi's own shipped tree, which is a separate copy of the same lineage. So the
+  decision does not collapse into one setting — omp can be enabled honestly
+  today, while pi still costs an identity claim or nothing.
 
 ### 2. Decoding
 
@@ -183,4 +197,4 @@ Three consequences that change the map's own framing:
   defensible; neither is derivable from the protocol.
 - **Whether pi probes lazily**, at the moment it first has an image. Measured
   absent at startup; the lazy case is untested and is the likelier design.
-- **omp's probe bytes.** Not installed on the machine that produced this spec.
+*(omp's probe bytes were the third item here. They are now measured, above.)*
