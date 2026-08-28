@@ -1,3 +1,0 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.39s
-     Running `target/debug/examples/browser_spike`
-WARNING: radv is not a conformant Vulkan implementation, testing use only.

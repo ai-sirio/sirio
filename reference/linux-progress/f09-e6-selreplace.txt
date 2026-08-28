@@ -1,6 +1,0 @@
-# F09 scratch
-
-alpha bravo charlie delta
-AB
-TYPED-OVER
-tail line stays unchanged

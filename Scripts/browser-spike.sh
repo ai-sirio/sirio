@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-$ROOT/reference/linux-progress/p72-browser-spike.png}"
+OUT="${1:-$ROOT/artifacts/p72-browser-spike.png}"
 DISP="${2:-:1}"
 LOG="${OUT%.png}.log"
 

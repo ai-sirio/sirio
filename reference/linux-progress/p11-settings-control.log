@@ -1,6 +1,0 @@
-[control] listening on /run/user/1000/TillerRust/p11-ui-settings.sock
-WARNING: radv is not a conformant Vulkan implementation, testing use only.
-import-im6.q16: unable to read X window image `0x200001': Resource temporarily unavailable @ error/xwindow.c/XImportImage/5004.
-import-im6.q16:  `/tmp/p11-settings-control-inner.png' @ error/import.c/ImportImageCommand/1276.
-import-im6.q16: unable to read X window image `0x200001': Resource temporarily unavailable @ error/xwindow.c/XImportImage/5004.
-import-im6.q16:  `reference/linux-progress/p11-settings-control.png' @ error/import.c/ImportImageCommand/1276.

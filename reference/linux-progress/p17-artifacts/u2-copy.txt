@@ -1,5 +1,0 @@
-╭─ bash tiller  rust/gpui-rewrite ≡  ?5 ~8  0ms⠀                    14,01:11 
-╰─ echo COPYPAYLOAD-73
-COPYPAYLOAD-73
-╭─ bash tiller  rust/gpui-rewrite ≡  ?5 ~8  2ms⠀                    14,01:11 
-╰─

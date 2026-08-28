@@ -342,7 +342,7 @@ fn close_tab_fallback_fires(
 }
 
 /// Fixed panel geometry, measured off the frozen reference shots — see
-/// `reference/MEASURED.md`.
+/// `docs/MEASURED.md`.
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;

@@ -259,7 +259,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=root / "reference/linux-progress/crash-runs",
+        default=root / "artifacts/crash-runs",
         help="directory for the report, output log, and screenshot",
     )
     parser.add_argument("--display", default=os.environ.get("DISPLAY", ":1"))

@@ -8,7 +8,7 @@
 //!
 //! Where each value comes from is recorded in
 //! `docs/linux-rewrite/THEME-PROVENANCE.md`. The re-runnable
-//! `./reference/waku/measure-theme.py` script reproduces the **historical**
+//! `./Scripts/measure-theme.py` script reproduces the **historical**
 //! Waku measurements only. Current shell values are audited there through the
 //! IntelliJ screenshot fingerprint, dimensions, sampling method, and pixel
 //! rectangles. Tokens the frames cannot settle say so at their own definition
@@ -2015,7 +2015,7 @@ mod tests {
     /// The dark palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
     ///
     /// The assertions cover the current shell values recorded in provenance.
-    /// `./reference/waku/measure-theme.py` reproduces historical Waku values
+    /// `./Scripts/measure-theme.py` reproduces historical Waku values
     /// only; the current shell is audited via the IntelliJ screenshot
     /// fingerprint, dimensions, method, and sampling rectangles documented
     /// there.

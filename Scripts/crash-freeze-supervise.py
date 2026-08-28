@@ -427,7 +427,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=root / "reference/linux-progress/freeze-runs",
+        default=root / "artifacts/freeze-runs",
     )
     parser.add_argument("--display", default=os.environ.get("DISPLAY", ":2"))
     parser.add_argument("--timeout", type=float, default=0.0)
