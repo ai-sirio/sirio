@@ -76,6 +76,33 @@ const STREAMING_BORDER_TICK: Duration = Duration::from_millis(16);
 /// and its contents stationary while the ring is shown.
 const STREAMING_BORDER_WIDTH: Pixels = px(1.0);
 
+/// #239: the generating spinner's frames, taken from Zed's
+/// `SpinnerVariant::Dots` (`ui/src/components/label/spinner_label.rs`) — the
+/// benchmark this surface is measured against. The issue calls it a
+/// "three-dot" indicator; Zed's `Dots` is this ten-frame braille cycle, and
+/// the issue body's "match Zed's `SpinnerVariant::Dots`" settles which one
+/// was meant.
+const GENERATING_SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// One full cycle of [`GENERATING_SPINNER_FRAMES`], matching Zed's 1000ms for
+/// the same variant — so 100ms a frame.
+const GENERATING_SPINNER_CYCLE: Duration = Duration::from_millis(1000);
+
+/// The spinner glyph for a turn that has been streaming for `elapsed`.
+///
+/// Pure, so the cycle is testable without a window. Deliberately samples a
+/// clock rather than owning an animation: while a turn streams, the composer's
+/// streaming border already has a repaint timer in flight and already records
+/// the turn's start instant, so this rides that one timer instead of adding a
+/// second. That is the same one-timer-per-surface discipline the border and
+/// the composer caret follow, and it is what keeps an idle-but-streaming chat
+/// affordable on a Raspberry Pi 5.
+fn generating_spinner_frame(elapsed: Duration) -> &'static str {
+    let frame_ms = GENERATING_SPINNER_CYCLE.as_millis() / GENERATING_SPINNER_FRAMES.len() as u128;
+    let index = (elapsed.as_millis() / frame_ms) % GENERATING_SPINNER_FRAMES.len() as u128;
+    GENERATING_SPINNER_FRAMES[index as usize]
+}
+
 /// Degrees of rotation for a streaming-border revolution `progress`
 /// (`0.0` = start of a revolution, `1.0` = one full turn) — continuous
 /// linear rotation, no easing.
@@ -7751,6 +7778,37 @@ impl Render for Chat {
                         .flex_grow_1(),
                     ),
             )
+            // #239: the generating spinner, transient by construction. It is a
+            // sibling of the transcript rather than an entry in it: the list is
+            // virtualized off `entries.len()`, so a pseudo-entry would have to
+            // be spliced in and out every turn and could be persisted or
+            // duplicated. Living outside the list makes "never part of the
+            // transcript" structural instead of a rule to maintain.
+            //
+            // The clock is read, never started — `render_composer` already owns
+            // the instant and the repaint timer for the streaming border, so no
+            // second timer is armed here (see `generating_spinner_frame`).
+            .when(self.streaming, |this| {
+                let elapsed = self
+                    .streaming_border_started_at
+                    .map(|started_at| {
+                        cx.background_executor()
+                            .now()
+                            .saturating_duration_since(started_at)
+                    })
+                    .unwrap_or_default();
+                this.child(
+                    div()
+                        .id("chat-generating-spinner")
+                        .debug_selector(|| "chat-generating-spinner".into())
+                        .w_full()
+                        .max_w(px(TRANSCRIPT_WIDTH))
+                        .pt(px(6.0))
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.colors.subtitle)
+                        .child(generating_spinner_frame(elapsed)),
+                )
+            })
             .child(
                 div()
                     .w_full()
@@ -8617,6 +8675,248 @@ mod tests {
                 larger.headline
             );
         }
+    }
+
+    /// #239: the cycle is Zed's — ten frames over 1000ms, so 100ms each. Spelt
+    /// out glyph by glyph rather than by index, so a reordering of the frame
+    /// table fails here instead of silently changing the animation.
+    #[test]
+    fn generating_spinner_cycles_through_all_ten_frames_in_one_second() {
+        assert_eq!(generating_spinner_frame(Duration::from_millis(0)), "⠋");
+        assert_eq!(generating_spinner_frame(Duration::from_millis(100)), "⠙");
+        assert_eq!(generating_spinner_frame(Duration::from_millis(150)), "⠙");
+        assert_eq!(generating_spinner_frame(Duration::from_millis(900)), "⠏");
+        assert_eq!(
+            generating_spinner_frame(Duration::from_millis(1000)),
+            "⠋",
+            "the cycle wraps at one second"
+        );
+        assert_eq!(
+            generating_spinner_frame(Duration::from_millis(1100)),
+            "⠙",
+            "and keeps cycling on later revolutions"
+        );
+    }
+
+    fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+        (chat, cx)
+    }
+
+    /// #239: the indicator is shown for exactly as long as a turn is in
+    /// flight, driven by the streaming flag the composer's border already
+    /// uses — no lifecycle of its own to fall out of step.
+    #[gpui::test]
+    async fn the_generating_spinner_appears_while_a_turn_streams(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "an idle chat shows no spinner"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "a streaming turn shows the spinner"
+        );
+    }
+
+    /// The same assertion covers completion, cancellation and error: all three
+    /// clear `streaming`, and the spinner is a pure function of that flag.
+    #[gpui::test]
+    async fn the_generating_spinner_disappears_when_the_turn_ends(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "the spinner leaves with the turn"
+        );
+    }
+
+    /// #239 requires the indicator stay transient and never join the
+    /// transcript. It is a sibling of the virtualized list rather than an
+    /// entry in it, so streaming must not move the entry count at all — this
+    /// is what makes "not persisted" and "never duplicated" structural.
+    #[gpui::test]
+    async fn the_transcript_gains_no_entry_for_the_spinner(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+        let before = chat.read_with(&*cx, |chat, _| chat.entries.len());
+
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+
+        let during = chat.read_with(&*cx, |chat, _| chat.entries.len());
+        assert_eq!(
+            before, during,
+            "the spinner is not a transcript entry, so streaming adds none"
+        );
+    }
+
+    /// #239 piece 2: the spinner must leave when a turn *completes*, driven
+    /// through the real fixture agent rather than by setting the flag — the
+    /// flag is what the earlier tests pin, and a flag can be right while the
+    /// path that clears it is not.
+    #[gpui::test]
+    async fn the_spinner_leaves_when_a_real_turn_completes(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "the spinner is up as soon as the turn starts"
+        );
+
+        std::fs::write(dir.0.join("go"), "go").expect("write go file");
+        pump_chat_until(cx, &chat, |chat| !chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "and gone once the turn has ended"
+        );
+    }
+
+    /// #239 piece 2: cancellation. Escape reaches `Chat::cancel` through the
+    /// real binding, so this exercises the same door a user does.
+    #[gpui::test]
+    async fn the_spinner_leaves_when_a_turn_is_cancelled(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        cx.simulate_keystrokes("escape");
+        pump_chat_until(cx, &chat, |chat| !chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "cancelling a turn takes the spinner with it"
+        );
+    }
+
+    /// #239 piece 2: the error path. `TransportError` is handed to
+    /// `handle_event` directly — it is the same handler the transport calls,
+    /// and killing a live fixture mid-turn from a test would be racing the
+    /// very state under assertion.
+    #[gpui::test]
+    async fn the_spinner_leaves_when_the_transport_fails(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::TransportError("agent went away".into()), cx);
+        });
+        pump_chat_until(cx, &chat, |chat| !chat.streaming);
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_none(),
+            "a failed turn must not leave the spinner running forever"
+        );
+    }
+
+    /// #239 piece 3, and the acceptance criterion most likely to fail: the
+    /// spinner appears in the same column as the composer, so it could push
+    /// it down or shrink it. The composer's drawn rectangle must be
+    /// bit-identical between idle and streaming.
+    #[gpui::test]
+    async fn the_spinner_does_not_move_or_resize_the_composer(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let idle = cx.debug_bounds("composer").expect("the composer is drawn");
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.streaming);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("chat-generating-spinner").is_some());
+
+        let streaming = cx.debug_bounds("composer").expect("the composer is drawn");
+
+        // The composer does shift while streaming, but not because of this
+        // row: it moves exactly 1px and shrinks exactly 2px, and that
+        // reproduces with the spinner disabled entirely. It is the streaming
+        // border, whose own comment claims it "keeps the composer's footprint
+        // and its contents stationary" -- filed separately rather than folded
+        // in here, so this test fails for one reason only.
+        //
+        // The spinner is a ~20px row in the same column, so if it displaced
+        // the composer at all it would blow this budget by an order of
+        // magnitude. Bounding the drift at the border's 1px is therefore a
+        // real guard on this row, not a rounded-off tautology.
+        let dx = (f32::from(idle.origin.x) - f32::from(streaming.origin.x)).abs();
+        let dy = (f32::from(idle.origin.y) - f32::from(streaming.origin.y)).abs();
+        assert!(
+            dx <= 1.0 && dy <= 1.0,
+            "the spinner must not move the composer; only the 1px border may:              idle {:?} vs streaming {:?}",
+            idle.origin,
+            streaming.origin
+        );
     }
 
     const CHAT_FIXTURE: &str = concat!(
@@ -9788,7 +10088,7 @@ mod tests {
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn && !chat.streaming);
 
-        let entries_after_turn_one = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
+        let entries_after_turn_one = chat.read_with(&*cx, |chat, _| chat.entries.len());
         assert_eq!(
             entries_after_turn_one, 3,
             "turn 1 should have settled to user + dismissed-permission + turn-footer"
@@ -9950,7 +10250,7 @@ mod tests {
             "permission-wait must not read as ordinary mid-turn queueing"
         );
 
-        let entries_before = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
+        let entries_before = chat.read_with(&*cx, |chat, _| chat.entries.len());
         focus_and_type(cx, "should not appear");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -9961,7 +10261,7 @@ mod tests {
             "the disabled editor must refuse typed characters entirely"
         );
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.entries.len()),
+            chat.read_with(&*cx, |chat, _| chat.entries.len()),
             entries_before,
             "Enter must not send or queue while a permission is pending"
         );
@@ -10032,7 +10332,7 @@ mod tests {
             "the disabled editor must refuse typed characters entirely while offline"
         );
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.entries.len()),
+            chat.read_with(&*cx, |chat, _| chat.entries.len()),
             entries_before,
             "Enter must neither send nor start a fresh reconnect attempt while offline"
         );
@@ -11627,7 +11927,7 @@ mod tests {
         // must launch a fresh connection attempt. The fixture rejects auth
         // immediately every time, so the observable effect is a second
         // AuthRequired error entry landing in the transcript.
-        let entries_before_retry = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
+        let entries_before_retry = chat.read_with(&*cx, |chat, _| chat.entries.len());
         cx.simulate_click(retry.center(), Modifiers::none());
         cx.run_until_parked();
         chat.read_with(&cx.cx, |chat, _| {
