@@ -7429,8 +7429,25 @@ impl Chat {
                             .bg(colors.raised)
                             .text_size(typography.ui_size)
                             .child(context_ring)
+                            // Named, like every other value in this row. A
+                            // blind review of the composer could read the
+                            // ring and the number but not what they measured
+                            // -- "context used? budget? direction
+                            // unreadable" -- and the answer only appeared
+                            // after clicking through to the popover, which
+                            // spells out "N% of context used". The field name
+                            // belongs where the value is.
                             .child(
                                 div()
+                                    .id("context-label")
+                                    .debug_selector(|| "context-label".into())
+                                    .text_color(colors.meta)
+                                    .child("Context"),
+                            )
+                            .child(
+                                div()
+                                    .id("context-percent")
+                                    .debug_selector(|| "context-percent".into())
                                     .text_color(colors.title)
                                     .child(format!("{context_percent}%")),
                             ),
@@ -14056,6 +14073,43 @@ mod tests {
         assert!(
             cx.debug_bounds("effort-option-high").is_some(),
             "clicking the effort pill must reach the effort choices"
+        );
+    }
+
+    /// The context meter names what it measures.
+    ///
+    /// It used to be a ring and a bare percentage. A blind review could read
+    /// both and still not know what they measured -- the answer only existed
+    /// in the popover, a click away, which spells out "N% of context used".
+    /// Every other value in this row carries its field name inline; this one
+    /// now does too, between the ring and the number.
+    #[gpui::test]
+    async fn the_context_meter_names_what_it_measures(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.context_usage.is_some());
+        refresh_frame(cx);
+
+        let ring = cx
+            .debug_bounds("context-ring")
+            .expect("the context ring is drawn");
+        let label = cx
+            .debug_bounds("context-label")
+            .expect("the context meter is labelled");
+        let percent = cx
+            .debug_bounds("context-percent")
+            .expect("the context percentage is drawn");
+
+        assert!(
+            f32::from(label.left()) >= f32::from(ring.right()),
+            "the label follows the ring: label left {}px vs ring right {}px",
+            f32::from(label.left()),
+            f32::from(ring.right())
+        );
+        assert!(
+            f32::from(percent.left()) >= f32::from(label.right()),
+            "the value follows its label, the same order the model and effort              pills use: value left {}px vs label right {}px",
+            f32::from(percent.left()),
+            f32::from(label.right())
         );
     }
 
