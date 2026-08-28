@@ -458,6 +458,10 @@ enum TillerScroll {
     Bottom,
     PageUp,
     PageDown,
+    /// #259: line-granular scroll, negative upwards. Autoscroll needs one
+    /// line at a time; a page per tick would fly past whatever the user was
+    /// dragging towards.
+    Lines(isize),
 }
 
 #[derive(Clone)]
@@ -783,6 +787,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             TillerScroll::Bottom => ScrollViewport::Bottom,
                             TillerScroll::PageUp => ScrollViewport::Delta(-page),
                             TillerScroll::PageDown => ScrollViewport::Delta(page),
+                            TillerScroll::Lines(delta) => ScrollViewport::Delta(delta),
                         };
                         terminal.scroll_viewport(viewport);
                     }
@@ -1684,6 +1689,12 @@ pub struct TerminalView {
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
     context_menu: Option<Point<Pixels>>,
+    /// #259: the running autoscroll, armed only while a drag is held outside
+    /// the pane. Cancel-on-drop, so releasing the button or coming back
+    /// inside stops it -- one timer per surface, the discipline
+    /// `caret::schedule` and the composer's streaming border already follow,
+    /// rather than a loop that runs whether or not anyone is dragging.
+    autoscroll: Option<gpui::Task<()>>,
     /// Live link-hover tooltip (#41): the pointer position plus the resolved
     /// target URI of the cell under the pointer. Set only while the platform
     /// modifier is held over a linked cell; cleared on modifier release or
@@ -1798,7 +1809,8 @@ impl TerminalView {
             focus_handle,
             exit_status: None,
             identity,
-            context_menu: None,
+            context_menu: None,
+            autoscroll: None,
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -1824,7 +1836,8 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             exit_status: None,
             identity,
-            context_menu: None,
+            context_menu: None,
+            autoscroll: None,
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -1872,7 +1885,8 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             exit_status: None,
             identity,
-            context_menu: None,
+            context_menu: None,
+            autoscroll: None,
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -2310,6 +2324,38 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// #259: how far to autoscroll for a drag at this height, in lines.
+    ///
+    /// Negative scrolls towards the scrollback, positive towards the active
+    /// area, zero means the drag is comfortably inside and nothing should
+    /// move.
+    ///
+    /// The trigger is a band *just inside* each edge, not the boundary
+    /// itself. That is not a nicety: GPUI stops delivering `on_mouse_move` to
+    /// an element once the pointer leaves its bounds, so a rule that only
+    /// fired outside the pane would never fire at all -- measured, after a
+    /// first version that armed on `pointer_y < top` and produced exactly
+    /// zero ticks. It is also why libghostty-vt ships an autoscroll tick
+    /// event separate from its drag events.
+    ///
+    /// One line per tick rather than a rate proportional to how far past the
+    /// edge the pointer is: a terminal drag aims at a line, and acceleration
+    /// is what makes autoscroll overshoot it.
+    fn autoscroll_lines(pointer_y: f32, top: f32, bottom: f32) -> isize {
+        /// One row. Measured: a 12px band left a pointer 3px below it
+        /// reporting "inside", which is not a distinction a hand at the edge
+        /// of a pane can make. A row is also the unit being scrolled, so the
+        /// band and the step agree.
+        let edge_band = f32::from(LINE_HEIGHT);
+        if pointer_y < top + edge_band {
+            -1
+        } else if pointer_y > bottom - edge_band {
+            1
+        } else {
+            0
+        }
+    }
+
     /// #259: whether a left drag makes a host selection rather than going to
     /// the guest.
     ///
@@ -2485,9 +2531,10 @@ impl TerminalView {
         // anchored press. Runs before the hover branch below, which returns
         // early for anything without the platform modifier.
         if event.pressed_button == Some(MouseButton::Left)
-            && let Some(terminal) = self.running_terminal()
+            && let Some(terminal) = self.running_terminal().cloned()
             && let Some(anchor) = *terminal.selection_anchor.lock()
         {
+            let terminal = &terminal;
             let cell = Self::cell_at(terminal, event.position);
             let range = SelectedRange::between(anchor, cell);
             let range = (!range.is_empty()).then_some(range);
@@ -2496,6 +2543,22 @@ impl TerminalView {
                 *current = range;
                 drop(current);
                 cx.notify();
+            }
+            let bounds = *terminal.last_bounds.lock();
+            let lines = bounds
+                .map(|bounds| {
+                    Self::autoscroll_lines(
+                        f32::from(event.position.y),
+                        f32::from(bounds.origin.y),
+                        f32::from(bounds.origin.y + bounds.size.height),
+                    )
+                })
+                .unwrap_or(0);
+            if lines == 0 {
+                // Back inside the pane: drop the task, which cancels it.
+                self.autoscroll = None;
+            } else if self.autoscroll.is_none() {
+                self.arm_autoscroll(lines, cx);
             }
         }
         if !opens_terminal_link(event.modifiers.platform) {
@@ -2544,6 +2607,55 @@ impl TerminalView {
 
     /// #43: left release has no Tiller gesture; it belongs to the guest
     /// whenever tracking was requested.
+    /// #259: scrolls one line per tick while a drag is held outside the pane,
+    /// extending the selection to the edge it is leaving through.
+    ///
+    /// Scrolling moves what a viewport row means, so the anchor is shifted by
+    /// the opposite amount each tick and stays pinned to the same text. That
+    /// holds because this is the only thing scrolling during a drag; a wheel
+    /// turn mid-drag would still slip, which is a smaller wrong than an anchor
+    /// that walks up the screen on its own.
+    fn arm_autoscroll(&mut self, lines: isize, cx: &mut gpui::Context<Self>) {
+        const AUTOSCROLL_TICK: Duration = Duration::from_millis(60);
+        self.autoscroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                let keep_going = this.update(cx, |view, cx| {
+                    let Some(terminal) = view.running_terminal() else {
+                        return false;
+                    };
+                    let Some(anchor) = *terminal.selection_anchor.lock() else {
+                        return false;
+                    };
+                    terminal.scroll_display(TillerScroll::Lines(lines));
+                    // The anchor is in viewport coordinates, and the viewport
+                    // just moved under it.
+                    let shifted = if lines < 0 {
+                        (anchor.0.saturating_add(1), anchor.1)
+                    } else {
+                        (anchor.0.saturating_sub(1), anchor.1)
+                    };
+                    *terminal.selection_anchor.lock() = Some(shifted);
+                    // Extend to the edge the drag is leaving through.
+                    let rows = terminal
+                        .last_size
+                        .lock()
+                        .map(|(_, rows)| rows as usize)
+                        .unwrap_or(0);
+                    let edge_row = if lines < 0 { 0 } else { rows.saturating_sub(1) };
+                    let focus = (edge_row, if lines < 0 { 0 } else { usize::MAX });
+                    let range = SelectedRange::between(shifted, focus);
+                    *terminal.selection.lock() = (!range.is_empty()).then_some(range);
+                    cx.notify();
+                    true
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn on_left_mouse_up(
         &mut self,
         event: &MouseUpEvent,
@@ -2551,7 +2663,8 @@ impl TerminalView {
         _: &mut gpui::Context<Self>,
     ) {
         // #259: the gesture ends; the selection it produced stays until the
-        // next press clears it.
+        // next press clears it, and the autoscroll stops with the button.
+        self.autoscroll = None;
         if let Some(terminal) = self.running_terminal() {
             *terminal.selection_anchor.lock() = None;
         }
@@ -3858,6 +3971,31 @@ mod tests {
             "tiller-terminal-test-{name}-{}-{serial}",
             std::process::id()
         ))
+    }
+
+    /// #259: autoscroll fires only outside the pane, and by one line.
+    ///
+    /// Inside the pane it must be exactly zero -- a drag that wanders within
+    /// the viewport should never move the view under the user. One line per
+    /// tick rather than a rate proportional to how far past the edge the
+    /// pointer is: a terminal drag aims at a line, and acceleration is what
+    /// makes autoscroll overshoot it.
+    #[test]
+    fn autoscroll_runs_only_near_the_panes_edges() {
+        // Comfortably inside: nothing moves.
+        assert_eq!(TerminalView::autoscroll_lines(250.0, 100.0, 400.0), 0);
+        assert_eq!(TerminalView::autoscroll_lines(150.0, 100.0, 400.0), 0);
+        assert_eq!(TerminalView::autoscroll_lines(350.0, 100.0, 400.0), 0);
+        // Inside but within a row of the edge -- the case that matters, and
+        // the one an "outside the bounds" rule could never see, because GPUI
+        // stops delivering moves there.
+        assert_eq!(TerminalView::autoscroll_lines(105.0, 100.0, 400.0), -1);
+        assert_eq!(TerminalView::autoscroll_lines(395.0, 100.0, 400.0), 1);
+        // Exactly on each edge, and beyond.
+        assert_eq!(TerminalView::autoscroll_lines(100.0, 100.0, 400.0), -1);
+        assert_eq!(TerminalView::autoscroll_lines(400.0, 100.0, 400.0), 1);
+        assert_eq!(TerminalView::autoscroll_lines(-500.0, 100.0, 400.0), -1);
+        assert_eq!(TerminalView::autoscroll_lines(5000.0, 100.0, 400.0), 1);
     }
 
     /// #259: how many clicks mean what.
