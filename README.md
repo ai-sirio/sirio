@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/tiller-logo.png" width="120" alt="Tiller logo" />
+  <img src="assets/sirio-logo.png" width="120" alt="Sirio logo" />
 </p>
 
 <h1 align="center">Tiller</h1>
