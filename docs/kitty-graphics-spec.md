@@ -26,15 +26,26 @@ from reading.
 | Does Tiller already link a PNG decoder? | **Yes** — `image` 0.25.10 with `png`, in the `tiller` binary | [#266](https://github.com/tillerai/tiller/issues/266) |
 | Does pi probe for graphics at startup? | **No** — 45s, TUI up, zero graphics APCs | [#264](https://github.com/tillerai/tiller/issues/264) |
 
-Two consequences that change the map's own framing:
+| Do codex or opencode probe? | **No** — zero graphics APCs from either | [#264](https://github.com/tillerai/tiller/issues/264) |
+| How does pi decide, then? | **Environment variables only.** `detectCapabilities` reads `TERM_PROGRAM`, `TERM`, `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_PANE`. No terminal query anywhere in it. | [#264](https://github.com/tillerai/tiller/issues/264), read from the shipped bundle |
+
+Three consequences that change the map's own framing:
 
 - **The probe is already answered today.** A guest that asks gets `OK` from a
-  pane that draws nothing. The map's decision that "the probe answer and the
-  rendering ship together" still holds, but it now costs nothing to honour —
-  the answer is already going out, and it is the *rendering* that is missing.
+  pane that draws nothing. It is the *rendering* that is missing, not the reply.
 - **`ESC [ ? u` in a capture is the Kitty _keyboard_ protocol**, not graphics.
-  The two share a vendor name and nothing else. Pi emits the keyboard query at
-  startup and no graphics APC at all.
+  The two share a vendor name and nothing else. Pi and opencode both emit the
+  keyboard query at startup and no graphics APC at all.
+- **The gate is the environment, not the protocol.** Tiller gives a pane
+  `TERM=xterm-256color` and `COLORTERM=truecolor` and nothing else
+  (`tiller_terminal/src/lib.rs:1130-1131`). Run that through pi's tree and every
+  image branch misses, so pi resolves to `images: null` and will not emit a
+  graphics byte **whatever the pane replies to an APC query**.
+
+  The map's binding decision reads "the probe alone is actively harmful: Pi and
+  omp degrade gracefully to a placeholder *because* nobody answers." Measured:
+  pi degrades because `TERM_PROGRAM` is unset. The harmful case cannot occur for
+  pi — and neither can the useful one.
 
 ## Requirements
 
@@ -51,6 +62,22 @@ Two consequences that change the map's own framing:
 - **R1.3** `set_apc_max_bytes_kitty` and `kitty_image_storage_limit` are set
   explicitly rather than left at their defaults. Neither bounds the
   _decompressed_ size; see R2.4.
+- **R1.4** **The pane declares image support through the environment**, not
+  only by answering a query. Pi decides from `TERM_PROGRAM` / `TERM` /
+  `KITTY_WINDOW_ID` / `GHOSTTY_RESOURCES_DIR` / `WEZTERM_PANE` before it sends
+  anything, and Tiller's current two variables miss every image branch — so
+  today pi cannot emit a graphics byte no matter what R1.1 replies.
+
+  Which claim to make is a real decision, not a lever to pull blind: asserting
+  a terminal identity means honouring it, and [#86](https://github.com/tillerai/tiller/issues/86)
+  already settled that Tiller's identity is `ai.tiller.Tiller`. Claiming
+  `TERM_PROGRAM=ghostty` buys pi's `images: "kitty"` branch and buys with it
+  every other behaviour a guest keys off "this is ghostty".
+
+  **The first milestone is this one line, not the renderer**: set the
+  environment, run pi, and see whether graphics APCs appear at all. That single
+  experiment also settles whether any guest probes lazily, which is the last
+  question left open on #264.
 
 ### 2. Decoding
 
