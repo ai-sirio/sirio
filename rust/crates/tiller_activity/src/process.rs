@@ -21,6 +21,74 @@ pub fn inspect_foreground_agent(shell_pid: u32) -> io::Result<Option<&'static st
     Ok(identify_agent_from_process_names(&names, &CATALOG_IDS))
 }
 
+/// One whole-system process snapshot, shareable across panes (#248).
+///
+/// Layer D polls once per terminal pane. On Windows each poll used to take its
+/// own `CreateToolhelp32Snapshot` of every process on the machine, so the cost
+/// grew with the number of open terminals — measured at about 1.95 % of a core
+/// per terminal while minimised. Taking one snapshot per tick and walking every
+/// pane against it makes that cost flat.
+///
+/// This shares the snapshot *within* a tick, never across ticks. A cache with a
+/// TTL was tried first and was wrong: the poll interval bounds how often a pane
+/// asks, but every answer must be fresh at the moment of asking, and a stale
+/// table made an exited agent read as still running.
+///
+/// Non-Windows platforms read `/proc` (or libproc) per pid with nothing to
+/// share, so there the snapshot is empty and each walk behaves exactly as
+/// before.
+#[cfg(windows)]
+pub struct ProcessSnapshot {
+    children_of: HashMap<u32, Vec<u32>>,
+    name_of: HashMap<u32, String>,
+}
+
+/// See the Windows counterpart: there is no shared cost to hoist here.
+#[cfg(not(windows))]
+pub struct ProcessSnapshot;
+
+/// Takes the snapshot every pane in this tick will be walked against.
+#[cfg(windows)]
+pub fn take_snapshot() -> io::Result<ProcessSnapshot> {
+    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut name_of: HashMap<u32, String> = HashMap::new();
+    for entry in windows_process::entries()? {
+        children_of
+            .entry(entry.parent_pid)
+            .or_default()
+            .push(entry.pid);
+        name_of.insert(entry.pid, entry.name);
+    }
+    Ok(ProcessSnapshot {
+        children_of,
+        name_of,
+    })
+}
+
+#[cfg(not(windows))]
+pub fn take_snapshot() -> io::Result<ProcessSnapshot> {
+    Ok(ProcessSnapshot)
+}
+
+/// The agent identified under `shell_pid`, walked against an already-taken
+/// snapshot (#248).
+#[cfg(not(windows))]
+pub fn inspect_foreground_agent_in(
+    _snapshot: &ProcessSnapshot,
+    shell_pid: u32,
+) -> io::Result<Option<&'static str>> {
+    inspect_foreground_agent(shell_pid)
+}
+
+#[cfg(windows)]
+pub fn inspect_foreground_agent_in(
+    snapshot: &ProcessSnapshot,
+    shell_pid: u32,
+) -> io::Result<Option<&'static str>> {
+    let names = inspect_process_names_in(snapshot, shell_pid)?;
+    Ok(identify_agent_from_process_names(&names, &CATALOG_IDS))
+}
+
 #[cfg(target_os = "linux")]
 use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
@@ -455,6 +523,18 @@ fn is_recycled_pid_ghost(
 
 #[cfg(windows)]
 pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
+    let snapshot = take_snapshot()?;
+    inspect_process_names_in(&snapshot, shell_pid)
+}
+
+/// The walk itself, against a snapshot the caller already took (#248). Split
+/// out so one snapshot can serve every pane in a tick; the logic below is
+/// unchanged from when it took its own.
+#[cfg(windows)]
+pub fn inspect_process_names_in(
+    snapshot: &ProcessSnapshot,
+    shell_pid: u32,
+) -> io::Result<HashSet<String>> {
     // `pty_shell_pid` (tiller_terminal) reports 0 when `GetProcessId` could
     // not resolve the ConPTY child; 0 is never a real Windows pid. Walking it
     // anyway would be actively harmful: Toolhelp32 happily reports system
@@ -470,7 +550,6 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
         ));
     }
 
-    let entries = windows_process::entries()?;
     // children_of and name_of are built eagerly in this one pass over the
     // already-materialized snapshot rows, and that is deliberate: the rows are
     // plain memory by the time `entries()` returns (the snapshot syscall is a
@@ -479,15 +558,8 @@ pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
     // part — so those alone are resolved lazily below, for pids the walk
     // actually touches, keeping the per-poll cost O(walked) like the Linux
     // /proc arm rather than O(all processes).
-    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut name_of: HashMap<u32, String> = HashMap::new();
-    for entry in entries {
-        children_of
-            .entry(entry.parent_pid)
-            .or_default()
-            .push(entry.pid);
-        name_of.insert(entry.pid, entry.name);
-    }
+    let children_of = &snapshot.children_of;
+    let name_of = &snapshot.name_of;
 
     // The shell vanished between the PTY watcher resolving its pid and this
     // snapshot. Like the Linux arm's depth-0 NotFound, this is surfaced as an

@@ -352,7 +352,23 @@ impl AgentActivityModel {
         pane_id: &str,
         shell_pid: u32,
     ) -> io::Result<Option<Transition>> {
-        match crate::process::inspect_foreground_agent(shell_pid) {
+        let snapshot = crate::process::take_snapshot()?;
+        self.refresh_process_signal_in(&snapshot, pane_id, shell_pid)
+    }
+
+    /// The same refresh, against a snapshot the caller already took (#248).
+    ///
+    /// Layer D runs once per terminal pane. Taking the snapshot outside lets
+    /// one tick serve every pane instead of enumerating the machine's whole
+    /// process table once per pane — the cost that made an idle minimised
+    /// Tiller grow with the number of open terminals.
+    pub fn refresh_process_signal_in(
+        &mut self,
+        snapshot: &crate::process::ProcessSnapshot,
+        pane_id: &str,
+        shell_pid: u32,
+    ) -> io::Result<Option<Transition>> {
+        match crate::process::inspect_foreground_agent_in(snapshot, shell_pid) {
             Ok(Some(agent_id)) => Ok(self.process_identified(pane_id, agent_id)),
             Ok(None) => {
                 self.process_gone(pane_id);
