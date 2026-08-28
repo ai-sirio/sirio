@@ -5989,7 +5989,16 @@ impl Chat {
             cx,
         );
         let caret_visible = focused && self.composer_blink.visible();
-        let caret_bar = || caret::bar(typography.body_line_height, colors.accent, caret_visible);
+        let caret_bar = || {
+            div()
+                .debug_selector(|| "composer-caret".into())
+                .child(caret::bar(
+                    typography.body_line_height,
+                    colors.accent,
+                    caret_visible,
+                ))
+                .into_any_element()
+        };
         // Where the insertion caret sits in the draft: `(part index, char
         // offset inside that Text part)`, `part == parts.len()` at the end.
         let (caret_part, caret_offset) = self.composer.cursor();
@@ -7129,6 +7138,8 @@ impl Chat {
                             if !before.is_empty() {
                                 split.push(
                                     div()
+                                        .debug_selector(move || format!("composer-text-{index}"))
+                                        .min_w_0()
                                         .text_color(colors.primary_text_color)
                                         .child(before)
                                         .into_any_element(),
@@ -7138,6 +7149,10 @@ impl Chat {
                             if !after.is_empty() {
                                 split.push(
                                     div()
+                                        .debug_selector(move || {
+                                            format!("composer-text-{index}-tail")
+                                        })
+                                        .min_w_0()
                                         .text_color(colors.primary_text_color)
                                         .child(after)
                                         .into_any_element(),
@@ -7147,6 +7162,8 @@ impl Chat {
                         }
                         vec![
                             div()
+                                .debug_selector(move || format!("composer-text-{index}"))
+                                .min_w_0()
                                 .text_color(colors.primary_text_color)
                                 .child(text.clone())
                                 .into_any_element(),
@@ -7170,6 +7187,7 @@ impl Chat {
                             .debug_selector(move || format!("composer-chip-{kind}"))
                             .flex()
                             .items_center()
+                            .mx(px(4.0))
                             .gap(px(4.0))
                             .px(px(6.0))
                             .py(px(2.0))
@@ -7275,7 +7293,6 @@ impl Chat {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap_x(px(4.0))
                     .gap_y(px(4.0))
                     .text_size(typography.headline)
                     .line_height(typography.body_line_height)
@@ -9129,6 +9146,74 @@ mod tests {
         assert!(
             cx.debug_bounds("composer-streaming-ring").is_none(),
             "the static border returns the moment streaming ends"
+        );
+    }
+
+    /// A draft longer than the composer is wide must wrap onto a second line
+    /// inside the card, not run out past its right border. Every draft text
+    /// run is a flex item in the wrapping `composer-input` row, and a flex
+    /// item's default `min-width: auto` pins it to its own max-content width
+    /// — one unbroken sentence measures far wider than the card and simply
+    /// overflows it, taking the caret with it onto a line of its own.
+    #[gpui::test]
+    async fn a_long_draft_wraps_inside_the_composer_instead_of_overflowing_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        // The app's real captured running size, the width the overflow was
+        // reported at.
+        cx.simulate_resize(size(px(1715.0), px(972.0)));
+        refresh_frame(cx);
+
+        focus_and_type(
+            cx,
+            "Correggi un bug che si presenta nell'editor: il cursore di battitura \
+             non lampeggia e non si muove",
+        );
+        refresh_frame(cx);
+
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input row is drawn");
+        let text = cx
+            .debug_bounds("composer-text-0")
+            .expect("the typed draft is drawn");
+
+        assert!(
+            text.origin.x + text.size.width <= input.origin.x + input.size.width,
+            "the draft must stay inside the composer's writing area, not spill \
+             past its right edge: text={text:?} input={input:?}"
+        );
+    }
+
+    /// The insertion caret marks the exact character position, so it must sit
+    /// flush against the character it follows. `composer-input` carried a 4px
+    /// `gap_x` for separating chips, and flex gap applies between *every*
+    /// adjacent pair — including the two halves a caret splits its own text
+    /// run into, which pushed the bar a phantom space away from the last
+    /// character the user typed.
+    #[gpui::test]
+    async fn the_caret_sits_flush_against_the_character_it_follows(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "ciao");
+        refresh_frame(cx);
+
+        let text = cx
+            .debug_bounds("composer-text-0")
+            .expect("the typed draft is drawn");
+        let caret = cx
+            .debug_bounds("composer-caret")
+            .expect("a focused composer draws its insertion caret");
+
+        assert_eq!(
+            caret.origin.x,
+            text.origin.x + text.size.width,
+            "the caret must touch the last typed character, with no gap \
+             between them: text={text:?} caret={caret:?}"
         );
     }
 
