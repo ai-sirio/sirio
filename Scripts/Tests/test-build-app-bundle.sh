@@ -53,7 +53,7 @@ for value in dev.sirio.Sirio 15.0 public.app-category.developer-tools; do
 done
 
 # The version belongs in both CFBundleShortVersionString and CFBundleVersion.
-COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST")
+COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST" || true)
 if [ "$COUNT" != "2" ]; then
   echo "FAIL: expected the version in both version keys, found $COUNT" >&2
   cat "$PLIST" >&2
