@@ -30,7 +30,7 @@ required_markers=(
     'cargo build'
     'sirio_control'
     'cargo test --workspace'
-    'TILLER_ACP_REAL'
+    'SIRIO_ACP_REAL'
     # Anchored on the invocation, not the bare name. `real_claude` alone is also present in
     # the explanatory comment above the stage, so repointing the stage at a different test
     # left this marker green -- the check passed on the strength of prose rather than of the
@@ -44,8 +44,8 @@ required_markers=(
     '--target aarch64-apple-darwin --workspace'
     'rustup target add'
     'error occurred in cc-rs:'
-    'TILLER_SOCKET'
-    'TILLER_DB'
+    'SIRIO_SOCKET'
+    'SIRIO_DB'
     'DISPLAY'
     'WAYLAND_DISPLAY'
     'project add "$ROOT"'
@@ -92,7 +92,7 @@ fmt_line=$(line_of 'cargo fmt')
 clippy_line=$(line_of 'cargo clippy')
 build_line=$(line_of 'cargo build')
 test_line=$(line_of 'cargo test --workspace')
-# NOT line_of 'TILLER_ACP_REAL': that string also appears in the header disclosure near
+# NOT line_of 'SIRIO_ACP_REAL': that string also appears in the header disclosure near
 # line 10, and line_of takes the first match, so it would resolve to the header and make
 # the ordering assertion below compare the wrong line. Anchor on the stage label instead.
 acp_line=$(line_of 'real ACP acceptance')
@@ -114,8 +114,8 @@ fi
 # has to be able to reach a green gate -- the same reasoning the gate already applies to its
 # sccache fallback, because an agent that can never reach a green gate learns to ignore it.
 # Making this stage unconditional would turn CI OK from over-claiming into unreachable.
-grep -Fq 'TILLER_ACP_REAL:-0' "$SCRIPT" || {
-    echo "FAIL: the real-agent ACP stage is not defaulted off (expected \${TILLER_ACP_REAL:-0})" >&2
+grep -Fq 'SIRIO_ACP_REAL:-0' "$SCRIPT" || {
+    echo "FAIL: the real-agent ACP stage is not defaulted off (expected \${SIRIO_ACP_REAL:-0})" >&2
     exit 1
 }
 grep -Fq 'SKIP: real ACP acceptance' "$SCRIPT" || {

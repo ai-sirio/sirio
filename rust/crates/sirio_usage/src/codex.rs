@@ -259,7 +259,7 @@ fn refresh_token(credentials: &CodexCredentials) -> Result<CodexCredentials, Tok
 }
 
 /// The token endpoint `refresh_token` calls, overridable via
-/// `TILLER_CODEX_TOKEN_URL` (F-CORE-USG-05). Before this override existed,
+/// `SIRIO_CODEX_TOKEN_URL` (F-CORE-USG-05). Before this override existed,
 /// `refresh_token_at` — the function that actually parses a response and
 /// drives `save_credentials_to`'s merge — was only reachable from the real
 /// `CodexUsageFetcher::fetch` path through the hardcoded `auth.openai.com`
@@ -268,12 +268,12 @@ fn refresh_token(credentials: &CodexCredentials) -> Result<CodexCredentials, Tok
 /// var at a local fixture server; `codex` itself never reads this var, so
 /// setting it cannot affect the real `codex` CLI's own token file.
 fn token_url() -> String {
-    std::env::var("TILLER_CODEX_TOKEN_URL").unwrap_or_else(|_| TOKEN_URL.to_string())
+    std::env::var("SIRIO_CODEX_TOKEN_URL").unwrap_or_else(|_| TOKEN_URL.to_string())
 }
 
 /// The wham usage endpoint [`fetch_usage`] calls, overridable via
-/// `TILLER_CODEX_USAGE_URL` (F-CORE-USG-07), the same pattern
-/// `TILLER_CODEX_TOKEN_URL`/[`token_url`] already established for the token
+/// `SIRIO_CODEX_USAGE_URL` (F-CORE-USG-07), the same pattern
+/// `SIRIO_CODEX_TOKEN_URL`/[`token_url`] already established for the token
 /// endpoint (F-CORE-USG-05): before this override existed, the
 /// valid-credentials/200-success branch of `CodexUsageFetcher::fetch` — the
 /// production entry point `status_bar.rs` calls — was reachable only
@@ -282,7 +282,7 @@ fn token_url() -> String {
 /// UNREACHABLE. `codex` itself never reads this var, so setting it cannot
 /// affect the real `codex` CLI's own requests.
 fn usage_url() -> String {
-    std::env::var("TILLER_CODEX_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
+    std::env::var("SIRIO_CODEX_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
 }
 
 /// [`refresh_token`], against an explicit endpoint rather than the hardcoded
@@ -536,7 +536,7 @@ mod tests {
     /// F-CORE-USG-05: proves the override itself, not just `refresh_token_at`
     /// — drives the *public* `refresh_token()` (the function
     /// `CodexUsageFetcher::fetch` actually calls) through
-    /// `TILLER_CODEX_TOKEN_URL` pointed at a local fixture, so this is the
+    /// `SIRIO_CODEX_TOKEN_URL` pointed at a local fixture, so this is the
     /// same code path a live `sirio` binary run with that var set would
     /// take, closing the "TOKEN_URL not overridable" gap.
     #[test]
@@ -547,7 +547,7 @@ mod tests {
         );
         // SAFETY: no other test in this module reads or writes this var.
         unsafe {
-            std::env::set_var("TILLER_CODEX_TOKEN_URL", &url);
+            std::env::set_var("SIRIO_CODEX_TOKEN_URL", &url);
         }
         let credentials = CodexCredentials {
             access_token: "stale".into(),
@@ -557,7 +557,7 @@ mod tests {
         };
         let result = refresh_token(&credentials);
         unsafe {
-            std::env::remove_var("TILLER_CODEX_TOKEN_URL");
+            std::env::remove_var("SIRIO_CODEX_TOKEN_URL");
         }
         let refreshed = result.expect("the override endpoint answers 200");
         assert_eq!(refreshed.access_token, "override-access");
@@ -590,8 +590,8 @@ mod tests {
     /// recorded UNREACHABLE on this development host: no override seam for
     /// `USAGE_URL` existed, and no Codex account here can reach the real
     /// `chatgpt.com` endpoint regardless. `usage_url()`'s
-    /// `TILLER_CODEX_USAGE_URL` override (added this pass, mirroring
-    /// `token_url()`/`TILLER_CODEX_TOKEN_URL`, F-CORE-USG-05's own
+    /// `SIRIO_CODEX_USAGE_URL` override (added this pass, mirroring
+    /// `token_url()`/`SIRIO_CODEX_TOKEN_URL`, F-CORE-USG-05's own
     /// precedent) makes it driveable: this test points the *public*,
     /// zero-argument `fetch()` at a real local HTTP fixture through the var
     /// alone, with a real, self-consistent (not stolen, not forged against
@@ -622,17 +622,17 @@ mod tests {
         .unwrap();
 
         // SAFETY: no other test in this module reads or writes CODEX_HOME
-        // or TILLER_CODEX_USAGE_URL (only `CodexUsageFetcher::fetch` reads
+        // or SIRIO_CODEX_USAGE_URL (only `CodexUsageFetcher::fetch` reads
         // the former, and only `usage_url` reads the latter, and this is
         // the only test exercising either).
         unsafe {
             std::env::set_var("CODEX_HOME", &dir);
-            std::env::set_var("TILLER_CODEX_USAGE_URL", &url);
+            std::env::set_var("SIRIO_CODEX_USAGE_URL", &url);
         }
         let outcome = CodexUsageFetcher::fetch();
         unsafe {
             std::env::remove_var("CODEX_HOME");
-            std::env::remove_var("TILLER_CODEX_USAGE_URL");
+            std::env::remove_var("SIRIO_CODEX_USAGE_URL");
         }
         let _ = std::fs::remove_dir_all(&dir);
 

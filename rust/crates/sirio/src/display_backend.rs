@@ -37,10 +37,10 @@
 
 use std::ffi::OsStr;
 
-/// The environment variable that opts out. On the existing `TILLER_*` precedent
-/// (`TILLER_SOCKET_ENABLE`, `TILLER_GIT_TIMEOUT_MS`), and parsed with the same
+/// The environment variable that opts out. On the existing `SIRIO_*` precedent
+/// (`SIRIO_SOCKET_ENABLE`, `SIRIO_GIT_TIMEOUT_MS`), and parsed with the same
 /// vocabulary `SettingsPolicy::with_environment_override` uses.
-const FORCE_FLAG: &str = "TILLER_FORCE_X11";
+const FORCE_FLAG: &str = "SIRIO_FORCE_X11";
 
 /// What [`prepare_environment`] should do, decided from the environment alone
 /// so the policy can be tested without a display server.
@@ -48,7 +48,7 @@ const FORCE_FLAG: &str = "TILLER_FORCE_X11";
 pub(crate) enum BackendChoice {
     /// Clear `WAYLAND_DISPLAY`, set `GDK_BACKEND=x11`.
     ForceX11,
-    /// `TILLER_FORCE_X11` was set to an off value. The user wants a
+    /// `SIRIO_FORCE_X11` was set to an off value. The user wants a
     /// Wayland-native app and has accepted that the browser will not render.
     OptedOut,
     /// No usable `DISPLAY`. There is no X server and no XWayland to move to, so
@@ -70,7 +70,7 @@ pub(crate) fn choose(display: Option<&str>, force_flag: Option<&str>) -> Backend
     }
     // An unset, empty or whitespace-only DISPLAY is not an X server. Note this
     // is checked *after* the opt-out but *regardless of* an explicit opt-in:
-    // `TILLER_FORCE_X11=1` cannot conjure a display, and honouring it here
+    // `SIRIO_FORCE_X11=1` cannot conjure a display, and honouring it here
     // would send the app headless.
     match display {
         Some(display) if !display.trim().is_empty() => BackendChoice::ForceX11,
@@ -102,7 +102,7 @@ pub(crate) fn prepare_environment() {
                 // build its child window against a Wayland GdkDisplay, so
                 // honouring GDK_BACKEND=wayland here would leave the app in the
                 // exact broken state this whole module exists to avoid. The
-                // way to keep Wayland is TILLER_FORCE_X11=0, which is checked
+                // way to keep Wayland is SIRIO_FORCE_X11=0, which is checked
                 // above and takes precedence over this.
                 std::env::set_var("GDK_BACKEND", "x11");
             }

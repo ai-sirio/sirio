@@ -48,13 +48,13 @@ impl Render for ChromeDemo {
 fn main() {
     application().with_assets(SirioAssets).run(|cx: &mut App| {
         // COSMIC-02: `Theme` now carries the COSMIC token layer directly, so
-        // forcing `TILLER_COSMIC_MODE=light|dark` for screenshot capture
+        // forcing `SIRIO_COSMIC_MODE=light|dark` for screenshot capture
         // forces the whole theme — waku colors and COSMIC tokens resolve
         // together, the same as every other surface. Unset follows the
         // system portal like the real app shell does. Installed before
         // `Titlebar::new` runs so its own lazy `Theme::init` bootstrap sees
         // a global already present and leaves this choice alone.
-        match std::env::var("TILLER_COSMIC_MODE").as_deref() {
+        match std::env::var("SIRIO_COSMIC_MODE").as_deref() {
             Ok("light") => Theme::install(ThemeMode::Light, cx),
             Ok("dark") => Theme::install(ThemeMode::Dark, cx),
             _ => Theme::init(cx),

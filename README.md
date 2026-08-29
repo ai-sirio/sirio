@@ -72,7 +72,7 @@ npx skills add e-palmisano/sirio --skill sirio -a claude-code,codex,opencode,pi 
 
 ```bash
 WORKER=$(sirioctl panel create --cmd 'claude')
-PEER=$(sirioctl panel split right --from "$TILLER_PANE_ID" --cmd 'codex')
+PEER=$(sirioctl panel split right --from "$SIRIO_PANE_ID" --cmd 'codex')
 
 sirioctl panel write --id "$WORKER" --input 'Implement the parser change' --enter
 sirioctl panel wait --id "$WORKER"

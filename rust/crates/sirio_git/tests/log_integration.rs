@@ -73,9 +73,9 @@ fn ensure_generous_timeout() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         // SAFETY: test process, set once. The only reader is the crate's
-        // per-call `TILLER_GIT_TIMEOUT_MS` lookup, and a wider budget can
+        // per-call `SIRIO_GIT_TIMEOUT_MS` lookup, and a wider budget can
         // only turn a would-be timeout into a pass — never the reverse.
-        unsafe { std::env::set_var("TILLER_GIT_TIMEOUT_MS", TEST_GIT_TIMEOUT_MS) };
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", TEST_GIT_TIMEOUT_MS) };
     });
 }
 

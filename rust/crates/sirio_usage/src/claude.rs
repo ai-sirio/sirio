@@ -293,7 +293,7 @@ impl ClaudeUsageFetcher {
         Self::fetch_with(Self::SETTLE, Self::POLL, Self::timeout())
     }
 
-    /// `Self::TIMEOUT`, unless overridden by `TILLER_USAGE_CLAUDE_TIMEOUT_MS`
+    /// `Self::TIMEOUT`, unless overridden by `SIRIO_USAGE_CLAUDE_TIMEOUT_MS`
     /// (F-USE-03). This exists purely as a live-driving instrument: a real
     /// 25s hang is too risky to exercise against this project's harness's
     /// own 180s silence kill, so this lets an operator shrink the bound
@@ -304,7 +304,7 @@ impl ClaudeUsageFetcher {
     /// injected around this function. Unset in every normal run, so default
     /// behaviour is exactly `Self::TIMEOUT`.
     fn timeout() -> Duration {
-        std::env::var("TILLER_USAGE_CLAUDE_TIMEOUT_MS")
+        std::env::var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_millis)
@@ -327,7 +327,7 @@ impl ClaudeUsageFetcher {
     /// silently reset by those dotfiles before `claude` ever runs, which
     /// used to make the `NotInstalled`/`LoggedOut`/`Error` unavailable
     /// states unreachable from any test. When `envs` carries
-    /// `TILLER_USAGE_NO_DOTFILES`, the shell is launched without sourcing
+    /// `SIRIO_USAGE_NO_DOTFILES`, the shell is launched without sourcing
     /// login/interactive dotfiles instead, so overrides in `envs` are the
     /// only thing deciding what `claude` resolves to. Production `fetch()`
     /// never sets that key, so real users still get the login shell.
@@ -347,7 +347,7 @@ impl ClaudeUsageFetcher {
         let shell = login_shell();
         let skip_dotfiles = envs
             .iter()
-            .any(|(key, _)| *key == "TILLER_USAGE_NO_DOTFILES");
+            .any(|(key, _)| *key == "SIRIO_USAGE_NO_DOTFILES");
         let shell_name = Path::new(&shell)
             .file_name()
             .and_then(|name| name.to_str())
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(classify_failure("some other output"), None);
     }
 
-    /// F-USE-03: `TILLER_USAGE_CLAUDE_TIMEOUT_MS` overrides `TIMEOUT` when
+    /// F-USE-03: `SIRIO_USAGE_CLAUDE_TIMEOUT_MS` overrides `TIMEOUT` when
     /// set and parseable, so a live drive can shrink the bound below
     /// `SETTLE` and force a genuine `TimedOut` in seconds instead of
     /// risking a real 25s hang against this harness's own silence kill.
@@ -707,17 +707,17 @@ mod tests {
         // SAFETY: single-threaded within this test; the var name is unique
         // to this test and touched nowhere else in the crate.
         unsafe {
-            std::env::remove_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS");
+            std::env::remove_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS");
         }
         assert_eq!(ClaudeUsageFetcher::timeout(), ClaudeUsageFetcher::TIMEOUT);
 
         unsafe {
-            std::env::set_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS", "1500");
+            std::env::set_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS", "1500");
         }
         assert_eq!(ClaudeUsageFetcher::timeout(), Duration::from_millis(1500));
 
         unsafe {
-            std::env::set_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS", "not-a-number");
+            std::env::set_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS", "not-a-number");
         }
         assert_eq!(
             ClaudeUsageFetcher::timeout(),
@@ -726,7 +726,7 @@ mod tests {
         );
 
         unsafe {
-            std::env::remove_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS");
+            std::env::remove_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS");
         }
     }
 }

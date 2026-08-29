@@ -9,7 +9,7 @@ description: Use when running inside a Sirio pane to create and manage terminal 
 Use `sirioctl` only inside a terminal launched by Sirio. Establish the control connection and obtain machine-stable identity before orchestrating:
 
 ```bash
-[ "$TILLER_ENV" = "1" ] || exit 1
+[ "$SIRIO_ENV" = "1" ] || exit 1
 sirioctl ping
 sirioctl identify --json
 ```
@@ -22,10 +22,10 @@ Capture every created panel's UUID immediately. `panel create` and `panel split`
 
 ```bash
 TAB_ID=$(sirioctl panel create --cmd 'codex')
-SPLIT_ID=$(sirioctl panel split right --from "$TILLER_PANE_ID" --cmd 'pi')
+SPLIT_ID=$(sirioctl panel split right --from "$SIRIO_PANE_ID" --cmd 'pi')
 ```
 
-`$TILLER_PANE_ID` identifies the current pane when choosing a split source. It does not authorize visual-selection inference. Use `TAB_ID` for the tab above and `SPLIT_ID` for the split above rather than whichever panel happens to be focused.
+`$SIRIO_PANE_ID` identifies the current pane when choosing a split source. It does not authorize visual-selection inference. Use `TAB_ID` for the tab above and `SPLIT_ID` for the split above rather than whichever panel happens to be focused.
 
 ## Drive a known panel
 
@@ -164,6 +164,6 @@ These capabilities return `not_supported`, never a silent success:
 Attach durable progress to the current worktree and use notifications for user-visible completion:
 
 ```bash
-sirioctl worktree set --workspace "$TILLER_WORKTREE_ID" --comment 'Implemented and verified'
+sirioctl worktree set --workspace "$SIRIO_WORKTREE_ID" --comment 'Implemented and verified'
 sirioctl notify --title 'Done' --body 'Worker completed'
 ```

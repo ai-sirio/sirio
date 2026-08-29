@@ -272,7 +272,7 @@ mod tests {
     fn git_timeout_fires() {
         use std::os::unix::fs::PermissionsExt;
 
-        if std::env::var_os("TILLER_GIT_TIMEOUT_TEST").is_none() {
+        if std::env::var_os("SIRIO_GIT_TIMEOUT_TEST").is_none() {
             let scratch = scratch_dir();
             let fake_dir = scratch.join("fake-bin");
             std::fs::create_dir_all(&fake_dir).expect("create fake bin dir");
@@ -290,7 +290,7 @@ mod tests {
                     "--nocapture",
                     "--test-threads=1",
                 ])
-                .env("TILLER_GIT_TIMEOUT_TEST", "1")
+                .env("SIRIO_GIT_TIMEOUT_TEST", "1")
                 .env(
                     "PATH",
                     format!("{}:{}", fake_dir.display(), path.to_string_lossy()),

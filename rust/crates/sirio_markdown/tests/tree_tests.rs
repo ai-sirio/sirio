@@ -511,7 +511,7 @@ fn ordinary_nesting_keeps_its_existing_tree_shape() {
 
 #[test]
 fn ten_thousand_nested_quotes_return_without_killing_the_test_runner() {
-    if std::env::var_os("TILLER_MARKDOWN_DEEP_CHILD").is_some() {
+    if std::env::var_os("SIRIO_MARKDOWN_DEEP_CHILD").is_some() {
         let source = "> ".repeat(10_000) + "text";
         let document = parse(&source);
         assert_eq!(document.blocks.len(), 1);
@@ -524,7 +524,7 @@ fn ten_thousand_nested_quotes_return_without_killing_the_test_runner() {
             "ten_thousand_nested_quotes_return_without_killing_the_test_runner",
             "--nocapture",
         ])
-        .env("TILLER_MARKDOWN_DEEP_CHILD", "1")
+        .env("SIRIO_MARKDOWN_DEEP_CHILD", "1")
         .status()
         .expect("spawn markdown depth child");
     assert!(

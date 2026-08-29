@@ -21,10 +21,10 @@ fn run() -> anyhow::Result<()> {
 
     // The smoke drive needs a real agent; name it explicitly instead of
     // defaulting to a network fetch.
-    let command = std::env::var_os("TILLER_ACP_PROGRAM")
+    let command = std::env::var_os("SIRIO_ACP_PROGRAM")
         .map(PathBuf::from)
         .map(AgentCommand::new)
-        .expect("set TILLER_ACP_PROGRAM to run the ACP smoke example");
+        .expect("set SIRIO_ACP_PROGRAM to run the ACP smoke example");
     println!("launching ACP agent: {command:?}");
 
     let (mut client, events) = AcpClient::launch(command, &cwd)?;

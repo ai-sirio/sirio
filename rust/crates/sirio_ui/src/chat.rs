@@ -1120,10 +1120,10 @@ impl Chat {
     /// There is deliberately no default: a hardcoded `npx …@latest` here
     /// meant every chat tab could start a network fetch before it could say
     /// anything, and silently connected a tab to Claude's server whatever
-    /// agent the user picked. `TILLER_ACP_PROGRAM` stays as a test escape
+    /// agent the user picked. `SIRIO_ACP_PROGRAM` stays as a test escape
     /// hatch, because integration tests need one.
     pub fn launch_from_env(cx: &mut Context<Self>) -> Option<Self> {
-        let command = std::env::var_os("TILLER_ACP_PROGRAM")
+        let command = std::env::var_os("SIRIO_ACP_PROGRAM")
             .map(PathBuf::from)
             .map(AgentCommand::new)?;
         Some(Self::launch_with_command(command, default_agent_cwd(), cx))
@@ -1210,7 +1210,7 @@ impl Chat {
         cx: &mut Context<Self>,
     ) -> Option<Self> {
         let cwd = default_agent_cwd();
-        let command = std::env::var_os("TILLER_ACP_PROGRAM")
+        let command = std::env::var_os("SIRIO_ACP_PROGRAM")
             .map(PathBuf::from)
             .map(AgentCommand::new)?;
         Some(Self::launch_with_command_and_persistence(

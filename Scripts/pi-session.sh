@@ -37,8 +37,8 @@ PARENT_DISPLAY_FILE=/tmp/sirio-parent.display
 PARENT_SOCK="/tmp/sirio-parent-sway.sock"
 PARENT_LOG="/tmp/sirio-parent-sway.log"
 VNC_LOG="/tmp/sirio-parent-wayvnc.log"
-VNC_ADDR="${TILLER_VNC_ADDR:-127.0.0.1}"
-VNC_PORT="${TILLER_VNC_PORT:-5900}"
+VNC_ADDR="${SIRIO_VNC_ADDR:-127.0.0.1}"
+VNC_PORT="${SIRIO_VNC_PORT:-5900}"
 
 parent_pid() {
   # The parent is identified by its config path in the command line, never by the name `sway` —

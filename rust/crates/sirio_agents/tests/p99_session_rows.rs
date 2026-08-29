@@ -79,7 +79,7 @@ fn leaves(value: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
 fn settings_with_stale_hook() -> serde_json::Value {
     serde_json::json!({
         "permissions": {"allow": ["Bash(cargo:*)", "Read"], "deny": []},
-        "env": {"TILLER_PANE": PANE, "NO_COLOR": "1"},
+        "env": {"SIRIO_PANE": PANE, "NO_COLOR": "1"},
         "hooks": {
             "SessionStart": [{"matcher": "", "hooks": [{
                 "type": "command",

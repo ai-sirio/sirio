@@ -5649,7 +5649,7 @@ mod tests {
         // enabled and disabled states.
         cx.update(Theme::init);
         let snapshot = SettingsSnapshot {
-            socket_path: "/run/user/1000/TillerRust/control.sock".into(),
+            socket_path: "/run/user/1000/Sirio/control.sock".into(),
             ..Default::default()
         };
         let window = cx.add_window(|_window, cx| Settings::with_snapshot(cx, snapshot));
@@ -5679,10 +5679,7 @@ mod tests {
                 .read(cx)
                 .snapshot()
         });
-        assert_eq!(
-            snapshot.socket_path,
-            "/run/user/1000/TillerRust/control.sock"
-        );
+        assert_eq!(snapshot.socket_path, "/run/user/1000/Sirio/control.sock");
         assert!(snapshot.control_socket_enabled);
 
         let toggle = cx
@@ -5704,7 +5701,7 @@ mod tests {
             "the row reflects the disabled state"
         );
         assert_eq!(
-            snapshot.socket_path, "/run/user/1000/TillerRust/control.sock",
+            snapshot.socket_path, "/run/user/1000/Sirio/control.sock",
             "the path stays resolved in both states"
         );
     }

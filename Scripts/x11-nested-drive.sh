@@ -59,11 +59,11 @@
 #     shot page-content-gesture
 #   ' 12
 #
-# Env: TILLER_X11_LABEL   names this instance and all its /tmp paths (default: x11-$$).
-#      TILLER_X11_BIN     drive a specific binary instead of rust/target/debug/sirio — pin a
-#                          snapshot the way wayland-drive.sh's TILLER_WL_BIN does, so a builder
+# Env: SIRIO_X11_LABEL   names this instance and all its /tmp paths (default: x11-$$).
+#      SIRIO_X11_BIN     drive a specific binary instead of rust/target/debug/sirio — pin a
+#                          snapshot the way wayland-drive.sh's SIRIO_WL_BIN does, so a builder
 #                          rebuilding the shared target dir mid-drive cannot swap it under a critic.
-#      TILLER_X11_KEEP=1  leave the compositor and app running after the actions finish.
+#      SIRIO_X11_KEEP=1  leave the compositor and app running after the actions finish.
 #
 # Exit: 0 ok · 2 no binary/tool · 3 compositor or Xwayland never came up · 4 app died ·
 #       5 first frame blank
@@ -73,8 +73,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTDIR="${1:?usage: x11-nested-drive.sh <outdir> '<actions>' [settle]}"
 ACTIONS="${2:-}"
 SETTLE="${3:-8}"
-LABEL="${TILLER_X11_LABEL:-x11-$$}"
-BIN="${TILLER_X11_BIN:-$ROOT/rust/target/debug/sirio}"
+LABEL="${SIRIO_X11_LABEL:-x11-$$}"
+BIN="${SIRIO_X11_BIN:-$ROOT/rust/target/debug/sirio}"
 MIN_COLORS=200
 
 SWAYSOCK="/tmp/$LABEL-sway.sock"
@@ -102,17 +102,17 @@ kill_ours() {
   done
 }
 cleanup() {
-  [ -n "${TILLER_X11_KEEP:-}" ] && {
+  [ -n "${SIRIO_X11_KEEP:-}" ] && {
     echo "NOTE: leaving $LABEL running (SOCK=$SOCK DISPLAY=$DISPLAY_N SOCK_SWAY=$SWAYSOCK)"
     return 0
   }
-  kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
+  kill_ours SIRIO_SOCKET "$SOCK" "$(basename "$BIN")"
   kill_ours SWAYSOCK "$SWAYSOCK" sway
   return 0
 }
 trap cleanup EXIT
 
-kill_ours TILLER_SOCKET "$SOCK" sirio
+kill_ours SIRIO_SOCKET "$SOCK" sirio
 kill_ours SWAYSOCK "$SWAYSOCK" sway
 
 W1=1280 H1=800          # sizes shot() alternates between to force a repaint (see the note below)
@@ -200,7 +200,7 @@ verify_nested_x11 || exit 3
 # app or GPUI could still prefer the Wayland backend it also sees on this same process's env.
 env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_N" \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    TILLER_DB="$DB" TILLER_SOCKET="$SOCK" \
+    SIRIO_DB="$DB" SIRIO_SOCKET="$SOCK" \
     "$BIN" >"$APP_LOG" 2>&1 &
 APP_PID=$!
 
@@ -323,7 +323,7 @@ shot() {
   swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "${W2}x${H2}" >/dev/null 2>&1
   sleep 0.4
   swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "${W1}x${H1}" >/dev/null 2>&1
-  sleep "${TILLER_X11_REPAINT_SETTLE:-0.8}"
+  sleep "${SIRIO_X11_REPAINT_SETTLE:-0.8}"
   local path
   path="$(printf '%s/%02d-%s.png' "$OUTDIR" "$SHOT_N" "$name")"
   DISPLAY="$DISPLAY_N" import -window "$WINID" "$path" 2>/dev/null

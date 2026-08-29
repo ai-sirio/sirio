@@ -38,7 +38,7 @@ impl InstallStore {
     ///
     /// This deliberately duplicates the shape of
     /// `sirio_control::protocol::default_socket_path` (`protocol.rs:98-139`)
-    /// rather than sharing it: that function resolves `$TILLER_SOCKET`
+    /// rather than sharing it: that function resolves `$SIRIO_SOCKET`
     /// first, then `$XDG_RUNTIME_DIR`, then the *state* directory, and
     /// carries a macOS branch — none of which applies here. The
     /// duplication is the absolute-path filter and nothing more; the other

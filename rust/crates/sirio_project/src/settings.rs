@@ -41,7 +41,7 @@ impl SettingsPolicy {
     }
 
     pub fn with_environment_override(mut self) -> Self {
-        if let Some(value) = std::env::var_os("TILLER_SOCKET_ENABLE") {
+        if let Some(value) = std::env::var_os("SIRIO_SOCKET_ENABLE") {
             match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
                 "0" | "false" | "no" | "off" => self.control_socket_enabled = false,
                 "1" | "true" | "yes" | "on" => self.control_socket_enabled = true,
@@ -76,22 +76,22 @@ mod tests {
 
     #[test]
     fn socket_environment_override_is_explicit_and_invalid_values_do_not_guess() {
-        let previous = std::env::var_os("TILLER_SOCKET_ENABLE");
-        unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", "off") };
+        let previous = std::env::var_os("SIRIO_SOCKET_ENABLE");
+        unsafe { std::env::set_var("SIRIO_SOCKET_ENABLE", "off") };
         assert!(
             !SettingsPolicy::default()
                 .with_environment_override()
                 .control_socket_enabled
         );
-        unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", "unexpected") };
+        unsafe { std::env::set_var("SIRIO_SOCKET_ENABLE", "unexpected") };
         assert!(
             SettingsPolicy::default()
                 .with_environment_override()
                 .control_socket_enabled
         );
         match previous {
-            Some(value) => unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", value) },
-            None => unsafe { std::env::remove_var("TILLER_SOCKET_ENABLE") },
+            Some(value) => unsafe { std::env::set_var("SIRIO_SOCKET_ENABLE", value) },
+            None => unsafe { std::env::remove_var("SIRIO_SOCKET_ENABLE") },
         }
     }
 }

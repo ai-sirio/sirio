@@ -35,8 +35,8 @@ fn real_claude_streams_tool_permission_and_writes_nonce() -> Result<()> {
 
     // This ignored drive needs a real agent; name it explicitly instead
     // of defaulting to a network fetch.
-    let program = std::env::var_os("TILLER_ACP_PROGRAM")
-        .expect("set TILLER_ACP_PROGRAM to run this gated test against a real agent");
+    let program = std::env::var_os("SIRIO_ACP_PROGRAM")
+        .expect("set SIRIO_ACP_PROGRAM to run this gated test against a real agent");
     let command = AgentCommand::new(program);
     let launch = AcpClient::launch(command, &cwd);
     let (mut client, events) = match launch {
