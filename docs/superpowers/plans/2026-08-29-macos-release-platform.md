@@ -14,7 +14,8 @@
 
 - **Zig exactly 0.15.2** must be on `PATH` for anything that builds `sirio_terminal`. A newer Zig fails too.
 - **macOS target: `aarch64-apple-darwin` only.** No universal binary, no Intel.
-- **Bundle identifier: `dev.sirio.Sirio`.** Bundle name `Sirio.app`, executable `sirio`.
+- **Bundle identifier: `app.sirioai.sirio`** (was `dev.sirio.Sirio`; single
+  identity source since #304). Bundle name `Sirio.app`, executable `sirio`.
 - **`LSMinimumSystemVersion`: `15.0`.**
 - **Version source of truth:** `rust/Cargo.toml`, `[workspace.package] version` (line 27, `0.6.0` today). It is the only line in that file starting with `version = `; every dependency version is inline inside `{ ... }`.
 - **Repository:** `ai-sirio/sirio`. No tags exist yet, so the first release tag is `v0.6.0`.
@@ -449,7 +450,7 @@ if [ ! -x "$FIXTURE/Sirio.app/Contents/MacOS/sirio" ]; then
 fi
 
 PLIST="$FIXTURE/Sirio.app/Contents/Info.plist"
-for value in dev.sirio.Sirio 15.0 public.app-category.developer-tools; do
+for value in app.sirioai.sirio 15.0 public.app-category.developer-tools; do
   if ! grep -q "$value" "$PLIST"; then
     echo "FAIL: Info.plist is missing '$value'" >&2
     cat "$PLIST" >&2
@@ -567,7 +568,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.sirio.Sirio</string>
+	<string>app.sirioai.sirio</string>
 	<key>CFBundleName</key>
 	<string>Sirio</string>
 	<key>CFBundleExecutable</key>

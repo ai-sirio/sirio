@@ -181,11 +181,11 @@ where
         .w(px(36.0))
         .h(px(20.0))
         .rounded(px(10.0))
-        .bg(if on {
-            theme.tab_focus_accent
-        } else {
-            theme.hairline
-        })
+        // An "on" track is a filled chip, so it takes the inverted pair
+        // rather than the active-chrome tint: `title` and `title_selected`
+        // are the same value, which would have put the knob's colour on the
+        // track's colour and made the knob vanish.
+        .bg(if on { theme.inverse } else { theme.hairline })
         .hover(|style| style.opacity(0.9))
         .on_click(callback)
         .child(
@@ -196,7 +196,11 @@ where
                 .w(px(14.0))
                 .h(px(14.0))
                 .rounded(px(7.0))
-                .bg(theme.title_selected),
+                .bg(if on {
+                    theme.on_inverse
+                } else {
+                    theme.title_selected
+                }),
         )
 }
 
@@ -484,12 +488,7 @@ where
             theme.title,
         ));
     if active {
-        badges = badges.child(badge(
-            theme,
-            "Active",
-            theme.tab_focus_accent,
-            theme.title_selected,
-        ));
+        badges = badges.child(badge(theme, "Active", theme.inverse, theme.on_inverse));
     }
 
     div()

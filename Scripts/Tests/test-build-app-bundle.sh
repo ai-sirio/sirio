@@ -44,10 +44,24 @@ if [ ! -x "$FIXTURE/Sirio.app/Contents/MacOS/sirio" ]; then
 fi
 
 PLIST="$FIXTURE/Sirio.app/Contents/Info.plist"
-for value in dev.sirio.Sirio 15.0 public.app-category.developer-tools; do
+
+# The generated plist must match the identity source, not a literal retyped in
+# the script: source the source itself and assert what it declares is what the
+# bundle carries (#304).
+. "$SCRIPT_DIR/../identity.sh"
+for value in "$SIRIO_APP_IDENTIFIER" "$SIRIO_DISPLAY_NAME" 15.0 public.app-category.developer-tools; do
   if ! grep -q "$value" "$PLIST"; then
     echo "FAIL: Info.plist is missing '$value'" >&2
     cat "$PLIST" >&2
+    exit 1
+  fi
+done
+
+# And no packaging script may retype an identifier literal: the identity source
+# is the only place an identifier is written (#304).
+for script in "$BUNDLE_SCRIPT" "$SCRIPT_DIR/../build-dev.sh"; do
+  if grep -Eq '(dev|ai|com)\.sirio' "$script"; then
+    echo "FAIL: $script retypes an identifier literal; take it from Scripts/identity.sh" >&2
     exit 1
   fi
 done

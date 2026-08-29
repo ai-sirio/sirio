@@ -49,7 +49,11 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ICON="$SCRIPT_DIR/../rust/assets/app-icon/icon.icns"
+
+# Identifier, display name and icon path come from the one identity source
+# (#304); this script only generates their plist rendering.
+. "$SCRIPT_DIR/identity.sh"
+ICON="$SCRIPT_DIR/../$SIRIO_ICON_PATH"
 
 if [ ! -f "$ICON" ]; then
   echo "error: icon not found at $ICON" >&2
@@ -79,9 +83,9 @@ cat > "$APP_PATH/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.sirio.Sirio</string>
+	<string>${SIRIO_APP_IDENTIFIER}</string>
 	<key>CFBundleName</key>
-	<string>Sirio</string>
+	<string>${SIRIO_DISPLAY_NAME}</string>
 	<key>CFBundleExecutable</key>
 	<string>sirio</string>
 	<key>CFBundleIconFile</key>

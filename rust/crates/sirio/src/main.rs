@@ -40,7 +40,7 @@ use sirio_ui::{
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     right_panel::{
-        ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
+        self, ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
@@ -480,6 +480,25 @@ enum AsyncScriptStart {
     Failed(String),
     /// Not a script method — answer it synchronously.
     NotApplicable,
+}
+
+fn browser_script_result(
+    method: &str,
+    verb: Option<&str>,
+    value: String,
+) -> Vec<(String, String)> {
+    if method == "browser.act" {
+        return vec![(
+            "verb".to_string(),
+            verb.unwrap_or_default().to_string(),
+        )];
+    }
+    let key = match method {
+        "browser.console" => "messages",
+        "browser.snapshot" => "snapshot",
+        _ => "result",
+    };
+    vec![(key.to_string(), value)]
 }
 
 fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Option<String> {
@@ -1610,6 +1629,12 @@ impl ControlHandler for AppControlHandler {
                             sirio_control::protocol::rows::encode(&rows),
                         ),
                         ("version".to_string(), sirio_control::VERSION.to_string()),
+                        (
+                            "channel".to_string(),
+                            sirio_control::ReleaseChannel::RELEASE_CHANNEL
+                                .as_str()
+                                .to_string(),
+                        ),
                         (
                             "socketEnabled".to_string(),
                             self.socket_info.enabled().to_string(),
@@ -3410,16 +3435,6 @@ struct WorktreeActivity {
     running: Vec<AgentMark>,
 }
 
-fn tab_status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
-    match status {
-        ActivityStatus::Idle => theme.meta,
-        ActivityStatus::Running => theme.tab_focus_accent,
-        ActivityStatus::NeedsInput => theme.tab_needs_input,
-        ActivityStatus::Done => theme.tab_done,
-        ActivityStatus::Error => theme.tab_error,
-    }
-}
-
 fn tab_status_glyph(status: ActivityStatus) -> &'static str {
     match status {
         ActivityStatus::Idle => "○",
@@ -4235,7 +4250,7 @@ impl SirioWorkspace {
                                     params,
                                     reply,
                                 } => {
-                                    workspace.dispatch_browser_action(
+                                    workspace.handle_browser_action(
                                         &method, &params, reply, window, cx,
                                     );
                                 }
@@ -8328,19 +8343,12 @@ impl SirioWorkspace {
         browser
     }
 
-    /// Answers a `browser.*` control action, **either now or later** (#142).
+    /// Answers a `browser.*` socket action, **either now or later** (#300).
     ///
-    /// The four script-based methods — `eval`, `console`, `snapshot`, `act` —
-    /// cannot be answered synchronously off Linux: waiting on the result
-    /// blocks the very thread the engine needs in order to deliver it, so the
-    /// script runs and the answer never arrives. Off Linux they hand `reply`
-    /// to the engine's completion callback and this returns immediately;
-    /// `queue_action` is already waiting on that channel from the socket
-    /// thread, so a late answer needs nothing new from the protocol.
-    ///
-    /// Linux keeps its GTK pump and the synchronous path unchanged, until the
-    /// async one is proven on hardware there.
-    fn dispatch_browser_action(
+    /// Script results are handed to the engine callback on macOS and Windows,
+    /// so this GPUI handler never waits on the platform thread. Linux keeps
+    /// the GTK-pumping synchronous path until the async path is proven there.
+    fn handle_browser_action(
         &mut self,
         method: &str,
         params: &BTreeMap<String, String>,
@@ -8358,7 +8366,7 @@ impl SirioWorkspace {
             AsyncScriptStart::NotApplicable => {}
         }
 
-        let result = self.handle_browser_action(method, params, window, cx);
+        let result = self.handle_browser_action_sync(method, params, window, cx);
         let _ = reply.send(result);
     }
 
@@ -8377,7 +8385,7 @@ impl SirioWorkspace {
         // The same validation the synchronous arms do, kept ahead of dispatch
         // so a bad request still fails with its own message rather than
         // reaching the engine.
-        let (script, key) = match method {
+        let script = match method {
             "browser.eval" => {
                 let Some(script) = params
                     .get("script")
@@ -8388,13 +8396,10 @@ impl SirioWorkspace {
                         "browser.eval requires a non-empty script".to_string(),
                     );
                 };
-                (script.clone(), "result")
+                script.clone()
             }
-            "browser.console" => (
-                "JSON.stringify(window.__sirioConsole || [])".to_string(),
-                "messages",
-            ),
-            "browser.snapshot" => (BROWSER_SNAPSHOT_SCRIPT.to_string(), "snapshot"),
+            "browser.console" => "JSON.stringify(window.__sirioConsole || [])".to_string(),
+            "browser.snapshot" => BROWSER_SNAPSHOT_SCRIPT.to_string(),
             "browser.act" => {
                 if params
                     .get("driving")
@@ -8410,7 +8415,7 @@ impl SirioWorkspace {
                     .or_else(|| params.get("value"))
                     .map(String::as_str);
                 match browser_act_script(verb, selector, text) {
-                    Ok(script) => (script, "verb"),
+                    Ok(script) => script,
                     Err(error) => {
                         return AsyncScriptStart::Failed(format!("{method} failed: {error}"));
                     }
@@ -8427,13 +8432,15 @@ impl SirioWorkspace {
         // the script evaluated to.
         let verb_payload =
             (method == "browser.act").then(|| params.get("verb").cloned().unwrap_or_default());
+        let method_for_callback = method.to_string();
         let reply = reply.clone();
         let started = browser.update(cx, |surface, _| {
             surface.evaluate_script_async(&script, move |value| {
-                let payload = match verb_payload {
-                    Some(verb) => vec![("verb".to_string(), verb)],
-                    None => vec![(key.to_string(), value)],
-                };
+                let payload = browser_script_result(
+                    &method_for_callback,
+                    verb_payload.as_deref(),
+                    value,
+                );
                 let _ = reply.send(Ok(payload));
             })
         });
@@ -8444,7 +8451,7 @@ impl SirioWorkspace {
         }
     }
 
-    fn handle_browser_action(
+    fn handle_browser_action_sync(
         &mut self,
         method: &str,
         params: &BTreeMap<String, String>,
@@ -10059,10 +10066,10 @@ impl SirioWorkspace {
                                     .px(theme.spacing.card_gap)
                                     .py(theme.spacing.titlebar_control_spacing)
                                     .rounded(theme.radii.control)
-                                    .bg(theme.tab_focus_accent)
+                                    .bg(theme.inverse)
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.canvas)
-                                    .hover(|style| style.bg(theme.accent))
+                                    .text_color(theme.on_inverse)
+                                    .hover(|style| style.opacity(0.9))
                                     .on_click(move |_, _, cx| {
                                         new_terminal_entity.update(cx, |workspace, cx| {
                                             workspace.add_terminal_tab("Terminal", cx);
@@ -10293,7 +10300,7 @@ impl SirioWorkspace {
                                 .debug_selector(|| "tab-rename-caret".to_owned())
                                 .child(sirio_ui::caret::bar(
                                     px(14.0),
-                                    theme.accent,
+                                    theme.caret,
                                     rename_caret_visible,
                                 )),
                         ),
@@ -10316,7 +10323,7 @@ impl SirioWorkspace {
                                 .debug_selector(move || {
                                     format!("workspace-tab-status-{status_name}-{id}")
                                 })
-                                .text_color(tab_status_color(status, theme))
+                                .text_color(right_panel::status_color(status, theme))
                                 .child(tab_status_glyph(status)),
                         )
                     })
@@ -11526,7 +11533,7 @@ impl SirioWorkspace {
                 shell_chrome::panel(
                     "shell-center-panel",
                     &self.center_panel_focus,
-                    false, // #58: The center pane deliberately never shows the shell focus ring.
+                    shell_chrome::CENTER_PANEL_FOCUS_VISIBLE,
                     theme,
                 )
                 .flex_1()
@@ -12623,7 +12630,7 @@ impl SirioWorkspace {
                             .debug_selector(|| "command-palette-caret".to_owned())
                             .child(sirio_ui::caret::bar(
                                 px(18.0),
-                                theme.accent,
+                                theme.caret,
                                 self.palette_caret_visible,
                             )),
                     ),
@@ -12684,27 +12691,26 @@ impl SirioWorkspace {
     /// live-looking dead control. Dismiss is the one action every state
     /// actually supports, and is fully wired to `UpdateEvent::Reset`.
     fn render_update_toast(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
-        let (message, action_label, accent): (String, Option<&'static str>, gpui::Rgba) =
+        let (message, action_label, message_tone): (String, Option<&'static str>, gpui::Rgba) =
             match &self.update_state {
                 UpdateState::Idle => return None,
                 UpdateState::Checking => {
                     ("Checking for updates…".to_string(), None, theme.subtitle)
                 }
+                // An available update is the one state waiting on the reader,
+                // so it is the one state that spends a colour. Checking,
+                // downloading and installing are the app talking about itself.
                 UpdateState::Available { version } => (
                     format!("Sirio {version} is available"),
                     Some("Download"),
-                    theme.tab_focus_accent,
+                    theme.tab_needs_input,
                 ),
                 UpdateState::Downloading { progress_percent } => (
                     format!("Downloading Sirio… {progress_percent}%"),
                     None,
-                    theme.tab_focus_accent,
+                    theme.subtitle,
                 ),
-                UpdateState::Installing => (
-                    "Installing update…".to_string(),
-                    None,
-                    theme.tab_focus_accent,
-                ),
+                UpdateState::Installing => ("Installing update…".to_string(), None, theme.subtitle),
                 UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.tab_done),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
@@ -12747,7 +12753,7 @@ impl SirioWorkspace {
                                 .debug_selector(|| "update-toast-message".to_owned())
                                 .flex_1()
                                 .text_size(theme.typography.footnote)
-                                .text_color(accent)
+                                .text_color(message_tone)
                                 .child(message),
                         )
                         .child(
@@ -12778,7 +12784,8 @@ impl SirioWorkspace {
                                 div()
                                     .h(px(5.0))
                                     .rounded(px(3.0))
-                                    .bg(theme.tab_focus_accent)
+                                    // A bar filling up is a quantity, not a status.
+                                    .bg(theme.gauge)
                                     .w(px(280.0 * (progress_percent as f32 / 100.0))),
                             ),
                     )
@@ -14729,6 +14736,7 @@ fn main() {
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
                         .with_version(sirio_control::VERSION)
+                        .with_channel(sirio_control::ReleaseChannel::RELEASE_CHANNEL.as_str())
                         .with_browser_origins(browser_origins_for_settings.clone())
                         .with_database_path(database_path_for_settings.clone())
                         .on_install_skill({
@@ -22623,6 +22631,23 @@ mod tests {
                 .is_some_and(|version| !version.is_empty()),
             "capabilities must report the running Sirio version"
         );
+        assert!(
+            capabilities
+                .result
+                .as_ref()
+                .and_then(|result| result.get("channel"))
+                .is_some_and(|channel| !channel.is_empty()),
+            "capabilities must report the release channel"
+        );
+        assert_eq!(
+            capabilities
+                .result
+                .as_ref()
+                .and_then(|result| result.get("channel"))
+                .map(String::as_str),
+            Some(sirio_control::ReleaseChannel::RELEASE_CHANNEL.as_str()),
+            "capabilities must report the compiled-in channel"
+        );
         let advertised: Vec<_> = methods
             .iter()
             .filter_map(|row| row.get("method").map(String::as_str))
@@ -22704,6 +22729,31 @@ mod tests {
             );
             assert!(control_actions.lock().expect("action queue").is_empty());
         }
+    }
+
+    #[test]
+    fn browser_script_callbacks_keep_socket_payload_keys() {
+        let params = BTreeMap::from([(String::from("verb"), String::from("click"))]);
+        assert_eq!(
+            browser_script_result("browser.eval", None, "42".to_string()),
+            vec![(String::from("result"), String::from("42"))]
+        );
+        assert_eq!(
+            browser_script_result("browser.console", None, "[]".to_string()),
+            vec![(String::from("messages"), String::from("[]"))]
+        );
+        assert_eq!(
+            browser_script_result("browser.snapshot", None, "{}".to_string()),
+            vec![(String::from("snapshot"), String::from("{}"))]
+        );
+        assert_eq!(
+            browser_script_result(
+                "browser.act",
+                params.get("verb").map(String::as_str),
+                "true".to_string(),
+            ),
+            vec![(String::from("verb"), String::from("click"))]
+        );
     }
 
     /// F-CTRL-BROWSER-05: `browser.act`'s click/fill/type/press/scroll verbs
@@ -22899,13 +22949,23 @@ mod tests {
         cx.update(|window, app| sidebar_focus.focus(window, app));
         cx.run_until_parked();
 
-        assert!(
-            cx.debug_bounds("shell-left-panel-focus-ring").is_some(),
-            "keyboard focus inside the sidebar must make the enclosing shell panel visible"
-        );
-        assert!(
-            cx.debug_bounds("shell-center-panel-focus-ring").is_none(),
-            "the center terminal panel must never render a focus ring"
+        // The focus treatment is now the panel's own border rather than a
+        // second ring inside it, so there is no element to look for: assert on
+        // the predicate that decides it and the colour that follows.
+        let left_focus =
+            workspace.update(&mut cx, |workspace, _| workspace.left_panel_focus.clone());
+        let border_now = |cx: &mut VisualTestContext| {
+            cx.update(|window, app| {
+                shell_chrome::panel_border(
+                    &Theme::dark(),
+                    shell_chrome::focus_is_keyboard_visible(&left_focus, window, app),
+                )
+            })
+        };
+        assert_eq!(
+            border_now(&mut cx),
+            Theme::dark().panel_focus_ring,
+            "keyboard focus inside the sidebar must brighten the enclosing shell panel's border"
         );
 
         // Click a live sidebar row rather than changing the input-mode flag
@@ -22922,10 +22982,18 @@ mod tests {
             &[expected_worktree],
             "the real sidebar row click must reach its SelectWorktree handler"
         );
-        assert!(cx.debug_bounds("shell-left-panel-focus-ring").is_none());
+        assert_eq!(
+            border_now(&mut cx),
+            Theme::dark().panel_border,
+            "a pointer click must drop the panel back to its resting border"
+        );
         assert!(cx.debug_bounds("shell-left-panel").is_some());
     }
 
+    /// #58, both halves: focusing the center panel from the keyboard really
+    /// would qualify for the focus treatment, and the panel is drawn without it
+    /// anyway. Asserting only the second half would pass just as well if the
+    /// focus never reached the panel at all.
     #[gpui::test]
     async fn center_panel_never_shows_the_keyboard_focus_ring(cx: &mut TestAppContext) {
         cx.set_global(Theme::dark());
@@ -22945,7 +23013,20 @@ mod tests {
         cx.update(|window, app| center_focus.focus(window, app));
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("shell-center-panel-focus-ring").is_none());
+        assert!(
+            cx.update(|window, app| shell_chrome::focus_is_keyboard_visible(
+                &center_focus,
+                window,
+                app
+            )),
+            "the center panel's own focus is genuinely keyboard-visible here"
+        );
+        assert!(!shell_chrome::CENTER_PANEL_FOCUS_VISIBLE);
+        assert_eq!(
+            shell_chrome::panel_border(&Theme::dark(), shell_chrome::CENTER_PANEL_FOCUS_VISIBLE),
+            Theme::dark().panel_border,
+            "the center panel keeps its resting border regardless"
+        );
         assert!(cx.debug_bounds("shell-center-panel").is_some());
     }
 

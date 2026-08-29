@@ -394,7 +394,7 @@ impl Render for CloneForm {
                             .child(url_value),
                     )
                     .when(field_focused, |this| {
-                        this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+                        this.child(caret::bar(px(16.0), theme.caret, caret_visible))
                     }),
             )
             .child(form_label("Destination", &theme))
@@ -440,7 +440,8 @@ impl Render for CloneForm {
                             div()
                                 .h(px(5.0))
                                 .rounded(px(3.0))
-                                .bg(theme.tab_focus_accent)
+                                // A bar filling up is a quantity, not a status.
+                                .bg(theme.gauge)
                                 .w(px(240.0 * progress as f32)),
                         ),
                 )
@@ -731,7 +732,7 @@ impl Render for CreateForm {
                             .child(name_value),
                     )
                     .when(field_focused, |this| {
-                        this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+                        this.child(caret::bar(px(16.0), theme.caret, caret_visible))
                     }),
             )
             .child(form_label("Parent location", &theme))

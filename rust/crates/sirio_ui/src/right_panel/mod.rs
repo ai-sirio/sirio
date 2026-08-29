@@ -47,6 +47,27 @@ pub enum ActivityStatus {
     Error,
 }
 
+/// The colour an [`ActivityStatus`] is painted in, wherever it is drawn.
+///
+/// The right panel's activity rows and the tab strip's status glyphs show the
+/// same five states, and used to carry two copies of this table — one here and
+/// one in the app crate. Two copies of a colour table is one edit away from two
+/// different colours for the same state, so there is now one.
+///
+/// Only the states that want something from the reader are coloured. Running is
+/// the ordinary case and reads as the bright text neutral; idle is the same
+/// neutral turned down. Amber, green and red are kept for "answer me", "this
+/// finished" and "this broke".
+pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
+    match status {
+        ActivityStatus::Idle => theme.meta,
+        ActivityStatus::Running => theme.title,
+        ActivityStatus::NeedsInput => theme.tab_needs_input,
+        ActivityStatus::Done => theme.tab_done,
+        ActivityStatus::Error => theme.tab_error,
+    }
+}
+
 /// User actions originating from an activity row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPanelEvent {

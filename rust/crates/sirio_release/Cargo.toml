@@ -1,0 +1,20 @@
+[package]
+name = "sirio_release"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Leaf on purpose: the release-signing trust checks must not drag agent,
+# terminal or UI layers in, and the updater (#311) will depend on exactly this
+# crate for them. Platform keys in the manifest reuse the spelling of
+# `sirio_registry::current_platform_key` without depending on it — one match
+# arm duplicated beats a leaf depending on another leaf.
+[dependencies]
+base64 = "0.22.1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = "2"

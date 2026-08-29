@@ -962,6 +962,9 @@ pub struct Settings {
     /// The host-supplied app version shown in General settings. The UI crate
     /// deliberately does not depend on `sirio_control` for this fact.
     version: String,
+    /// The host-supplied release channel shown next to the version (F-305):
+    /// same independence rule as `version`.
+    channel: String,
     /// Whether the summarizer picker's agent menu is open (F-SET-05).
     summarizer_popover_open: bool,
     /// Focus handle for the picker menu, so Escape closes the menu alone:
@@ -1205,6 +1208,7 @@ impl Settings {
             provider_accounts: ProviderAccountStates::discovered(),
             socket_path: initial.socket_path,
             version: String::new(),
+            channel: String::new(),
             summarizer_popover_open: false,
             summarizer_focus: cx.focus_handle(),
             surface_focus: cx.focus_handle(),
@@ -1261,6 +1265,13 @@ impl Settings {
     /// `sirio_control`.
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = version.into();
+        self
+    }
+
+    /// Supplies the host's compiled release channel for the General settings
+    /// row. Same host-owns-the-value rule as [`Self::with_version`].
+    pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
+        self.channel = channel.into();
         self
     }
 
@@ -2952,7 +2963,7 @@ impl Settings {
             // single-line fields always append. Invisible (but still laid
             // out) while unfocused so the bar never shifts the text.
             .when(is_focused, |this| {
-                this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+                this.child(caret::bar(px(16.0), theme.caret, caret_visible))
             })
     }
 
@@ -3624,7 +3635,7 @@ impl Settings {
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
                                     px(16.0),
-                                    theme.accent,
+                                    theme.caret,
                                     self.field_caret_visible,
                                 ))
                             }),
@@ -3850,16 +3861,27 @@ impl Settings {
         // something untrue about the program (P58, F-SET-03 — same
         // platform-gating as the Permissions category and the file-icon
         // sets).
-        let about = controls::card(theme).child(controls::row(
-            "Version",
-            None,
-            div()
-                .debug_selector(|| "settings-version".into())
-                .text_size(theme.typography.callout)
-                .text_color(theme.subtitle)
-                .child(text!(self.version.clone())),
-            theme,
-        ));
+        let about = controls::card(theme)
+            .child(controls::row(
+                "Version",
+                None,
+                div()
+                    .debug_selector(|| "settings-version".into())
+                    .text_size(theme.typography.callout)
+                    .text_color(theme.subtitle)
+                    .child(text!(self.version.clone())),
+                theme,
+            ))
+            .child(controls::row(
+                "Channel",
+                None,
+                div()
+                    .debug_selector(|| "settings-channel".into())
+                    .text_size(theme.typography.callout)
+                    .text_color(theme.subtitle)
+                    .child(text!(self.channel.clone())),
+                theme,
+            ));
 
         let agents = controls::card(theme).child(controls::row(
             "Resume agent sessions on launch",
@@ -6936,7 +6958,9 @@ mod tests {
     ) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_version("test-version")
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_version("test-version")
+                .with_channel("dev")
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -6962,6 +6986,20 @@ mod tests {
                 .clone()
         });
         assert_eq!(version, "test-version");
+        assert!(
+            cx.debug_bounds("settings-channel").is_some(),
+            "the release channel is stated in General settings"
+        );
+        let channel = cx.update(|window, app| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(app)
+                .channel
+                .clone()
+        });
+        assert_eq!(channel, "dev");
         assert!(
             cx.debug_bounds("settings-control-socket-row").is_some(),
             "the sirioctl card renders"

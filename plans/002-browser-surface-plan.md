@@ -307,7 +307,7 @@ prompt; il badge appare durante un comando agente e scompare dopo.
 **Verifica**
 - Misura memoria: 5 tab browser di cui 2 visibili → surface vive ≤ 5, nessuna
   visibile smontata; confronto IOSurface prima/dopo con la metodologia già
-  documentata (gate su bundle id `dev.sirio.Sirio`, `log show --signpost`,
+  documentata (gate su bundle id `app.sirioai.sirio`, `log show --signpost`,
   A/B interlacciato).
 - Gate finale (**solo orchestratore**): `Scripts/ci.sh` deve stampare `CI OK`
   oppure fallire **esattamente** sulle 4 suite della baseline rossa del
