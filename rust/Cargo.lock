@@ -6684,6 +6684,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_update"
+version = "0.6.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hex",
+ "rand_core 0.6.4",
+ "semver",
+ "serde_json",
+ "sha2 0.10.9",
+ "sirio_control",
+ "sirio_registry",
+ "sirio_release",
+ "thiserror 2.0.20",
+ "ureq",
+]
+
+[[package]]
 name = "sirio_usage"
 version = "0.1.0"
 dependencies = [
