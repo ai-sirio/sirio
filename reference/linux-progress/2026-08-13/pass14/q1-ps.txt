@@ -1,5 +1,0 @@
-enzopal+ 1913448  2.0  0.3 1764160 114628 ?      Sl   22:16   0:00 npm exec @agentclientprotocol/codex-acp@latest
-enzopal+ 1913488  0.0  0.0   2812  1856 ?        S    22:16   0:00 sh -c 'codex-acp'
-enzopal+ 1913489  1.0  0.2 1429036 81936 ?       Sl   22:16   0:00 node /home/enzopalmisano/.npm/_npx/a81fa54699a25c5d/node_modules/.bin/codex-acp
-enzopal+ 1913496  0.0  0.1 1407812 50028 ?       Sl   22:16   0:00 /home/enzopalmisano/.nvm/versions/node/v24.19.0/bin/node /home/enzopalmisano/.npm/_npx/a81fa54699a25c5d/node_modules/@openai/codex/bin/codex.js app-server
-enzopal+ 1913503  3.9  0.4 542528 142760 ?       Sl   22:16   0:00 /home/enzopalmisano/.npm/_npx/a81fa54699a25c5d/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server

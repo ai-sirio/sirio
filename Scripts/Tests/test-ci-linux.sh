@@ -28,15 +28,15 @@ required_markers=(
     'cargo fmt'
     'cargo clippy'
     'cargo build'
-    'tiller_control'
+    'sirio_control'
     'cargo test --workspace'
-    'TILLER_ACP_REAL'
+    'SIRIO_ACP_REAL'
     # Anchored on the invocation, not the bare name. `real_claude` alone is also present in
     # the explanatory comment above the stage, so repointing the stage at a different test
     # left this marker green -- the check passed on the strength of prose rather than of the
     # command actually run. Verified by negative control: 's/--test real_claude/--test other/'
     # now fails, where 'real_claude' did not.
-    '-p tiller_acp --test real_claude'
+    '-p sirio_acp --test real_claude'
     'test-crash-supervise.py'
     'test-crash-freeze-supervise.py'
     'test-visual-sweep.sh'
@@ -44,8 +44,8 @@ required_markers=(
     '--target aarch64-apple-darwin --workspace'
     'rustup target add'
     'error occurred in cc-rs:'
-    'TILLER_SOCKET'
-    'TILLER_DB'
+    'SIRIO_SOCKET'
+    'SIRIO_DB'
     'DISPLAY'
     'WAYLAND_DISPLAY'
     'project add "$ROOT"'
@@ -66,7 +66,7 @@ required_markers=(
     'CI OK'
 )
 for marker in "${required_markers[@]}"; do
-    # `--` is required: markers may begin with a dash (e.g. '-p tiller_acp --test
+    # `--` is required: markers may begin with a dash (e.g. '-p sirio_acp --test
     # real_claude'), which grep would otherwise parse as its own options.
     grep -Fq -- "$marker" "$SCRIPT" || {
         echo "FAIL: gate is missing required marker: $marker" >&2
@@ -92,7 +92,7 @@ fmt_line=$(line_of 'cargo fmt')
 clippy_line=$(line_of 'cargo clippy')
 build_line=$(line_of 'cargo build')
 test_line=$(line_of 'cargo test --workspace')
-# NOT line_of 'TILLER_ACP_REAL': that string also appears in the header disclosure near
+# NOT line_of 'SIRIO_ACP_REAL': that string also appears in the header disclosure near
 # line 10, and line_of takes the first match, so it would resolve to the header and make
 # the ordering assertion below compare the wrong line. Anchor on the stage label instead.
 acp_line=$(line_of 'real ACP acceptance')
@@ -114,8 +114,8 @@ fi
 # has to be able to reach a green gate -- the same reasoning the gate already applies to its
 # sccache fallback, because an agent that can never reach a green gate learns to ignore it.
 # Making this stage unconditional would turn CI OK from over-claiming into unreachable.
-grep -Fq 'TILLER_ACP_REAL:-0' "$SCRIPT" || {
-    echo "FAIL: the real-agent ACP stage is not defaulted off (expected \${TILLER_ACP_REAL:-0})" >&2
+grep -Fq 'SIRIO_ACP_REAL:-0' "$SCRIPT" || {
+    echo "FAIL: the real-agent ACP stage is not defaulted off (expected \${SIRIO_ACP_REAL:-0})" >&2
     exit 1
 }
 grep -Fq 'SKIP: real ACP acceptance' "$SCRIPT" || {
@@ -145,8 +145,8 @@ grep -Fq 'not a code regression' "$SCRIPT" || {
     exit 1
 }
 
-if grep -Fq -- '-p tillerctl' "$SCRIPT"; then
-    echo "FAIL: gate builds the nonexistent tillerctl package" >&2
+if grep -Fq -- '-p sirioctl' "$SCRIPT"; then
+    echo "FAIL: gate builds the nonexistent sirioctl package" >&2
     exit 1
 fi
 if grep -Fq 'mktemp -u' "$SCRIPT"; then
@@ -171,12 +171,12 @@ grep -Fq -- '-D warnings' "$SCRIPT" || {
     echo "FAIL: owned-crate clippy must fail on the first warning" >&2
     exit 1
 }
-grep -Fq -- '--exclude tiller' "$SCRIPT" || {
-    echo "FAIL: clippy must leave the tiller main owner boundary untouched" >&2
+grep -Fq -- '--exclude sirio' "$SCRIPT" || {
+    echo "FAIL: clippy must leave the sirio main owner boundary untouched" >&2
     exit 1
 }
-grep -Fq -- '--exclude tiller_ui' "$SCRIPT" || {
-    echo "FAIL: clippy must leave the tiller_ui owner boundary untouched" >&2
+grep -Fq -- '--exclude sirio_ui' "$SCRIPT" || {
+    echo "FAIL: clippy must leave the sirio_ui owner boundary untouched" >&2
     exit 1
 }
 

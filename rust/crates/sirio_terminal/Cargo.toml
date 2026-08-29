@@ -1,0 +1,28 @@
+[package]
+name = "sirio_terminal"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui_platform = { workspace = true, features = ["font-kit"] }
+sirio_theme.workspace = true
+sirio_project.workspace = true
+anyhow.workspace = true
+futures = "0.3"
+libghostty-vt = "0.2.1"
+portable-pty = "0.9"
+parking_lot = "0.12"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# wayland/x11 are Linux-only gpui/gpui_platform windowing backends; see the
+# long comment above the workspace-level `gpui` entry in the root Cargo.toml
+# for why this lives here per-crate rather than on the workspace dependency
+# itself.
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

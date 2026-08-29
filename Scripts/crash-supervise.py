@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Tiller until it exits and preserve the evidence that a bare terminal loses.
+"""Run Sirio until it exits and preserve the evidence that a bare terminal loses.
 
 The parent uses waitpid directly so the report contains the real POSIX wait status,
 not just the shell's 128 + signal convention.  The child gets its own process group,
@@ -259,7 +259,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=root / "reference/linux-progress/crash-runs",
+        default=root / "artifacts/crash-runs",
         help="directory for the report, output log, and screenshot",
     )
     parser.add_argument("--display", default=os.environ.get("DISPLAY", ":1"))
@@ -285,13 +285,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
-        help="command to run; put it after -- (defaults to the debug Tiller binary)",
+        help="command to run; put it after -- (defaults to the debug Sirio binary)",
     )
     args = parser.parse_args()
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
     if not args.command:
-        args.command = [str(root / "rust/target/debug/tiller")]
+        args.command = [str(root / "rust/target/debug/sirio")]
     if args.poll <= 0 or args.sample <= 0 or args.tail < 1:
         parser.error("--poll and --sample must be positive and --tail must be at least 1")
     if args.input_evidence and not args.driven:

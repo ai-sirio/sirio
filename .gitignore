@@ -12,9 +12,9 @@ build/
 .pi/
 .claude/
 # Generated per-worktree agent hook, written by OhMyPiAdapter::prepare on every
-# omp launch and carrying that machine's tillerctl path and that launch's pane id
+# omp launch and carrying that machine's sirioctl path and that launch's pane id
 # (#203). Its five siblings above are ignored for the same reason.
-.tiller/
+.sirio/
 .idea/
 skills-lock.json
 .DS_Store

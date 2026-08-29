@@ -1,7 +1,7 @@
 # libghostty-vt on Windows — what the `prototype/ghostty-pane` spike found
 
 Issue #33, part of the alacritty → libghostty-vt map (#27).
-Prototype: `rust/crates/tiller_terminal/examples/prototype_ghostty_pane.rs` (throwaway).
+Prototype: `rust/crates/sirio_terminal/examples/prototype_ghostty_pane.rs` (throwaway).
 
 ## The question
 
@@ -49,7 +49,7 @@ and dropped, ConPTY never unblocked, and no shell output existed to render.
 
 ## Why the current terminal does not have this problem
 
-`tiller_terminal` runs on `alacritty_terminal`, which answers DSR internally and
+`sirio_terminal` runs on `alacritty_terminal`, which answers DSR internally and
 writes the response to the pty itself. The obligation is discharged inside the
 library, so no embedder ever had to know about it. Moving to `libghostty-vt`
 moves that obligation outward, to us.
@@ -98,7 +98,7 @@ above is for.
 
 ## Windows argument quoting — measured, and it breaks
 
-`tiller_terminal::command_shell_invocation` (`src/lib.rs:432`) builds a Windows
+`sirio_terminal::command_shell_invocation` (`src/lib.rs:432`) builds a Windows
 shell invocation by pre-wrapping the command in quotes itself:
 
 ```rust
@@ -107,14 +107,14 @@ shell invocation by pre-wrapping the command in quotes itself:
 
 `portable_pty::CommandBuilder::cmdline()` then runs `append_quoted` over every
 argument. That takes its fast path only when the argument contains no space,
-tab, newline, vertical tab **or quote**. Tiller's argument has both spaces and
+tab, newline, vertical tab **or quote**. Sirio's argument has both spaces and
 quotes, so it takes the slow path and the embedded quotes come back escaped.
 
 Measured, not deduced (`windows_shell_invocation_survives_command_builder`):
 
 | argv | result |
 |---|---|
-| `["cmd.exe", "/C", "\"echo SENTINEL\""]` — Tiller's form | **does not execute** |
+| `["cmd.exe", "/C", "\"echo SENTINEL\""]` — Sirio's form | **does not execute** |
 | `["cmd.exe", "/C", "echo SENTINEL"]` — plain | executes |
 
 The failing capture carries the explanation in its own bytes: `\"echo …`.
@@ -167,7 +167,7 @@ Without it every build touching the crate dies with
 
 ## Final state of the spike
 
-`cargo test -p tiller_terminal --example prototype_ghostty_pane -- --test-threads=1`
+`cargo test -p sirio_terminal --example prototype_ghostty_pane -- --test-threads=1`
 
 ```
 running 6 tests

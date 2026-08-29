@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/tiller-logo.png" width="120" alt="Tiller logo" />
+  <img src="assets/sirio-logo.png" width="120" alt="Sirio logo" />
 </p>
 
-<h1 align="center">Tiller</h1>
+<h1 align="center">Sirio</h1>
 
 <p align="center">
   <strong>Steer every coding agent from one native Linux window.</strong>
@@ -17,16 +17,16 @@
   <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" />
   <img src="https://img.shields.io/badge/Rust-2024%20edition-orange?style=flat-square" alt="Rust 2024 edition" />
-  <a href="https://github.com/e-palmisano/tiller"><img src="https://img.shields.io/github/stars/e-palmisano/tiller?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
+  <a href="https://github.com/ai-sirio/sirio"><img src="https://img.shields.io/github/stars/ai-sirio/sirio?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
   <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" /></a>
 </p>
 
 ---
 
-> Tiller started as a native macOS app (SwiftUI/Swift 6) and has been rewritten in Rust on
-> [gpui](https://github.com/zed-industries/zed) for Linux. The Swift original is retired —
-> see [`docs/linux-rewrite/README.md`](docs/linux-rewrite/README.md) for the exact commit and
-> how to read its source from git history.
+> Sirio started as a native macOS app (SwiftUI/Swift 6) and has been rewritten in Rust on
+> [gpui](https://github.com/zed-industries/zed) for Linux. The Swift original is retired at
+> commit `5430d7bfdb4a295be8ce072526ae5108259b80f8` — read its source with
+> `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`.
 
 ## Features
 
@@ -36,13 +36,13 @@
 - 🌐 **Embedded browser tab** — a native WebKitGTK surface composited alongside the terminal, for previewing a running dev server without leaving the window
 - 📋 **Diff/changes viewer** — a git-status-aware Changes surface: stage, unstage, discard, and open a path-specific diff tab
 - 🤖 **5 agent adapters** — Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, each with lifecycle hooks
-- 🔌 **Control socket** — `tillerctl` CLI for scripted create/write/read/wait/notify against any pane
+- 🔌 **Control socket** — `sirioctl` CLI for scripted create/write/read/wait/notify against any pane
 - 🔔 **Tray roster** — a `StatusNotifierItem` tray icon with a live pulse on every active agent; click to jump straight back into the right worktree, even with the window closed
 - 🔕 **Desktop notifications** — a heads-up when an agent finishes or stalls
 - 💾 **Session persistence** — agent sessions survive an app restart (SQLite-backed)
 - 📊 **Provider usage tracking** — Claude / Codex / OpenCode / Ollama usage at a glance
 
-**Deliberately not doing:** remote SSH / mobile relay, scheduling — Tiller stays a focused terminal + agent hub, not an IDE.
+**Deliberately not doing:** remote SSH / mobile relay, scheduling — Sirio stays a focused terminal + agent hub, not an IDE.
 
 ---
 
@@ -60,24 +60,24 @@
 
 ## Agent Orchestration
 
-Tiller automatically provisions [`skills/tiller/SKILL.md`](skills/tiller/SKILL.md) inside every launched worktree for all five Tiller harnesses: Claude Code, Codex, OpenCode, Pi, and Oh-My-Pi. No manual install is needed in those worktrees.
+Sirio automatically provisions [`skills/sirio/SKILL.md`](skills/sirio/SKILL.md) inside every launched worktree for all five Sirio harnesses: Claude Code, Codex, OpenCode, Pi, and Oh-My-Pi. No manual install is needed in those worktrees.
 
-For supported Skills CLI agents outside a launched Tiller worktree, install the public package with:
+For supported Skills CLI agents outside a launched Sirio worktree, install the public package with:
 
 ```bash
-npx skills add e-palmisano/tiller --skill tiller -a claude-code,codex,opencode,pi -y
+npx skills add ai-sirio/sirio --skill sirio -a claude-code,codex,opencode,pi -y
 ```
 
-`tillerctl panel` returns panel UUIDs. Capture them and address every operation explicitly with `--id`; use `--from` only to identify the UUID of the panel being split.
+`sirioctl panel` returns panel UUIDs. Capture them and address every operation explicitly with `--id`; use `--from` only to identify the UUID of the panel being split.
 
 ```bash
-WORKER=$(tillerctl panel create --cmd 'claude')
-PEER=$(tillerctl panel split right --from "$TILLER_PANE_ID" --cmd 'codex')
+WORKER=$(sirioctl panel create --cmd 'claude')
+PEER=$(sirioctl panel split right --from "$SIRIO_PANE_ID" --cmd 'codex')
 
-tillerctl panel write --id "$WORKER" --input 'Implement the parser change' --enter
-tillerctl panel wait --id "$WORKER"
-tillerctl panel read --id "$WORKER"
-tillerctl panel close --id "$WORKER"
+sirioctl panel write --id "$WORKER" --input 'Implement the parser change' --enter
+sirioctl panel wait --id "$WORKER"
+sirioctl panel read --id "$WORKER"
+sirioctl panel close --id "$WORKER"
 ```
 
 The eleven panel subcommands are:
@@ -98,13 +98,13 @@ The eleven panel subcommands are:
 
 ## Install
 
-Tiller doesn't ship prebuilt binaries yet — build it from source (see below). It's a Cargo workspace of 13 crates; first build takes a few minutes.
+Sirio doesn't ship prebuilt binaries yet — build it from source (see below). It's a Cargo workspace of 13 crates; first build takes a few minutes.
 
 ---
 
 ## First Launch
 
-Tiller needs no special permission prompts on Linux — it runs with no elevated access, no telemetry, and no network calls beyond what your agents themselves make. Desktop notifications go through the freedesktop D-Bus notification service, and the tray roster needs a `StatusNotifierItem`-capable panel (KDE, GNOME/COSMIC and most other desktops via their SNI/AppIndicator bridge).
+Sirio needs no special permission prompts on Linux — it runs with no elevated access, no telemetry, and no network calls beyond what your agents themselves make. Desktop notifications go through the freedesktop D-Bus notification service, and the tray roster needs a `StatusNotifierItem`-capable panel (KDE, GNOME/COSMIC and most other desktops via their SNI/AppIndicator bridge).
 
 ---
 
@@ -131,19 +131,19 @@ The tray icon is always one click away — it reflects the worst status across e
 
 | Path | Role |
 |------|------|
-| `rust/crates/tiller/` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
-| `rust/crates/tiller_ui/` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings) |
-| `rust/crates/tiller_terminal/` | Terminal panes backed by `alacritty_terminal`, PTY handling, splits |
-| `rust/crates/tiller_activity/` | Layered agent-activity detection (hooks / title / content / process), no GPUI dependency |
-| `rust/crates/tiller_control/` | `ControlServer` (unix socket) + `PaneRegistry` + `tillerctl` CLI |
-| `rust/crates/tiller_agents/` | Adapters for the 5 supported agents, with lifecycle hooks |
-| `rust/crates/tiller_acp/` | Agent Client Protocol transport for chat-hosted agents |
-| `rust/crates/tiller_git/` | Shell-out to git for local worktrees |
-| `rust/crates/tiller_persistence/` | SQLite (`rusqlite`) schema, migrations, records |
-| `rust/crates/tiller_project/` | Workspace/project domain logic, update-check state machine |
-| `rust/crates/tiller_theme/` | Color palette and theme tokens |
-| `rust/crates/tiller_markdown/` | Markdown parsing/rendering for the editor and chat |
-| `rust/crates/tiller_usage/` | Provider usage-tracking (Claude/Codex/OpenCode/Ollama) |
+| `rust/crates/sirio/` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
+| `rust/crates/sirio_ui/` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings) |
+| `rust/crates/sirio_terminal/` | Terminal panes backed by `alacritty_terminal`, PTY handling, splits |
+| `rust/crates/sirio_activity/` | Layered agent-activity detection (hooks / title / content / process), no GPUI dependency |
+| `rust/crates/sirio_control/` | `ControlServer` (unix socket) + `PaneRegistry` + `sirioctl` CLI |
+| `rust/crates/sirio_agents/` | Adapters for the 5 supported agents, with lifecycle hooks |
+| `rust/crates/sirio_acp/` | Agent Client Protocol transport for chat-hosted agents |
+| `rust/crates/sirio_git/` | Shell-out to git for local worktrees |
+| `rust/crates/sirio_persistence/` | SQLite (`rusqlite`) schema, migrations, records |
+| `rust/crates/sirio_project/` | Workspace/project domain logic, update-check state machine |
+| `rust/crates/sirio_theme/` | Color palette and theme tokens |
+| `rust/crates/sirio_markdown/` | Markdown parsing/rendering for the editor and chat |
+| `rust/crates/sirio_usage/` | Provider usage-tracking (Claude/Codex/OpenCode/Ollama) |
 
 See `CLAUDE.md`'s Architecture section for the dependency graph between them.
 
@@ -154,7 +154,7 @@ See `CLAUDE.md`'s Architecture section for the dependency graph between them.
 ```bash
 cd rust
 cargo build --workspace
-cargo run -p tiller
+cargo run -p sirio
 ```
 
 Requires a Rust toolchain (2024 edition) and, on Linux, GTK/WebKit development headers for the embedded browser surface (`gtk`, `webkit2gtk` — package names vary by distro).
@@ -181,8 +181,8 @@ Each agent CLI (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) has its own lifecycl
 **Does closing the window stop my agents?**
 No. Every agent session runs in its own PTY, and closing the window only flushes session state — it does not tear panes down. The tray icon keeps tracking them and can bring you straight back. Only quitting the app ends everything.
 
-**What's `tillerctl` for?**
-It's the CLI side of Tiller's control socket — create a pane, write to it, read its output, wait for a state, or send a notification, all scriptable from outside the app. It's also how agent lifecycle hooks talk back to Tiller.
+**What's `sirioctl` for?**
+It's the CLI side of Sirio's control socket — create a pane, write to it, read its output, wait for a state, or send a notification, all scriptable from outside the app. It's also how agent lifecycle hooks talk back to Sirio.
 
 ---
 
@@ -202,9 +202,9 @@ Bug reports and pull requests are welcome.
    cd rust && cargo test -p <crate>
    ```
 
-2. **Respect the crate boundaries.** See `CLAUDE.md`'s Architecture section for the current dependency graph between `rust/crates/*`. `tiller` (the app) is the only crate that depends on everything; nothing underneath depends back up.
+2. **Respect the crate boundaries.** See `CLAUDE.md`'s Architecture section for the current dependency graph between `rust/crates/*`. `sirio` (the app) is the only crate that depends on everything; nothing underneath depends back up.
 
-3. **Keep pure logic pure.** State machines, parsers, and merge/filter logic that don't need a window belong in a crate with no `gpui` dependency (see `tiller_activity` for the pattern) — that is what keeps them unit-testable without spinning up a window.
+3. **Keep pure logic pure.** State machines, parsers, and merge/filter logic that don't need a window belong in a crate with no `gpui` dependency (see `sirio_activity` for the pattern) — that is what keeps them unit-testable without spinning up a window.
 
 4. **Commit messages.** Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`. Lower-case, imperative subject.
 
@@ -220,7 +220,7 @@ MIT — see [LICENSE](LICENSE) for details.
 
 ## Acknowledgements
 
-Tiller is a fork of [Orca](https://github.com/stability-ai/orca) with a deliberately reduced scope, designed and built with the help of AI pair programmers:
+Sirio is a fork of [Orca](https://github.com/stability-ai/orca) with a deliberately reduced scope, designed and built with the help of AI pair programmers:
 
 - **[Claude Code](https://claude.ai/code)** by Anthropic — architecture, implementation, and review throughout the project, including the Rust/gpui Linux port.
 - **[OpenCode](https://opencode.ai/)** — parallel subagent execution for isolated, independently-verified feature branches.

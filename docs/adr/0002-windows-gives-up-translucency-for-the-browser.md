@@ -46,7 +46,7 @@ The alternatives were weighed and rejected for now:
 
 ## Decision
 
-Tiller sets `GPUI_DISABLE_DIRECT_COMPOSITION` itself on Windows, before GPUI
+Sirio sets `GPUI_DISABLE_DIRECT_COMPOSITION` itself on Windows, before GPUI
 initialises. It is not exposed as a user setting.
 
 `shell_chrome::current_platform_material` stops reporting native blur support for
@@ -62,7 +62,7 @@ The browser works on Windows.
 There is no setting to get translucency back, deliberately: its only alternative
 branch produces an invisible browser, which is a trap rather than a preference.
 
-Tiller now depends on a GPUI environment variable that upstream treats as a
+Sirio now depends on a GPUI environment variable that upstream treats as a
 debugging escape hatch. If it is removed or changes meaning, the browser goes
 blank again — a risk accepted knowingly, and the reason visual hosting remains
 the intended destination rather than this.

@@ -1,5 +1,0 @@
-crash-freeze-supervise report
-display: :2
-display_probe: xdpyinfo failed for :2: Command '['xdpyinfo', '-display', ':2']' timed out after 5 seconds
-freeze_detected: False
-valid_observation_minutes: 0.000

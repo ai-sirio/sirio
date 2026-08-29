@@ -36,10 +36,10 @@ Usage
 -----
     python3 Scripts/dead-model-audit.py [crate-src-dir] [--control SYMBOL]
 
-    # default: audit tiller_project against the rest of the workspace
+    # default: audit sirio_project against the rest of the workspace
     python3 Scripts/dead-model-audit.py
 
-    python3 Scripts/dead-model-audit.py rust/crates/tiller_git/src \
+    python3 Scripts/dead-model-audit.py rust/crates/sirio_git/src \
         --control run_streaming
 """
 
@@ -107,7 +107,7 @@ def call_count(name: str, text: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("crate_src", nargs="?", default="rust/crates/tiller_project/src")
+    parser.add_argument("crate_src", nargs="?", default="rust/crates/sirio_project/src")
     parser.add_argument("--workspace", default="rust/crates")
     parser.add_argument(
         "--control",

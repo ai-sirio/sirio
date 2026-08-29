@@ -5,7 +5,7 @@ Implementable spec produced by wayfinder map
 traces to a closed decision ticket; this document assembles them, it does not
 re-decide them.
 
-**Scope.** Host Tiller's existing Browser surface on macOS and Windows at
+**Scope.** Host Sirio's existing Browser surface on macOS and Windows at
 contract parity with the verified Linux one, and make a Browser tab a tab like
 any other — never a sidebar row. The Linux X11 path is not touched.
 
@@ -51,7 +51,7 @@ GPUI creates its Windows window with `WS_EX_NOREDIRECTIONBITMAP` and composes
 through DirectComposition, so the DWM never shows an ordinary child HWND — which
 is exactly what wry's `build_as_child` produces.
 
-- **R2.1** Tiller sets `GPUI_DISABLE_DIRECT_COMPOSITION` itself on Windows,
+- **R2.1** Sirio sets `GPUI_DISABLE_DIRECT_COMPOSITION` itself on Windows,
   before GPUI initialises. Not a user setting. GPUI reads it once in
   `WindowsPlatform::new`, so it cannot be deferred to when a browser tab opens.
 - **R2.2** `shell_chrome::current_platform_material` (`shell_chrome.rs:20-28`)
@@ -124,7 +124,7 @@ guaranteed timeout.
 - **R6.1** One shared profile, not per-worktree, scoped by the session
   database's rule: explicit override → the checkout containing the running
   binary → a stable location when installed.
-- **R6.2** Linux and Windows take a Tiller-owned directory through wry's
+- **R6.2** Linux and Windows take a Sirio-owned directory through wry's
   `WebContext`. macOS has no path setting at all and uses a
   `data_store_identifier` derived from the same criterion — hence **macOS 14 is
   the minimum supported version** (ADR 0001), below which the identifier is
@@ -132,7 +132,7 @@ guaranteed timeout.
 - **R6.3** Windows' default, if nothing is set, is `<exe>.WebView2\EBWebView`
   beside the binary — unwritable under `Program Files`. Setting the directory is
   therefore required on Windows, not merely tidy.
-- **R6.4** **Origin grants** (Tiller's, portable, what `browser.permission`
+- **R6.4** **Origin grants** (Sirio's, portable, what `browser.permission`
   resolves) and **capability permissions** (the engine's) stay distinct — see
   `CONTEXT.md`. Capability permissions remain with the engine.
 - **R6.5** Browser tabs restore with their URL.
@@ -158,8 +158,8 @@ needs hosting, geometry and scripting. They ship independently.
   while every prior Windows document in this repo targets `x86_64`. A GUI
   launched over SSH lands in an invisible window station — use a Scheduled Task
   with `LogonType Interactive`.
-- `tiller_ui` does not depend on `tiller_terminal`, so browser work builds
-  without Zig via `cargo build -p tiller_ui --example …`.
+- `sirio_ui` does not depend on `sirio_terminal`, so browser work builds
+  without Zig via `cargo build -p sirio_ui --example …`.
 
 ## Out of scope
 
@@ -170,6 +170,6 @@ needs hosting, geometry and scripting. They ship independently.
 - **`browser.screenshot`** — unsupported on all platforms by decision.
 - **WebView2 visual hosting** — the architecturally correct answer for Windows,
   but it needs upstream changes to both wry (no composition support in 0.56.1)
-  and GPUI (`DirectComposition` is private). Its own project. Until then Tiller
+  and GPUI (`DirectComposition` is private). Its own project. Until then Sirio
   depends on a GPUI environment variable that upstream treats as a debugging
   escape hatch: if it is removed, the Windows browser goes blank again.

@@ -1,19 +1,19 @@
 name: Bug report
-description: Something in Tiller does not behave the way it should
+description: Something in Sirio does not behave the way it should
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for filing a bug. The two fields that resolve most Tiller reports are
-        **Environment** (Wayland vs X11 and the GPU driver — Tiller renders through gpui)
+        Thanks for filing a bug. The two fields that resolve most Sirio reports are
+        **Environment** (Wayland vs X11 and the GPU driver — Sirio renders through gpui)
         and **Which agent** — several bugs only reproduce with one CLI's title or hook
         conventions.
 
   - type: input
     id: version
     attributes:
-      label: Tiller version or commit
+      label: Sirio version or commit
       description: "`git rev-parse --short HEAD`, or the release tag you installed."
       placeholder: c3f7f2fa
     validations:
@@ -23,20 +23,20 @@ body:
     id: area
     attributes:
       label: Area
-      description: Which part of Tiller? Pick the closest — a guess is fine.
+      description: Which part of Sirio? Pick the closest — a guess is fine.
       multiple: true
       options:
-        - "UI / layout / theming (tiller_ui, tiller_theme)"
-        - "Terminal & PTY (tiller_terminal)"
-        - "Agent activity: running / idle / needs-input (tiller_activity)"
-        - "Agent adapters & hooks (tiller_agents)"
-        - "ACP protocol (tiller_acp)"
-        - "Git & worktrees (tiller_git, tiller_project)"
-        - "Session / settings persistence (tiller_persistence)"
-        - "Control socket & tillerctl (tiller_control)"
-        - "Usage & cost tracking (tiller_usage)"
-        - "Markdown rendering (tiller_markdown)"
-        - "App shell / window / startup (tiller)"
+        - "UI / layout / theming (sirio_ui, sirio_theme)"
+        - "Terminal & PTY (sirio_terminal)"
+        - "Agent activity: running / idle / needs-input (sirio_activity)"
+        - "Agent adapters & hooks (sirio_agents)"
+        - "ACP protocol (sirio_acp)"
+        - "Git & worktrees (sirio_git, sirio_project)"
+        - "Session / settings persistence (sirio_persistence)"
+        - "Control socket & sirioctl (sirio_control)"
+        - "Usage & cost tracking (sirio_usage)"
+        - "Markdown rendering (sirio_markdown)"
+        - "App shell / window / startup (sirio)"
         - "Build, CI or packaging"
         - "Not sure"
     validations:
@@ -87,7 +87,7 @@ body:
     attributes:
       label: Environment
       description: |
-        Tiller renders through gpui, so the display server and GPU driver matter more
+        Sirio renders through gpui, so the display server and GPU driver matter more
         here than in a typical app. `echo $XDG_SESSION_TYPE` gives you wayland or x11.
       value: |
         - Distro / version:

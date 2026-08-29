@@ -4,13 +4,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cd rust
-cargo build -p tiller -p tiller_control
+cargo build -p sirio -p sirio_control
 cd ..
 
-BIN="rust/target/debug/tiller"
-LOG="/tmp/tiller-dev.log"
+BIN="rust/target/debug/sirio"
+LOG="/tmp/sirio-dev.log"
 
-pkill -x tiller || true
+pkill -x sirio || true
 
 # `setsid` keeps the direct process alive on Linux after this script exits.
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -27,7 +27,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   # instead of `rust/target/debug/` sidesteps that; `open`'s own
   # `-o`/`--stderr` redirect the log the way `nohup`'s redirection did for
   # the bare binary.
-  APP="${TMPDIR:-/tmp/}tiller-dev/Tiller.app"
+  APP="${TMPDIR:-/tmp/}sirio-dev/Sirio.app"
   rm -rf "$APP"
   mkdir -p "$APP/Contents/MacOS"
   cat >"$APP/Contents/Info.plist" <<PLIST
@@ -35,14 +35,14 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key><string>dev.tiller.tiller-dev</string>
-  <key>CFBundleName</key><string>Tiller</string>
-  <key>CFBundleExecutable</key><string>tiller</string>
+  <key>CFBundleIdentifier</key><string>dev.sirio.sirio-dev</string>
+  <key>CFBundleName</key><string>Sirio</string>
+  <key>CFBundleExecutable</key><string>sirio</string>
   <key>CFBundlePackageType</key><string>APPL</string>
 </dict>
 </plist>
 PLIST
-  cp "$BIN" "$APP/Contents/MacOS/tiller"
+  cp "$BIN" "$APP/Contents/MacOS/sirio"
   codesign --force --sign - "$APP"
   open -n --stdout "$LOG" --stderr "$LOG" "$APP"
 else
