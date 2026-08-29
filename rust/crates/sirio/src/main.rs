@@ -51,7 +51,7 @@ use sirio_ui::{
     },
     status_bar::{StatusBar, UsageBarData},
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
-    titlebar::{Titlebar, TitlebarEvent},
+    titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
@@ -14366,6 +14366,38 @@ fn startup_window_background(translucency_enabled: bool) -> gpui::WindowBackgrou
     shell_chrome::current_platform_material(translucency_enabled).window_background()
 }
 
+/// What a window-close request does.
+///
+/// A close request is a *question*: gpui asks, and the answer decides
+/// whether the window actually goes away. The two answers are not
+/// interchangeable, and which one is right is a platform convention rather
+/// than a preference -- see [`close_request`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseRequest {
+    /// End the process. The window's close button *is* the application's.
+    Quit,
+    /// Keep the application -- and every pane's PTY -- alive, and minimize
+    /// instead. The tray is the way back in.
+    Minimize,
+}
+
+/// What the titlebar's close button does, per platform.
+///
+/// Pure, and takes the host instead of reading `cfg!` itself, for the
+/// reason [`HostPlatform`]'s own doc gives: a `cfg!` is not a seam, so a
+/// test can only ever reach the branch it happened to be compiled into.
+/// Every branch below is asserted from every host.
+fn close_request(host: HostPlatform) -> CloseRequest {
+    match host {
+        // Windows has no convention where an app outlives its only window:
+        // the `×` ends the program. Minimizing there reads as a bug, and
+        // #290 gave that button to Windows for the first time.
+        HostPlatform::Windows => CloseRequest::Quit,
+        // Both keep the tray-backed behaviour `F-WIN-08` describes.
+        HostPlatform::Macos | HostPlatform::Linux => CloseRequest::Minimize,
+    }
+}
+
 /// The window icon passed to `WindowOptions`. X11 writes it into
 /// `_NET_WM_ICON`; the other platforms ignore it, because their icons have
 /// their own homes — the `.ico` resource on Windows (see `build.rs`) and
@@ -14810,14 +14842,35 @@ fn main() {
                 // F-WIN-08: the Swift original hides the window on close
                 // via an `NSWindowDelegate` and reopens it from the Dock
                 // icon or the menu-bar roster. `PlatformWindow` exposes no
-                // hide/show pair on Linux, so this intercepts the close
-                // request and minimizes instead -- the window (and every
-                // pane's PTY) never actually closes either way.
+                // hide/show pair on Linux, so there the close request is
+                // intercepted and minimizes instead -- the window (and
+                // every pane's PTY) never actually closes.
                 // `window.activate_window()` (see `tray::TrayRequest`'s
                 // handlers above) is the re-show half.
-                window.on_window_should_close(cx, |window, _cx| {
-                    window.minimize_window();
-                    false
+                //
+                // Windows does not share that convention, and carrying it
+                // over made the `×` #290 added look broken: it reduced the
+                // app to a taskbar icon, and the only ways back out were
+                // the tray's Quit and the control socket -- while
+                // `tray::spawn` returning `None` is explicitly tolerated,
+                // which could leave none at all. [`close_request`] holds
+                // that split, and is tested for every host.
+                window.on_window_should_close(cx, |window, cx| {
+                    match close_request(HostPlatform::current()) {
+                        CloseRequest::Quit => {
+                            // The window closing is not itself wired to end
+                            // the process (see `cx.on_app_quit` below, which
+                            // is what terminates control-owned PTYs), so
+                            // this asks for the quit rather than relying on
+                            // the last window going away.
+                            cx.quit();
+                            true
+                        }
+                        CloseRequest::Minimize => {
+                            window.minimize_window();
+                            false
+                        }
+                    }
                 });
                 *workspace_slot
                     .lock()
@@ -14879,6 +14932,28 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    /// The defect this pins: `on_window_should_close` minimized and then
+    /// vetoed the close on *every* platform, so #290's new Windows `×`
+    /// reduced the app to a taskbar icon instead of ending it. The only
+    /// ways out were the tray's Quit and the control socket -- and
+    /// `tray::spawn` is explicitly allowed to return `None`, which left no
+    /// way out at all.
+    #[test]
+    fn the_close_button_ends_the_app_on_windows() {
+        assert_eq!(close_request(HostPlatform::Windows), CloseRequest::Quit);
+    }
+
+    /// The other half of the same decision. Hiding the window and living on
+    /// in the menu bar is the macOS convention the Swift original followed
+    /// (`F-WIN-08`), and Linux keeps it too; only Windows departs. Asserted
+    /// so a later "simplify this to one branch" cannot quietly take the
+    /// tray-backed platforms with it.
+    #[test]
+    fn the_close_button_keeps_the_app_alive_everywhere_else() {
+        assert_eq!(close_request(HostPlatform::Macos), CloseRequest::Minimize);
+        assert_eq!(close_request(HostPlatform::Linux), CloseRequest::Minimize);
+    }
 
     #[test]
     fn a_chat_launches_the_resolved_source_not_a_hardcoded_default() {
