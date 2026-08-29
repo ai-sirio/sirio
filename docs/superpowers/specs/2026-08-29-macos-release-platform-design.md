@@ -137,6 +137,9 @@ rebrand:
 | `LSMinimumSystemVersion` | `15.0` (unchanged from the old bundle) |
 | `CFBundleIconFile` | `icon` |
 | `LSApplicationCategoryType` | `public.app-category.developer-tools` |
+| `CFBundleName` | `Sirio` |
+| `CFBundlePackageType` | `APPL` |
+| `NSHighResolutionCapable` | `true` |
 
 `CFBundleVersion` matching `CFBundleShortVersionString` is not redundancy. They
 have different semantics (user-facing version vs monotonic build number), and
@@ -251,19 +254,50 @@ Most of the original pipeline survives unchanged.
 |---|---|
 | Checkout | verbatim |
 | Check version matches tag | retargeted to `rust/Cargo.toml` |
+| Verify release scripts | new; runs the four `Scripts/Tests/` release tests on the runner before anything is signed |
 | ~~Install XcodeGen~~ | dropped |
-| Unlock login keychain | verbatim |
+| ~~Unlock login keychain~~ | dropped; see below |
 | Run CI gate — `Scripts/ci.sh` | verbatim (now the Rust gate) |
 | Import signing certificate | verbatim |
 | ~~xcodegen + xcodebuild archive + exportArchive~~ | replaced: `cargo build --release --target aarch64-apple-darwin` + `build-app-bundle.sh` |
 | Notarize and staple | verbatim; only the input path changes |
 | Build DMG | `build-dmg.sh` restored, verbatim |
+| Sign, notarize and staple the DMG | new; see below |
+| Upload the DMG | new; the artifact hand-off to `publish` |
 | ~~Generate appcast~~ | deferred (see Out of scope) |
-| Generate changelog | verbatim; the script is still in the tree |
-| Publish release | verbatim, with `ai-sirio/sirio` and the name `Sirio` |
+| ~~Generate changelog~~ | moved to the `publish` job |
+| ~~Publish release~~ | moved to the `publish` job |
 | Clean up keychain | verbatim |
 
-Nine steps unchanged, two retargeted or replaced, two dropped.
+Six steps unchanged, two retargeted or replaced, three new, two moved to the
+`publish` job, three dropped.
+
+**Why the changelog and the release move out of the macOS job.** Publishing is
+the one thing that must not happen until *all three* platforms have produced an
+artifact, and a step inside `macos` cannot wait on `linux` and `windows` — that
+is what a fourth job with `needs: [macos, linux, windows]` expresses. It also
+means the write permission the release call needs lives on a job that compiles
+nothing and runs no third-party code.
+
+**Why the DMG is signed and notarized too.** The `.app` is notarized and stapled
+before the DMG is built, but a notarization ticket is per-artifact: the one on
+`Sirio.app` says nothing about the container it ends up inside. The DMG is what
+the user downloads, so the DMG is what carries the quarantine flag and what
+Gatekeeper evaluates first. Stapling its own ticket makes that check resolve
+offline, so first open works without a live call to Apple. It costs a second
+round-trip on every release.
+
+**Why the login-keychain unlock is gone.** `da9d18da` added that step because the
+Swift app's `KeychainCredentialStore` made the gate fail intermittently against a
+locked keychain. That class went with the Swift app. The only macOS keychain use
+left in the Rust workspace is `keychain_cookie` in
+`rust/crates/sirio_usage/src/opencode_go.rs`, which shells out to
+`security find-generic-password` and returns `None` on any failure, so a locked
+keychain cannot fail the gate. Meanwhile the step unlocked the maintainer's
+personal login keychain before ~400 crates' build scripts and test binaries ran.
+Nothing downstream needs it: the workflow creates its own `ci.keychain` and puts
+it first in the search list, `codesign` finds the identity there, `notarytool`
+authenticates with the API key file, and `stapler` needs no credentials.
 
 The version-vs-tag check sits second on purpose. Ordering steps by increasing
 cost of failure is the same principle as `needs: macos` above: a version
@@ -287,7 +321,6 @@ The repo has no tags yet and the secrets lived in the previous repo, so they
 must be recreated in `ai-sirio/sirio`:
 
 ```
-MAC_LOGIN_KEYCHAIN_PASSWORD          unlocks the login keychain on the runner
 DEVELOPER_ID_CERTIFICATE_P12         certificate, base64
 DEVELOPER_ID_CERTIFICATE_PASSWORD    .p12 password
 KEYCHAIN_PASSWORD                    ephemeral CI keychain
@@ -295,6 +328,11 @@ ASC_API_KEY_P8                       App Store Connect key, base64
 ASC_API_KEY_ID                       key id
 ASC_API_ISSUER_ID                    issuer id
 ```
+
+`MAC_LOGIN_KEYCHAIN_PASSWORD` is deliberately absent from that list. The
+Swift-era pipeline needed it; this one does not, for the reasons under "The macOS
+job, step by step" above. Do not recreate it — adding the secret back is the
+first half of adding the step back.
 
 `SPARKLE_ED_PRIVATE_KEY` is not needed now, but must not be discarded: it is the
 only one that cannot be regenerated without invalidating updates for anyone who
@@ -334,7 +372,7 @@ Scripts/Tests/test-build-dmg.sh                new
 Scripts/Tests/test-check-release-version.sh    new
 Scripts/Tests/test-release-workflow.sh         new
 Scripts/ci-linux.sh                            runs the four new tests
-.github/workflows/release.yml                  rewritten: 3 jobs, needs: macos
+.github/workflows/release.yml                  rewritten: 4 jobs, needs: macos
 CLAUDE.md                                      "What this is" and "Commands" updated
 ```
 
