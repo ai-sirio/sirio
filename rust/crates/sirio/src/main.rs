@@ -482,6 +482,25 @@ enum AsyncScriptStart {
     NotApplicable,
 }
 
+fn browser_script_result(
+    method: &str,
+    verb: Option<&str>,
+    value: String,
+) -> Vec<(String, String)> {
+    if method == "browser.act" {
+        return vec![(
+            "verb".to_string(),
+            verb.unwrap_or_default().to_string(),
+        )];
+    }
+    let key = match method {
+        "browser.console" => "messages",
+        "browser.snapshot" => "snapshot",
+        _ => "result",
+    };
+    vec![(key.to_string(), value)]
+}
+
 fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Option<String> {
     if !BROWSER_CAPABILITIES.contains(&method) {
         return Some(format!(
@@ -4235,7 +4254,7 @@ impl SirioWorkspace {
                                     params,
                                     reply,
                                 } => {
-                                    workspace.dispatch_browser_action(
+                                    workspace.handle_browser_action(
                                         &method, &params, reply, window, cx,
                                     );
                                 }
@@ -8328,19 +8347,12 @@ impl SirioWorkspace {
         browser
     }
 
-    /// Answers a `browser.*` control action, **either now or later** (#142).
+    /// Answers a `browser.*` socket action, **either now or later** (#300).
     ///
-    /// The four script-based methods — `eval`, `console`, `snapshot`, `act` —
-    /// cannot be answered synchronously off Linux: waiting on the result
-    /// blocks the very thread the engine needs in order to deliver it, so the
-    /// script runs and the answer never arrives. Off Linux they hand `reply`
-    /// to the engine's completion callback and this returns immediately;
-    /// `queue_action` is already waiting on that channel from the socket
-    /// thread, so a late answer needs nothing new from the protocol.
-    ///
-    /// Linux keeps its GTK pump and the synchronous path unchanged, until the
-    /// async one is proven on hardware there.
-    fn dispatch_browser_action(
+    /// Script results are handed to the engine callback on macOS and Windows,
+    /// so this GPUI handler never waits on the platform thread. Linux keeps
+    /// the GTK-pumping synchronous path until the async path is proven there.
+    fn handle_browser_action(
         &mut self,
         method: &str,
         params: &BTreeMap<String, String>,
@@ -8358,7 +8370,7 @@ impl SirioWorkspace {
             AsyncScriptStart::NotApplicable => {}
         }
 
-        let result = self.handle_browser_action(method, params, window, cx);
+        let result = self.handle_browser_action_sync(method, params, window, cx);
         let _ = reply.send(result);
     }
 
@@ -8377,7 +8389,7 @@ impl SirioWorkspace {
         // The same validation the synchronous arms do, kept ahead of dispatch
         // so a bad request still fails with its own message rather than
         // reaching the engine.
-        let (script, key) = match method {
+        let script = match method {
             "browser.eval" => {
                 let Some(script) = params
                     .get("script")
@@ -8388,13 +8400,10 @@ impl SirioWorkspace {
                         "browser.eval requires a non-empty script".to_string(),
                     );
                 };
-                (script.clone(), "result")
+                script.clone()
             }
-            "browser.console" => (
-                "JSON.stringify(window.__sirioConsole || [])".to_string(),
-                "messages",
-            ),
-            "browser.snapshot" => (BROWSER_SNAPSHOT_SCRIPT.to_string(), "snapshot"),
+            "browser.console" => "JSON.stringify(window.__sirioConsole || [])".to_string(),
+            "browser.snapshot" => BROWSER_SNAPSHOT_SCRIPT.to_string(),
             "browser.act" => {
                 if params
                     .get("driving")
@@ -8410,7 +8419,7 @@ impl SirioWorkspace {
                     .or_else(|| params.get("value"))
                     .map(String::as_str);
                 match browser_act_script(verb, selector, text) {
-                    Ok(script) => (script, "verb"),
+                    Ok(script) => script,
                     Err(error) => {
                         return AsyncScriptStart::Failed(format!("{method} failed: {error}"));
                     }
@@ -8427,13 +8436,15 @@ impl SirioWorkspace {
         // the script evaluated to.
         let verb_payload =
             (method == "browser.act").then(|| params.get("verb").cloned().unwrap_or_default());
+        let method_for_callback = method.to_string();
         let reply = reply.clone();
         let started = browser.update(cx, |surface, _| {
             surface.evaluate_script_async(&script, move |value| {
-                let payload = match verb_payload {
-                    Some(verb) => vec![("verb".to_string(), verb)],
-                    None => vec![(key.to_string(), value)],
-                };
+                let payload = browser_script_result(
+                    &method_for_callback,
+                    verb_payload.as_deref(),
+                    value,
+                );
                 let _ = reply.send(Ok(payload));
             })
         });
@@ -8444,7 +8455,7 @@ impl SirioWorkspace {
         }
     }
 
-    fn handle_browser_action(
+    fn handle_browser_action_sync(
         &mut self,
         method: &str,
         params: &BTreeMap<String, String>,
@@ -22704,6 +22715,31 @@ mod tests {
             );
             assert!(control_actions.lock().expect("action queue").is_empty());
         }
+    }
+
+    #[test]
+    fn browser_script_callbacks_keep_socket_payload_keys() {
+        let params = BTreeMap::from([(String::from("verb"), String::from("click"))]);
+        assert_eq!(
+            browser_script_result("browser.eval", None, "42".to_string()),
+            vec![(String::from("result"), String::from("42"))]
+        );
+        assert_eq!(
+            browser_script_result("browser.console", None, "[]".to_string()),
+            vec![(String::from("messages"), String::from("[]"))]
+        );
+        assert_eq!(
+            browser_script_result("browser.snapshot", None, "{}".to_string()),
+            vec![(String::from("snapshot"), String::from("{}"))]
+        );
+        assert_eq!(
+            browser_script_result(
+                "browser.act",
+                params.get("verb").map(String::as_str),
+                "true".to_string(),
+            ),
+            vec![(String::from("verb"), String::from("click"))]
+        );
     }
 
     /// F-CTRL-BROWSER-05: `browser.act`'s click/fill/type/press/scroll verbs
