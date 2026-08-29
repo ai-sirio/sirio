@@ -6522,6 +6522,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "image",
  "libc",
  "libghostty-vt",
  "parking_lot",
