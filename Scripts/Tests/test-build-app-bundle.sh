@@ -53,7 +53,7 @@ for value in dev.sirio.Sirio 15.0 public.app-category.developer-tools; do
 done
 
 # The version belongs in both CFBundleShortVersionString and CFBundleVersion.
-COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST")
+COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST" || true)
 if [ "$COUNT" != "2" ]; then
   echo "FAIL: expected the version in both version keys, found $COUNT" >&2
   cat "$PLIST" >&2
@@ -70,5 +70,19 @@ if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" >/dev/nul
   echo "FAIL: a missing binary must exit non-zero" >&2
   exit 1
 fi
+
+# Asserted by the error message rather than just a non-zero exit, because every
+# later guard in the script would also reject this invocation — the point is
+# that the *version* is what gets named. An empty version otherwise substitutes
+# into `<string></string>` in both version keys and yields a bundle that signs,
+# notarizes and launches with no version anywhere a user or Sparkle can read one.
+ERR=$("$BUNDLE_SCRIPT" "$FIXTURE/sirio" "" "$FIXTURE/Y.app" 2>&1 >/dev/null || true)
+case "$ERR" in
+  *"version must not be empty"*) ;;
+  *)
+    echo "FAIL: an empty version must be rejected by name, got: $ERR" >&2
+    exit 1
+    ;;
+esac
 
 echo "PASS: app bundle layout and signing flags"
