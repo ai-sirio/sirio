@@ -1,7 +1,7 @@
 # Browser parity on macOS and Windows
 
 Implementable spec produced by wayfinder map
-[#125](https://github.com/tillerai/tiller/issues/125). Every requirement below
+[#125](https://github.com/ai-sirio/sirio/issues/125). Every requirement below
 traces to a closed decision ticket; this document assembles them, it does not
 re-decide them.
 
@@ -18,17 +18,17 @@ where they differ.
 
 Everything here was measured on a real build, not inferred. Linux under forced
 X11; macOS on the dev Mac; Windows on the ARM64 VM from
-[#129](https://github.com/tillerai/tiller/issues/129).
+[#129](https://github.com/ai-sirio/sirio/issues/129).
 
 | | Linux (X11) | macOS | Windows |
 |---|---|---|---|
 | build | ✅ | ✅ | ✅ `aarch64-pc-windows-msvc` |
 | webview attaches | ✅ | ✅ | ✅ |
 | page loads | ✅ | ✅ | ✅ |
-| **page paints** | ✅ | ✅ | ❌ [#144](https://github.com/tillerai/tiller/issues/144) |
-| geometry: resize/clip/tab-switch | ✅ | ✅ [#139](https://github.com/tillerai/tiller/issues/139) | not yet re-tested |
-| geometry: scale change | ✅ | ❌ [#141](https://github.com/tillerai/tiller/issues/141) | ❌ [#146](https://github.com/tillerai/tiller/issues/146) |
-| `eval`/`snapshot`/`act`/`console` | ✅ | ❌ [#135](https://github.com/tillerai/tiller/issues/135) | ❌ [#147](https://github.com/tillerai/tiller/issues/147) |
+| **page paints** | ✅ | ✅ | ❌ [#144](https://github.com/ai-sirio/sirio/issues/144) |
+| geometry: resize/clip/tab-switch | ✅ | ✅ [#139](https://github.com/ai-sirio/sirio/issues/139) | not yet re-tested |
+| geometry: scale change | ✅ | ❌ [#141](https://github.com/ai-sirio/sirio/issues/141) | ❌ [#146](https://github.com/ai-sirio/sirio/issues/146) |
+| `eval`/`snapshot`/`act`/`console` | ✅ | ❌ [#135](https://github.com/ai-sirio/sirio/issues/135) | ❌ [#147](https://github.com/ai-sirio/sirio/issues/147) |
 
 `browser.screenshot` is unsupported everywhere by decision, and `browser.errors`
 has no dispatch arm on any platform — both out of scope, see below.
@@ -45,7 +45,7 @@ has no dispatch arm on any platform — both out of scope, see below.
 - **R1.3** `TabKind::Browser` gets its own icon. It currently falls through
   `sidebar.rs:2606-2610`'s catch-all and draws the chat icon.
 
-### 2. Windows hosting — [#145](https://github.com/tillerai/tiller/issues/145), ADR 0002
+### 2. Windows hosting — [#145](https://github.com/ai-sirio/sirio/issues/145), ADR 0002
 
 GPUI creates its Windows window with `WS_EX_NOREDIRECTIONBITMAP` and composes
 through DirectComposition, so the DWM never shows an ordinary child HWND — which
@@ -63,7 +63,7 @@ is exactly what wry's `build_as_child` produces.
   `"WKWebView child failed"`. Two proven divergences make this a pattern, not an
   edge case.
 
-### 3. Geometry — [#141](https://github.com/tillerai/tiller/issues/141)/[#143](https://github.com/tillerai/tiller/issues/143), measured by [#146](https://github.com/tillerai/tiller/issues/146)
+### 3. Geometry — [#141](https://github.com/ai-sirio/sirio/issues/141)/[#143](https://github.com/ai-sirio/sirio/issues/143), measured by [#146](https://github.com/ai-sirio/sirio/issues/146)
 
 `native_webview_rect` (`browser.rs:1971-1988`) is not platform-gated and
 multiplies by `scale_factor` on every platform. That is right for exactly one of
@@ -87,7 +87,7 @@ the three.
   on every platform and so defends the bug.
 - **R3.6** The untested identity requirement gets its own test.
 
-### 4. Scripting — [#135](https://github.com/tillerai/tiller/issues/135)/[#147](https://github.com/tillerai/tiller/issues/147)
+### 4. Scripting — [#135](https://github.com/ai-sirio/sirio/issues/135)/[#147](https://github.com/ai-sirio/sirio/issues/147)
 
 `wait_for_script_result` (`browser.rs:897-931`) pumps GTK on Linux and blocks on
 `recv_timeout` everywhere else — on the very thread the engine needs to deliver
@@ -119,7 +119,7 @@ guaranteed timeout.
   currently returns `ok:true` regardless (`main.rs:8086-8093`).
 - **R5.3** Error strings stop saying `"WKWebView child failed"` on Windows.
 
-### 6. Profile and permissions — [#137](https://github.com/tillerai/tiller/issues/137), [#138](https://github.com/tillerai/tiller/issues/138), [#140](https://github.com/tillerai/tiller/issues/140)
+### 6. Profile and permissions — [#137](https://github.com/ai-sirio/sirio/issues/137), [#138](https://github.com/ai-sirio/sirio/issues/138), [#140](https://github.com/ai-sirio/sirio/issues/140)
 
 - **R6.1** One shared profile, not per-worktree, scoped by the session
   database's rule: explicit override → the checkout containing the running
