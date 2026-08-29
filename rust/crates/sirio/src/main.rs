@@ -49,7 +49,7 @@ use sirio_ui::{
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize},
     },
-    status_bar::{StatusBar, UsageBarData},
+    status_bar::{StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData},
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
@@ -61,7 +61,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
@@ -930,6 +930,9 @@ enum WorkspaceAction {
     NewChatAgent(&'static str),
     InstallSkill(sirio_project::SkillInstallCommand),
     OpenSettings,
+    /// Opens the General settings update detail from the status-bar
+    /// indicator; it never starts an update operation itself.
+    OpenUpdateSettings,
     /// F-TAB-08: clicking the New Chat menu's "Other agents…" empty-state
     /// card (drawn when no supported agent is on PATH) opens Settings
     /// straight to the Agents section instead of the general default.
@@ -4047,6 +4050,9 @@ impl SirioWorkspace {
                                 }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
+                                }
+                                WorkspaceAction::OpenUpdateSettings => {
+                                    workspace.open_settings(Some(SettingsCategory::General), cx);
                                 }
                                 WorkspaceAction::OpenAgentSettings => {
                                     workspace.open_settings(Some(SettingsCategory::Agents), cx);
@@ -14342,6 +14348,9 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
             sirio_ui::settings::FileIconChoice::Material => FileIconTheme::Material,
         },
         control_socket_enabled: snapshot.control_socket_enabled,
+        // `SettingsSnapshot` carries only UI-owned values; the update opt-out
+        // is persisted by its dedicated host callback.
+        updates_enabled: true,
         resume_agent_sessions: snapshot.resume_agent_sessions,
         auto_naming: snapshot.auto_naming,
         limit_chat_history: snapshot.limit_chat_history,
@@ -14362,6 +14371,53 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         // dragged panel every time any unrelated setting changed.
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
+    }
+}
+
+fn format_update_check_age(now: SystemTime, checked_at: SystemTime) -> String {
+    let age = now
+        .duration_since(checked_at)
+        .unwrap_or(Duration::ZERO);
+    if age < Duration::from_secs(60) {
+        "just now".into()
+    } else if age < Duration::from_secs(60 * 60) {
+        format!("{} minutes ago", age.as_secs() / 60)
+    } else if age < Duration::from_secs(60 * 60 * 24) {
+        format!("{} hours ago", age.as_secs() / (60 * 60))
+    } else {
+        format!("{} days ago", age.as_secs() / (60 * 60 * 24))
+    }
+}
+
+fn ui_update_state_from_check(
+    previous: &UiUpdateState,
+    result: Result<sirio_update::CheckResult, sirio_update::UpdateError>,
+    checked_at: Option<SystemTime>,
+    now: SystemTime,
+) -> UiUpdateState {
+    let status = match result {
+        Ok(sirio_update::CheckResult::Disabled) => UiUpdateStatus::Disabled,
+        Ok(sirio_update::CheckResult::NotDue) => previous.status.clone(),
+        Ok(sirio_update::CheckResult::UpToDate) => UiUpdateStatus::UpToDate,
+        Ok(sirio_update::CheckResult::Available(update)) => UiUpdateStatus::Available {
+            version: update.version,
+            notes: update.notes,
+        },
+        Ok(sirio_update::CheckResult::Ready(update)) => UiUpdateStatus::Ready {
+            version: update.version,
+            notes: update.notes,
+        },
+        Err(error) => UiUpdateStatus::Failed {
+            message: error.to_string(),
+        },
+    };
+    UiUpdateState {
+        enabled: previous.enabled,
+        channel: previous.channel.clone(),
+        status,
+        last_checked: checked_at
+            .map(|checked_at| format_update_check_age(now, checked_at))
+            .or_else(|| previous.last_checked.clone()),
     }
 }
 
@@ -14541,6 +14597,7 @@ fn main() {
         let pending_actions = Arc::new(Mutex::new(Vec::<WorkspaceAction>::new()));
         let pending_for_tab_bar = pending_actions.clone();
         let pending_for_status_bar = pending_actions.clone();
+        let pending_for_update_settings = pending_actions.clone();
         let pending_for_settings = pending_actions.clone();
         let pending_for_settings_change = pending_actions.clone();
         let pending_for_titlebar = pending_actions.clone();
@@ -14599,9 +14656,22 @@ fn main() {
         control_socket.set_enabled(saved_settings.control_socket_enabled);
         let session_store_for_window = session_store.clone();
         let session_store_for_settings = session_store.clone();
+        let session_store_for_update_enabled = session_store.clone();
         let session_store_for_browser_revoke = session_store.clone();
         let control_socket_for_settings = control_socket.clone();
         let browser_origins_for_settings = session_store.load_browser_origin_grants();
+        let initial_update_state = UiUpdateState {
+            enabled: saved_settings.updates_enabled,
+            channel: sirio_control::ReleaseChannel::RELEASE_CHANNEL
+                .as_str()
+                .to_owned(),
+            status: if sirio_control::ReleaseChannel::RELEASE_CHANNEL.updates_enabled() {
+                UiUpdateStatus::NotDue
+            } else {
+                UiUpdateStatus::Disabled
+            },
+            last_checked: None,
+        };
         // F-PERSIST-DB-06: the account-identity cache lives in the same
         // database file the session store already opened above.
         let database_path_for_settings = database_path.clone();
@@ -14737,9 +14807,15 @@ fn main() {
                         .with_preferences(sirio_ui::status_bar::UsageBarPrefs::from_snapshot(
                             &settings_snapshot,
                         ))
+                        .with_update_state(initial_update_state.clone())
                         .on_settings(move || {
                             if let Ok(mut actions) = pending_for_status_bar.lock() {
                                 actions.push(WorkspaceAction::OpenSettings);
+                            }
+                        })
+                        .on_update(move || {
+                            if let Ok(mut actions) = pending_for_update_settings.lock() {
+                                actions.push(WorkspaceAction::OpenUpdateSettings);
                             }
                         })
                 });
@@ -14747,8 +14823,14 @@ fn main() {
                     Settings::with_snapshot(cx, settings_snapshot)
                         .with_version(sirio_control::VERSION)
                         .with_channel(sirio_control::ReleaseChannel::RELEASE_CHANNEL.as_str())
+                        .with_update_state(initial_update_state.clone())
                         .with_browser_origins(browser_origins_for_settings.clone())
                         .with_database_path(database_path_for_settings.clone())
+                        .on_update_enabled_change(move |enabled| {
+                            let mut settings = session_store_for_update_enabled.load_settings();
+                            settings.updates_enabled = enabled;
+                            session_store_for_update_enabled.save_settings(&settings);
+                        })
                         .on_install_skill({
                             let pending_actions = pending_for_settings.clone();
                             move |command| {
@@ -14770,6 +14852,10 @@ fn main() {
                             }
                             let stored = session_store_for_settings.load_settings();
                             let mut settings = app_settings_from_snapshot(snapshot);
+                            // Update opt-out is owned by the update callback,
+                            // not SettingsSnapshot; preserve it when another
+                            // setting is saved.
+                            settings.updates_enabled = stored.updates_enabled;
                             settings.sidebar_width = stored.sidebar_width;
                             settings.right_panel_width = stored.right_panel_width;
                             session_store_for_settings.save_settings(&settings);
@@ -20928,13 +21014,53 @@ mod tests {
     }
 
     #[test]
-    fn persisted_settings_round_trip_maps_all_nineteen_fields_explicitly() {
+    fn host_update_check_results_become_ui_state_with_fresh_details() {
+        let previous = UiUpdateState {
+            enabled: true,
+            channel: "nightly".into(),
+            status: UiUpdateStatus::Checking,
+            last_checked: None,
+        };
+        let result = ui_update_state_from_check(
+            &previous,
+            Ok(sirio_update::CheckResult::Available(
+                sirio_update::AvailableUpdate {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                    artifact: sirio_release::ManifestArtifact {
+                        url: "https://example.invalid/sirio".into(),
+                        sha256: "00".repeat(32),
+                        signature: "A".repeat(88),
+                    },
+                },
+            )),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+        );
+
+        assert_eq!(
+            result,
+            UiUpdateState {
+                enabled: true,
+                channel: "nightly".into(),
+                status: UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                },
+                last_checked: Some("just now".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn persisted_settings_round_trip_maps_all_twenty_fields_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
+            updates_enabled: true,
             resume_agent_sessions: false,
             auto_naming: true,
             limit_chat_history: false,
@@ -21043,6 +21169,7 @@ mod tests {
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
+            updates_enabled: true,
             resume_agent_sessions: false,
             auto_naming: true,
             limit_chat_history: false,
