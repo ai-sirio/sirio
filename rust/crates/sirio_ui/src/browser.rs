@@ -1167,6 +1167,11 @@ pub struct BrowserSurface {
     /// PageLoad(Finished) address resync below from clobbering a caret or
     /// selection the user is actively editing.
     address_focused: bool,
+    /// The address field's insertion caret. The field is a full text editor
+    /// (selection, click-to-place, select-all), so it blinks like every
+    /// other editable surface rather than holding a permanently-solid bar.
+    address_blink: sirio_ui::caret::Blink,
+    address_caret_visible: bool,
     webview: SharedWebView,
     /// R6.2/R6.3: the engine's profile context, held for the surface's life.
     /// `WebViewBuilder` only borrows it while building, so this is ownership
@@ -1234,6 +1239,8 @@ impl BrowserSurface {
             address_focus: cx.focus_handle(),
             address_dragging: false,
             address_focused: false,
+            address_blink: sirio_ui::caret::Blink::new(),
+            address_caret_visible: false,
             webview,
             _web_context: web_context,
             webview_scale_correction: Rc::new(Cell::new(None)),
@@ -1569,6 +1576,7 @@ impl BrowserSurface {
     }
 
     fn on_address_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.address_blink.wake();
         if event.keystroke.key == "a"
             && (event.keystroke.modifiers.control || event.keystroke.modifiers.platform)
         {
@@ -1681,6 +1689,12 @@ impl BrowserSurface {
         drained
     }
 
+    /// Blink timer tick for the address field's insertion caret.
+    fn flip_address_blink(&mut self, cx: &mut Context<Self>) {
+        self.address_blink.flip();
+        cx.notify();
+    }
+
     fn render_toolbar(&self, theme: Theme, entity: gpui::Entity<Self>) -> impl IntoElement {
         let address_focus = self.address_focus.clone();
         let address_entity = entity.clone();
@@ -1693,6 +1707,7 @@ impl BrowserSurface {
             self.address_editor.text().to_owned(),
             self.address_editor.selection(),
             self.address_editor.caret,
+            self.address_caret_visible,
             address_focus.clone(),
             theme,
         );
@@ -1847,6 +1862,13 @@ impl Render for BrowserSurface {
         // the focus system directly; pump_web_events (a background timer
         // task) reads this snapshot instead of calling is_focused itself.
         self.address_focused = self.address_focus.is_focused(window);
+        sirio_ui::caret::schedule(
+            &mut self.address_blink,
+            self.address_focused,
+            Self::flip_address_blink,
+            cx,
+        );
+        self.address_caret_visible = self.address_focused && self.address_blink.visible();
         let entity = cx.entity();
         let permission = self.state.permission_prompt().cloned();
         let webview = NativeWebViewElement::new(
@@ -1965,6 +1987,10 @@ struct AddressTextElement {
     text: SharedString,
     selection: Range<usize>,
     caret: usize,
+    /// Resolved by `BrowserSurface::render` (focus × blink phase) rather
+    /// than re-derived here: prepaint runs on every frame the toolbar is
+    /// drawn, and the blink is the surface's state, not the element's.
+    caret_visible: bool,
     focus: FocusHandle,
     theme: Theme,
 }
@@ -1983,6 +2009,7 @@ impl AddressTextElement {
         text: String,
         selection: Range<usize>,
         caret: usize,
+        caret_visible: bool,
         focus: FocusHandle,
         theme: Theme,
     ) -> Self {
@@ -1991,6 +2018,7 @@ impl AddressTextElement {
             text: text.into(),
             selection,
             caret,
+            caret_visible,
             focus,
             theme,
         }
@@ -2066,7 +2094,7 @@ impl Element for AddressTextElement {
         } else {
             None
         };
-        let cursor = if selection_start == selection_end && self.focus.is_focused(window) {
+        let cursor = if selection_start == selection_end && self.caret_visible {
             let caret = self.caret.min(self.text.len());
             Some(fill(
                 Bounds::new(

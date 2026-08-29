@@ -359,6 +359,7 @@ pub(super) fn render_chip_popup(
 /// `on_search_key`.
 pub(super) fn render_paths_popup(
     draft: &str,
+    caret_visible: bool,
     focus: &FocusHandle,
     entity: Entity<GitHistory>,
     theme: Theme,
@@ -396,11 +397,21 @@ pub(super) fn render_paths_popup(
                 } else {
                     theme.title
                 })
+                .flex()
+                .items_center()
                 .child(if draft.is_empty() {
                     "Path or glob".to_owned()
                 } else {
                     draft.to_owned()
-                }),
+                })
+                // Same `caret::bar` the search row above uses: it always
+                // occupies layout, so the pathspec does not shift by two
+                // pixels every half second as the bar blinks.
+                .child(
+                    div()
+                        .debug_selector(|| "history-path-caret".to_owned())
+                        .child(crate::caret::bar(px(14.0), theme.title, caret_visible)),
+                ),
         )
 }
 
@@ -472,7 +483,7 @@ pub(super) fn render_toolbar(
         &history.search_draft,
         history.search_regex,
         history.search_case_sensitive,
-        history.search_blink.visible(),
+        history.search_caret_visible,
         history.search_focus_handle(),
         entity.clone(),
         theme,
@@ -523,6 +534,7 @@ pub(super) fn render_toolbar(
         if open == FilterChip::Paths {
             chip_row = chip_row.child(render_paths_popup(
                 &history.path_draft,
+                history.path_caret_visible,
                 history.path_focus_handle(),
                 entity.clone(),
                 theme,

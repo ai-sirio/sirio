@@ -3720,6 +3720,16 @@ struct SirioWorkspace {
     /// the visibility stashed for this frame's `render_title_prompt`.
     modal_field_blink: sirio_ui::caret::Blink,
     modal_caret_visible: bool,
+    /// The command palette's filter field is a text field like any other —
+    /// it takes typed characters through `handle_palette_key` — so it owns
+    /// a blink and this frame's bar visibility, resolved in `render` where
+    /// a `Window` exists and stashed for `render_command_palette`.
+    palette_field_blink: sirio_ui::caret::Blink,
+    palette_caret_visible: bool,
+    /// The inline tab-rename field's caret. Only one tab renames at a time,
+    /// so one blink covers the whole strip.
+    tab_rename_blink: sirio_ui::caret::Blink,
+    tab_rename_caret_visible: bool,
     palette_open: bool,
     palette_query: String,
     palette_selected: usize,
@@ -4432,6 +4442,10 @@ impl SirioWorkspace {
             pending_title_prompt: None,
             modal_field_blink: sirio_ui::caret::Blink::new(),
             modal_caret_visible: false,
+            palette_field_blink: sirio_ui::caret::Blink::new(),
+            palette_caret_visible: false,
+            tab_rename_blink: sirio_ui::caret::Blink::new(),
+            tab_rename_caret_visible: false,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -10083,6 +10097,7 @@ impl SirioWorkspace {
         renaming: bool,
         rename_draft: Option<&str>,
         rename_focus: Option<FocusHandle>,
+        rename_caret_visible: bool,
         entity: Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -10238,7 +10253,18 @@ impl SirioWorkspace {
                                 workspace.handle_tab_rename_key(event, window, cx)
                             });
                         })
-                        .child(draft),
+                        .flex()
+                        .items_center()
+                        .child(draft)
+                        .child(
+                            div()
+                                .debug_selector(|| "tab-rename-caret".to_owned())
+                                .child(sirio_ui::caret::bar(
+                                    px(14.0),
+                                    theme.accent,
+                                    rename_caret_visible,
+                                )),
+                        ),
                 )
             })
             .child(
@@ -10867,6 +10893,18 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// Blink timer tick for the command palette's filter field.
+    fn flip_palette_blink(&mut self, cx: &mut Context<Self>) {
+        self.palette_field_blink.flip();
+        cx.notify();
+    }
+
+    /// Blink timer tick for the inline tab-rename field.
+    fn flip_tab_rename_blink(&mut self, cx: &mut Context<Self>) {
+        self.tab_rename_blink.flip();
+        cx.notify();
+    }
+
     fn handle_title_prompt_key(
         &mut self,
         event: &KeyDownEvent,
@@ -10929,6 +10967,7 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.tab_rename_blink.wake();
         let key = event.keystroke.key.as_str();
         match key {
             "enter" | "return" => self.commit_tab_rename(window, cx),
@@ -11216,6 +11255,7 @@ impl SirioWorkspace {
                 renaming,
                 rename_draft,
                 rename_focus,
+                self.tab_rename_caret_visible,
                 entity.clone(),
                 theme,
             ));
@@ -12187,6 +12227,7 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.palette_field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.close_command_palette(window, cx);
@@ -12542,7 +12583,18 @@ impl SirioWorkspace {
                         "Type to filter commands".to_owned()
                     } else {
                         query
-                    }),
+                    })
+                    // `caret::bar`, so the query text does not shift by two
+                    // pixels every half second as the bar blinks.
+                    .child(
+                        div()
+                            .debug_selector(|| "command-palette-caret".to_owned())
+                            .child(sirio_ui::caret::bar(
+                                px(18.0),
+                                theme.accent,
+                                self.palette_caret_visible,
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -12861,6 +12913,25 @@ impl Render for SirioWorkspace {
             cx,
         );
         self.modal_caret_visible = modal_focused && self.modal_field_blink.visible();
+        let palette_focused = self.palette_open && self.palette_focus.is_focused(window);
+        sirio_ui::caret::schedule(
+            &mut self.palette_field_blink,
+            palette_focused,
+            Self::flip_palette_blink,
+            cx,
+        );
+        self.palette_caret_visible = palette_focused && self.palette_field_blink.visible();
+        let tab_rename_focused = self
+            .tab_rename
+            .as_ref()
+            .is_some_and(|rename| rename.focus.is_focused(window));
+        sirio_ui::caret::schedule(
+            &mut self.tab_rename_blink,
+            tab_rename_focused,
+            Self::flip_tab_rename_blink,
+            cx,
+        );
+        self.tab_rename_caret_visible = tab_rename_focused && self.tab_rename_blink.visible();
         // Fetched fresh every frame from the global, so a change of appearance
         // is picked up without the workspace holding a stale copy.
         let theme = *Theme::get(cx);
@@ -17472,6 +17543,45 @@ mod tests {
         );
     }
 
+    /// The palette's filter row takes typed characters through
+    /// `handle_palette_key`, so it is a text field — but it drew no
+    /// insertion bar at all, in the one surface a user reaches by typing.
+    #[gpui::test]
+    async fn the_command_palette_filter_draws_a_blinking_caret(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        open_palette_for_test(&mut cx, &workspace);
+
+        assert!(
+            cx.debug_bounds("command-palette-caret").is_some(),
+            "the filter row accepts typing, so it must show where it lands"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.palette_caret_visible),
+            "and the bar is lit while the palette holds focus"
+        );
+
+        cx.cx.executor().advance_clock(sirio_ui::caret::BLINK_INTERVAL);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            !workspace.read_with(&cx.cx, |workspace, _| workspace.palette_caret_visible),
+            "one interval later it is dark — the bar blinks rather than sitting solid"
+        );
+    }
+
     #[gpui::test]
     async fn drawn_palette_filters_and_dispatches_sidebar_action_through_shell_route(
         cx: &mut TestAppContext,
@@ -17702,6 +17812,15 @@ mod tests {
         assert!(cx.debug_bounds("tab-rename-field").is_some());
         // While the rename field is open, focus is on it, not the terminal.
         assert!(!cx.update(|window, _| focus.is_focused(window)));
+        // …and because it holds focus and takes typing, it draws a caret.
+        assert!(
+            cx.debug_bounds("tab-rename-caret").is_some(),
+            "the rename field must show where the next character lands"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_rename_caret_visible),
+            "and the bar is lit while it holds focus"
+        );
 
         cx.simulate_input(" renamed");
         cx.simulate_keystrokes("enter");

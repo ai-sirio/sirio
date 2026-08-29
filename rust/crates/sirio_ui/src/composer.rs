@@ -352,6 +352,42 @@ impl Composer {
         )
     }
 
+    /// The selected slice of part `index`'s text run, as char offsets, or
+    /// `None` when that part holds no selected characters. `len` is the
+    /// part's own char count: the renderer has already counted it, and
+    /// re-counting here would walk every run twice per frame.
+    ///
+    /// This is the seam the renderer draws the selection through — the
+    /// `Cursor` ordering that decides what is inside a selection stays in
+    /// this module rather than being re-derived at each paint site.
+    pub(crate) fn selected_span_in_part(&self, index: usize, len: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.selected_range()?;
+        if index < start.part || index > end.part {
+            return None;
+        }
+        let lo = if index == start.part {
+            start.offset.min(len)
+        } else {
+            0
+        };
+        let hi = if index == end.part {
+            end.offset.min(len)
+        } else {
+            len
+        };
+        (lo < hi).then_some((lo, hi))
+    }
+
+    /// Whether the chip at `index` falls inside the selection. A chip is one
+    /// indivisible document position, so it is wholly selected or not at
+    /// all — never half-shaded.
+    pub(crate) fn chip_is_selected(&self, index: usize) -> bool {
+        let Some((start, end)) = self.selected_range() else {
+            return false;
+        };
+        start.part <= index && index < end.part
+    }
+
     pub(crate) fn delete_selected(&mut self) -> bool {
         let Some((start, end)) = self.selected_range() else {
             return false;
@@ -555,6 +591,44 @@ mod tests {
         composer.select_all();
         assert!(composer.delete_selected());
         assert!(composer.is_empty());
+    }
+
+    /// What the renderer asks the model in order to shade a selection.
+    /// Select-all covers every run and every chip; a shift-left from the
+    /// end covers only the characters actually crossed.
+    #[test]
+    fn the_selected_span_of_each_part_is_what_the_renderer_shades() {
+        let mut composer = Composer::new();
+        composer.insert_text("ab");
+        composer.insert_chip_at_cursor(skill("cr"));
+        composer.insert_text("cd");
+
+        assert_eq!(
+            composer.selected_span_in_part(0, 2),
+            None,
+            "nothing is selected yet"
+        );
+        assert!(!composer.chip_is_selected(1));
+
+        composer.select_all();
+        assert_eq!(composer.selected_span_in_part(0, 2), Some((0, 2)));
+        assert!(composer.chip_is_selected(1));
+        assert_eq!(composer.selected_span_in_part(2, 2), Some((0, 2)));
+
+        // One shift-left from the end selects exactly the final character:
+        // the chip and everything before it stay unselected.
+        composer.move_end(false);
+        composer.move_left(true);
+        assert_eq!(
+            composer.selected_span_in_part(2, 2),
+            Some((1, 2)),
+            "only the crossed character is shaded"
+        );
+        assert_eq!(composer.selected_span_in_part(0, 2), None);
+        assert!(
+            !composer.chip_is_selected(1),
+            "a chip outside the range is never half-shaded"
+        );
     }
 
     #[test]

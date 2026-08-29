@@ -4,6 +4,14 @@
 //! and do not edit it from a piece worktree — the integrator owns it.
 
 pub mod browser;
+// `src/browser.rs` is compiled twice: once as this crate's `browser` module,
+// and once as a bare `mod browser;` inside the `browser_*` examples, whose
+// crate root is the example itself. A `crate::` path therefore resolves to
+// two different roots and breaks the example build — so browser.rs addresses
+// shared modules by this crate's own name, which this alias makes valid from
+// inside the crate as well.
+extern crate self as sirio_ui;
+
 pub mod caret;
 pub mod changes;
 pub mod chat;

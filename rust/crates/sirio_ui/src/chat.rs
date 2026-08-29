@@ -1005,6 +1005,16 @@ pub struct Chat {
     composer_focus: FocusHandle,
     /// F-CHAT-25: the question answer field (focus, draft, owner request).
     question_answer: QuestionAnswerState,
+    /// The answer field's own caret. It lives on `Chat` rather than inside
+    /// `QuestionAnswerState` because that struct is cloned once per frame
+    /// for the render closure, and blink state must not be duplicated —
+    /// one surface, one `Blink`, one timer.
+    answer_blink: caret::Blink,
+    answer_caret_visible: bool,
+    /// The model picker's search row: a third editable surface, with its own
+    /// focus handle, so it gets its own blink and its own timer.
+    model_search_blink: caret::Blink,
+    model_search_caret_visible: bool,
     streaming: bool,
     /// Wall-clock origin of the current streaming-border revolution, read
     /// through `cx.background_executor().now()` so it stays fakeable under
@@ -1262,6 +1272,10 @@ impl Chat {
             entries: Vec::new(),
             composer: Composer::new(),
             composer_blink: caret::Blink::new(),
+            answer_blink: caret::Blink::new(),
+            answer_caret_visible: false,
+            model_search_blink: caret::Blink::new(),
+            model_search_caret_visible: false,
             composer_caret_sig: (0, 0, 0),
             composer_focus: cx.focus_handle().tab_stop(true),
             question_answer: QuestionAnswerState {
@@ -3530,6 +3544,7 @@ impl Chat {
         // question, printable characters type. This mirrors the composer's
         // own fallback handling below for hosts without the keymap.
         if let Some(request_id) = self.question_answer.for_request {
+            self.answer_blink.wake();
             if matches!(event.keystroke.key.as_str(), "enter" | "return") {
                 let draft = self.question_answer.draft.clone();
                 self.answer_question_text(request_id, &draft, cx);
@@ -3551,6 +3566,7 @@ impl Chat {
         // than a raw key this handler ever sees), Escape closes the picker
         // the same way its own `Cancel` action binding does.
         if self.model_picker_open {
+            self.model_search_blink.wake();
             if event.keystroke.key == "escape" {
                 self.model_picker_open = false;
                 cx.notify();
@@ -3662,6 +3678,7 @@ impl Chat {
         theme: &Theme,
         entity: Entity<Self>,
         question_answer: &QuestionAnswerState,
+        caret_visible: bool,
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -3711,6 +3728,8 @@ impl Chat {
                             }
                         });
                     })
+                    .flex()
+                    .items_center()
                     .child(if question_answer.draft.is_empty() {
                         div()
                             .text_color(colors.meta)
@@ -3721,7 +3740,18 @@ impl Chat {
                             .text_color(colors.title)
                             .child(question_answer.draft.clone())
                             .into_any_element()
-                    }),
+                    })
+                    // The bar always occupies layout, so the answer text does
+                    // not shift by two pixels every half second as it blinks.
+                    .child(
+                        div()
+                            .debug_selector(|| "question-answer-caret".into())
+                            .child(caret::bar(
+                                typography.body_line_height,
+                                colors.accent,
+                                caret_visible,
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -4730,6 +4760,7 @@ impl Chat {
         transcript_focus: FocusHandle,
         source_start: usize,
         question_answer: &QuestionAnswerState,
+        answer_caret_visible: bool,
         copied_target: Option<CopyTarget>,
         edit_summary: Option<EditSummaryState>,
     ) -> impl IntoElement {
@@ -5002,6 +5033,7 @@ impl Chat {
                         theme,
                         entity.clone(),
                         question_answer,
+                        answer_caret_visible,
                     ));
                 } else {
                     let mut row = div().flex().gap(px(8.0));
@@ -5916,6 +5948,18 @@ impl Chat {
         cx.notify();
     }
 
+    /// Blink timer tick for the question answer field's caret.
+    fn flip_answer_blink(&mut self, cx: &mut Context<Self>) {
+        self.answer_blink.flip();
+        cx.notify();
+    }
+
+    /// Blink timer tick for the model picker's search row.
+    fn flip_model_search_blink(&mut self, cx: &mut Context<Self>) {
+        self.model_search_blink.flip();
+        cx.notify();
+    }
+
     fn render_composer(
         &mut self,
         theme: &Theme,
@@ -5982,6 +6026,20 @@ impl Chat {
             cx,
         );
         let caret_visible = focused && self.composer_blink.visible();
+        // The model picker's search row rides this same render pass — it is
+        // drawn from here, and this is where a `Window` exists to ask the
+        // focus system.
+        let model_search_focused =
+            self.model_picker_open && self.model_picker_focus.is_focused(window);
+        caret::schedule(
+            &mut self.model_search_blink,
+            model_search_focused,
+            Self::flip_model_search_blink,
+            cx,
+        );
+        self.model_search_caret_visible =
+            model_search_focused && self.model_search_blink.visible();
+        let model_search_caret_visible = self.model_search_caret_visible;
         let caret_bar = || {
             div()
                 .debug_selector(|| "composer-caret".into())
@@ -6228,6 +6286,8 @@ impl Chat {
                                 .border_1()
                                 .border_color(colors.hairline)
                                 .text_size(typography.footnote)
+                                .flex()
+                                .items_center()
                                 .child(if search_placeholder {
                                     div()
                                         .text_color(colors.meta)
@@ -6238,7 +6298,16 @@ impl Chat {
                                         .text_color(colors.title)
                                         .child(search_text)
                                         .into_any_element()
-                                }),
+                                })
+                                .child(
+                                    div()
+                                        .debug_selector(|| "model-search-caret".into())
+                                        .child(caret::bar(
+                                            typography.body_line_height,
+                                            colors.accent,
+                                            model_search_caret_visible,
+                                        )),
+                                ),
                         )
                     })
                     .when(self.available_models.is_empty(), |this| {
@@ -7121,46 +7190,83 @@ impl Chat {
                 .enumerate()
                 .flat_map(|(index, part)| match part {
                     ComposerPart::Text(text) => {
-                        // The caret splits its own text part: the bar is
-                        // rendered inline at the exact char offset, so the
-                        // draft reads as one continuous line.
-                        if index == caret_part {
-                            let before: String = text.chars().take(caret_offset).collect();
-                            let after: String = text.chars().skip(caret_offset).collect();
-                            let mut split = Vec::with_capacity(3);
-                            if !before.is_empty() {
-                                split.push(
-                                    div()
-                                        .debug_selector(move || format!("composer-text-{index}"))
-                                        .min_w_0()
-                                        .text_color(colors.primary_text_color)
-                                        .child(before)
-                                        .into_any_element(),
-                                );
+                        // A text part is cut at up to three boundaries — the
+                        // caret and the two ends of the selected span — and
+                        // the pieces are laid out inline, so the draft still
+                        // reads as one continuous line. Splitting rather
+                        // than overlaying keeps the shading exactly as wide
+                        // as the characters it covers, with no measuring.
+                        let chars: Vec<char> = text.chars().collect();
+                        let len = chars.len();
+                        let span = self.composer.selected_span_in_part(index, len);
+                        let caret_at = (index == caret_part).then(|| caret_offset.min(len));
+
+                        let mut cuts = vec![0usize, len];
+                        if let Some((lo, hi)) = span {
+                            cuts.push(lo);
+                            cuts.push(hi);
+                        }
+                        if let Some(at) = caret_at {
+                            cuts.push(at);
+                        }
+                        cuts.sort_unstable();
+                        cuts.dedup();
+
+                        let mut run: Vec<AnyElement> = Vec::new();
+                        // The first unselected piece keeps the plain
+                        // `composer-text-{index}` name; any later one is a
+                        // tail, so the existing caret-placement assertions
+                        // keep addressing the piece they always did.
+                        let mut plain_seen = false;
+                        for cut in cuts.windows(2) {
+                            let (from, to) = (cut[0], cut[1]);
+                            if caret_at == Some(from) {
+                                run.push(caret_bar());
                             }
-                            split.push(caret_bar());
-                            if !after.is_empty() {
-                                split.push(
+                            if from == to {
+                                continue;
+                            }
+                            let piece: String = chars[from..to].iter().collect();
+                            let selected =
+                                span.is_some_and(|(lo, hi)| from >= lo && to <= hi);
+                            if selected {
+                                run.push(
                                     div()
                                         .debug_selector(move || {
-                                            format!("composer-text-{index}-tail")
+                                            format!("composer-selection-{index}")
+                                        })
+                                        .min_w_0()
+                                        .rounded(px(2.0))
+                                        .bg(colors.selection_fill)
+                                        .text_color(colors.primary_text_color)
+                                        .child(piece)
+                                        .into_any_element(),
+                                );
+                            } else {
+                                let tail = plain_seen;
+                                plain_seen = true;
+                                run.push(
+                                    div()
+                                        .debug_selector(move || {
+                                            if tail {
+                                                format!("composer-text-{index}-tail")
+                                            } else {
+                                                format!("composer-text-{index}")
+                                            }
                                         })
                                         .min_w_0()
                                         .text_color(colors.primary_text_color)
-                                        .child(after)
+                                        .child(piece)
                                         .into_any_element(),
                                 );
                             }
-                            return split;
                         }
-                        vec![
-                            div()
-                                .debug_selector(move || format!("composer-text-{index}"))
-                                .min_w_0()
-                                .text_color(colors.primary_text_color)
-                                .child(text.clone())
-                                .into_any_element(),
-                        ]
+                        // `windows(2)` never starts a pair at the last cut,
+                        // so an end-of-part caret is emitted here.
+                        if caret_at == Some(len) {
+                            run.push(caret_bar());
+                        }
+                        run
                     }
                     ComposerPart::Chip(chip) => {
                         // On a chip part the caret always sits just before it.
@@ -7185,7 +7291,14 @@ impl Chat {
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(5.0))
-                            .bg(colors.card_fill)
+                            // A chip is one atomic position, so it takes the
+                            // selection fill whole or not at all — the same
+                            // rule `chip_is_selected` encodes in the model.
+                            .bg(if self.composer.chip_is_selected(index) {
+                                colors.selection_fill
+                            } else {
+                                colors.card_fill
+                            })
                             .border_1()
                             .border_color(colors.hairline)
                             .text_size(typography.caption2)
@@ -7596,6 +7709,17 @@ impl Render for Chat {
         // calls its row processor separately for every visible index.
         let turn_roles = turn_row_roles(&self.entries, &self.unfolded_turns);
         let transcript_focus = self.transcript_focus.clone();
+        // The answer field's caret, resolved before the tree is built so the
+        // card and the composer agree within one frame.
+        let answer_focused = self.question_answer.focus.is_focused(window);
+        caret::schedule(
+            &mut self.answer_blink,
+            answer_focused,
+            Self::flip_answer_blink,
+            cx,
+        );
+        self.answer_caret_visible = answer_focused && self.answer_blink.visible();
+        let answer_caret_visible = self.answer_caret_visible;
         let question_answer = self.question_answer.clone();
         // F-CHAT-13: captured once per render, same as Swift's `canAcceptDrop`
         // — a permission-wait that starts mid-drag simply means the next
@@ -7720,6 +7844,7 @@ impl Render for Chat {
                                                                     transcript_focus.clone(),
                                                                     source_start,
                                                                     &question_answer,
+                                                                    answer_caret_visible,
                                                                     this.copied_target.clone(),
                                                                     None,
                                                                 )
@@ -7800,6 +7925,7 @@ impl Render for Chat {
                                                 transcript_focus.clone(),
                                                 source_start,
                                                 &question_answer,
+                                                answer_caret_visible,
                                                 this.copied_target.clone(),
                                                 this.edit_summaries.get(&entry_index).cloned(),
                                             ))
@@ -9205,6 +9331,90 @@ mod tests {
             text.origin.x + text.size.width,
             "the caret must touch the last typed character, with no gap \
              between them: text={text:?} caret={caret:?}"
+        );
+    }
+
+    /// The composer has always *had* a selection — `SelectLeft`,
+    /// `SelectRight` and `SelectAll` all mutate it, and `delete_selected`
+    /// acts on it — but nothing ever drew it. Select-all followed by one
+    /// keystroke therefore replaced the entire draft with no on-screen sign
+    /// that anything had been selected: a destructive edit with an
+    /// invisible precondition.
+    #[gpui::test]
+    async fn the_composer_paints_the_run_it_has_selected(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "ciao");
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-selection-0").is_none(),
+            "fixture invariant: a freshly typed draft has nothing selected"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.composer.select_all();
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let selected = cx
+            .debug_bounds("composer-selection-0")
+            .expect("selected text must be drawn as a filled run, not as plain text");
+        assert!(
+            selected.size.width > px(0.0),
+            "the filled run must cover the selected characters: {selected:?}"
+        );
+        assert!(
+            cx.debug_bounds("composer-text-0").is_none(),
+            "select-all leaves no unselected remainder of the draft behind"
+        );
+    }
+
+    /// F-CHAT-25's answer field takes typed characters through
+    /// `on_composer_key`, so it is a text field by every measure except the
+    /// one the user checks: it drew no insertion bar at all.
+    #[gpui::test]
+    async fn the_question_answer_field_draws_a_caret_while_it_holds_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["question"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the pending question offers a text answer field");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("question-answer-caret").is_some(),
+            "a field that accepts typing must show where the next character lands"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.answer_caret_visible),
+            "and the bar must be lit while the field holds focus, not merely \
+             present in layout"
         );
     }
 
@@ -12360,6 +12570,17 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(cx.debug_bounds("model-search-input").is_some());
+        // The search row takes typed characters through `on_composer_key`'s
+        // model-picker redirect, so it is a text field and must say where
+        // the next character lands.
+        assert!(
+            cx.debug_bounds("model-search-caret").is_some(),
+            "the picker's search row draws an insertion bar"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.model_search_caret_visible),
+            "and it is lit while the open picker holds focus"
+        );
         assert!(
             cx.debug_bounds("model-option-recommended").is_some(),
             "the driver's first-listed model (opus) is badged Recommended"
