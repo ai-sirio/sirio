@@ -227,6 +227,10 @@ pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
 pub(crate) const ROW_V_PADDING: f32 = 7.0;
 /// Gap between a card's title and context lines.
 pub(crate) const ROW_GAP: f32 = 4.0;
+/// Vertical seam between row cards in the tree. The hover and selection
+/// fills paint across a card's whole box, so cards that touch merge into
+/// one highlight block; this keeps them reading as separate cards.
+pub(crate) const ROW_V_GAP: f32 = 2.0;
 /// Two-line card height: 7 + 18 + 4 + 15 + 7 — waku's session-card math.
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
 const GUIDE_LEFT: f32 = 20.0;
@@ -3912,9 +3916,12 @@ impl Sidebar {
                 div()
                     .absolute()
                     .left(px(guide_left))
-                    .top(px(0.0))
+                    // The tree separates row cards by `ROW_V_GAP`; the guide
+                    // reaches across that seam so the gutter still reads as
+                    // one line down the worktree list.
+                    .top(px(-ROW_V_GAP))
+                    .bottom(px(-ROW_V_GAP))
                     .w(px(GUIDE_WIDTH))
-                    .h_full()
                     .bg(INDENT_GUIDE_FILL),
             );
         }
@@ -4084,6 +4091,7 @@ impl Render for Sidebar {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .gap(px(ROW_V_GAP))
                     .overflow_y_scroll()
                     // Rows reorder during the drag, so the row originally
                     // under the pointer may be a different entity by
@@ -5807,6 +5815,30 @@ mod tests {
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
                 .is_some()
+        );
+    }
+
+    /// A row card paints its hover and selection fill across its whole box,
+    /// so adjacent cards that touch read as one merged highlight block (the
+    /// selected worktree's fill ran straight into the next row's hover
+    /// fill). The tree must leave a visible seam between row boxes.
+    #[gpui::test]
+    async fn adjacent_row_highlight_boxes_do_not_touch(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let above = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the selected worktree row is drawn");
+        let below = cx
+            .debug_bounds("sidebar-row-2")
+            .expect("its tab row is drawn");
+        let gap = below.origin.y - (above.origin.y + above.size.height);
+        assert!(
+            gap >= px(ROW_V_GAP),
+            "adjacent row highlight boxes must be separated by {ROW_V_GAP}px, got {gap:.1}px"
         );
     }
 
