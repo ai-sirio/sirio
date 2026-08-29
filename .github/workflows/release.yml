@@ -59,6 +59,7 @@ jobs:
           bash Scripts/Tests/test-check-release-version.sh
           bash Scripts/Tests/test-build-dmg.sh
           bash Scripts/Tests/test-build-app-bundle.sh
+          bash Scripts/Tests/test-build-inno.sh
           bash Scripts/Tests/test-release-workflow.sh
           bash Scripts/Tests/test-generate-changelog.sh
 
@@ -289,6 +290,12 @@ jobs:
         with:
           version: 0.15.2
 
+      # rust/.cargo/config.toml sets rustc-wrapper = "sccache" unconditionally;
+      # a job without it fails before compiling a single crate, in a way that
+      # looks nothing like its cause (spec §1.5).
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -304,16 +311,23 @@ jobs:
         env:
           VERSION: ${{ needs.macos.outputs.version }}
         run: |
-          STAGING="sirio-${VERSION}-x86_64-windows"
+          STAGING="build/windows"
           mkdir -p "$STAGING"
-          cp rust/target/release/sirio.exe rust/target/release/sirioctl.exe "$STAGING/"
-          7z a "${STAGING}.zip" "$STAGING"
-          echo "path=${STAGING}.zip" >> "$GITHUB_OUTPUT"
+          cp rust/target/release/sirio.exe    "$STAGING/"
+          cp rust/target/release/sirioctl.exe "$STAGING/"
+          # The .iss is generated beside the binaries: ISCC resolves its
+          # relative Source: paths against the script's own directory, and the
+          # script's OutputBaseFilename lands SirioSetup-<version>.exe there
+          # too. The setup is compiled with the ISCC.exe the windows-latest
+          # runner image ships -- no extra install step.
+          bash Scripts/build-inno.sh "$VERSION" "$STAGING/Sirio.iss"
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "$STAGING/Sirio.iss"
+          echo "path=$STAGING/SirioSetup-${VERSION}.exe" >> "$GITHUB_OUTPUT"
 
-      - name: Upload the zip
+      - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          name: windows-zip
+          name: windows-setup
           path: ${{ steps.package.outputs.path }}
           if-no-files-found: error
 

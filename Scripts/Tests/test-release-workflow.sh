@@ -45,4 +45,19 @@ grep -q "options runtime\|build-app-bundle.sh" "$WORKFLOW" || fail "no app bundl
 grep -q "notarytool submit"                    "$WORKFLOW" || fail "no notarization step"
 grep -q "stapler staple"                       "$WORKFLOW" || fail "no stapling step"
 
+# The Windows release is an Inno Setup installer, not a zip: the .iss is
+# generated from the identity source, compiled with the ISCC.exe that ships
+# with the windows-latest runner image, and uploaded as SirioSetup-<version>.exe.
+grep -q "Scripts/build-inno.sh" "$WORKFLOW" || fail "the windows job must generate the .iss from the identity source"
+grep -q "ISCC.exe"              "$WORKFLOW" || fail "the windows job must compile the .iss with ISCC"
+grep -q "SirioSetup-"           "$WORKFLOW" || fail "no SirioSetup-<version>.exe artifact name"
+grep -q "name: windows-setup"   "$WORKFLOW" || fail "no windows-setup artifact upload"
+if grep -q "windows-zip" "$WORKFLOW"; then
+  fail "the windows zip upload is gone"
+fi
+
+# rust/.cargo/config.toml sets rustc-wrapper = "sccache" unconditionally, so a
+# release job without sccache on PATH fails before compiling a single crate.
+grep -q "mozilla-actions/sccache-action" "$WORKFLOW" || fail "the windows job must install sccache"
+
 echo "PASS: release workflow structure"
