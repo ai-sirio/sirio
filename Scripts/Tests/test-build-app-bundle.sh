@@ -1,0 +1,74 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_SCRIPT="$SCRIPT_DIR/../build-app-bundle.sh"
+
+FIXTURE=$(mktemp -d)
+trap 'rm -rf "$FIXTURE"' EXIT
+
+# `codesign` exists only on macOS, and even there this test must never reach a
+# real keychain. The stub records its arguments so the assertions can check the
+# hardened runtime is requested — the flag notarization refuses submissions
+# without, and the one whose absence would only surface at the Apple round-trip.
+mkdir -p "$FIXTURE/bin"
+cat > "$FIXTURE/bin/codesign" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" > "$CODESIGN_ARGS"
+exit 0
+EOF
+chmod +x "$FIXTURE/bin/codesign"
+
+printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/sirio"
+chmod +x "$FIXTURE/sirio"
+
+CODESIGN_ARGS="$FIXTURE/codesign.args" \
+CODESIGN_IDENTITY="Developer ID Application: Test" \
+PATH="$FIXTURE/bin:$PATH" \
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Sirio.app" >/dev/null
+
+for path in \
+  "$FIXTURE/Sirio.app/Contents/Info.plist" \
+  "$FIXTURE/Sirio.app/Contents/MacOS/sirio" \
+  "$FIXTURE/Sirio.app/Contents/Resources/icon.icns"
+do
+  if [ ! -f "$path" ]; then
+    echo "FAIL: missing $path" >&2
+    exit 1
+  fi
+done
+
+if [ ! -x "$FIXTURE/Sirio.app/Contents/MacOS/sirio" ]; then
+  echo "FAIL: the bundled binary must be executable" >&2
+  exit 1
+fi
+
+PLIST="$FIXTURE/Sirio.app/Contents/Info.plist"
+for value in dev.sirio.Sirio 15.0 public.app-category.developer-tools; do
+  if ! grep -q "$value" "$PLIST"; then
+    echo "FAIL: Info.plist is missing '$value'" >&2
+    cat "$PLIST" >&2
+    exit 1
+  fi
+done
+
+# The version belongs in both CFBundleShortVersionString and CFBundleVersion.
+COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST")
+if [ "$COUNT" != "2" ]; then
+  echo "FAIL: expected the version in both version keys, found $COUNT" >&2
+  cat "$PLIST" >&2
+  exit 1
+fi
+
+if ! grep -q -- "--options runtime" "$FIXTURE/codesign.args"; then
+  echo "FAIL: codesign must request the hardened runtime" >&2
+  cat "$FIXTURE/codesign.args" >&2
+  exit 1
+fi
+
+if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" >/dev/null 2>&1; then
+  echo "FAIL: a missing binary must exit non-zero" >&2
+  exit 1
+fi
+
+echo "PASS: app bundle layout and signing flags"
