@@ -3,6 +3,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Dev builds share the release identifier, from the same identity source (#304,
+# spec §8.1) — no -dev suffix anywhere an OS reads.
+. Scripts/identity.sh
+
 cd rust
 cargo build -p sirio -p sirio_control
 cd ..
@@ -35,8 +39,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key><string>dev.sirio.sirio-dev</string>
-  <key>CFBundleName</key><string>Sirio</string>
+  <key>CFBundleIdentifier</key><string>${SIRIO_APP_IDENTIFIER}</string>
+  <key>CFBundleName</key><string>${SIRIO_DISPLAY_NAME}</string>
   <key>CFBundleExecutable</key><string>sirio</string>
   <key>CFBundlePackageType</key><string>APPL</string>
 </dict>

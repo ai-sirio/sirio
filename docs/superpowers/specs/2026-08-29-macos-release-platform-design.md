@@ -130,7 +130,7 @@ rebrand:
 
 | Key | Value |
 |---|---|
-| `CFBundleIdentifier` | `dev.sirio.Sirio` (prefix was `dev.tiller`) |
+| `CFBundleIdentifier` | `app.sirioai.sirio` (was `dev.sirio.Sirio`; prefix before that `dev.tiller`) |
 | `CFBundleExecutable` | `sirio` |
 | `CFBundleShortVersionString` | from `rust/Cargo.toml` (`0.6.0` today) |
 | `CFBundleVersion` | identical to `CFBundleShortVersionString` |

@@ -180,7 +180,7 @@ fixture e lo stesso hardware prima e dopo.
 
 - Eseguire le fixture due volte: devono produrre lo stesso numero di eventi,
   byte, elementi e refresh.
-- `defaults read dev.sirio debug.signpostMetrics` assente o falso deve lasciare
+- `defaults read app.sirioai.sirio debug.signpostMetrics` assente o falso deve lasciare
   i signpost disabilitati.
 - Le etichette dei signpost non devono includere testo terminale, prompt,
   comandi, percorsi o identità.

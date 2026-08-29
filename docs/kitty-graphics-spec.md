@@ -72,7 +72,7 @@ Three consequences that change the map's own framing:
 
   Which claim to make is a real decision, not a lever to pull blind: asserting
   a terminal identity means honouring it, and [#86](https://github.com/ai-sirio/sirio/issues/86)
-  already settled that Sirio's identity is `ai.sirio.Sirio`. Claiming
+  already settled that Sirio's identity is `app.sirioai.sirio`. Claiming
   `TERM_PROGRAM=ghostty` buys pi's `images: "kitty"` branch and buys with it
   every other behaviour a guest keys off "this is ghostty".
 
@@ -93,7 +93,7 @@ Three consequences that change the map's own framing:
   an `off` kill switch) and treats it as pinning the choice — its own comment
   says a runtime capability probe must not override it. That turns images on
   and nothing else on, so it does not buy the rest of "this is ghostty" the way
-  `TERM_PROGRAM` does, and it leaves #86's `ai.sirio.Sirio` identity intact.
+  `TERM_PROGRAM` does, and it leaves #86's `app.sirioai.sirio` identity intact.
 
   It is **omp-only**, despite the `PI_` prefix: the variable is absent from
   pi's own shipped tree, which is a separate copy of the same lineage. So the
