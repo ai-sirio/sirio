@@ -365,7 +365,7 @@ impl EventEmitter<TitlebarEvent> for Titlebar {}
 /// the single production `cfg!` to [`Self::current`] leaves everything
 /// above it exercisable for every host, from any host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HostPlatform {
+pub enum HostPlatform {
     Linux,
     Macos,
     Windows,
@@ -373,7 +373,7 @@ enum HostPlatform {
 
 impl HostPlatform {
     /// The one `cfg!` left in this module's production path.
-    fn current() -> Self {
+    pub fn current() -> Self {
         if cfg!(target_os = "macos") {
             Self::Macos
         } else if cfg!(target_os = "windows") {
