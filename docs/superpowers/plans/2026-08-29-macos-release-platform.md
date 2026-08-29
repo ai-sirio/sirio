@@ -37,7 +37,9 @@
 | `Scripts/Tests/test-build-app-bundle.sh` | New. Asserts bundle layout, `Info.plist` keys and the hardened-runtime flag, with `codesign` stubbed. |
 | `Scripts/Tests/test-release-workflow.sh` | New. Asserts the job graph and the pins that silently rot. |
 | `.github/workflows/release.yml` | Rewritten: four jobs (`macos`, `linux`, `windows`, `publish`), `needs: macos`. |
-| `Scripts/ci-linux.sh` | Modified: runs the four new tests beside the ones it already runs. |
+| `Scripts/generate-changelog.sh` | Modified: caps the untagged first release at 100 commits, so the body stays under GitHub's 125,000-character limit. |
+| `Scripts/Tests/test-generate-changelog.sh` | Extended: asserts the untagged case is bounded and says how many commits were omitted. |
+| `Scripts/ci-linux.sh` | Modified: runs the five new tests beside the ones it already runs. |
 | `CLAUDE.md` | Modified: "What this is" and "Commands". |
 
 Each script takes an artifact and produces the next one, so every stage is runnable by hand against the previous stage's output. That is what makes a failed release debuggable without re-running the whole pipeline.

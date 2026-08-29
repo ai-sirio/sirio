@@ -174,7 +174,14 @@ Both are in git history and come back from `c47234de^`.
   truth moves from `project.yml` to `rust/Cargo.toml`'s
   `[workspace.package] version`. Tag `v0.6.0` must match `version = "0.6.0"`.
 
-`Scripts/generate-changelog.sh` is still in the tree and needs no change.
+`Scripts/generate-changelog.sh` is still in the tree, but it did need one change.
+Its no-previous-tag fallback sets the range to the bare tag, which on a repository
+with no tags means `git log <tag>` walks the entire history: 2552 commits, a
+140,547-character body, against GitHub's 125,000-character release-body limit.
+The first release would have failed at `gh release create` — after signing and
+notarization had already succeeded. It now caps that path at the 100 most recent
+commits with a note saying how many were omitted; the with-previous-tag path is
+unchanged.
 
 ## The gate, and what "macOS is the reference" means
 
@@ -371,7 +378,9 @@ Scripts/Tests/test-build-app-bundle.sh         new
 Scripts/Tests/test-build-dmg.sh                new
 Scripts/Tests/test-check-release-version.sh    new
 Scripts/Tests/test-release-workflow.sh         new
-Scripts/ci-linux.sh                            runs the four new tests
+Scripts/generate-changelog.sh                  capped for the untagged first release
+Scripts/Tests/test-generate-changelog.sh       extended: the untagged case
+Scripts/ci-linux.sh                            runs the five new tests
 .github/workflows/release.yml                  rewritten: 4 jobs, needs: macos
 CLAUDE.md                                      "What this is" and "Commands" updated
 ```
