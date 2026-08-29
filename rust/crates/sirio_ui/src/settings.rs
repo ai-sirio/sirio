@@ -3874,7 +3874,7 @@ impl Settings {
             .child(controls::row(
                 "Auto-rename tabs and agents",
                 Some(
-                    "Summarizes each session into a short tab title using the selected agent."
+                    "Names each session after your first prompt, then shortens it with the selected agent."
                         .into(),
                 ),
                 auto,
