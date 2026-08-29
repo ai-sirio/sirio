@@ -4,6 +4,47 @@ The project's glossary: terms whose meaning has been decided, so the same word
 cannot quietly mean two things. Definitions only — no implementation detail, no
 decisions (those live in issues and `docs/adr/`).
 
+## Workspace layout
+
+### Pane
+
+A region of the **split tree inside a single tab** — what `SplitPaneRight` and
+`SplitPaneDown` create, and what the control socket's `pane.*` verbs drive. A
+pane never spans tabs, and it is never one of the two halves of the
+[center split](#center-split).
+
+The word is deliberately reserved for this one meaning. It has been used
+loosely for two other things — the halves of the center split, and the pty
+records the control socket's `panel.*` verbs address — and
+[#319](https://github.com/ai-sirio/sirio/issues/319) settled that neither may
+be called a pane. Those have their own names below and in `sirio_control`.
+
+### Center split
+
+The division of the work area between the sidebars into two halves, each with
+a fixed role and its own tab strip. Not a general N-way split: there are always
+exactly two halves, and which one a tab belongs to is decided by what the tab
+*is*, never chosen or stored.
+
+### Primary pane role
+
+The half of the [center split](#center-split) that holds conversations with
+agents and terminals. It is always shown, and takes the whole work area
+whenever the [secondary](#secondary-pane-role) half is not.
+
+Despite the name it is not a [pane](#pane) — "role" is part of the term, not a
+qualifier that can be dropped.
+
+### Secondary pane role
+
+The half of the [center split](#center-split) that holds everything the user
+looks at rather than talks to — a browser, a file being edited, a diff. Absent
+by default, present only once something of that kind is open, and gone again
+when the last of them closes.
+
+Despite the name it is not a [pane](#pane); see
+[primary pane role](#primary-pane-role).
+
 ## Browser
 
 ### Origin grant
