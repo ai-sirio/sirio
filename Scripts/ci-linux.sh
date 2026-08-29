@@ -259,6 +259,7 @@ run_root_stage "test-visual-sweep.sh" env PYTHONDONTWRITEBYTECODE=1 \
 run_root_stage "test-check-release-version.sh" bash Scripts/Tests/test-check-release-version.sh
 run_root_stage "test-build-dmg.sh"             bash Scripts/Tests/test-build-dmg.sh
 run_root_stage "test-build-app-bundle.sh"      bash Scripts/Tests/test-build-app-bundle.sh
+run_root_stage "test-build-appimage.sh"         bash Scripts/Tests/test-build-appimage.sh
 run_root_stage "test-release-workflow.sh"      bash Scripts/Tests/test-release-workflow.sh
 run_root_stage "test-generate-changelog.sh"    bash Scripts/Tests/test-generate-changelog.sh
 
