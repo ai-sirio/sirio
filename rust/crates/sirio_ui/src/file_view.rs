@@ -687,7 +687,7 @@ impl FileView {
                 this.child(
                     div()
                         .text_size(theme.typography.caption2)
-                        .text_color(theme.accent)
+                        .text_color(theme.title)
                         .child("● edited"),
                 )
             })
@@ -1433,7 +1433,10 @@ impl EditableLine {
             .into_iter()
             .map(|span| {
                 let color = match span.kind {
-                    CodeSpanKind::Keyword => theme.accent,
+                    // Blue keywords, green literals, grey comments: the three
+                    // most conventional syntax colours there are, and none of
+                    // them a brand tint.
+                    CodeSpanKind::Keyword => theme.gauge,
                     CodeSpanKind::Literal => theme.diff_addition,
                     CodeSpanKind::Comment => theme.meta,
                 };
@@ -1450,10 +1453,10 @@ impl EditableLine {
             (
                 range.clone(),
                 HighlightStyle {
-                    color: Some(theme.accent.into()),
+                    color: Some(theme.file_link.into()),
                     underline: Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(theme.accent.into()),
+                        color: Some(theme.file_link.into()),
                         wavy: false,
                     }),
                     ..Default::default()
@@ -1475,7 +1478,7 @@ impl EditableLine {
             selection,
             selection_fill: theme.selected_fill,
             caret_offset,
-            caret_color: theme.accent,
+            caret_color: theme.caret,
             links,
             pressed: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
