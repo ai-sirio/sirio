@@ -45,7 +45,20 @@ Each script takes an artifact and produces the next one, so every stage is runna
 
 ### Task 1: Phase 0 — verify the workspace builds on macOS
 
-**This task gates every other task.** The workspace has never been compiled for macOS. Nothing below is worth writing until this is green.
+> **Ordering amended 2026-08-29, by the maintainer's decision.** This task was
+> specified as gating every other one. It is now deferred: Tasks 2-6 are built
+> first, and this task becomes the gate before the **first release tag** rather
+> than before the first line of code. The reason is availability — Task 1 needs
+> Mac hardware, and nothing else in the plan does, because every script test
+> stubs the macOS-only executable it drives.
+>
+> What this trades away is real and worth naming: Tasks 2-6 are written against
+> a workspace that has never compiled for macOS. If Phase 0 uncovers something
+> structural, some of that work is rewritten. The bet is that the three risks
+> below are localized (a manifest, a tray, a linker flag) rather than shaped
+> like a redesign. **Do not push a `v*.*.*` tag until this task is green.**
+
+**The workspace has never been compiled for macOS.** Nothing below is verified until this is green.
 
 **Files:**
 - Modify: whatever the build reveals is broken (unknown until run)

@@ -59,8 +59,16 @@ writing ours.
 
 ## Phase 0 — the verifying build (blocks everything else)
 
-**No workflow code is written until `Scripts/ci.sh` prints `CI OK` on a real
-Mac.** The workspace has never been compiled for macOS.
+**`Scripts/ci.sh` must print `CI OK` on a real Mac before any release tag is
+pushed.** The workspace has never been compiled for macOS.
+
+> **Amended 2026-08-29.** This section originally read "no workflow code is
+> written until" — Phase 0 gated all implementation. The maintainer moved the
+> gate to the first release tag instead, so the scripts and workflow are built
+> first. The reason is availability: Phase 0 needs Mac hardware and nothing else
+> in the plan does, because every script test stubs the macOS-only executable it
+> drives. The cost is that those scripts are written against an unverified
+> build, and a structural surprise in Phase 0 would mean reworking some of them.
 
 ```bash
 rustup target add aarch64-apple-darwin
