@@ -42,17 +42,33 @@
 //! like AppKit, never overrides `window_decorations()` — so the trait default
 //! answers `Server` for a window that in fact has *no* window controls at
 //! all. Taking that report at face value left Windows builds with no way to
-//! close/minimize/maximize by mouse. Zed's own resolution
-//! (`platform_title_bar.rs`) renders its caption buttons unconditionally on
-//! Windows; this file reaches the same result through
-//! [`show_window_controls`]: under `Server`, only Windows draws the
-//! fallback lights, because there they are the *only* controls the window
-//! will ever get.
+//! close/minimize/maximize by mouse. Windows therefore gets **the classic
+//! Windows caption buttons at the trailing edge**, not a second set of
+//! macOS-style dots: see [`WindowControls::WindowsCaption`] and
+//! [`caption_button`].
+//!
+//! # One value, not two compile-time branches
+//!
+//! What this row draws is [`WindowControls`], resolved once per render from
+//! the platform's decoration report and this build's host. It replaced a
+//! pair of `cfg!(target_os = ...)` branches — one for whether to draw our
+//! own controls, one for where the icon cluster starts — and the single
+//! remaining production `cfg!` is confined to `HostPlatform::current`.
+//!
+//! That is not tidiness. A `cfg!` is not a seam: you cannot alter its
+//! behaviour without editing at that spot, so the tests around it had to
+//! branch on `cfg!` too, and could only ever verify the arm they were
+//! compiled into. One of them (`macos_cluster_clears_appkit_traffic_lights`)
+//! opened with an early `return` on every non-macOS host and asserted
+//! nothing at all on the Linux CI. Driving [`WindowControls`] through
+//! [`Titlebar::with_window_controls`] lets every host exercise all four
+//! outcomes.
 //!
 //! Geometry comes from [`sirio_theme::BrowserChrome`] (bar height, fallback
 //! light size/gap/inset, `BrowserChrome::cluster_start` for the derivation of
 //! where a fallback light group hands off to the button cluster, and the
-//! macOS AppKit reserve) and
+//! macOS AppKit reserve), [`sirio_theme::WindowsCaption`] (caption-button
+//! width and glyph size) and
 //! `Spacing::compact_action` (the 24px cluster-button frame). Colour comes
 //! from `Theme::get(cx).cosmic`: the bar sits on `containers.background`
 //! (not `primary` — a deliberate override of COSMIC's usual raised-bar
@@ -60,13 +76,18 @@
 //! seam between chrome and content), the lights are COSMIC's own
 //! `destructive`/`warning`/`success` semantic colours (already red/amber/
 //! green — no new colour tokens needed), and the cluster buttons use
-//! `semantic.icon_button` like the surface's original two controls did.
+//! `semantic.icon_button` like the surface's original two controls did. The
+//! caption buttons use `icon_button` too, except for the close button's
+//! red, which is a *system* constant and lives in
+//! [`sirio_theme::WindowsCaption`] — that type's docs explain why COSMIC's
+//! `destructive` cannot stand in for it.
 //!
-//! Row layout, left to right: traffic lights → cluster (sidebar toggle,
-//! back, forward, `+`) → accent dot + title → muted subtitle → (spacer) →
-//! right-panel toggle. The far-right scope/branch pills and collapse/
-//! expand controls from the screenshot are **not built** — see the P76
-//! report for why.
+//! Row layout, left to right: traffic lights (Linux CSD only) → cluster
+//! (sidebar toggle, back, forward, `+`) → accent dot + title → muted
+//! subtitle → (spacer) → history, right-panel toggle → the Windows caption
+//! buttons (Windows only), flush to the trailing edge. The far-right
+//! scope/branch pills and collapse/expand controls from the screenshot are
+//! **not built** — see the P76 report for why.
 //!
 //! Back/forward/`+` have no data to act on from inside this crate (no
 //! navigation history, no new-tab concept lives here) — rather than ship
@@ -80,9 +101,10 @@ use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
     SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
-use sirio_theme::Theme;
 use sirio_theme::cosmic::CosmicComponent;
+use sirio_theme::{BrowserChrome, Theme, WindowsCaption};
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use crate::sidebar::icons::{Icon, IconSize};
 
@@ -189,16 +211,16 @@ pub struct Titlebar {
     /// with [`Self::with_menu_handler`], the same constraint `new`'s docs
     /// already state for minimize/maximize.
     on_show_menu: Rc<dyn Fn(&mut Window, Point<Pixels>)>,
-    /// P102 test seam: forces what [`Self::render`] treats as the
-    /// platform's decoration report instead of calling the real
-    /// `Window::window_decorations()`. `TestWindow` never overrides that
-    /// method, so it always answers `Decorations::Server` -- without this
-    /// override a drawn test could only ever exercise the Server branch,
-    /// never Client, which is exactly the "only proves half the work"
-    /// gap P102 calls out. Production leaves this `None` and reads the
-    /// real platform value every render, the same as Zed's
-    /// `platform_title_bar.rs`.
-    decorations_override: Option<Decorations>,
+    /// The platform seam: forces what [`Self::render`] draws where the
+    /// window controls belong, instead of resolving it from the real
+    /// `Window::window_decorations()` and this build's host. `TestWindow`
+    /// never overrides `window_decorations()`, so it always answers
+    /// `Decorations::Server`, and the host is fixed at compile time --
+    /// without this override a drawn test could only ever exercise the one
+    /// combination it was compiled into. Production leaves this `None` and
+    /// re-resolves every render, the same per-render idiom as Zed's
+    /// `platform_title_bar.rs`, not a value cached at window-open time.
+    window_controls_override: Option<WindowControls>,
 }
 
 impl Titlebar {
@@ -231,7 +253,7 @@ impl Titlebar {
             subtitle: None,
             double_click_action: DoubleClickAction::from_system(),
             on_show_menu: Rc::new(|window, position| window.show_window_menu(position)),
-            decorations_override: None,
+            window_controls_override: None,
         }
     }
 
@@ -275,16 +297,14 @@ impl Titlebar {
         self
     }
 
-    /// P102 test override: forces the decoration state [`Self::render`]
-    /// treats the platform as reporting, instead of the real
-    /// `Window::window_decorations()` -- see the field doc for why a
-    /// drawn test exercising `Decorations::Client` MUST supply this
-    /// (`TestWindow` always answers `Decorations::Server`, same
-    /// `unimplemented!()`-avoidance reason the other `with_*_handler`
-    /// overrides on this type exist for). Has no effect on macOS -- see
-    /// the module docs' carve-out.
-    pub fn with_decorations(mut self, decorations: Decorations) -> Self {
-        self.decorations_override = Some(decorations);
+    /// Test/host override for the platform seam -- see the field doc for
+    /// why a drawn test exercising anything other than this host's own
+    /// resolution MUST supply one. Replaces the former
+    /// `with_decorations`: `Decorations` alone could not express what this
+    /// row draws, because the answer also depended on a `cfg!` no test
+    /// could cross.
+    pub fn with_window_controls(mut self, controls: WindowControls) -> Self {
+        self.window_controls_override = Some(controls);
         self
     }
 
@@ -335,22 +355,156 @@ impl Titlebar {
 
 impl EventEmitter<TitlebarEvent> for Titlebar {}
 
-/// Whether this row must draw the three window controls itself.
+/// Which platform this build runs on.
 ///
-/// `Decorations::Client` always means yes: the platform reported that
-/// nothing else will decorate this window (P102's original case). The
-/// Windows carve-out is the second such case: gpui_windows suppresses the
-/// native caption when `TitlebarOptions.appears_transparent` is set and
-/// never overrides `PlatformWindow::window_decorations()`, so it answers
-/// the trait default `Decorations::Server` for a window that has *no*
-/// controls at all. There, as on Zed's Windows titlebar, our fallback is
-/// not a duplicate — it is the only close button the window will ever
-/// have. On Linux `Server` keeps its P102 meaning ("a window manager drew
-/// the titlebar above us") and must draw nothing.
-fn show_window_controls(decorations: &Decorations) -> bool {
-    match decorations {
-        Decorations::Client { .. } => true,
-        Decorations::Server => cfg!(target_os = "windows"),
+/// This type exists so [`WindowControls::resolve`] can be a **pure
+/// function**. A `cfg!` is not a seam — you cannot alter its behaviour
+/// without editing at that spot — so the tests that used to branch on
+/// `cfg!` could only ever verify the one branch they happened to be
+/// compiled into, and the macOS assertions never ran anywhere. Confining
+/// the single production `cfg!` to [`Self::current`] leaves everything
+/// above it exercisable for every host, from any host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostPlatform {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl HostPlatform {
+    /// The one `cfg!` left in this module's production path.
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Macos
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// What this row draws where the window controls belong, and what it must
+/// reserve for controls somebody else draws.
+///
+/// One value answers both questions the platform used to answer through
+/// two separate compile-time branches — whether to draw our own controls,
+/// and where the icon cluster's leading edge sits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowControls {
+    /// A window manager drew its own titlebar *above* this row: draw
+    /// nothing, reserve nothing. P102's central case on Linux.
+    OsDrawnAbove,
+    /// AppKit owns the real controls, and draws them *inside* this row's
+    /// left edge: draw nothing, but reserve their width so our cluster
+    /// begins clear of them.
+    MacosNative,
+    /// Nothing else will decorate this window — a Wayland compositor
+    /// forcing client-side decorations, or no window manager at all. Our
+    /// three dots at the leading edge are then the only controls the
+    /// window will ever have; without them it cannot be closed by mouse.
+    TrafficLights,
+    /// The platform suppressed its own caption: the Windows caption
+    /// buttons at the **trailing** edge. gpui_windows hides the native
+    /// caption when `TitlebarOptions.appears_transparent` is set (which
+    /// `main.rs` sets) and never overrides
+    /// `PlatformWindow::window_decorations()`, so it answers the trait
+    /// default `Server` for a window that in fact has no controls at all —
+    /// which is why Windows resolves here under *either* decoration
+    /// report.
+    WindowsCaption,
+}
+
+impl WindowControls {
+    /// The full mapping, stated host-independently. Windows collapses both
+    /// decoration reports onto the same answer (see
+    /// [`Self::WindowsCaption`]); on the other two platforms `Client`
+    /// means "nothing else will decorate this window" and `Server` means
+    /// the opposite, exactly as P102 established.
+    fn resolve(decorations: Decorations, host: HostPlatform) -> Self {
+        match host {
+            HostPlatform::Windows => Self::WindowsCaption,
+            HostPlatform::Macos => match decorations {
+                Decorations::Server => Self::MacosNative,
+                Decorations::Client { .. } => Self::TrafficLights,
+            },
+            HostPlatform::Linux => match decorations {
+                Decorations::Server => Self::OsDrawnAbove,
+                Decorations::Client { .. } => Self::TrafficLights,
+            },
+        }
+    }
+
+    /// The left padding applied to the icon cluster. Note this is a *gap*
+    /// under [`Self::TrafficLights`] — the dots are drawn as a preceding
+    /// sibling, so the cluster's own edge lands at
+    /// [`BrowserChrome::cluster_start`] — and an absolute inset from the
+    /// window edge in every other case, where nothing precedes it.
+    fn cluster_leading_gap(self, chrome: &BrowserChrome) -> Pixels {
+        match self {
+            Self::TrafficLights => chrome.traffic_light_cluster_gap,
+            Self::MacosNative => chrome.macos_traffic_light_cluster_inset,
+            Self::OsDrawnAbove | Self::WindowsCaption => chrome.traffic_light_inset,
+        }
+    }
+}
+
+/// Segoe's own caption glyphs, the same code points Windows draws in its
+/// native caption and the ones Zed's `platform_windows.rs` uses.
+const GLYPH_MINIMIZE: &str = "\u{e921}";
+const GLYPH_MAXIMIZE: &str = "\u{e922}";
+const GLYPH_RESTORE: &str = "\u{e923}";
+const GLYPH_CLOSE: &str = "\u{e8bb}";
+
+const SEGOE_FLUENT_ICONS: &str = "Segoe Fluent Icons";
+const SEGOE_MDL2_ASSETS: &str = "Segoe MDL2 Assets";
+
+/// Resolved once per process — [`gpui::TextSystem::all_font_names`] builds
+/// and sorts a `Vec<String>` of every installed family, which must not run
+/// on every render.
+static CAPTION_FONT_FAMILY: OnceLock<&'static str> = OnceLock::new();
+
+/// Which Segoe icon family carries the caption glyphs on this machine.
+///
+/// Zed picks this from the OS build number via `RtlGetVersion`. Asking the
+/// text system which families it actually has answers the real question
+/// instead of a proxy for it — a slimmed Windows image or a future family
+/// rename breaks the proxy but not this — and needs neither the `windows`
+/// crate nor an `unsafe` block.
+///
+/// The fallback is **not** a safety net: `font_fallbacks` maps *code
+/// points* to families and is only built once the base family has already
+/// resolved, so a family that is not installed renders as tofu rather than
+/// falling through. Measured; see the prototype on
+/// `prototype/caption-glyphs`. Picking the family up front is what avoids
+/// that, and if neither family exists the glyphs draw as tofu while the
+/// buttons keep working — their hit areas are geometric, so the window
+/// stays closable.
+fn caption_font_family(cx: &App) -> &'static str {
+    *CAPTION_FONT_FAMILY.get_or_init(|| {
+        if cx
+            .text_system()
+            .all_font_names()
+            .iter()
+            .any(|name| name == SEGOE_FLUENT_ICONS)
+        {
+            SEGOE_FLUENT_ICONS
+        } else {
+            SEGOE_MDL2_ASSETS
+        }
+    })
+}
+
+/// The middle caption button shows "restore" once the window is maximized,
+/// the same swap Windows itself makes. Pure, because `TestWindow::
+/// is_maximized` is hardcoded to `false` — a drawn test can never reach
+/// the other state, and widening `Titlebar`'s interface with an override
+/// for one `bool` would cost more than it proves.
+fn maximize_glyph(is_maximized: bool) -> &'static str {
+    if is_maximized {
+        GLYPH_RESTORE
+    } else {
+        GLYPH_MAXIMIZE
     }
 }
 
@@ -417,6 +571,89 @@ fn cluster_button(
     element
 }
 
+/// One Windows caption button.
+///
+/// **No `on_click`, and no `stop_propagation`** — deliberately, and this is
+/// the one place in this file where that is the correct shape.
+///
+/// On Windows the platform acts on these itself. `window_control_area`
+/// turns the element into a non-client area
+/// (`gpui_windows::events::handle_hit_test_msg` maps it to `HTCLOSE` /
+/// `HTMAXBUTTON` / `HTMINBUTTON`), and `handle_nc_mouse_up_msg` then runs
+/// `ShowWindowAsync(SW_MINIMIZE)`, the `SW_MAXIMIZE`/`SW_NORMAL` toggle,
+/// and `PostMessageW(WM_CLOSE)`.
+///
+/// Adding our own handler *as well* fires both, so a click would maximize
+/// and immediately restore. Wiring one *instead* is worse than it sounds:
+/// `Window::zoom_window` reaches `WindowsWindow::zoom`, which is
+/// `ShowWindowAsync(SW_MAXIMIZE)` **unconditionally**, and gpui exposes no
+/// `restore` — a hand-wired maximize button could never un-maximize
+/// without pulling the `windows` crate and an `unsafe` block into this
+/// crate. `.occlude()` is what Zed uses here for the same reason: it
+/// blocks the drag area underneath without consuming the platform's own
+/// handling.
+///
+/// Declaring the area is not only about clicks: `HTMAXBUTTON` is what
+/// raises Windows 11's Snap Layouts flyout on hover.
+///
+/// Only the close button departs from the theme's own `icon_button`
+/// colours, because only its red is a system constant — see
+/// [`sirio_theme::WindowsCaption`].
+#[allow(clippy::too_many_arguments)]
+fn caption_button(
+    id: &'static str,
+    glyph: &'static str,
+    area: WindowControlArea,
+    enabled: bool,
+    is_close: bool,
+    caption: WindowsCaption,
+    bar_height: Pixels,
+    icon_button: CosmicComponent,
+) -> impl IntoElement {
+    let (hover_bg, hover_on, pressed_bg, pressed_on) = if is_close {
+        (
+            caption.close_hover,
+            caption.close_on,
+            caption.close_pressed,
+            caption.close_on,
+        )
+    } else {
+        (
+            icon_button.hover,
+            icon_button.on,
+            icon_button.pressed,
+            icon_button.on,
+        )
+    };
+    // The same muting `cluster_button` uses for an unwired seam — one
+    // idiom for "this control is present but cannot act", not a second.
+    let resting_on = if enabled {
+        icon_button.on
+    } else {
+        icon_button.on.opacity(0.55)
+    };
+
+    let mut element = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .occlude()
+        .window_control_area(area)
+        .w(caption.button_width)
+        .h(bar_height)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(caption.glyph_size)
+        .text_color(resting_on)
+        .child(glyph);
+    if enabled {
+        element = element
+            .hover(|style| style.bg(hover_bg).text_color(hover_on))
+            .active(|style| style.bg(pressed_bg).text_color(pressed_on));
+    }
+    element
+}
+
 impl Render for Titlebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // P102: never draw our own window controls when the platform is
@@ -426,20 +663,21 @@ impl Render for Titlebar {
         // per-render idiom `docs/linux-rewrite/tasks/
         // P102-the-top-bar-belongs-to-the-os.md` found in Zed's own
         // `platform_title_bar.rs`, not a value cached at window-open time.
-        let decorations = self
-            .decorations_override
-            .unwrap_or_else(|| window.window_decorations());
-        let show_traffic_lights = show_window_controls(&decorations);
+        let controls = self.window_controls_override.unwrap_or_else(|| {
+            WindowControls::resolve(window.window_decorations(), HostPlatform::current())
+        });
 
         let theme = Theme::get(cx);
         let cosmic = theme.cosmic;
         let chrome = theme.browser_chrome;
+        let caption = theme.windows_caption;
         let bar = cosmic.containers.background;
         let icon_button = cosmic.semantic.icon_button;
         let control_radius = px(cosmic.radii.radius_xs[0]);
         let button_size = theme.spacing.compact_action;
         let icon_size = IconSize::Medium;
         let trailing_inset = px(cosmic.spacing.xs as f32);
+        let caption_family = caption_font_family(cx);
         let entity = cx.entity();
 
         let on_close = self.on_close.clone();
@@ -470,7 +708,7 @@ impl Render for Titlebar {
         // under `Decorations::Server` this is not "drawn but hidden", it
         // is not constructed at all, so there is no lingering hitbox for a
         // click to land on.
-        let traffic_lights = show_traffic_lights.then(|| {
+        let traffic_lights = (controls == WindowControls::TrafficLights).then(|| {
             div()
                 .id("titlebar-traffic-lights")
                 .pl(chrome.traffic_light_inset)
@@ -503,13 +741,52 @@ impl Render for Titlebar {
         // With no fallback traffic lights, the cluster either clears the
         // system-owned macOS controls or becomes the row's own leftmost
         // control. Linux keeps its existing leading inset byte-for-byte.
-        let cluster_leading_gap = if show_traffic_lights {
-            chrome.traffic_light_cluster_gap
-        } else if cfg!(target_os = "macos") {
-            chrome.macos_traffic_light_cluster_inset
-        } else {
-            chrome.traffic_light_inset
-        };
+        let cluster_leading_gap = controls.cluster_leading_gap(&chrome);
+
+        // The Windows caption buttons ride at the trailing edge, flush to
+        // the window border: no right padding, so the top-right corner
+        // stays clickable edge-to-edge (Fitts). Built only under
+        // `WindowsCaption` -- under every other value they are not
+        // constructed at all, so no lingering hitbox is left behind, the
+        // same discipline the traffic lights follow above.
+        let caption_buttons = (controls == WindowControls::WindowsCaption).then(|| {
+            div()
+                .id("titlebar-window-caption")
+                .debug_selector(|| "titlebar-window-caption".to_owned())
+                .flex()
+                .items_center()
+                .font_family(caption_family)
+                .child(caption_button(
+                    "titlebar-minimize",
+                    GLYPH_MINIMIZE,
+                    WindowControlArea::Min,
+                    window.is_minimizable(),
+                    false,
+                    caption,
+                    chrome.bar_height,
+                    icon_button,
+                ))
+                .child(caption_button(
+                    "titlebar-maximize",
+                    maximize_glyph(window.is_maximized()),
+                    WindowControlArea::Max,
+                    window.is_resizable(),
+                    false,
+                    caption,
+                    chrome.bar_height,
+                    icon_button,
+                ))
+                .child(caption_button(
+                    "titlebar-close",
+                    GLYPH_CLOSE,
+                    WindowControlArea::Close,
+                    true,
+                    true,
+                    caption,
+                    chrome.bar_height,
+                    icon_button,
+                ))
+        });
 
         let cluster = div()
             .id("titlebar-cluster")
@@ -645,6 +922,7 @@ impl Render for Titlebar {
                         Some(on_right_panel),
                     )),
             )
+            .children(caption_buttons)
             .font_weight(FontWeight::NORMAL)
     }
 }
@@ -699,21 +977,70 @@ mod tests {
         );
     }
 
-    /// The full decoration → controls mapping, stated host-independently:
-    /// Client always draws; Server draws only on Windows, where the
-    /// platform suppresses its native caption yet still reports Server
-    /// (see [`show_window_controls`] and the module docs' Windows
-    /// paragraph). The drawn tests below pin `render` to this function;
-    /// this one pins the function itself.
+    /// The full decoration × host mapping, as a table.
+    ///
+    /// **Every row runs on every host.** That is the whole reason
+    /// [`WindowControls::resolve`] is pure: this assertion used to read
+    /// `assert_eq!(show_window_controls(&Server), cfg!(target_os =
+    /// "windows"))`, which compared the code against itself and could only
+    /// ever exercise the branch it was compiled into.
     #[test]
-    fn window_controls_mapping_covers_both_decoration_reports() {
-        assert!(show_window_controls(&client_side_decorations()));
-        assert_eq!(
-            show_window_controls(&Decorations::Server),
-            cfg!(target_os = "windows"),
-            "Server means 'a WM drew the chrome' on Linux/macOS but \
-             'no chrome exists at all' on Windows -- only the latter may \
-             draw the fallback controls"
+    fn window_controls_resolve_covers_every_host_and_decoration_report() {
+        let table = [
+            (
+                HostPlatform::Linux,
+                Decorations::Server,
+                WindowControls::OsDrawnAbove,
+            ),
+            (
+                HostPlatform::Linux,
+                client_side_decorations(),
+                WindowControls::TrafficLights,
+            ),
+            (
+                HostPlatform::Macos,
+                Decorations::Server,
+                WindowControls::MacosNative,
+            ),
+            (
+                HostPlatform::Macos,
+                client_side_decorations(),
+                WindowControls::TrafficLights,
+            ),
+            // Windows collapses both reports: gpui_windows suppresses the
+            // native caption yet still answers the trait default `Server`,
+            // so a window that reports Server there has no controls at all.
+            (
+                HostPlatform::Windows,
+                Decorations::Server,
+                WindowControls::WindowsCaption,
+            ),
+            (
+                HostPlatform::Windows,
+                client_side_decorations(),
+                WindowControls::WindowsCaption,
+            ),
+        ];
+
+        for (index, (host, decorations, expected)) in table.into_iter().enumerate() {
+            assert_eq!(
+                WindowControls::resolve(decorations, host),
+                expected,
+                "row {index}: {host:?}"
+            );
+        }
+    }
+
+    /// The glyph swap Windows itself makes once the window is maximized.
+    /// Pure, because `TestWindow::is_maximized` is hardcoded to `false` --
+    /// no drawn test can reach the other state.
+    #[test]
+    fn the_maximize_glyph_swaps_to_restore_when_maximized() {
+        assert_eq!(maximize_glyph(false), GLYPH_MAXIMIZE);
+        assert_eq!(maximize_glyph(true), GLYPH_RESTORE);
+        assert_ne!(
+            GLYPH_MAXIMIZE, GLYPH_RESTORE,
+            "the two states must be visually distinguishable"
         );
     }
 
@@ -976,7 +1303,7 @@ mod tests {
     #[gpui::test]
     async fn the_close_control_closes_the_real_window(cx: &mut TestAppContext) {
         let window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_decorations(client_side_decorations())
+            Titlebar::new(cx).with_window_controls(WindowControls::TrafficLights)
         });
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
         vcx.run_until_parked();
@@ -1010,7 +1337,7 @@ mod tests {
         let spy = called.clone();
         let window = cx.add_window(|_window, cx| {
             Titlebar::new(cx)
-                .with_decorations(client_side_decorations())
+                .with_window_controls(WindowControls::TrafficLights)
                 .with_minimize_handler(move |_window| {
                     *spy.borrow_mut() = true;
                 })
@@ -1035,7 +1362,7 @@ mod tests {
         let spy = called.clone();
         let window = cx.add_window(|_window, cx| {
             Titlebar::new(cx)
-                .with_decorations(client_side_decorations())
+                .with_window_controls(WindowControls::TrafficLights)
                 .with_maximize_handler(move |_window| {
                     *spy.borrow_mut() = true;
                 })
@@ -1180,7 +1507,7 @@ mod tests {
     ) {
         cx.update(|cx| Theme::install(ThemeMode::Dark, cx));
         let window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_decorations(client_side_decorations())
+            Titlebar::new(cx).with_window_controls(WindowControls::TrafficLights)
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -1207,7 +1534,7 @@ mod tests {
     ) {
         cx.update(|cx| Theme::install(ThemeMode::Light, cx));
         let window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_decorations(client_side_decorations())
+            Titlebar::new(cx).with_window_controls(WindowControls::TrafficLights)
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -1232,60 +1559,44 @@ mod tests {
         );
     }
 
-    /// P102's central contract, both halves proven in one test with the
-    /// decoration state constructed directly rather than left to whatever
-    /// this machine's `TestWindow` happens to default to (`Decorations::
-    /// Server`, always, since it never overrides `window_decorations()`)
-    /// -- a test exercising only that default would prove half the work.
-    /// `Decorations::Server` means a window manager is already drawing
-    /// chrome: this app must draw none of its own. `Decorations::Client`
-    /// means nothing else will decorate the window (a Wayland compositor
-    /// forcing client-side decorations, or no window manager at all): the
-    /// fallback must still be there, or the window becomes unclosable by
-    /// mouse. The icon cluster must survive in both branches -- the
-    /// directive is "OS top bar **+ our icons**", not "OS top bar only".
+    /// P102's central contract, now stated for **all four** outcomes
+    /// instead of the two a given host happened to compile.
+    ///
+    /// `OsDrawnAbove` means a window manager is already drawing chrome:
+    /// this app must draw none of its own. `MacosNative` leaves the real
+    /// controls to AppKit, likewise drawing none. `TrafficLights` means
+    /// nothing else will ever decorate this window, so the fallback must
+    /// be there or it becomes unclosable by mouse. `WindowsCaption` draws
+    /// its own for the same reason.
+    ///
+    /// The icon cluster must survive every one of them -- the directive is
+    /// "OS top bar **+ our icons**", not "OS top bar only".
     #[gpui::test]
-    async fn fallback_controls_follow_the_platform_decoration_report(cx: &mut TestAppContext) {
-        let server_window =
-            cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
-        let mut server_cx = VisualTestContext::from_window(server_window.into(), cx);
-        server_cx.run_until_parked();
-        // What "under Server" means is the production decision itself
-        // ([`show_window_controls`]): absence where an OS really drew chrome
-        // (Linux, macOS), presence where nothing else ever will (Windows,
-        // whose platform suppresses its native caption yet reports Server).
-        // Asserting against that function keeps this test honest on every
-        // host without hardcoding one platform's answer.
-        let server_draws = show_window_controls(&Decorations::Server);
-        for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
-            assert_eq!(
-                server_cx.debug_bounds(id).is_some(),
-                server_draws,
-                "{id} under Decorations::Server must match show_window_controls"
-            );
-        }
-        assert!(
-            server_cx.debug_bounds("titlebar-sidebar").is_some(),
-            "the icon cluster must still draw under Server -- OS chrome + our icons, \
-             not OS chrome only"
-        );
+    async fn what_the_row_draws_follows_the_resolved_window_controls(cx: &mut TestAppContext) {
+        for (controls, draws_our_own) in [
+            (WindowControls::OsDrawnAbove, false),
+            (WindowControls::MacosNative, false),
+            (WindowControls::TrafficLights, true),
+            (WindowControls::WindowsCaption, true),
+        ] {
+            let window =
+                cx.add_window(|_window, cx| Titlebar::new(cx).with_window_controls(controls));
+            let mut window_cx = VisualTestContext::from_window(window.into(), cx);
+            window_cx.run_until_parked();
 
-        let client_window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_decorations(client_side_decorations())
-        });
-        let mut client_cx = VisualTestContext::from_window(client_window.into(), cx);
-        client_cx.run_until_parked();
-        for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
+            for id in ["titlebar-close", "titlebar-minimize", "titlebar-maximize"] {
+                assert_eq!(
+                    window_cx.debug_bounds(id).is_some(),
+                    draws_our_own,
+                    "{id} under {controls:?}"
+                );
+            }
             assert!(
-                client_cx.debug_bounds(id).is_some(),
-                "{id} must draw as the fallback when the platform reports \
-                 Decorations::Client -- nothing else will decorate this window"
+                window_cx.debug_bounds("titlebar-sidebar").is_some(),
+                "the icon cluster must draw under {controls:?} -- OS chrome + our icons, \
+                 not OS chrome only"
             );
         }
-        assert!(
-            client_cx.debug_bounds("titlebar-sidebar").is_some(),
-            "the icon cluster still draws under Client too"
-        );
     }
 
     /// A tiled edge under CSD is exactly the case a real compositor uses
@@ -1295,91 +1606,76 @@ mod tests {
     /// rounding a seam against another tiled window; this row's own
     /// rendering does not vary by which edges are tiled, so this test
     /// documents that non-effect rather than leaving it unverified.
-    #[gpui::test]
-    async fn tiled_edges_do_not_change_whether_the_fallback_controls_draw(cx: &mut TestAppContext) {
-        let window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_decorations(Decorations::Client {
-                tiling: Tiling::tiled(),
-            })
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("titlebar-close").is_some(),
-            "a fully tiled Client window still gets the fallback close control"
+    #[test]
+    fn tiled_edges_do_not_change_what_the_row_draws() {
+        assert_eq!(
+            WindowControls::resolve(
+                Decorations::Client {
+                    tiling: Tiling::tiled(),
+                },
+                HostPlatform::Linux,
+            ),
+            WindowControls::TrafficLights,
+            "a fully tiled Client window still gets the fallback controls"
+        );
+        assert_eq!(
+            WindowControls::resolve(
+                Decorations::Client {
+                    tiling: Tiling::tiled(),
+                },
+                HostPlatform::Macos,
+            ),
+            WindowControls::TrafficLights
         );
     }
 
-    /// The icon cluster starts after the system traffic-light group on macOS,
-    /// where AppKit draws native controls, and at its own leading inset on
-    /// Linux when server-side decorations leave the window controls to the OS.
+    /// Where the icon cluster's leading edge lands, for all four outcomes.
+    ///
+    /// The expected values are the literals `sirio_theme`'s own
+    /// `browser_chrome_matches_the_comet_measured_spec` pins, not a second
+    /// call into `cluster_leading_gap` -- a test that recomputes the
+    /// expectation the way the code does can never disagree with it.
     #[gpui::test]
-    async fn the_cluster_position_tracks_platform_traffic_lights(cx: &mut TestAppContext) {
-        let server_window =
-            cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
-        let mut server_cx = VisualTestContext::from_window(server_window.into(), cx);
-        server_cx.run_until_parked();
-        let sidebar_server = server_cx
-            .debug_bounds("titlebar-sidebar")
-            .expect("cluster is drawn under Server");
+    async fn the_cluster_position_follows_the_resolved_window_controls(cx: &mut TestAppContext) {
+        for (controls, expected) in [
+            // Nothing precedes the cluster: it starts at the row's own inset.
+            (WindowControls::OsDrawnAbove, px(10.0)),
+            // The caption buttons live at the *trailing* edge, so the
+            // leading edge is untouched -- the same x as OsDrawnAbove.
+            (WindowControls::WindowsCaption, px(10.0)),
+            // AppKit's own controls are reserved before ours.
+            (WindowControls::MacosNative, px(80.0)),
+            // Our dots precede it: 10 + 3*12 + 2*8 + 8 = 70.
+            (WindowControls::TrafficLights, px(70.0)),
+        ] {
+            let window =
+                cx.add_window(|_window, cx| Titlebar::new(cx).with_window_controls(controls));
+            let mut window_cx = VisualTestContext::from_window(window.into(), cx);
+            window_cx.run_until_parked();
 
-        let client_window = cx.add_window(|_window, cx| {
-            Titlebar::new(cx).with_decorations(client_side_decorations())
-        });
-        let mut client_cx = VisualTestContext::from_window(client_window.into(), cx);
-        client_cx.run_until_parked();
-        let sidebar_client = client_cx
-            .debug_bounds("titlebar-sidebar")
-            .expect("cluster is drawn under Client");
-
-        if cfg!(target_os = "macos") {
-            let appkit_reserve = cx.update(|cx| {
-                Theme::get(cx)
-                    .browser_chrome
-                    .macos_traffic_light_cluster_inset
-            });
+            let cluster = window_cx
+                .debug_bounds("titlebar-sidebar")
+                .unwrap_or_else(|| panic!("cluster is drawn under {controls:?}"));
             assert_eq!(
-                sidebar_server.origin.x, appkit_reserve,
-                "Server-side macOS chrome must reserve the AppKit traffic-light width"
-            );
-            assert!(
-                sidebar_server.origin.x > sidebar_client.origin.x,
-                "macOS must reserve AppKit's traffic lights before the cluster (Server: {:?}, Client: {:?})",
-                sidebar_server.origin.x,
-                sidebar_client.origin.x
-            );
-        } else if cfg!(target_os = "windows") {
-            assert_eq!(
-                sidebar_server.origin.x, sidebar_client.origin.x,
-                "Windows draws the fallback under both reports (its platform \
-                 suppresses the native caption and reports Server regardless), \
-                 so the cluster must start at the same x either way \
-                 (Server: {:?}, Client: {:?})",
-                sidebar_server.origin.x, sidebar_client.origin.x
-            );
-        } else {
-            assert!(
-                sidebar_server.origin.x < sidebar_client.origin.x,
-                "Linux server-side decorations omit fallback traffic lights, so the cluster \
-                 starts closer to the left edge (Server: {:?}, Client: {:?})",
-                sidebar_server.origin.x,
-                sidebar_client.origin.x
+                cluster.origin.x, expected,
+                "cluster leading edge under {controls:?}"
             );
         }
     }
 
-    /// AppKit owns the macOS traffic lights when the platform reports Server:
-    /// the fallback controls must be absent and the first icon must begin at
-    /// the theme's documented system-light reserve.
+    /// AppKit owns the macOS traffic lights: our fallback must be absent
+    /// and the first icon must begin at the theme's documented reserve.
+    ///
+    /// This test used to open with `if !cfg!(target_os = "macos") {
+    /// return; }`, which made it a no-op that asserted nothing on Linux,
+    /// on Windows, and on CI -- a green test proving nothing anywhere the
+    /// project actually builds. Driving the outcome through the seam is
+    /// what lets it run.
     #[gpui::test]
     async fn macos_cluster_clears_appkit_traffic_lights(cx: &mut TestAppContext) {
-        if !cfg!(target_os = "macos") {
-            return;
-        }
-
-        let window =
-            cx.add_window(|_window, cx| Titlebar::new(cx).with_decorations(Decorations::Server));
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx).with_window_controls(WindowControls::MacosNative)
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -1398,5 +1694,65 @@ mod tests {
                 .macos_traffic_light_cluster_inset
         });
         assert_eq!(cluster.origin.x, appkit_reserve);
+    }
+
+    /// The Windows caption buttons: three of them, in Windows' own order,
+    /// each the theme's `button_width` wide, filling the row's height, and
+    /// **flush to the trailing edge**. The flush edge is not cosmetic --
+    /// a padded corner cannot be hit by throwing the pointer into it,
+    /// which is how a Windows user closes a window.
+    #[gpui::test]
+    async fn windows_caption_buttons_sit_flush_at_the_trailing_edge(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx).with_window_controls(WindowControls::WindowsCaption)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("sirio-titlebar")
+            .expect("titlebar is drawn");
+        let (caption, bar_height) = cx.update(|_, cx| {
+            let theme = Theme::get(cx);
+            (theme.windows_caption, theme.browser_chrome.bar_height)
+        });
+
+        let minimize = cx
+            .debug_bounds("titlebar-minimize")
+            .expect("minimize is drawn");
+        let maximize = cx
+            .debug_bounds("titlebar-maximize")
+            .expect("maximize is drawn");
+        let close = cx.debug_bounds("titlebar-close").expect("close is drawn");
+
+        for (name, bounds) in [
+            ("minimize", minimize),
+            ("maximize", maximize),
+            ("close", close),
+        ] {
+            assert_eq!(bounds.size.width, caption.button_width, "{name} width");
+            assert_eq!(bounds.size.height, bar_height, "{name} fills the row height");
+        }
+
+        assert!(
+            minimize.origin.x < maximize.origin.x && maximize.origin.x < close.origin.x,
+            "Windows' own order is minimize, maximize, close (got {:?}, {:?}, {:?})",
+            minimize.origin.x,
+            maximize.origin.x,
+            close.origin.x
+        );
+        assert_eq!(
+            close.origin.x + close.size.width,
+            bar.origin.x + bar.size.width,
+            "the close button must reach the window's trailing edge"
+        );
+
+        let right_panel = cx
+            .debug_bounds("titlebar-right-panel")
+            .expect("the app's own trailing icons survive");
+        assert!(
+            right_panel.origin.x + right_panel.size.width <= minimize.origin.x,
+            "the app's icons stay to the left of the window controls"
+        );
     }
 }
