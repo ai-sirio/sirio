@@ -55,11 +55,13 @@ On Windows, the MSVC toolchain is required; see `docs/prototypes/ghostty-pane-wi
 ```
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_agents, sirio_activity, sirio_markdown, sirio_usage,
-sirio_registry   (leaves — no local deps)
+sirio_registry, sirio_release   (leaves — no local deps)
     ^
 sirio_acp        (-> sirio_persistence)
 sirio_terminal    (-> sirio_project, sirio_theme)
 sirio_control    (-> sirio_acp, sirio_persistence)
+sirio_update     (-> sirio_control, sirio_registry, sirio_release)
+sirio_apply      (-> sirio_update)
     ^
 sirio_ui         (-> sirio_acp, sirio_agents, sirio_git, sirio_markdown,
                       sirio_persistence, sirio_project, sirio_registry, sirio_theme,
@@ -71,6 +73,19 @@ sirio            (the app: main.rs — the only crate that depends on everything
 ```
 
 There is no single crate every other crate funnels through the way Swift's `TillerCore` worked — each concern (git, persistence, agent adapters, activity detection, terminal, control socket, UI primitives) lives in its own largely-independent leaf or near-leaf crate, and `sirio`'s `main.rs` is the integration point that wires `PaneRegistry` (`sirio_control`), `AgentActivityModel` (`sirio_activity`), and the ACP/agent/git/persistence layers into the `sirio_ui` components it renders. Run `cargo build -p <crate>` to check one crate compiles in isolation before assuming a change is layered correctly.
+
+### Release, update, apply — three crates, one hand-off each
+
+`sirio_release` owns the signed-artifact format: the channel manifest, the accepted
+Ed25519 key set, and `AcceptedKeys::verify` (recompute SHA-256, then `verify_strict`).
+`sirio_update` reads the manifest for the compiled-in channel (`sirio_control::
+ReleaseChannel::RELEASE_CHANNEL`), downloads, and verifies — and **stops there**,
+handing back a `VerifiedUpdate { version, notes, path, platform }`. `sirio_apply` is the
+only crate that touches the running installation. The boundary is deliberate: a `Dev`
+build never reaches the network at all (`updates_enabled()` is false), and refusing to
+apply is a real outcome — `sirio_apply` rejects an install it cannot self-locate rather
+than guessing a path. Every packaging file reads its identity from `Scripts/identity.sh`;
+`SIRIO_INNO_APP_ID` must never change, because Inno decides upgrade-in-place by comparing it.
 
 ### Agent adapters (`sirio_agents`)
 

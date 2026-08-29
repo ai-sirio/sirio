@@ -23,6 +23,7 @@ members = [
     "crates/sirio_registry",
     "crates/sirio_release",
     "crates/sirio_update",
+    "crates/sirio_apply",
 ]
 
 [workspace.package]
@@ -81,6 +82,7 @@ sirio_usage = { path = "crates/sirio_usage" }
 sirio_registry = { path = "crates/sirio_registry" }
 sirio_release = { path = "crates/sirio_release" }
 sirio_update = { path = "crates/sirio_update" }
+sirio_apply = { path = "crates/sirio_apply" }
 
 # Local override for F-CORE-FILE-03A: upstream `gpui_linux`'s wl_data_device `Drop` handler
 # bails out silently (no `finish()`/`destroy()`, no error, no event delivered to the app) when
