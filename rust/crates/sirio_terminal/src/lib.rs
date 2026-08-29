@@ -28,8 +28,9 @@ use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
     render::{CellIteration, CellIterator, Colors, RowIterator},
     screen::{CellWide, GridRef},
+    selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection},
     style::{StyleColor, Underline},
-    terminal::{Mode, Point as GhosttyPoint, PointCoordinate, ScrollViewport},
+    terminal::{Mode, Point as GhosttyPoint, PointCoordinate, PointSpace, ScrollViewport},
 };
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -283,6 +284,92 @@ impl SnapshotCell {
 /// this channel. Blocking round-trips (Snapshot/Text) wait on a oneshot-ish
 /// reply channel; the owner loop polls with a small sleep so worst-case
 /// command latency is bounded by [`EVENT_POLL_INTERVAL`].
+/// #259: what a repeated click selects around the cell under the pointer.
+///
+/// Resolved by libghostty-vt, not here: word boundaries know about wide
+/// characters and semantic prompt marks, and a line knows whether it was soft
+/// wrapped. Reimplementing either from a cell snapshot gets the easy cases
+/// right and the ones that matter wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickSelection {
+    /// Double click.
+    Word,
+    /// Triple click.
+    Line,
+}
+
+impl ClickSelection {
+    /// GPUI counts clicks for us; anything past three repeats the line, which
+    /// is what a terminal user expects from a fourth click.
+    pub fn for_click_count(count: usize) -> Option<Self> {
+        match count {
+            0 | 1 => None,
+            2 => Some(Self::Word),
+            _ => Some(Self::Line),
+        }
+    }
+}
+
+/// #259: the selected region, in viewport grid coordinates, as plain data.
+///
+/// libghostty-vt owns the real `Selection` -- it is what `format_selection_alloc`
+/// reads for Copy -- but that type borrows the terminal and cannot cross to the
+/// render thread, and the terminal itself is `!Send`. Painting the highlight
+/// through `Selection::contains` would also mean one FFI call per cell per
+/// frame across the whole viewport, which is exactly the per-cell cost the
+/// Raspberry Pi 5 budget cannot carry.
+///
+/// So the owner thread snapshots the resolved range into these four numbers and
+/// the paint loop does ordinary arithmetic against them, tinting background
+/// quads it already emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectedRange {
+    /// First selected cell, inclusive.
+    pub start: (usize, usize),
+    /// Last selected cell, inclusive.
+    pub end: (usize, usize),
+}
+
+impl SelectedRange {
+    /// Builds a range from two endpoints in either order, so a drag upwards or
+    /// leftwards selects the same cells as the same drag reversed.
+    pub fn between(a: (usize, usize), b: (usize, usize)) -> Self {
+        if (a.0, a.1) <= (b.0, b.1) {
+            Self { start: a, end: b }
+        } else {
+            Self { start: b, end: a }
+        }
+    }
+
+    /// Whether a viewport cell falls inside the selection.
+    ///
+    /// Linewise, not rectangular: a selection spanning lines takes every cell
+    /// after the anchor on the first line, all of each line between, and every
+    /// cell up to the focus on the last. Rectangle selection is explicitly out
+    /// of scope for #259.
+    pub fn contains(&self, line: usize, column: usize) -> bool {
+        if line < self.start.0 || line > self.end.0 {
+            return false;
+        }
+        if self.start.0 == self.end.0 {
+            return column >= self.start.1 && column <= self.end.1;
+        }
+        if line == self.start.0 {
+            return column >= self.start.1;
+        }
+        if line == self.end.0 {
+            return column <= self.end.1;
+        }
+        true
+    }
+
+    /// Whether the range covers no cells at all -- a click with no drag, which
+    /// must clear the highlight rather than tint a single cell.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
+
 struct KeyInput {
     action: key::Action,
     key: key::Key,
@@ -348,6 +435,17 @@ enum TerminalCommand {
     Scroll(SirioScroll),
     Snapshot(std::sync::mpsc::Sender<(Vec<Vec<SnapshotCell>>, (usize, usize))>),
     Text(std::sync::mpsc::Sender<String>),
+    /// #259: the text under a selected range, formatted by the emulator
+    /// rather than re-extracted here -- it knows about soft wrapping and
+    /// trailing blanks, which slicing a cell snapshot does not.
+    SelectionText(SelectedRange, std::sync::mpsc::Sender<String>),
+    /// #259: resolve a double or triple click into a range, using the
+    /// emulator's own word and line rules.
+    ClickSelect(
+        (usize, usize),
+        ClickSelection,
+        std::sync::mpsc::Sender<Option<SelectedRange>>,
+    ),
     Shutdown,
 }
 
@@ -360,6 +458,10 @@ enum SirioScroll {
     Bottom,
     PageUp,
     PageDown,
+    /// #259: line-granular scroll, negative upwards. Autoscroll needs one
+    /// line at a time; a page per tick would fly past whatever the user was
+    /// dragging towards.
+    Lines(isize),
 }
 
 #[derive(Clone)]
@@ -401,6 +503,17 @@ struct TerminalHandle {
     /// Sirio-gesture vs encode without a blocking round-trip into the !Send
     /// terminal state.
     mouse_tracking: Arc<AtomicBool>,
+    /// #259: the resolved selection, in viewport grid coordinates.
+    ///
+    /// Written by the owner thread when a gesture changes it, read by
+    /// `TerminalElement::prepaint` to tint background quads. Plain data by
+    /// design -- see [`SelectedRange`] for why the emulator's own `Selection`
+    /// cannot be what the paint loop consults.
+    selection: Arc<Mutex<Option<SelectedRange>>>,
+    /// The cell a drag started from, same coordinates. Kept beside the
+    /// selection so a press that never becomes a drag can clear the highlight
+    /// without inventing a zero-width range.
+    selection_anchor: Arc<Mutex<Option<(usize, usize)>>>,
     /// F-TERM-03: the PTY master's raw fd number, captured once at spawn
     /// time before the master itself moves to the terminal owner thread (the
     /// fd *number* stays valid for as long as the master is open, so holding
@@ -675,6 +788,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             SirioScroll::Bottom => ScrollViewport::Bottom,
                             SirioScroll::PageUp => ScrollViewport::Delta(-page),
                             SirioScroll::PageDown => ScrollViewport::Delta(page),
+                            SirioScroll::Lines(delta) => ScrollViewport::Delta(delta),
                         };
                         terminal.scroll_viewport(viewport);
                     }
@@ -689,6 +803,17 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     }
                     TerminalCommand::Text(reply) => {
                         let _ = reply.send(capture_scrollback_text(&mut terminal));
+                    }
+                    TerminalCommand::ClickSelect(cell, kind, reply) => {
+                        let _ = reply.send(click_selection_range(&terminal, cell, kind));
+                    }
+                    TerminalCommand::SelectionText(range, reply) => {
+                        // Built and consumed inside this one iteration:
+                        // `Selection` borrows the terminal, so it can never be
+                        // held across the loop. The plain range on the handle
+                        // is what survives between frames.
+                        let text = selection_text(&terminal, range).unwrap_or_default();
+                        let _ = reply.send(text);
                     }
                     TerminalCommand::Shutdown => shutdown = true,
                 }
@@ -1077,6 +1202,8 @@ impl TerminalHandle {
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
                 mouse_tracking: mouse_tracking_flag,
+                selection: Arc::new(Mutex::new(None)),
+                selection_anchor: Arc::new(Mutex::new(None)),
                 #[cfg(unix)]
                 pty_master_fd,
             },
@@ -1219,6 +1346,26 @@ impl TerminalHandle {
     /// reads the emulator's complete retained history rather than only the
     /// visible viewport, so a persistence layer can restore what the user
     /// would have found by scrolling up.
+    /// #259: the range a double or triple click selects around a cell.
+    fn click_select(&self, cell: (usize, usize), kind: ClickSelection) -> Option<SelectedRange> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.commands
+            .send(TerminalCommand::ClickSelect(cell, kind, reply_tx))
+            .ok()?;
+        reply_rx.recv().ok().flatten()
+    }
+
+    /// #259: the currently selected text, or `None` when nothing is selected.
+    fn selected_text(&self) -> Option<String> {
+        let range = (*self.selection.lock())?;
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.commands
+            .send(TerminalCommand::SelectionText(range, reply_tx))
+            .ok()?;
+        let text = reply_rx.recv().ok()?;
+        (!text.is_empty()).then_some(text)
+    }
+
     fn capture_scrollback(&self) -> Vec<u8> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
@@ -1549,6 +1696,12 @@ pub struct TerminalView {
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
     context_menu: Option<Point<Pixels>>,
+    /// #259: the running autoscroll, armed only while a drag is held outside
+    /// the pane. Cancel-on-drop, so releasing the button or coming back
+    /// inside stops it -- one timer per surface, the discipline
+    /// `caret::schedule` and the composer's streaming border already follow,
+    /// rather than a loop that runs whether or not anyone is dragging.
+    autoscroll: Option<gpui::Task<()>>,
     /// Live link-hover tooltip (#41): the pointer position plus the resolved
     /// target URI of the cell under the pointer. Set only while the platform
     /// modifier is held over a linked cell; cleared on modifier release or
@@ -1664,6 +1817,7 @@ impl TerminalView {
             exit_status: None,
             identity,
             context_menu: None,
+            autoscroll: None,
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -1690,6 +1844,7 @@ impl TerminalView {
             exit_status: None,
             identity,
             context_menu: None,
+            autoscroll: None,
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -1738,6 +1893,7 @@ impl TerminalView {
             exit_status: None,
             identity,
             context_menu: None,
+            autoscroll: None,
             link_hover: None,
             last_dropped_diff: None,
             last_dropped_files: None,
@@ -2169,6 +2325,77 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// #259: how far to autoscroll for a drag at this height, in lines.
+    ///
+    /// Negative scrolls towards the scrollback, positive towards the active
+    /// area, zero means the drag is comfortably inside and nothing should
+    /// move.
+    ///
+    /// The trigger is a band *just inside* each edge, not the boundary
+    /// itself. That is not a nicety: GPUI stops delivering `on_mouse_move` to
+    /// an element once the pointer leaves its bounds, so a rule that only
+    /// fired outside the pane would never fire at all -- measured, after a
+    /// first version that armed on `pointer_y < top` and produced exactly
+    /// zero ticks. It is also why libghostty-vt ships an autoscroll tick
+    /// event separate from its drag events.
+    ///
+    /// One line per tick rather than a rate proportional to how far past the
+    /// edge the pointer is: a terminal drag aims at a line, and acceleration
+    /// is what makes autoscroll overshoot it.
+    fn autoscroll_lines(pointer_y: f32, top: f32, bottom: f32) -> isize {
+        /// One row. Measured: a 12px band left a pointer 3px below it
+        /// reporting "inside", which is not a distinction a hand at the edge
+        /// of a pane can make. A row is also the unit being scrolled, so the
+        /// band and the step agree.
+        let edge_band = f32::from(LINE_HEIGHT);
+        if pointer_y < top + edge_band {
+            -1
+        } else if pointer_y > bottom - edge_band {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// #259: whether a left drag makes a host selection rather than going to
+    /// the guest.
+    ///
+    /// The convention xterm, alacritty, iTerm2 and Ghostty's own app share:
+    /// while the guest is tracking the mouse it owns bare drags, and `Shift`
+    /// takes one back for the host. With tracking off there is nothing to
+    /// take it from. It does not collide with the `platform` modifier, which
+    /// link opening already claims (`link_router::opens_terminal_link`).
+    fn selection_gesture_wanted(mouse_tracking: bool, shift: bool) -> bool {
+        !mouse_tracking || shift
+    }
+
+    /// The viewport cell under a window-space position.
+    ///
+    /// Undoes the pane origin and divides by the measured glyph advance --
+    /// the same inversion link hit-testing does, kept in one place now that
+    /// selection needs it too (F-TERM-UI-02 explains why the origin and the
+    /// real `last_cell_width` both matter).
+    fn cell_at(terminal: &TerminalHandle, position: gpui::Point<Pixels>) -> (usize, usize) {
+        let origin = terminal
+            .last_bounds
+            .lock()
+            .map(|bounds| bounds.origin)
+            .unwrap_or_default();
+        let cell_width = terminal
+            .last_cell_width
+            .lock()
+            .map(f32::from)
+            .unwrap_or(8.0);
+        link_router::resolve_click_cell(
+            f32::from(position.x),
+            f32::from(position.y),
+            f32::from(origin.x),
+            f32::from(origin.y),
+            cell_width,
+            f32::from(LINE_HEIGHT),
+        )
+    }
+
     fn on_left_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2189,6 +2416,38 @@ impl TerminalView {
                 event.position,
                 event.modifiers,
             );
+        }
+        // #259: a press anchors a possible drag and drops the previous
+        // highlight. It does not select anything on its own -- a bare click
+        // must clear, not select the cell under the pointer.
+        //
+        // Not while the context menu is open, though. Clicking `Copy` in it
+        // is a left press over this same pane, and the press arrives before
+        // the item's own handler: clearing here left `copy_text` with nothing
+        // to copy, and the highlight vanishing under the click. Found by
+        // driving the real app -- the unit tests below cannot see it, because
+        // the ordering is GPUI's, not this function's.
+        if self.context_menu.is_none()
+            && let Some(terminal) = self.running_terminal()
+            && Self::selection_gesture_wanted(
+                terminal.mouse_tracking.load(Ordering::Relaxed),
+                event.modifiers.shift,
+            )
+        {
+            let cell = Self::cell_at(terminal, event.position);
+            // A repeated click selects a word or a line outright; a single one
+            // only anchors, so a plain click clears rather than selecting the
+            // cell under the pointer.
+            let clicked = ClickSelection::for_click_count(event.click_count)
+                .and_then(|kind| terminal.click_select(cell, kind));
+            *terminal.selection_anchor.lock() = Some(cell);
+            let mut selection = terminal.selection.lock();
+            let previous = *selection;
+            *selection = clicked;
+            if previous != clicked {
+                drop(selection);
+                cx.notify();
+            }
         }
         if !opens_terminal_link(event.modifiers.platform) {
             return;
@@ -2269,6 +2528,40 @@ impl TerminalView {
                 event.modifiers,
             );
         }
+        // #259: extend the selection while the left button is held from an
+        // anchored press. Runs before the hover branch below, which returns
+        // early for anything without the platform modifier.
+        if event.pressed_button == Some(MouseButton::Left)
+            && let Some(terminal) = self.running_terminal().cloned()
+            && let Some(anchor) = *terminal.selection_anchor.lock()
+        {
+            let terminal = &terminal;
+            let cell = Self::cell_at(terminal, event.position);
+            let range = SelectedRange::between(anchor, cell);
+            let range = (!range.is_empty()).then_some(range);
+            let mut current = terminal.selection.lock();
+            if *current != range {
+                *current = range;
+                drop(current);
+                cx.notify();
+            }
+            let bounds = *terminal.last_bounds.lock();
+            let lines = bounds
+                .map(|bounds| {
+                    Self::autoscroll_lines(
+                        f32::from(event.position.y),
+                        f32::from(bounds.origin.y),
+                        f32::from(bounds.origin.y + bounds.size.height),
+                    )
+                })
+                .unwrap_or(0);
+            if lines == 0 {
+                // Back inside the pane: drop the task, which cancels it.
+                self.autoscroll = None;
+            } else if self.autoscroll.is_none() {
+                self.arm_autoscroll(lines, cx);
+            }
+        }
         if !opens_terminal_link(event.modifiers.platform) {
             if self.link_hover.take().is_some() {
                 cx.notify();
@@ -2315,12 +2608,67 @@ impl TerminalView {
 
     /// #43: left release has no Sirio gesture; it belongs to the guest
     /// whenever tracking was requested.
+    /// #259: scrolls one line per tick while a drag is held outside the pane,
+    /// extending the selection to the edge it is leaving through.
+    ///
+    /// Scrolling moves what a viewport row means, so the anchor is shifted by
+    /// the opposite amount each tick and stays pinned to the same text. That
+    /// holds because this is the only thing scrolling during a drag; a wheel
+    /// turn mid-drag would still slip, which is a smaller wrong than an anchor
+    /// that walks up the screen on its own.
+    fn arm_autoscroll(&mut self, lines: isize, cx: &mut gpui::Context<Self>) {
+        const AUTOSCROLL_TICK: Duration = Duration::from_millis(60);
+        self.autoscroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                let keep_going = this.update(cx, |view, cx| {
+                    let Some(terminal) = view.running_terminal() else {
+                        return false;
+                    };
+                    let Some(anchor) = *terminal.selection_anchor.lock() else {
+                        return false;
+                    };
+                    terminal.scroll_display(SirioScroll::Lines(lines));
+                    // The anchor is in viewport coordinates, and the viewport
+                    // just moved under it.
+                    let shifted = if lines < 0 {
+                        (anchor.0.saturating_add(1), anchor.1)
+                    } else {
+                        (anchor.0.saturating_sub(1), anchor.1)
+                    };
+                    *terminal.selection_anchor.lock() = Some(shifted);
+                    // Extend to the edge the drag is leaving through.
+                    let rows = terminal
+                        .last_size
+                        .lock()
+                        .map(|(_, rows)| rows as usize)
+                        .unwrap_or(0);
+                    let edge_row = if lines < 0 { 0 } else { rows.saturating_sub(1) };
+                    let focus = (edge_row, if lines < 0 { 0 } else { usize::MAX });
+                    let range = SelectedRange::between(shifted, focus);
+                    *terminal.selection.lock() = (!range.is_empty()).then_some(range);
+                    cx.notify();
+                    true
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn on_left_mouse_up(
         &mut self,
         event: &MouseUpEvent,
         _: &mut Window,
         _: &mut gpui::Context<Self>,
     ) {
+        // #259: the gesture ends; the selection it produced stays until the
+        // next press clears it, and the autoscroll stops with the button.
+        self.autoscroll = None;
+        if let Some(terminal) = self.running_terminal() {
+            *terminal.selection_anchor.lock() = None;
+        }
         if let Some(terminal) = self.running_terminal() {
             Self::encode_mouse(
                 terminal,
@@ -2417,13 +2765,16 @@ impl TerminalView {
         let Some(terminal) = self.running_terminal() else {
             return;
         };
-        // There is no drag selection under libghostty-vt yet (alacritty's
-        // selection_to_string was never populated by any UI here either), so
-        // Copy always captures the scrollback text.
-        let text = terminal.capture_scrollback();
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            String::from_utf8_lossy(&text).into(),
-        ));
+        // #259: Copy takes the selection, and does nothing without one. It
+        // used to copy the entire scrollback, because there was no selection
+        // to take -- hundreds of lines where the user had highlighted a word.
+        //
+        // `capture_scrollback` stays: session save is its other consumer
+        // (`sirio/src/main.rs`), and that one really does want everything.
+        let Some(text) = terminal.selected_text() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     fn running_terminal(&self) -> Option<&TerminalHandle> {
@@ -2544,6 +2895,10 @@ struct TerminalPalette {
     background: Hsla,
     foreground: Hsla,
     cursor: Hsla,
+    /// #259: the wash painted under selected cells. `ThemeColors::selection`
+    /// is the token reserved for text selection, as distinct from the
+    /// selected-row fill -- see its doc comment in `sirio_theme`.
+    selection: Hsla,
 }
 
 impl TerminalPalette {
@@ -2552,6 +2907,7 @@ impl TerminalPalette {
             background: theme.terminal_surface.into(),
             foreground: theme.primary_text_color.into(),
             cursor: theme.primary_text_color.into(),
+            selection: theme.selection.into(),
         }
     }
 }
@@ -2626,6 +2982,9 @@ impl Element for TerminalElement {
         );
 
         let (cells, cursor) = self.terminal.snapshot();
+        // #259: read once per frame, not per cell. The range is plain numbers
+        // precisely so the inner loop stays arithmetic.
+        let selection = *self.terminal.selection.lock();
         let mut backgrounds = Vec::new();
         let mut lines = Vec::with_capacity(cells.len());
 
@@ -2678,16 +3037,26 @@ impl Element for TerminalElement {
                 }
                 text.extend(cell.chars());
 
-                backgrounds.push(fill(
-                    Bounds::new(
-                        point(
-                            bounds.origin.x + cell_width * column as f32,
-                            bounds.origin.y + LINE_HEIGHT * line as f32,
-                        ),
-                        size(cell_width, LINE_HEIGHT),
+                let cell_bounds = Bounds::new(
+                    point(
+                        bounds.origin.x + cell_width * column as f32,
+                        bounds.origin.y + LINE_HEIGHT * line as f32,
                     ),
+                    size(cell_width, LINE_HEIGHT),
+                );
+                backgrounds.push(fill(
+                    cell_bounds,
                     color_to_hsla(cell.bg, self.palette),
                 ));
+                // #259: a selected cell is *washed*, not repainted -- a second
+                // translucent quad over the guest's own background rather than
+                // instead of it. Replacing it outright would erase the
+                // distinction between, say, a diff's red and green lines the
+                // moment they were selected. Only selected cells pay for the
+                // extra quad, and the text still shapes on top of both.
+                if selection.is_some_and(|range| range.contains(line, column)) {
+                    backgrounds.push(fill(cell_bounds, self.palette.selection));
+                }
             }
 
             let shaped_line = window
@@ -3377,6 +3746,68 @@ fn character_key(character: char) -> key::Key {
     }
 }
 
+/// #259: the selected text, straight from the emulator.
+///
+/// Viewport coordinates in, formatted text out. `unwrap` rejoins soft-wrapped
+/// lines and `trim` drops the run of blanks a terminal pads every row with --
+/// both reasons to ask libghostty-vt rather than slice a cell snapshot, which
+/// would copy a screenful of trailing spaces.
+fn selection_text(terminal: &Terminal<'_, '_>, range: SelectedRange) -> Option<String> {
+    let point = |cell: (usize, usize)| {
+        GhosttyPoint::Viewport(PointCoordinate {
+            x: u16::try_from(cell.1).unwrap_or(u16::MAX),
+            y: u32::try_from(cell.0).unwrap_or(u32::MAX),
+        })
+    };
+    let start = terminal.grid_ref(point(range.start)).ok()?;
+    let end = terminal.grid_ref(point(range.end)).ok()?;
+    let selection = Selection::new(start, end, false);
+    let options = FormatOptions::new()
+        .with_selection(&selection)
+        .with_unwrap(true)
+        .with_trim(true);
+    let bytes = terminal.format_selection_alloc(None, options).ok()??;
+    Some(String::from_utf8_lossy(bytes.as_ref()).into_owned())
+}
+
+/// #259: the range a double or triple click selects.
+///
+/// `select_word` and `select_line` are the emulator's own, so wide characters,
+/// semantic prompt boundaries and soft-wrapped lines behave the way they do in
+/// Ghostty rather than the way a hand-written boundary scan would. The result
+/// comes back as a `Selection` over `GridRef`s, which
+/// `Terminal::point_from_grid_ref` converts to the viewport coordinates the
+/// paint loop understands -- the inverse of the lookup that produced them.
+///
+/// `None` when the click lands somewhere with no word (blank cells) or the
+/// range cannot be expressed in the viewport, which is what a click into empty
+/// space should do: nothing.
+fn click_selection_range(
+    terminal: &Terminal<'_, '_>,
+    cell: (usize, usize),
+    kind: ClickSelection,
+) -> Option<SelectedRange> {
+    let point = GhosttyPoint::Viewport(PointCoordinate {
+        x: u16::try_from(cell.1).unwrap_or(u16::MAX),
+        y: u32::try_from(cell.0).unwrap_or(u32::MAX),
+    });
+    let grid_ref = terminal.grid_ref(point).ok()?;
+    let selection = match kind {
+        ClickSelection::Word => terminal.select_word(SelectWordOptions::new(grid_ref)).ok()??,
+        ClickSelection::Line => terminal.select_line(SelectLineOptions::new(grid_ref)).ok()??,
+    };
+    let viewport = |grid_ref: &GridRef<'_>| {
+        terminal
+            .point_from_grid_ref(grid_ref, PointSpace::Viewport)
+            .ok()
+            .flatten()
+            .map(|point| (point.y as usize, point.x as usize))
+    };
+    let start = viewport(&selection.start())?;
+    let end = viewport(&selection.end())?;
+    Some(SelectedRange::between(start, end))
+}
+
 fn encode_key_input(
     terminal: &Terminal<'_, '_>,
     encoder: &mut key::Encoder<'_>,
@@ -3541,6 +3972,162 @@ mod tests {
             "sirio-terminal-test-{name}-{}-{serial}",
             std::process::id()
         ))
+    }
+
+    /// #259: autoscroll fires only outside the pane, and by one line.
+    ///
+    /// Inside the pane it must be exactly zero -- a drag that wanders within
+    /// the viewport should never move the view under the user. One line per
+    /// tick rather than a rate proportional to how far past the edge the
+    /// pointer is: a terminal drag aims at a line, and acceleration is what
+    /// makes autoscroll overshoot it.
+    #[test]
+    fn autoscroll_runs_only_near_the_panes_edges() {
+        // Comfortably inside: nothing moves.
+        assert_eq!(TerminalView::autoscroll_lines(250.0, 100.0, 400.0), 0);
+        assert_eq!(TerminalView::autoscroll_lines(150.0, 100.0, 400.0), 0);
+        assert_eq!(TerminalView::autoscroll_lines(350.0, 100.0, 400.0), 0);
+        // Inside but within a row of the edge -- the case that matters, and
+        // the one an "outside the bounds" rule could never see, because GPUI
+        // stops delivering moves there.
+        assert_eq!(TerminalView::autoscroll_lines(105.0, 100.0, 400.0), -1);
+        assert_eq!(TerminalView::autoscroll_lines(395.0, 100.0, 400.0), 1);
+        // Exactly on each edge, and beyond.
+        assert_eq!(TerminalView::autoscroll_lines(100.0, 100.0, 400.0), -1);
+        assert_eq!(TerminalView::autoscroll_lines(400.0, 100.0, 400.0), 1);
+        assert_eq!(TerminalView::autoscroll_lines(-500.0, 100.0, 400.0), -1);
+        assert_eq!(TerminalView::autoscroll_lines(5000.0, 100.0, 400.0), 1);
+    }
+
+    /// #259: how many clicks mean what.
+    ///
+    /// A single click anchors a drag and selects nothing -- selecting the cell
+    /// under the pointer would make every click leave a one-cell highlight.
+    /// Past three, a terminal user expects the line again, not a new mode.
+    #[test]
+    fn click_count_maps_to_word_then_line() {
+        assert_eq!(ClickSelection::for_click_count(0), None);
+        assert_eq!(ClickSelection::for_click_count(1), None);
+        assert_eq!(
+            ClickSelection::for_click_count(2),
+            Some(ClickSelection::Word)
+        );
+        assert_eq!(
+            ClickSelection::for_click_count(3),
+            Some(ClickSelection::Line)
+        );
+        assert_eq!(
+            ClickSelection::for_click_count(4),
+            Some(ClickSelection::Line)
+        );
+    }
+
+    /// #259: who owns a left drag.
+    ///
+    /// While the guest tracks the mouse it owns bare drags -- a TUI's own
+    /// selection, its scrollbars, its panes -- and `Shift` takes one back for
+    /// the host. With tracking off there is nothing to take it from, so a bare
+    /// drag selects. This is the xterm/alacritty/iTerm2/Ghostty convention.
+    #[test]
+    fn shift_takes_a_drag_back_from_a_mouse_tracking_guest() {
+        // Guest tracking: it owns the bare drag, shift overrides.
+        assert!(!TerminalView::selection_gesture_wanted(true, false));
+        assert!(TerminalView::selection_gesture_wanted(true, true));
+        // No tracking: nothing to override, either way selects.
+        assert!(TerminalView::selection_gesture_wanted(false, false));
+        assert!(TerminalView::selection_gesture_wanted(false, true));
+    }
+
+    /// #264 (part of #263): does libghostty-vt answer the Kitty graphics
+    /// query itself, or must the pane compose the reply?
+    ///
+    /// This is the pivot the whole ticket turns on. Both Pi and omp probe
+    /// actively and stay silent until answered, so if the crate replies the
+    /// remaining work is only rendering; if it does not, the pane owes a
+    /// reply it currently has no idea how to build.
+    ///
+    /// The query is Kitty's own support probe -- a 1x1 RGB image with
+    /// `a=q` (query, do not store) -- and a terminal that supports the
+    /// protocol answers `_Gi=<id>;OK`.
+    #[test]
+    fn kitty_graphics_query_answer_comes_from_the_crate_or_not_at_all() {
+        let replies = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
+        let sink = replies.clone();
+        let mut term = headless_term(80, 24);
+        term.on_pty_write(move |_term, data: &[u8]| {
+            sink.borrow_mut().extend_from_slice(data);
+        })
+        .expect("register the pty-write callback");
+
+        // A control first: DSR-CPR is a query the crate is known to answer,
+        // so an empty result below means "no Kitty reply", not "the callback
+        // was never wired".
+        advance_headless(&mut term, b"[6n");
+        let cursor_reply = String::from_utf8_lossy(&replies.borrow()).into_owned();
+        assert!(
+            cursor_reply.contains('R'),
+            "control: the crate answers DSR-CPR, so the callback is live: {cursor_reply:?}"
+        );
+        replies.borrow_mut().clear();
+
+        advance_headless(&mut term, b"_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\");
+        let answer = String::from_utf8_lossy(&replies.borrow()).into_owned();
+        assert_eq!(
+            answer, "_Gi=31;OK\\",
+            "libghostty-vt answers the Kitty graphics query itself; if this              ever fails, the pane owes the reply and #263's scope grows"
+        );
+    }
+
+    /// #259: a selection spanning lines is linewise, not rectangular.
+    #[test]
+    fn a_multi_line_selection_takes_whole_lines_between_its_ends() {
+        let range = SelectedRange::between((1, 5), (3, 2));
+        // First line: from the anchor rightwards only.
+        assert!(!range.contains(1, 4));
+        assert!(range.contains(1, 5));
+        assert!(range.contains(1, 99));
+        // Middle lines: everything.
+        assert!(range.contains(2, 0));
+        assert!(range.contains(2, 400));
+        // Last line: up to the focus only.
+        assert!(range.contains(3, 2));
+        assert!(!range.contains(3, 3));
+        // Outside entirely.
+        assert!(!range.contains(0, 5));
+        assert!(!range.contains(4, 0));
+    }
+
+    /// A drag that runs backwards selects the same cells as the same drag
+    /// forwards -- the user does not have to sweep in the "right" direction.
+    #[test]
+    fn a_backwards_selection_covers_the_same_cells() {
+        let forwards = SelectedRange::between((1, 5), (3, 2));
+        let backwards = SelectedRange::between((3, 2), (1, 5));
+        assert_eq!(forwards, backwards);
+
+        let right = SelectedRange::between((2, 1), (2, 8));
+        let left = SelectedRange::between((2, 8), (2, 1));
+        assert_eq!(right, left);
+        assert!(right.contains(2, 4));
+    }
+
+    /// Within one line the selection is an ordinary column span.
+    #[test]
+    fn a_single_line_selection_is_a_column_span() {
+        let range = SelectedRange::between((7, 3), (7, 6));
+        assert!(!range.contains(7, 2));
+        assert!(range.contains(7, 3));
+        assert!(range.contains(7, 6));
+        assert!(!range.contains(7, 7));
+        assert!(!range.contains(6, 4));
+        assert!(!range.contains(8, 4));
+    }
+
+    /// A click without a drag must clear the highlight, not tint one cell.
+    #[test]
+    fn a_selection_with_no_extent_is_empty() {
+        assert!(SelectedRange::between((4, 9), (4, 9)).is_empty());
+        assert!(!SelectedRange::between((4, 9), (4, 10)).is_empty());
     }
 
     #[cfg(windows)]

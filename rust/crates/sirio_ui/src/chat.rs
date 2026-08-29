@@ -2313,6 +2313,26 @@ impl Chat {
         self.transcript_text()
     }
 
+    /// The first thing the user actually asked, for naming the session.
+    ///
+    /// Read from the entries rather than parsed out of `transcript_text`,
+    /// because the transcript is prose: "the first line" is the agent's
+    /// words, or a tool call, depending on where the session was cut.
+    ///
+    /// The entries are the reliable source across both restore paths, but
+    /// not an identical one. A chat reloaded from the database keeps its
+    /// real user turns (`restored_entry` maps `ChatEntry::UserMessage` back
+    /// to `Entry::User`), so this finds the original prompt. A chat brought
+    /// back through `restore_transcript` -- flat retained text, no structure
+    /// -- becomes a single *assistant* entry, and this correctly returns
+    /// `None` rather than offering the agent's words as the user's.
+    pub fn first_user_prompt(&self) -> Option<String> {
+        self.entries.iter().find_map(|entry| match entry {
+            Entry::User(text) if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })
+    }
+
     /// Restores retained transcript text into a fresh chat surface. It is
     /// intentionally rendered as one historical assistant entry: preserving
     /// the exact visible transcript is more important than pretending the
@@ -4287,6 +4307,38 @@ impl Chat {
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
+
+        // Column widths, as flex weights.
+        //
+        // Every cell used to be `flex_1`: an equal share of the row whatever
+        // it held, so a two-column table split 50/50 even when one side was
+        // `[255, 0, 0, 255]` and the other a sentence. A blind review called
+        // the result "two loosely floating text blocks rather than a grid" --
+        // the dead space between a value and its label is what breaks the
+        // row-to-column association once a table is long.
+        //
+        // Equal shares were not arbitrary, though: flex rows lay out
+        // independently, so identical weights are the only reason columns line
+        // up across rows at all. Sizing each cell to its own content would
+        // stagger every row. The weight therefore belongs to the COLUMN, taken
+        // across the header and every row, and applied identically to each
+        // cell in it -- proportional widths that still align.
+        //
+        // Character count is a proxy for rendered width, not a measurement:
+        // proportional text makes `iiii` narrower than `WWWW`. It is the right
+        // proxy here because it needs no text system on the layout path, which
+        // `prepaint` cannot afford, and because the failure it fixes is a
+        // factor-of-several mismatch that no per-glyph accuracy would change.
+        let cell_text =
+            |cell: &sirio_markdown::TableCell| sirio_markdown::Inline::plain_text_all(&cell.inline);
+        let column_weights = markdown_table_column_weights(
+            &header.iter().map(&cell_text).collect::<Vec<_>>(),
+            &rows
+                .iter()
+                .map(|row| row.iter().map(&cell_text).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+        );
+
         let render_row = |cells: Vec<sirio_markdown::TableCell>,
                           row_id: String,
                           header_row: bool,
@@ -4303,12 +4355,21 @@ impl Chat {
                         let alignment = alignment.get(index).copied().unwrap_or(Alignment::None);
                         let cell_text = sirio_markdown::Inline::plain_text_all(&cell.inline);
                         let mut cell_view = div()
-                            .flex_1()
+                            .flex_grow(column_weights.get(index).copied().unwrap_or(1.0))
+                            .flex_basis(px(0.0))
+                            // Without this a long word sets the cell's minimum
+                            // and the weights stop deciding anything.
+                            .min_w_0()
                             .px(px(8.0))
                             .py(px(5.0))
                             .flex()
                             .text_size(typography.callout)
-                            .text_color(colors.title);
+                            .text_color(colors.title)
+                            // The rule the grid was missing. Not on the first
+                            // column, where it would double the table border.
+                            .when(index > 0, |this| {
+                                this.border_l_1().border_color(colors.hairline)
+                            });
                         cell_view = match alignment {
                             Alignment::Center => cell_view.justify_center(),
                             Alignment::Right => cell_view.justify_end(),
@@ -6140,7 +6201,11 @@ impl Chat {
                     .find(|choice| choice.value == *current)
                     .map(|choice| choice.name.clone())
                     .unwrap_or_else(|| current.clone());
-                name.to_uppercase()
+                // Not uppercased any more: it used to be a bare caption that
+                // needed to read as chrome, and now it sits beside its own
+                // "Effort" label exactly the way the model value sits beside
+                // "Model".
+                name
             })
         });
         // The picker chip — "Model" in muted chrome text, the value in
@@ -6149,7 +6214,6 @@ impl Chat {
         // models the pill degrades to a plain agent badge (F-CHAT-36): no
         // label, no chevron, no picker.
         let model_control = if self.model_control_visible() {
-            let effort_for_chip = effort_label.clone();
             let model_selection_id = self
                 .selected_model
                 .as_deref()
@@ -6166,7 +6230,13 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
-                .flex_1()
+                // Sized to its content, not to the row. It used to carry
+                // `flex_1`, which stretched the pill the whole width of the
+                // control row and stranded its own chevron ~200px from the
+                // model name, next to the overflow button -- so the chevron
+                // read as belonging to nothing and the model value read as a
+                // caption rather than a picker. `min_w_0` still lets it
+                // shrink, which is what keeps the name's ellipsis working.
                 .min_w_0()
                 .hover(|style| style.bg(colors.chat_row_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -6177,23 +6247,28 @@ impl Chat {
                     div()
                         .id(model_selection_id.clone())
                         .debug_selector(move || model_selection_id)
-                        .flex_1()
+                        // No `flex_1`. Inert on its own now that the pill
+                        // hugs its content -- there is no slack left inside
+                        // to absorb, and removing it alone does not move the
+                        // chevron, which the test below confirms. It goes
+                        // because the two together are what stranded the
+                        // chevron: restore `flex_1` on the pill and this
+                        // would push it to the far edge again.
+                        // `min_w_0` + `text_ellipsis` do the real work,
+                        // truncating a long name when the row is tight.
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(colors.title)
                         .child(selected_model_name.clone()),
                 )
-                .when_some(effort_for_chip, |this, label| {
-                    this.child(
-                        div()
-                            .id("model-effort-label")
-                            .debug_selector(|| "model-effort-label".into())
-                            .text_size(typography.caption2)
-                            .text_color(colors.meta)
-                            .child(label),
-                    )
-                })
-                .child(div().text_color(colors.meta).child("⌄"))
+                .child(
+                    div()
+                        .id("model-chip-chevron")
+                        .debug_selector(|| "model-chip-chevron".into())
+                        .flex_none()
+                        .text_color(colors.meta)
+                        .child("⌄"),
+                )
         } else {
             // #206: this badge names the *agent*, so it reads the agent.
             // It used to render `selected_model_name`, a model variable
@@ -6215,17 +6290,54 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .bg(colors.raised)
                 .text_size(typography.ui_size)
-                .flex_1()
+                // Same rule as the chip above: hug the content.
                 .min_w_0()
                 .child(
                     div()
-                        .flex_1()
                         .min_w_0()
                         .text_ellipsis()
                         .text_color(colors.title)
                         .child(agent_badge_name),
                 )
         };
+
+        // The effort level is a peer of the model, not a caption inside it:
+        // it is changed about as often, so it belongs at the same depth and
+        // carries its own label. Drawn only when the agent reports a value
+        // AND the picker can actually open, so this is never a click target
+        // that leads nowhere. `flex_none` keeps it intact while the model
+        // pill beside it absorbs the squeeze on a narrow pane.
+        let effort_control = effort_label
+            .filter(|_| self.model_control_visible())
+            .map(|label| {
+                let effort_entity = entity.clone();
+                div()
+                    .id("effort-chip")
+                    .debug_selector(|| "effort-chip".into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(theme.radii.control)
+                    .bg(colors.raised)
+                    .text_size(typography.ui_size)
+                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .on_click(move |_, window, cx| {
+                        effort_entity
+                            .update(cx, |chat, cx| chat.toggle_model_picker(window, cx));
+                    })
+                    .child(div().text_color(colors.meta).child("Effort"))
+                    .child(
+                        div()
+                            .id("model-effort-label")
+                            .debug_selector(|| "model-effort-label".into())
+                            .text_color(colors.title)
+                            .child(label),
+                    )
+                    .child(div().flex_none().text_color(colors.meta).child("⌄"))
+            });
 
         let model_picker = if self.model_picker_open {
             let picker_entity = model_entity.clone();
@@ -7465,6 +7577,12 @@ impl Chat {
                     .child(attach_button)
                     .child(status_pill)
                     .child(model_control)
+                    .children(effort_control)
+                    // Splits the row into the two groups it always meant to
+                    // be: what you configure on the left, status and send on
+                    // the right. Without it every control drifts leftward and
+                    // the spacing carries no meaning.
+                    .child(div().flex_1())
                     .child(overflow_button)
                     .child(
                         div()
@@ -7478,8 +7596,25 @@ impl Chat {
                             .bg(colors.raised)
                             .text_size(typography.ui_size)
                             .child(context_ring)
+                            // Named, like every other value in this row. A
+                            // blind review of the composer could read the
+                            // ring and the number but not what they measured
+                            // -- "context used? budget? direction
+                            // unreadable" -- and the answer only appeared
+                            // after clicking through to the popover, which
+                            // spells out "N% of context used". The field name
+                            // belongs where the value is.
                             .child(
                                 div()
+                                    .id("context-label")
+                                    .debug_selector(|| "context-label".into())
+                                    .text_color(colors.meta)
+                                    .child("Context"),
+                            )
+                            .child(
+                                div()
+                                    .id("context-percent")
+                                    .debug_selector(|| "context-percent".into())
                                     .text_color(colors.title)
                                     .child(format!("{context_percent}%")),
                             ),
@@ -8625,6 +8760,38 @@ impl ToolCallPlainText {
 
 /// Names the first file a collapsed tool call touched, keeping the path
 /// useful without repeating a path already present in the tool title.
+/// Column widths for a markdown table, as flex weights.
+///
+/// One weight per column, taken from the widest cell in that column across the
+/// header and every row, and applied identically to each cell in it. Both
+/// halves matter: proportional so a four-character column stops claiming half
+/// the table, identical down a column so the rows still line up -- flex rows
+/// lay out independently, so per-cell sizing would stagger them.
+///
+/// Character count is a proxy for rendered width, not a measurement, since
+/// proportional text makes `iiii` narrower than `WWWW`. It is the right proxy
+/// here: it needs no text system on the layout path, and the failure it
+/// corrects is a factor-of-several mismatch that per-glyph accuracy would not
+/// change.
+fn markdown_table_column_weights(header: &[String], rows: &[Vec<String>]) -> Vec<f32> {
+    let mut widths: Vec<usize> = Vec::new();
+    for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
+        for (index, text) in row.iter().enumerate() {
+            let len = text.chars().count();
+            match widths.get_mut(index) {
+                Some(slot) => *slot = (*slot).max(len),
+                None => widths.push(len),
+            }
+        }
+    }
+    widths
+        .into_iter()
+        // A floor keeps a column of empty cells from collapsing to a hairline.
+        // The set stays relative, so equal-length columns still split evenly.
+        .map(|len| len.max(3) as f32)
+        .collect()
+}
+
 fn collapsed_tool_row_text(
     status: &str,
     title: &str,
@@ -14049,6 +14216,108 @@ mod tests {
         );
     }
 
+    /// The chevron has to stay beside the name it qualifies.
+    ///
+    /// The chip used to carry `flex_1`, stretching the pill across the whole
+    /// control row, and the name div carried it too, so the name ate the
+    /// slack and the chip's own chevron landed at the row's right edge --
+    /// next to the overflow button, ~200px from the model it belonged to. A
+    /// blind review of the composer read it as "a lone chevron floating
+    /// mid-row, orphaned from whatever it belongs to", and read the model
+    /// value as a caption rather than something clickable.
+    /// A markdown table sizes its columns to their content, and the same
+    /// column gets the same width in every row.
+    ///
+    /// The weights are what make both true at once. Per-cell content sizing
+    /// would stagger the rows -- flex rows lay out independently -- and the
+    /// equal shares this replaced gave a two-column table a 50/50 split
+    /// whatever it held.
+    #[test]
+    fn table_column_weights_follow_content_and_are_shared_down_a_column() {
+        let weights = markdown_table_column_weights(
+            &["id".into(), "what the measurement showed".into()],
+            &[
+                vec!["#268".into(), "BGRA, settled by sampling pixels".into()],
+                vec!["#264".into(), "zero graphics APCs from three CLIs".into()],
+            ],
+        );
+        assert_eq!(weights.len(), 2);
+        assert!(
+            weights[1] > weights[0] * 3.0,
+            "a sentence column must outweigh a four-character one, not tie              with it: {weights:?}"
+        );
+        // The widest cell in a column decides, header included.
+        let header_wins = markdown_table_column_weights(
+            &["a considerably longer header".into(), "b".into()],
+            &[vec!["x".into(), "y".into()]],
+        );
+        assert!(header_wins[0] > header_wins[1]);
+    }
+
+    /// Equal content still splits evenly -- the change is proportional, not a
+    /// new bias.
+    #[test]
+    fn table_columns_of_equal_content_still_split_evenly() {
+        // Genuinely equal: "left"/"same" are both four characters, as are the
+        // body cells. An earlier version of this test used "left"/"right" and
+        // failed on the one-character difference -- which is the rule working.
+        let weights = markdown_table_column_weights(
+            &["left".into(), "same".into()],
+            &[vec!["aaaa".into(), "bbbb".into()]],
+        );
+        assert_eq!(weights[0], weights[1]);
+    }
+
+    /// An empty column keeps a floor rather than collapsing to a hairline.
+    #[test]
+    fn an_empty_table_column_does_not_collapse() {
+        let weights = markdown_table_column_weights(
+            &["".into(), "a much longer column".into()],
+            &[vec!["".into(), "more text here".into()]],
+        );
+        assert!(weights[0] >= 3.0, "{weights:?}");
+    }
+
+    #[gpui::test]
+    async fn the_model_chips_chevron_stays_beside_the_model_name(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "hi");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        refresh_frame(cx);
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("the model chip is drawn");
+        let chevron = cx
+            .debug_bounds("model-chip-chevron")
+            .expect("the chip's chevron is drawn");
+
+        // The chevron sits inside the pill, near its right edge -- which is
+        // only true when the pill is sized to its content.
+        let trailing_gap = f32::from(chip.right() - chevron.right());
+        assert!(
+            trailing_gap < 24.0,
+            "the chevron must sit at the pill's own right edge, not be stranded              by a stretched pill: gap {trailing_gap}px"
+        );
+
+        // And the pill must not span the control row. The composer is far
+        // wider than a model name; a pill claiming most of it is the bug.
+        let composer = cx
+            .debug_bounds("composer")
+            .expect("the composer is drawn");
+        assert!(
+            f32::from(chip.size.width) < f32::from(composer.size.width) * 0.6,
+            "the pill must hug its content, not the row: pill {}px of {}px",
+            f32::from(chip.size.width),
+            f32::from(composer.size.width)
+        );
+    }
+
     /// F-CHAT-17: the model picker offers the agent's advertised effort
     /// levels, the current one is marked, and choosing one updates the
     /// selection and the effort label on the model chip.
@@ -14096,9 +14365,98 @@ mod tests {
             "choosing an effort updates the selection"
         );
         refresh_frame(cx);
+        // The effort no longer lives inside the model chip -- it is its own
+        // labelled pill beside it, so the old wording here would be wrong.
         assert!(
             cx.debug_bounds("model-effort-label").is_some(),
-            "the model chip shows the selected effort"
+            "the effort pill shows the selected effort"
+        );
+        assert_effort_is_a_peer_of_the_model(cx);
+    }
+
+    /// The effort pill sits beside the model pill, not inside it.
+    ///
+    /// It used to be an uppercased caption with no label and no click target,
+    /// tucked in among the model chip's own children, so changing it meant
+    /// opening the model picker and already knowing the effort lived in
+    /// there. Both pills are peers now, and each says what it is.
+    fn assert_effort_is_a_peer_of_the_model(cx: &mut VisualTestContext) {
+        let model = cx
+            .debug_bounds("model-chip")
+            .expect("the model chip is drawn");
+        let effort = cx
+            .debug_bounds("effort-chip")
+            .expect("the effort pill is drawn");
+        assert!(
+            f32::from(effort.left()) >= f32::from(model.right()),
+            "the effort pill must start at or after the model pill ends, not              be nested inside it: effort left {}px vs model right {}px",
+            f32::from(effort.left()),
+            f32::from(model.right())
+        );
+    }
+
+    /// The effort control is reachable as a peer, and it names itself.
+    #[gpui::test]
+    async fn the_effort_control_is_a_peer_of_the_model_not_a_caption(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "hi");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        refresh_frame(cx);
+
+        assert_effort_is_a_peer_of_the_model(cx);
+
+        // And it opens the picker on its own, rather than being a label the
+        // user has to know is hidden behind the model chip.
+        let effort = cx
+            .debug_bounds("effort-chip")
+            .expect("the effort pill is drawn");
+        cx.simulate_click(effort.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("effort-option-high").is_some(),
+            "clicking the effort pill must reach the effort choices"
+        );
+    }
+
+    /// The context meter names what it measures.
+    ///
+    /// It used to be a ring and a bare percentage. A blind review could read
+    /// both and still not know what they measured -- the answer only existed
+    /// in the popover, a click away, which spells out "N% of context used".
+    /// Every other value in this row carries its field name inline; this one
+    /// now does too, between the ring and the number.
+    #[gpui::test]
+    async fn the_context_meter_names_what_it_measures(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.context_usage.is_some());
+        refresh_frame(cx);
+
+        let ring = cx
+            .debug_bounds("context-ring")
+            .expect("the context ring is drawn");
+        let label = cx
+            .debug_bounds("context-label")
+            .expect("the context meter is labelled");
+        let percent = cx
+            .debug_bounds("context-percent")
+            .expect("the context percentage is drawn");
+
+        assert!(
+            f32::from(label.left()) >= f32::from(ring.right()),
+            "the label follows the ring: label left {}px vs ring right {}px",
+            f32::from(label.left()),
+            f32::from(ring.right())
+        );
+        assert!(
+            f32::from(percent.left()) >= f32::from(label.right()),
+            "the value follows its label, the same order the model and effort              pills use: value left {}px vs label right {}px",
+            f32::from(percent.left()),
+            f32::from(label.right())
         );
     }
 
