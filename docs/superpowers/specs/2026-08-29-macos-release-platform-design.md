@@ -318,12 +318,27 @@ already has the app installed.
 ## Deliverables
 
 ```
-Scripts/build-app-bundle.sh          new
-Scripts/build-dmg.sh                 restored from c47234de^, verbatim
-Scripts/check-release-version.sh     restored, retargeted to Cargo.toml
-.github/workflows/release.yml        rewritten: 3 jobs, needs: macos
-CLAUDE.md                            "What this is" and "Commands" updated
+Scripts/build-app-bundle.sh                    new
+Scripts/build-dmg.sh                           restored from c47234de^, verbatim
+Scripts/check-release-version.sh               restored, retargeted to Cargo.toml
+Scripts/Tests/test-build-app-bundle.sh         new
+Scripts/Tests/test-build-dmg.sh                new
+Scripts/Tests/test-check-release-version.sh    new
+Scripts/Tests/test-release-workflow.sh         new
+Scripts/ci-linux.sh                            runs the four new tests
+.github/workflows/release.yml                  rewritten: 3 jobs, needs: macos
+CLAUDE.md                                      "What this is" and "Commands" updated
 ```
+
+The four tests follow the repo's own convention ("Tests first"), and every macOS-only
+executable they touch — `codesign`, `hdiutil` — is stubbed the way
+`Scripts/Tests/test-ci.sh` already stubs `cargo`. That keeps them runnable on any
+POSIX host rather than only on the release machine.
+
+The signing identity is **not** an eighth secret. It is read back at run time from
+the certificate the workflow has just imported into `ci.keychain`, because the
+certificate already carries its own name and a stored copy would be a second source
+of truth free to drift from it.
 
 `CLAUDE.md` is not an afterthought. It is the file that instructs every agent
 working in this repo, it already lags the code (`process.rs` describes Linux as
