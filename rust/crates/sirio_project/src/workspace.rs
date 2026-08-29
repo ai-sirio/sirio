@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn filter_matches_project_name() {
         let workspace = seeded_workspace();
-        let filtered = workspace.filter("till");
+        let filtered = workspace.filter("sir");
 
         assert_eq!(filtered.projects.len(), 1);
         // The project itself matched, so all descendants stay visible.
