@@ -22,7 +22,7 @@ TAG_VERSION="${TAG#v}"
 # `[workspace.package]`'s version is the only top-level `version = ` assignment
 # in this file; every dependency version is inline inside a `{ ... }` table, so
 # an anchored match cannot pick the wrong one.
-CARGO_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed -E 's/^version = "([^"]+)".*/\1/')
+CARGO_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed -E 's/^version = "([^"]+)".*/\1/' || true)
 
 if [ -z "$CARGO_VERSION" ]; then
   echo "error: could not find a workspace version in $CARGO_TOML" >&2

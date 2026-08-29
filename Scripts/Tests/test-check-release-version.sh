@@ -40,4 +40,14 @@ if "$CHECK_SCRIPT" "v0.6.0" "$FIXTURE/missing.toml" >/dev/null 2>&1; then
   exit 1
 fi
 
+printf '[workspace]\nresolver = "2"\n' > "$FIXTURE/no-version.toml"
+if STDERR=$("$CHECK_SCRIPT" "v0.6.0" "$FIXTURE/no-version.toml" 2>&1 >/dev/null); then
+  echo "FAIL: a Cargo.toml with no workspace version must exit non-zero" >&2
+  exit 1
+fi
+case "$STDERR" in
+  *error:*) ;;
+  *) echo "FAIL: expected an 'error:' message on stderr, got '$STDERR'" >&2; exit 1 ;;
+esac
+
 echo "PASS: release version check"
