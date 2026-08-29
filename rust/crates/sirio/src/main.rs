@@ -6988,15 +6988,47 @@ impl SirioWorkspace {
         }
 
         let mut transcript = None;
+        let mut first_prompt = None;
         self.tabs[tab_index]
             .panes
             .for_each(&mut |leaf_id, content| {
                 if leaf_id == pane_id
                     && let TabContent::Chat(chat) = content
                 {
-                    transcript = Some(chat.read(cx).transcript_for_resume());
+                    let chat = chat.read(cx);
+                    transcript = Some(chat.transcript_for_resume());
+                    first_prompt = chat.first_user_prompt();
                 }
             });
+
+        // Name the session from what the user asked, immediately, before the
+        // summarizer is even considered.
+        //
+        // Naming used to run through the summarizer alone, and
+        // `summarizer_candidate_commands` returning empty made this function
+        // return in silence -- leaving the tab called "OpenCode", along with
+        // every other one. A blind review of the sidebar put it plainly: "a
+        // dozen siblings all read OpenCode, so the rail can list your work but
+        // cannot help you find it, and its Filter box is inert against its own
+        // contents."
+        //
+        // The fallback costs no model call, no agent and no network. It does
+        // not fire any earlier than the summarizer would have -- this whole
+        // function runs on an agent status transition into Done/NeedsInput,
+        // so a session is still unnamed until its first turn closes. What
+        // changes is that the name no longer depends on there being a
+        // summarizer to ask. A summarizer, when there is one, still
+        // overwrites it later --
+        // `apply_auto_title` guards on `title_is_auto_named`, which this does
+        // not clear.
+        if let Some(prompt) = first_prompt.as_deref()
+            && let Some(title) = title_from_prompt(prompt)
+            && self.tabs[tab_index].title != title
+        {
+            self.tabs[tab_index].title = title;
+            self.rebuild_tab_machinery();
+            cx.notify();
+        }
         let Some(transcript) = transcript else {
             return;
         };
@@ -13563,6 +13595,42 @@ fn restore_tabs(
 
 /// #125 (spec R6.5): the address a restored Browser tab opens at.
 ///
+/// A session title taken from the user's first prompt.
+///
+/// Whitespace collapsed so a pasted multi-line question does not become a
+/// multi-line tab, and cut at a word boundary rather than mid-word -- a rail
+/// full of truncated fragments is only marginally better than a rail full of
+/// "OpenCode". `None` for a prompt with nothing in it, which leaves the
+/// existing title alone rather than blanking the tab.
+fn title_from_prompt(prompt: &str) -> Option<String> {
+    const MAX: usize = 42;
+    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= MAX {
+        return Some(collapsed);
+    }
+    let mut title = String::new();
+    for word in collapsed.split(' ') {
+        let candidate = if title.is_empty() {
+            word.to_string()
+        } else {
+            format!("{title} {word}")
+        };
+        if candidate.chars().count() > MAX {
+            break;
+        }
+        title = candidate;
+    }
+    // A single word longer than the cap has no boundary to cut at; take the
+    // characters rather than return nothing.
+    if title.is_empty() {
+        title = collapsed.chars().take(MAX).collect();
+    }
+    Some(format!("{title}…"))
+}
+
 /// What was captured at save time, or the fallback page when the session
 /// predates the capture or the tab never carried an address. Both restore
 /// paths go through here so the fallback is spelled once.
@@ -25271,6 +25339,57 @@ mod tests {
             draft.expect("restored chat tab has a chat pane")
         });
         assert_eq!(draft, "an idea I never sent");
+    }
+
+    /// A session is named from what the user asked, not from its agent.
+    ///
+    /// The sidebar showed a dozen rows all reading "OpenCode" because naming
+    /// ran through the summarizer alone, and no summarizer meant no name. This
+    /// is the deterministic half: no model call, no agent, no network.
+    #[test]
+    fn a_title_comes_from_the_prompt_and_keeps_its_words_whole() {
+        assert_eq!(
+            title_from_prompt("fix the browser profile directory"),
+            Some("fix the browser profile directory".into()),
+            "a short prompt is the title, unchanged"
+        );
+
+        // Long enough to cut: the cut lands on a space, never mid-word.
+        let long = "why does the terminal pane copy the whole scrollback instead of the selection";
+        let title = title_from_prompt(long).expect("a long prompt still names the tab");
+        assert!(title.ends_with('…'), "{title:?}");
+        assert!(
+            long.starts_with(title.trim_end_matches('…')),
+            "the title must be a prefix of the prompt: {title:?}"
+        );
+        assert!(
+            title.chars().count() <= 43,
+            "one character over the cap is the ellipsis: {}",
+            title.chars().count()
+        );
+
+        // Newlines and runs of spaces collapse -- a pasted question must not
+        // become a multi-line tab.
+        assert_eq!(
+            title_from_prompt("  fix   the
+
+browser  profile  "),
+            Some("fix the browser profile".into())
+        );
+
+        // Nothing to name from leaves the existing title alone.
+        assert_eq!(title_from_prompt("   
+  "), None);
+        assert_eq!(title_from_prompt(""), None);
+    }
+
+    /// A single word longer than the cap has no boundary to cut at.
+    #[test]
+    fn a_title_survives_a_prompt_with_no_spaces() {
+        let word = "a".repeat(200);
+        let title = title_from_prompt(&word).expect("still names the tab");
+        assert!(title.ends_with('…'));
+        assert!(title.chars().count() <= 43, "{}", title.chars().count());
     }
 
     /// #125 (spec R6.5): the fallback is spelled once, and only stands in for
