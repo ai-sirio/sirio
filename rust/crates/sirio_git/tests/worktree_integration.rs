@@ -1,0 +1,384 @@
+//! Integration tests for worktree creation and removal against REAL
+//! temporary git repositories. Everything is asserted against what
+//! `git worktree list --porcelain` actually reports afterwards — not
+//! against this crate's own idea of what happened.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use sirio_git::{WorktreeError, create_worktree, derive_worktree_path, remove_worktree};
+
+/// A throwaway directory, removed on drop. Canonicalized so paths match what
+/// git reports (macOS `/var` is a symlink to `/private/var`).
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "sirio-worktree-test-{tag}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        Self(std::fs::canonicalize(&path).expect("canonicalize temp dir"))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs `git <args>` in `dir`, asserting success.
+fn git(dir: &Path, args: &[&str]) {
+    ensure_generous_timeout();
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("git must be installed to run these tests");
+    assert!(
+        status.success(),
+        "`git {args:?}` failed in {}",
+        dir.display()
+    );
+}
+
+/// The crate's runner bounds every git invocation with a wall-clock
+/// deadline (10 s by default) so a hung git can never freeze the UI. Under
+/// machine load — parallel compiles, high load average — a single
+/// invocation on a tiny fixture repo can legitimately exceed that budget,
+/// so the tests opt into a generous one. The production default is
+/// untouched; the override only applies while this variable is set.
+const TEST_GIT_TIMEOUT_MS: &str = "120000";
+
+/// Sets the process-wide timeout override exactly once, before any test
+/// shells out through the crate's runner. Every test in this file reaches
+/// [`git`] (directly or via `make_repo`) before touching the crate API, so
+/// this one call site covers all of them.
+fn ensure_generous_timeout() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: test process, set once. The only reader is the crate's
+        // per-call `SIRIO_GIT_TIMEOUT_MS` lookup, and a wider budget can
+        // only turn a would-be timeout into a pass — never the reverse.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", TEST_GIT_TIMEOUT_MS) };
+    });
+}
+
+/// Runs `git <args>` in `dir`, returning stdout.
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git must be installed to run these tests");
+    assert!(
+        output.status.success(),
+        "`git {args:?}` failed in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The branch of the worktree at `path`, per `git worktree list --porcelain`.
+/// git-for-Windows spells porcelain worktree paths with forward slashes
+/// and no verbatim prefix (`C:/Users/...`), while the fixtures hold
+/// canonicalized `\\?\C:\...` paths — normalize before comparing.
+fn porcelain_spelling(path: &Path) -> String {
+    let mut spelling = path.display().to_string();
+    #[cfg(windows)]
+    if let Some(rest) = spelling.strip_prefix(r"\\?\") {
+        spelling = rest.to_string();
+    }
+    spelling.replace('\\', "/")
+}
+
+fn porcelain_branch(repo: &Path, path: &Path) -> Option<String> {
+    let output = git_stdout(repo, &["worktree", "list", "--porcelain"]);
+    let mut current_path: Option<&str> = None;
+    for line in output.lines() {
+        if let Some(worktree_path) = line.strip_prefix("worktree ") {
+            current_path = Some(worktree_path);
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
+            && current_path == Some(porcelain_spelling(path).as_str())
+        {
+            return Some(branch.to_string());
+        }
+    }
+    None
+}
+
+fn porcelain_worktree_count(repo: &Path) -> usize {
+    git_stdout(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+/// Creates a git repo with one commit on `main`.
+///
+/// The identity is written into the repo's own config, not passed as `-c`
+/// on the first commit alone: `created_worktree_survives_a_porcelain_round_trip_with_base`
+/// makes a *second* commit through the bare `git` helper, and on a machine
+/// with no global git identity (this one) git refuses it with "Author
+/// identity unknown" and the test dies in its fixture rather than in the
+/// code under test. Same defect, same fix, as `git_integration.rs`.
+fn make_repo(tag: &str) -> TempDir {
+    let repo = TempDir::new(tag);
+    git(repo.path(), &["init", "-b", "main"]);
+    git(repo.path(), &["config", "user.email", "test@sirio.dev"]);
+    git(repo.path(), &["config", "user.name", "Sirio Test"]);
+    std::fs::write(repo.path().join("file.txt"), "one\ntwo\nthree\n").expect("write file");
+    git(repo.path(), &["add", "-A"]);
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.email=test@sirio.dev",
+            "-c",
+            "user.name=Sirio Test",
+            "commit",
+            "-m",
+            "root",
+        ],
+    );
+    repo
+}
+
+#[test]
+fn creates_a_worktree_on_a_new_branch() {
+    let repo = make_repo("create");
+    let parent = repo.path().parent().expect("parent");
+    let project_name = repo.path().file_name().unwrap().to_string_lossy();
+    let branch = "feature-x";
+    let path = derive_worktree_path(parent, &project_name, branch);
+    let _ = std::fs::remove_dir_all(&path);
+
+    create_worktree(repo.path(), branch, &path, None).expect("create worktree");
+
+    assert_eq!(
+        porcelain_branch(repo.path(), &path).as_deref(),
+        Some(branch),
+        "git worktree list --porcelain reports the new worktree on the new branch"
+    );
+    assert!(
+        path.join("file.txt").exists(),
+        "the checkout has the repo's files"
+    );
+}
+
+#[test]
+fn attaches_to_an_existing_branch_without_a_worktree() {
+    let repo = make_repo("attach");
+    // Create a branch that is not checked out anywhere.
+    git(repo.path(), &["branch", "existing-branch"]);
+    let path = repo.path().with_extension("wt-existing");
+
+    create_worktree(repo.path(), "existing-branch", &path, None)
+        .expect("attach to existing branch");
+
+    assert_eq!(
+        porcelain_branch(repo.path(), &path).as_deref(),
+        Some("existing-branch")
+    );
+}
+
+#[test]
+fn branch_that_already_has_a_worktree_is_refused_clearly() {
+    let repo = make_repo("dupe");
+    let first = repo.path().with_extension("wt-first");
+    create_worktree(repo.path(), "feature-x", &first, None).expect("first worktree");
+
+    let second = repo.path().with_extension("wt-second");
+    let error = create_worktree(repo.path(), "feature-x", &second, None)
+        .expect_err("a second worktree for the same branch must be refused");
+
+    assert!(
+        matches!(
+            error,
+            WorktreeError::BranchAlreadyCheckedOut { ref branch, .. } if branch == "feature-x"
+        ),
+        "the refusal names the branch: {error}"
+    );
+
+    // Nothing broken was created: porcelain still reports exactly one
+    // worktree for that branch, and the second path does not exist.
+    assert_eq!(
+        porcelain_worktree_count(repo.path()),
+        2,
+        "main + the one worktree"
+    );
+    assert_eq!(
+        porcelain_branch(repo.path(), &first).as_deref(),
+        Some("feature-x")
+    );
+    assert!(!second.exists(), "no broken second checkout was created");
+}
+
+#[test]
+fn branch_with_a_slash_becomes_a_nested_directory() {
+    let repo = make_repo("slash");
+    let parent = repo.path().parent().expect("parent");
+    let project_name = repo.path().file_name().unwrap().to_string_lossy();
+    let branch = "feature/login";
+    let path = derive_worktree_path(parent, &project_name, branch);
+
+    create_worktree(repo.path(), branch, &path, None).expect("create with a slash");
+
+    assert!(
+        path.join("file.txt").exists(),
+        "the nested checkout exists at {}",
+        path.display()
+    );
+    assert_eq!(
+        porcelain_branch(repo.path(), &path).as_deref(),
+        Some("feature/login"),
+        "porcelain reports the slash branch on the nested path"
+    );
+}
+
+#[test]
+fn branch_with_a_space_is_refused_by_git_and_creates_nothing() {
+    let repo = make_repo("space");
+    let parent = repo.path().parent().expect("parent");
+    let project_name = repo.path().file_name().unwrap().to_string_lossy();
+    let branch = "café branch"; // spaces are invalid in git branch names
+    let path = derive_worktree_path(parent, &project_name, branch);
+
+    let error = create_worktree(repo.path(), branch, &path, None)
+        .expect_err("git rejects a branch name with a space");
+
+    assert!(
+        matches!(error, WorktreeError::Git(_)),
+        "git's own refusal is surfaced, name unmangled: {error}"
+    );
+    assert!(!path.exists(), "no broken checkout was created");
+    assert_eq!(porcelain_worktree_count(repo.path()), 1);
+}
+
+#[test]
+fn branch_with_non_ascii_characters_is_created_raw() {
+    let repo = make_repo("unicode");
+    let parent = repo.path().parent().expect("parent");
+    let project_name = repo.path().file_name().unwrap().to_string_lossy();
+    let branch = "café-branch"; // non-ASCII is legal; spaces are not
+    let path = derive_worktree_path(parent, &project_name, branch);
+
+    create_worktree(repo.path(), branch, &path, None).expect("create with non-ASCII");
+
+    assert!(path.exists());
+    assert_eq!(
+        porcelain_branch(repo.path(), &path).as_deref(),
+        Some("café-branch"),
+        "porcelain reports the raw branch name"
+    );
+}
+
+#[test]
+fn unborn_head_creates_a_valid_worktree_with_an_unborn_branch() {
+    // git supports creating a worktree from a repository with no commits:
+    // the new branch is simply unborn too (all-zero HEAD in porcelain).
+    let repo = TempDir::new("unborn");
+    git(repo.path(), &["init", "-b", "main"]);
+    git(repo.path(), &["config", "user.email", "test@sirio.dev"]);
+    git(repo.path(), &["config", "user.name", "Sirio Test"]);
+
+    let path = repo.path().with_extension("wt-unborn");
+    create_worktree(repo.path(), "feature-x", &path, None).expect("unborn HEAD creation");
+
+    let output = git_stdout(repo.path(), &["worktree", "list", "--porcelain"]);
+    assert!(
+        output.contains(&format!(
+            "worktree {}\nHEAD 0000000",
+            porcelain_spelling(&path)
+        )),
+        "the unborn worktree is reported: {output}"
+    );
+    assert_eq!(
+        porcelain_branch(repo.path(), &path).as_deref(),
+        Some("feature-x")
+    );
+}
+
+#[test]
+fn remove_worktree_removes_it_from_porcelain() {
+    let repo = make_repo("remove");
+    let path = repo.path().with_extension("wt-remove");
+    create_worktree(repo.path(), "feature-x", &path, None).expect("create");
+    assert_eq!(porcelain_worktree_count(repo.path()), 2);
+
+    remove_worktree(repo.path(), &path).expect("remove");
+
+    assert_eq!(
+        porcelain_worktree_count(repo.path()),
+        1,
+        "git worktree list --porcelain no longer reports the removed worktree"
+    );
+    assert!(!path.exists(), "the checkout directory is gone");
+}
+
+#[test]
+fn remove_refuses_a_worktree_with_uncommitted_changes() {
+    let repo = make_repo("dirty");
+    let path = repo.path().with_extension("wt-dirty");
+    create_worktree(repo.path(), "feature-x", &path, None).expect("create");
+    std::fs::write(path.join("uncommitted.txt"), "work in progress\n").expect("write");
+
+    let error = remove_worktree(repo.path(), &path).expect_err("git refuses by default");
+
+    assert!(
+        matches!(error, WorktreeError::Git(_)),
+        "the refusal is surfaced, not forced through: {error}"
+    );
+    assert_eq!(
+        porcelain_worktree_count(repo.path()),
+        2,
+        "the worktree still exists after the refused removal"
+    );
+    assert!(
+        path.join("uncommitted.txt").exists(),
+        "the uncommitted work survives"
+    );
+}
+
+#[test]
+fn non_git_directory_is_refused() {
+    let dir = TempDir::new("notgit");
+    let path = dir.path().with_extension("wt");
+    let error = create_worktree(dir.path(), "feature-x", &path, None)
+        .expect_err("a non-git directory has no worktrees");
+    assert!(
+        matches!(error, WorktreeError::Git(_)),
+        "git's refusal is surfaced: {error}"
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn created_worktree_survives_a_porcelain_round_trip_with_base() {
+    let repo = make_repo("base");
+    // Advance main so a base matters.
+    std::fs::write(repo.path().join("file.txt"), "one\ntwo\nthree\nfour\n").expect("write");
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-m", "second"]);
+
+    let path = repo.path().with_extension("wt-based");
+    create_worktree(repo.path(), "based", &path, Some("main")).expect("create with base");
+
+    let based_head = git_stdout(repo.path(), &["log", "-1", "--format=%H", "based"]);
+    let main_head = git_stdout(repo.path(), &["log", "-1", "--format=%H", "main"]);
+    assert_eq!(
+        based_head.trim(),
+        main_head.trim(),
+        "the branch was created from the given base"
+    );
+}

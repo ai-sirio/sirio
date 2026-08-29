@@ -1,11 +1,11 @@
 #!/bin/bash
-# Browser surface e2e against a running Tiller instance. Pass the worktree UUID as
+# Browser surface e2e against a running Sirio instance. Pass the worktree UUID as
 # the first argument; all content is served from a local temporary directory.
 set -euo pipefail
 
 WT="${1:?usage: e2e-browser.sh <worktree-uuid>}"
-TILLERCTL="$(dirname "$0")/../rust/target/debug/tillerctl"
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tiller-browser-e2e.XXXXXX")"
+SIRIOCTL="$(dirname "$0")/../rust/target/debug/sirioctl"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sirio-browser-e2e.XXXXXX")"
 SERVER_PID=""
 
 cleanup() {
@@ -17,19 +17,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ ! -x "$TILLERCTL" ]; then
-    echo "tillerctl not found or not executable: $TILLERCTL" >&2
+if [ ! -x "$SIRIOCTL" ]; then
+    echo "sirioctl not found or not executable: $SIRIOCTL" >&2
     exit 1
 fi
-if ! "$TILLERCTL" ping >/dev/null 2>&1; then
-    echo "Tiller is not running or its control socket is unavailable" >&2
+if ! "$SIRIOCTL" ping >/dev/null 2>&1; then
+    echo "Sirio is not running or its control socket is unavailable" >&2
     exit 1
 fi
 
 cat > "$TMP_DIR/fixture.html" <<'HTML'
 <!doctype html>
 <html>
-  <head><title>Tiller Browser E2E Fixture</title></head>
+  <head><title>Sirio Browser E2E Fixture</title></head>
   <body>
     <p>Known browser e2e body text</p>
     <form onsubmit="event.preventDefault(); document.querySelector('#result').textContent = document.querySelector('#name').value">
@@ -75,35 +75,35 @@ done
 [ "$ready" -eq 1 ] || { echo "local fixture server did not start" >&2; exit 1; }
 
 BASE_URL="http://127.0.0.1:$PORT/fixture.html"
-OPEN_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser open "$BASE_URL" --id-format both)"
+OPEN_OUTPUT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser open "$BASE_URL" --id-format both)"
 SURFACE="$(printf '%s\n' "$OPEN_OUTPUT" | awk -F '\t' 'NR == 1 { print $2 }')"
 OPEN_TITLE="$(printf '%s\n' "$OPEN_OUTPUT" | awk -F '\t' 'NR == 1 { print $4 }')"
 case "$SURFACE" in
     surface:*) ;;
     *) echo "browser open did not return a surface ref: $OPEN_OUTPUT" >&2; exit 1 ;;
 esac
-[ "$OPEN_TITLE" = "Tiller Browser E2E Fixture" ] || {
+[ "$OPEN_TITLE" = "Sirio Browser E2E Fixture" ] || {
     echo "browser open title mismatch: $OPEN_OUTPUT" >&2
     exit 1
 }
 
-URL_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser get "$SURFACE" url)"
+URL_OUTPUT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser get "$SURFACE" url)"
 [ "$URL_OUTPUT" = "$BASE_URL" ] || {
     echo "browser get url mismatch: $URL_OUTPUT" >&2
     exit 1
 }
 
-TEXT_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser get "$SURFACE" text)"
+TEXT_OUTPUT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser get "$SURFACE" text)"
 printf '%s\n' "$TEXT_OUTPUT" | grep -Fq "Known browser e2e body text"
 
-RELOAD_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser navigate "$SURFACE" reload)"
+RELOAD_OUTPUT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser navigate "$SURFACE" reload)"
 RELOAD_URL="$(printf '%s\n' "$RELOAD_OUTPUT" | awk -F '\t' 'NR == 1 { print $1 }')"
 [ "$RELOAD_URL" = "$BASE_URL" ] || {
     echo "browser reload changed url: $RELOAD_OUTPUT" >&2
     exit 1
 }
 
-SNAPSHOT_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser snapshot "$SURFACE" --json)"
+SNAPSHOT_OUTPUT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser snapshot "$SURFACE" --json)"
 read -r GENERATION INPUT_REF BUTTON_REF <<EOF
 $(SNAPSHOT_OUTPUT="$SNAPSHOT_OUTPUT" python3 - <<'PY'
 import json
@@ -118,16 +118,16 @@ PY
 )
 EOF
 
-TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser act "$SURFACE" fill \
+SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser act "$SURFACE" fill \
     --ref "$INPUT_REF" --value "Ada" --generation "$GENERATION" >/dev/null
-TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser act "$SURFACE" click \
+SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser act "$SURFACE" click \
     --ref "$BUTTON_REF" --generation "$GENERATION" >/dev/null
-TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser wait "$SURFACE" \
+SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser wait "$SURFACE" \
     --text "Ada" --timeout-ms 3000 >/dev/null
-LOOP_TEXT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser get "$SURFACE" text)"
+LOOP_TEXT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser get "$SURFACE" text)"
 printf '%s\n' "$LOOP_TEXT" | grep -Fq "Ada"
 
-STALE_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser snapshot "$SURFACE" --json)"
+STALE_OUTPUT="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser snapshot "$SURFACE" --json)"
 read -r STALE_GENERATION STALE_REF <<EOF
 $(STALE_OUTPUT="$STALE_OUTPUT" python3 - <<'PY'
 import json
@@ -139,9 +139,9 @@ print(payload["generation"], nodes[0]["ref"])
 PY
 )
 EOF
-TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser navigate "$SURFACE" reload >/dev/null
+SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser navigate "$SURFACE" reload >/dev/null
 set +e
-STALE_ERROR="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser act "$SURFACE" click \
+STALE_ERROR="$(SIRIO_WORKTREE_ID="$WT" "$SIRIOCTL" browser act "$SURFACE" click \
     --ref "$STALE_REF" --generation "$STALE_GENERATION" 2>&1)"
 STALE_STATUS=$?
 set -e

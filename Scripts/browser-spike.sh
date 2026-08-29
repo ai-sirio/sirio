@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-$ROOT/reference/linux-progress/p72-browser-spike.png}"
+OUT="${1:-$ROOT/artifacts/p72-browser-spike.png}"
 DISP="${2:-:1}"
 LOG="${OUT%.png}.log"
 
@@ -13,7 +13,7 @@ export DISPLAY="$DISP"
 unset WAYLAND_DISPLAY
 export GPUI_X11_SCALE_FACTOR=1
 
-(cd "$ROOT/rust" && cargo run -p tiller_ui --example browser_spike) >"$LOG" 2>&1 &
+(cd "$ROOT/rust" && cargo run -p sirio_ui --example browser_spike) >"$LOG" 2>&1 &
 APP_PID=$!
 trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
 

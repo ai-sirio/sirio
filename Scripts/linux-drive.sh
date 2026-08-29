@@ -24,7 +24,7 @@
 #   '
 #
 # Only one agent may drive at a time, and this script now enforces that with a real lock —
-# see the block below. Set TILLER_DRIVE_LABEL so a waiter can see who is holding it.
+# see the block below. Set SIRIO_DRIVE_LABEL so a waiter can see who is holding it.
 #
 # Exit: 0 captured · 2 no binary · 3 no window/display · 4 app died · 5 frame blank
 #       6 gave up waiting for the drive lock
@@ -35,7 +35,7 @@ OUT="${1:?usage: linux-drive.sh <out.png> '<actions>' [settle] [display]}"
 ACTIONS="${2:-}"
 SETTLE="${3:-6}"
 DISP="${4:-:1}"
-BIN="$ROOT/rust/target/debug/tiller"
+BIN="$ROOT/rust/target/debug/sirio"
 LOG="${OUT%.png}.log"
 MIN_COLORS=200
 
@@ -74,9 +74,9 @@ timeout 10 env DISPLAY="$DISP" xdpyinfo >/dev/null 2>&1 || { echo "FAIL: no X se
 # project's rate limit. So this lock is self-healing: it records its holder and
 # breaks itself if that holder is gone or has held it implausibly long.
 # ---------------------------------------------------------------------------
-LOCKDIR="${TILLER_DRIVE_LOCK:-/tmp/tiller-drive$(printf '%s' "$DISP" | tr -c 'a-zA-Z0-9' '-').lockd}"
-LOCK_WAIT="${TILLER_DRIVE_LOCK_WAIT:-900}"
-LOCK_STALE="${TILLER_DRIVE_LOCK_STALE:-1800}"
+LOCKDIR="${SIRIO_DRIVE_LOCK:-/tmp/sirio-drive$(printf '%s' "$DISP" | tr -c 'a-zA-Z0-9' '-').lockd}"
+LOCK_WAIT="${SIRIO_DRIVE_LOCK_WAIT:-900}"
+LOCK_STALE="${SIRIO_DRIVE_LOCK_STALE:-1800}"
 WE_HOLD_LOCK=""
 
 cleanup() {
@@ -92,7 +92,7 @@ while :; do
   if mkdir "$LOCKDIR" 2>/dev/null; then
     WE_HOLD_LOCK=1
     printf 'pid=%s label=%s since=%s out=%s\n' \
-      "$$" "${TILLER_DRIVE_LABEL:-unlabelled}" "$(date -Is)" "$OUT" >"$LOCKDIR/holder"
+      "$$" "${SIRIO_DRIVE_LABEL:-unlabelled}" "$(date -Is)" "$OUT" >"$LOCKDIR/holder"
     break
   fi
 

@@ -14,7 +14,7 @@
 # path where that pump is what we are destroying, so the request was issued
 # into a buffer with nobody left to drain it.
 #
-# That is a claim about Xlib, not about Tiller, so this test makes Xlib answer
+# That is a claim about Xlib, not about Sirio, so this test makes Xlib answer
 # it: a real X server, a real child window on GDK's real connection, and a
 # second independent client asking the server what it believes. If the unmap
 # turns out to be delivered eagerly, the diagnosis behind the fix is wrong and
@@ -23,7 +23,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$ROOT/Scripts/Tests/x11-unmap-flush-probe.c"
-RUST="$ROOT/rust/crates/tiller_ui/src/browser.rs"
+RUST="$ROOT/rust/crates/sirio_ui/src/browser.rs"
 [[ -r "$SRC" ]] || { echo "FAIL: missing $SRC" >&2; exit 1; }
 
 for tool in gcc pkg-config Xvfb; do

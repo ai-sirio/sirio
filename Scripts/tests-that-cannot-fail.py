@@ -3,7 +3,7 @@
 
 Why this exists
 ---------------
-`probe_escape_dispatch` (rust/crates/tiller/src/main.rs) is a `#[gpui::test]`
+`probe_escape_dispatch` (rust/crates/sirio/src/main.rs) is a `#[gpui::test]`
 with zero assertions and four `eprintln!`s, two of which *compute* the very
 condition that should have been asserted (`cx.debug_bounds(..).is_some()`) and
 print it instead. It is green, it has always been green, and it can never be
@@ -62,7 +62,7 @@ ASSERT = re.compile(
 
 # Three distinct false-positive classes were found by reading the code, each
 # only after the tool had already reported the test as proving nothing:
-#   1. project assertion helpers   — `expect_color(..)` in tiller_theme
+#   1. project assertion helpers   — `expect_color(..)` in sirio_theme
 #   2. documented no-op entry points — `helper_process` (subprocess re-exec)
 #   3. wait-until-or-panic helpers  — `pump_until(..)`, which ends in
 #      `panic!("condition never became true within the pump budget")`, so a
@@ -175,7 +175,7 @@ def main():
     # are excluded by name and the exclusion is printed, never silent.
     BY_DESIGN = {
         "helper_process": "documented subprocess entry point; a no-op unless "
-                          "TILLER_PERSISTENCE_HELPER is set",
+                          "SIRIO_PERSISTENCE_HELPER is set",
         "writer_process": "documented subprocess entry point; same contract",
     }
 

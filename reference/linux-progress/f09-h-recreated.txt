@@ -1,9 +1,0 @@
--rw-rw-r-- 1 enzopalmisano enzopalmisano 109 ago 14 03:08 aaa-f09-scratch.md
-# F09 scratch
-
-RECREATED-BY-SAVE
-AB
-**TYPED-OVER**
-tail line stays unchanged
-EXTERNAL-LINE-1
-EXTERNAL-LINE-3

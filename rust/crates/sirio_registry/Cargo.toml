@@ -1,0 +1,24 @@
+[package]
+name = "sirio_registry"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Deliberately a leaf: no `sirio_*` dependency may appear here. The
+# launch-resolution design puts the join with `sirio_agents` in the
+# caller (see `resolve`), precisely so neither crate learns about the
+# other.
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+flate2 = "1"
+sha2 = "0.10"
+tar = "0.4"
+thiserror = "2"
+zip = "8"
+# Blocking on purpose: this crate does one 50 KB GET a day plus the
+# occasional download, and a second async runtime beside GPUI's and
+# sirio_acp's would cost more than it buys. `sirio` runs these calls on
+# the background executor.
+ureq = "3.4"

@@ -7,7 +7,7 @@
 # verification claim.
 #
 # Nor is CI OK an ACP claim by default. The one real-agent ACP test in the tree is
-# #[ignore]d and runs only with TILLER_ACP_REAL=1 (see the stage below). Without it
+# #[ignore]d and runs only with SIRIO_ACP_REAL=1 (see the stage below). Without it
 # this gate is green whether or not an agent can be connected at all.
 set -Eeuo pipefail
 
@@ -19,7 +19,7 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-# libghostty-vt-sys (a tiller_terminal dependency since #27) shells out to
+# libghostty-vt-sys (a sirio_terminal dependency since #27) shells out to
 # `zig build`, and upstream pins Zig at EXACTLY 0.15.2 -- a newer Zig fails
 # too, so the upgrade reflex makes it worse; 0.15.2 must be installed
 # alongside and found first on PATH. Without this preflight the failure
@@ -54,21 +54,21 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-RUN_DIR="$(mktemp -d /tmp/tiller-ci-XXXXXX)"
+RUN_DIR="$(mktemp -d /tmp/sirio-ci-XXXXXX)"
 LOG_DIR="$RUN_DIR/logs"
 SMOKE_DIR="$RUN_DIR/smoke"
 mkdir -p "$LOG_DIR" "$SMOKE_DIR"
 
 # The directory is unique and created atomically, so the socket path cannot
-# collide with another agent's live Tiller instance or be raced into existence.
-export TILLER_SOCKET="$RUN_DIR/tiller.sock"
-export TILLER_DB="$RUN_DIR/tiller.sqlite"
+# collide with another agent's live Sirio instance or be raced into existence.
+export SIRIO_SOCKET="$RUN_DIR/sirio.sock"
+export SIRIO_DB="$RUN_DIR/sirio.sqlite"
 
 APP_PID=""
 PANE_ID=""
 PANE_GROUPS=()
-APP_BIN="$ROOT/rust/target/debug/tiller"
-CTL_BIN="$ROOT/rust/target/debug/tillerctl"
+APP_BIN="$ROOT/rust/target/debug/sirio"
+CTL_BIN="$ROOT/rust/target/debug/sirioctl"
 APP_LOG="$SMOKE_DIR/app.log"
 SMOKE_LOG="$SMOKE_DIR/commands.log"
 
@@ -87,7 +87,7 @@ cleanup() {
     local status=$?
     trap - EXIT INT TERM
 
-    if [[ -n "${PANE_ID:-}" ]] && [[ -S "$TILLER_SOCKET" ]] && [[ -x "$CTL_BIN" ]]; then
+    if [[ -n "${PANE_ID:-}" ]] && [[ -S "$SIRIO_SOCKET" ]] && [[ -x "$CTL_BIN" ]]; then
         timeout 3 "$CTL_BIN" panel close --id "$PANE_ID" >/dev/null 2>&1 || true
     fi
     for pgid in "${PANE_GROUPS[@]}"; do
@@ -115,7 +115,7 @@ cleanup() {
         kill -KILL -- "-$pgid" 2>/dev/null || true
     done
 
-    [[ -e "$TILLER_SOCKET" ]] && rm -f "$TILLER_SOCKET"
+    [[ -e "$SIRIO_SOCKET" ]] && rm -f "$SIRIO_SOCKET"
     rm -rf "$RUN_DIR"
     exit "$status"
 }
@@ -208,9 +208,9 @@ run_cargo_stage "cargo fmt --check" cargo fmt --all -- --check
 # rather than grandfathered into this gate. Every other workspace crate is
 # ours here and must fail the gate on its first new warning.
 run_cargo_stage "cargo clippy (owned crates)" cargo clippy --workspace --all-targets \
-    --exclude tiller --exclude tiller_ui -- -D warnings
+    --exclude sirio --exclude sirio_ui -- -D warnings
 
-run_cargo_stage "cargo build" cargo build -p tiller -p tiller_control
+run_cargo_stage "cargo build" cargo build -p sirio -p sirio_control
 # Per-crate, not `cargo test --workspace`.
 #
 # Historical note: these two tests were once timing-sensitive when every crate's test
@@ -220,9 +220,9 @@ run_cargo_stage "cargo build" cargo build -p tiller -p tiller_control
 # This remains a diagnostic/per-crate mode; the common gate is responsible for the
 # workspace-wide no-fail-fast result.
 WORKSPACE_CRATES=(
-    tiller tiller_acp tiller_persistence tiller_activity tiller_agents tiller_control
-    tiller_git tiller_project tiller_terminal tiller_theme tiller_ui tiller_markdown
-    tiller_usage
+    sirio sirio_acp sirio_persistence sirio_activity sirio_agents sirio_control
+    sirio_git sirio_project sirio_terminal sirio_theme sirio_ui sirio_markdown
+    sirio_usage
 )
 for crate in "${WORKSPACE_CRATES[@]}"; do
     run_cargo_stage "cargo test -p $crate" cargo test -p "$crate"
@@ -242,11 +242,11 @@ done
 # Opt-in rather than default: an agent pane without credentials must still be able
 # to reach a green gate, or it learns to ignore the gate (the same reasoning as the
 # sccache fallback above). Verified passing 2026-08-13 in 8.16s.
-if [ "${TILLER_ACP_REAL:-0}" = "1" ]; then
-    run_cargo_stage "real ACP acceptance (TILLER_ACP_REAL=1)" \
-        cargo test -p tiller_acp --test real_claude -- --ignored
+if [ "${SIRIO_ACP_REAL:-0}" = "1" ]; then
+    run_cargo_stage "real ACP acceptance (SIRIO_ACP_REAL=1)" \
+        cargo test -p sirio_acp --test real_claude -- --ignored
 else
-    echo "SKIP: real ACP acceptance — set TILLER_ACP_REAL=1 to exercise it"
+    echo "SKIP: real ACP acceptance — set SIRIO_ACP_REAL=1 to exercise it"
 fi
 
 run_root_stage "test-crash-supervise.py" env PYTHONDONTWRITEBYTECODE=1 \
@@ -298,7 +298,7 @@ run_root_stage "test-x11-unmap-needs-a-flush.sh" env PYTHONDONTWRITEBYTECODE=1 \
 #
 #  SKIP -- rust-std itself is not installed for the triple (`rustup target list --installed`
 #  doesn't list it). This is a one-command, always-fixable, per-contributor setup gap that
-#  cannot regress from a code change, so it is treated the same way the TILLER_ACP_REAL stage
+#  cannot regress from a code change, so it is treated the same way the SIRIO_ACP_REAL stage
 #  above is: skip loudly, name the exact fix (`rustup target add <triple>`), and let a
 #  contributor who hasn't opted in yet still reach a green gate. A maintained CI runner installs
 #  the target once, permanently, so the skip path is a laptop convenience, not a hole CI lives
@@ -385,7 +385,7 @@ run_cross_target_stage() {
 
     # Every top-level error except the allowlisted build-script walls. `could not compile
     # <crate>` is the reliable marker for one of ours failing to build — it is what caught
-    # the 30 real tiller_control errors the previous classifier was masking.
+    # the 30 real sirio_control errors the previous classifier was masking.
     # Second environmental shape, macOS only: Zed's vendored `media` crate generates its
     # CoreVideo/CoreMedia bindings from a build script gated on a real macOS *host*. On
     # this Linux host the script runs but writes no `bindings.rs`, so `media` fails at
@@ -474,16 +474,16 @@ capture_panel_groups() {
 }
 
 [[ -x "$APP_BIN" ]] || smoke_failure "missing app binary at $APP_BIN"
-[[ -x "$CTL_BIN" ]] || smoke_failure "missing tillerctl binary at $CTL_BIN"
+[[ -x "$CTL_BIN" ]] || smoke_failure "missing sirioctl binary at $CTL_BIN"
 
 setsid env -u DISPLAY -u WAYLAND_DISPLAY \
-    TILLER_SOCKET="$TILLER_SOCKET" TILLER_DB="$TILLER_DB" \
+    SIRIO_SOCKET="$SIRIO_SOCKET" SIRIO_DB="$SIRIO_DB" \
     "$APP_BIN" >"$APP_LOG" 2>&1 &
 APP_PID=$!
 
 socket_ready=0
 for _ in $(seq 1 150); do
-    if [[ -S "$TILLER_SOCKET" ]]; then
+    if [[ -S "$SIRIO_SOCKET" ]]; then
         socket_ready=1
         break
     fi
@@ -496,11 +496,11 @@ done
 [[ "$socket_ready" -eq 1 ]] || smoke_failure "app did not create its private socket"
 capture_panel_groups
 
-# ControlState::from_catalog (crates/tiller/src/main.rs) builds `workspaces` only from
+# ControlState::from_catalog (crates/sirio/src/main.rs) builds `workspaces` only from
 # the persisted project catalog -- being launched inside a git checkout is not by itself
 # enough for `current-workspace` to see one, the same way `Scripts/visual-sweep.sh` already
 # has to `project add` its fixture before any `workspace.current`/`workspace.select` call.
-# $TILLER_DB above is a fresh, empty, per-run database, so without this the very next call
+# $SIRIO_DB above is a fresh, empty, per-run database, so without this the very next call
 # always reports "no current workspace" -- not a failure of anything this gate is testing.
 smoke_capture project-add "$CTL_BIN" project add "$ROOT" >/dev/null
 

@@ -31,10 +31,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-$ROOT/reference/linux-progress/shot.png}"
+OUT="${1:-$ROOT/artifacts/shot.png}"
 SETTLE="${2:-6}"
 DISP="${3:-:1}"
-BIN="$ROOT/rust/target/debug/tiller"
+BIN="$ROOT/rust/target/debug/sirio"
 LOG="${OUT%.png}.log"
 MIN_COLORS=200          # a real UI frame has thousands; a dropped-frame capture has 1
 
@@ -66,8 +66,8 @@ mkdir -p "$(dirname "$OUT")"
 # unconfigured 640x480 until told otherwise. `:1` was found at 640x480 and enlarged with exactly
 # this call, after which it still presented — resizing does not lose the good modifier set.
 OWN_DISPLAY=""
-if [ -n "${TILLER_NEW_DISPLAY:-}" ]; then
-  echo "note: creating a private X server because TILLER_NEW_DISPLAY is set. On this machine" >&2
+if [ -n "${SIRIO_NEW_DISPLAY:-}" ]; then
+  echo "note: creating a private X server because SIRIO_NEW_DISPLAY is set. On this machine" >&2
   echo "      freshly created Xwaylands do not present — expect a blank frame and exit 5." >&2
   for n in $(seq 60 79); do [ -e "/tmp/.X11-unix/X$n" ] || { DISP=":$n"; break; }; done
   WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}" Xwayland "$DISP" -ac -noreset -nolisten tcp \

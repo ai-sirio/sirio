@@ -1,11 +1,11 @@
 name: Feature request
-description: Propose new behaviour or a change to how Tiller works today
+description: Propose new behaviour or a change to how Sirio works today
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Tiller deliberately has a smaller scope than the tools it steers. The most useful
+        Sirio deliberately has a smaller scope than the tools it steers. The most useful
         thing you can write here is the **problem**, not the solution — a well-described
         problem often has a cheaper answer than the feature that prompted it.
 
@@ -13,7 +13,7 @@ body:
     id: problem
     attributes:
       label: What problem are you hitting
-      description: What are you trying to do today, and where does Tiller get in the way?
+      description: What are you trying to do today, and where does Sirio get in the way?
       placeholder: |
         I run four agents at once and I cannot tell which one has been idle longest,
         so I keep clicking through tabs to find the one waiting on me.
@@ -34,17 +34,17 @@ body:
       label: Area
       multiple: true
       options:
-        - "UI / layout / theming (tiller_ui, tiller_theme)"
-        - "Terminal & PTY (tiller_terminal)"
-        - "Agent activity: running / idle / needs-input (tiller_activity)"
-        - "Agent adapters & hooks (tiller_agents)"
-        - "ACP protocol (tiller_acp)"
-        - "Git & worktrees (tiller_git, tiller_project)"
-        - "Session / settings persistence (tiller_persistence)"
-        - "Control socket & tillerctl (tiller_control)"
-        - "Usage & cost tracking (tiller_usage)"
-        - "Markdown rendering (tiller_markdown)"
-        - "App shell / window / startup (tiller)"
+        - "UI / layout / theming (sirio_ui, sirio_theme)"
+        - "Terminal & PTY (sirio_terminal)"
+        - "Agent activity: running / idle / needs-input (sirio_activity)"
+        - "Agent adapters & hooks (sirio_agents)"
+        - "ACP protocol (sirio_acp)"
+        - "Git & worktrees (sirio_git, sirio_project)"
+        - "Session / settings persistence (sirio_persistence)"
+        - "Control socket & sirioctl (sirio_control)"
+        - "Usage & cost tracking (sirio_usage)"
+        - "Markdown rendering (sirio_markdown)"
+        - "App shell / window / startup (sirio)"
         - "Not sure"
     validations:
       required: true
@@ -85,5 +85,5 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: "I have checked this is not something the agent CLI itself should do rather than Tiller"
+        - label: "I have checked this is not something the agent CLI itself should do rather than Sirio"
           required: false

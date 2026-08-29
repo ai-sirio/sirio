@@ -1,4 +1,0 @@
-signal time=1786726526.232175 sender=org.freedesktop.DBus -> destination=:1.2891 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
-   string ":1.2891"
-signal time=1786726526.232209 sender=org.freedesktop.DBus -> destination=:1.2891 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost
-   string ":1.2891"

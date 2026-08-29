@@ -18,7 +18,7 @@ For each `pub fn NAME` defined in crate C, it counts identifier references:
   - OUT  : in any other crate's src/  (the only count that proves cross-crate wiring)
   - IN   : elsewhere in C's own src/, outside #[cfg(test)] and outside test fns
   - TEST : inside #[cfg(test)] regions AND crate-level tests/ dirs (integration tests).
-           FABLE-05: the first version read src/ only, so the whole tiller_activity
+           FABLE-05: the first version read src/ only, so the whole sirio_activity
            cluster printed test=0 while being integration-tested — which understated
            the finding ("tested and unwired" is stronger than "dead code").
 DEAD  = OUT 0 and IN 0  -> only its definition and its tests mention it.
@@ -42,9 +42,9 @@ Known false positives, all of which must be checked by hand before any row is to
     surface, not a dead feature. A `~sibling=` marker below means exactly this
     suspicion; treat that row as "delete the variant", never as "the feature is gone".
   - PARALLEL MODEL IN ANOTHER CRATE: the variant trap at crate scale, invisible to any
-    name heuristic. FABLE-05: tiller_markdown's MarkdownDocument (set_text /
+    name heuristic. FABLE-05: sirio_markdown's MarkdownDocument (set_text /
     refresh_from_disk / has_conflict / is_deleted all DEAD) reads as "the editor's
-    document model is unwired" -- but the feature lives in tiller_ui::editor::Editor,
+    document model is unwired" -- but the feature lives in sirio_ui::editor::Editor,
     driven by FileView in production. Different crate, different names, live feature.
     Before reporting a dead *model type*, grep for who owns the feature it models.
   - SAME-NAME FIELD MASKING (false NEGATIVE): a method sharing its name with a field
@@ -71,13 +71,13 @@ blindness one tier up: two dead modules citing each other both show out>0.
 
 So the module tier is not a counter. It is REACHABILITY: build the graph "file B mentions
 a pub item defined in file A", then BFS from the binary roots (the app's main.rs and the
-shipped tillerctl; dev-harness bins are separate roots and marked, not trusted). A file no
+shipped sirioctl; dev-harness bins are separate roots and marked, not trusted). A file no
 root reaches is dead AS A GROUP with everything else in its component — the cluster is the
 unit, because it hides a feature, not a function.
 
 Edges flow from CONSUMPTION, not publication: `pub use` lines are stripped from the
 referencing side, because a lib.rs re-export must not vivify its own crate's dead module
-(tiller_activity/rows.rs: re-exported, zero consumers, caught only after this rule).
+(sirio_activity/rows.rs: re-exported, zero consumers, caught only after this rule).
 Consumer-side `use` lines are kept — they are evidence, and for import-renamed items the
 only visible evidence (cosmic/hex.rs lives as `use super::hex::parse as hex;`).
 
@@ -104,7 +104,7 @@ files, plus the most-cross-referenced file must be inside the reached set.
 usage:
     Scripts/dead-models.py                 # dead only
     Scripts/dead-models.py --all           # dead + local
-    Scripts/dead-models.py --crate tiller_activity
+    Scripts/dead-models.py --crate sirio_activity
     Scripts/dead-models.py --modules       # module/cluster reachability tier
 """
 from __future__ import annotations
@@ -133,7 +133,7 @@ IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # over-strips), but over-stripping only moves files INTO the hand-check list, never out.
 LINE_COMMENT = re.compile(r"//.*")
 # A `pub use` is publication, not consumption: lib.rs re-exporting a module's items must
-# not keep that module alive, or a crate vivifies its own dead subsystems (tiller_activity
+# not keep that module alive, or a crate vivifies its own dead subsystems (sirio_activity
 # rows.rs was exactly this — re-exported, zero consumers). Plain `use` lines are KEPT:
 # a consumer-side import is real evidence, and sometimes the only visible evidence
 # (cosmic/hex.rs is consumed as `use super::hex::parse as hex;` + bare `hex(` calls —
@@ -141,7 +141,7 @@ LINE_COMMENT = re.compile(r"//.*")
 PUB_USE_LINE = re.compile(r"^\s*pub(?:\s*\([^)]*\))?\s+use\b.*", re.M)
 # Shipped binaries; every other src/bin/*.rs is a dev harness (changes_preview.rs says so
 # in its own docstring) whose reach is reported but never trusted as product wiring.
-PRODUCT_BINS = {"main.rs", "tillerctl.rs"}
+PRODUCT_BINS = {"main.rs", "sirioctl.rs"}
 # A test region: `#[cfg(test)] mod ...` to end of file is the overwhelmingly common shape
 # in this workspace, plus `#[test]`/`#[gpui::test]` fns. Being generous here only moves
 # references from IN to TEST, which makes DEAD *more* likely -- so it is checked by hand.
@@ -203,7 +203,7 @@ def sibling_names(name: str) -> list[str]:
         else:
             out.append(name + suf)
     # Drop the last underscore-segment. This is the rule that catches an abandoned API
-    # shape sitting beside the live one: tiller_git/actions.rs had EIGHT dead functions
+    # shape sitting beside the live one: sirio_git/actions.rs had EIGHT dead functions
     # (`stage_entries`, `discard_changes`, `discard_untracked`, ...) whose work is done by
     # the shorter `stage`/`unstage`/`discard` the app actually calls. Reading the list
     # without this rule suggests git staging is unwired. It is not.
@@ -218,7 +218,7 @@ def live_sibling(name: str, prod: dict[str, str], home: str) -> str | None:
     The sibling must also be DEFINED as a fn in `home` itself. Without that check the
     flag fires on generic-word matches (`should_notify`~should, `build_payload`~build,
     `needs_refresh`~needs) and on cross-crate coincidences (`migrate_file` in
-    tiller_agents flagged by persistence's `migrate`) — all noise, FABLE-05.
+    sirio_agents flagged by persistence's `migrate`) — all noise, FABLE-05.
     """
     for s in sibling_names(name):
         if len(s) < 5:

@@ -22,7 +22,7 @@
 #   1. The parent must be restorable by anyone, in one command, without archaeology.
 #   2. The parent's socket must have a name a nested compositor cannot take. Nested sways get
 #      wayland-N from a counter and sway offers no way to name its own socket, so the parent
-#      PUBLISHES the name it got (an exec line in the config writes /tmp/tiller-parent.display)
+#      PUBLISHES the name it got (an exec line in the config writes /tmp/sirio-parent.display)
 #      and is identified by its config path, never by "whatever holds wayland-1".
 #
 # `pkill -x sway` is still wrong — it kills every agent's nested compositor too. Use the lane's own
@@ -33,12 +33,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF="$ROOT/Scripts/pi-sway-headless.conf"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
-PARENT_DISPLAY_FILE=/tmp/tiller-parent.display
-PARENT_SOCK="/tmp/tiller-parent-sway.sock"
-PARENT_LOG="/tmp/tiller-parent-sway.log"
-VNC_LOG="/tmp/tiller-parent-wayvnc.log"
-VNC_ADDR="${TILLER_VNC_ADDR:-127.0.0.1}"
-VNC_PORT="${TILLER_VNC_PORT:-5900}"
+PARENT_DISPLAY_FILE=/tmp/sirio-parent.display
+PARENT_SOCK="/tmp/sirio-parent-sway.sock"
+PARENT_LOG="/tmp/sirio-parent-sway.log"
+VNC_LOG="/tmp/sirio-parent-wayvnc.log"
+VNC_ADDR="${SIRIO_VNC_ADDR:-127.0.0.1}"
+VNC_PORT="${SIRIO_VNC_PORT:-5900}"
 
 parent_pid() {
   # The parent is identified by its config path in the command line, never by the name `sway` —

@@ -1,6 +1,6 @@
 //! A real wl_data_device_manager XDND drag SOURCE.
 //!
-//! Everything on Tiller's own side of a file drop was already traced correct against the
+//! Everything on Sirio's own side of a file drop was already traced correct against the
 //! vendored pinned Zed gpui_linux checkout (F-CORE-FILE-03A): `wl_data_device` `Enter` reads
 //! `text/uri-list` through one pipe, `Drop` carries a position, `window.rs` stores the parsed
 //! paths, and the terminal's `on_drop::<gpui::ExternalPaths>` inserts them into the shell. What
@@ -10,17 +10,17 @@
 //! This binary is that missing half: a minimal Wayland client that becomes the XDND drag
 //! *source*. It creates a tiny `zwlr_layer_shell_v1` overlay surface (deliberately NOT an
 //! `xdg_toplevel` — a layer-shell surface is not part of sway's tiled layout, so it cannot
-//! disturb Tiller's own window geometry or the coordinates `wayland-drive.sh` already uses), waits
+//! disturb Sirio's own window geometry or the coordinates `wayland-drive.sh` already uses), waits
 //! for `wayland-drive.sh`'s persistent virtual pointer to press a button over that surface (the
 //! same virtual-pointer client already proven for click/rightclick/drag in P124/P130), and on that
 //! real `wl_pointer.button` press — using ITS serial, per protocol — calls
 //! `wl_data_device.start_drag` offering `text/uri-list`. The virtual pointer then walks to the
 //! drop target and releases; the compositor (sway/wlroots) delivers `wl_data_device.enter` /
-//! `motion` / `drop` to whatever surface is under the pointer, i.e. Tiller's own window, exactly
+//! `motion` / `drop` to whatever surface is under the pointer, i.e. Sirio's own window, exactly
 //! as a real file manager's drag would.
 //!
 //! Protocol notes:
-//!   - `text/uri-list` (RFC 2483, CRLF-separated) is the one MIME type Tiller's `Enter` handler
+//!   - `text/uri-list` (RFC 2483, CRLF-separated) is the one MIME type Sirio's `Enter` handler
 //!     reads (`FILE_LIST_MIME_TYPE` in the vendored gpui_linux checkout).
 //!   - The "slow-resolving provider" clause: on `text/uri-list` the whole list arrives through one
 //!     pipe in one write, so there is no per-file resolution to be slow about. `--delay-ms` instead
@@ -323,7 +323,7 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                 if state.args.delay_ms > 0 {
                     std::thread::sleep(Duration::from_millis(state.args.delay_ms));
                 }
-                // RFC 2483: one absolute URI per line, CRLF-terminated. Tiller's Enter handler
+                // RFC 2483: one absolute URI per line, CRLF-terminated. Sirio's Enter handler
                 // only ever splits on `.lines()`, which also accepts a bare LF, but CRLF is what a
                 // real file manager (e.g. Nautilus, GTK's GtkFileChooser drag source) sends.
                 let mut body = String::new();
