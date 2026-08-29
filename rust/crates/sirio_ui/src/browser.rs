@@ -294,6 +294,45 @@ pub enum BrowserError {
     Navigation(String),
 }
 
+/// #307: what a Windows machine without the WebView2 Runtime sees in place
+/// of the browser's content. Names the runtime, owns that Sirio could not
+/// install it, and points at the one retry action.
+const RUNTIME_MISSING_MESSAGE: &str = "Sirio needs the Microsoft Edge WebView2 Runtime to show pages here, and could not install it. The rest of Sirio works without it — check your network connection, or install the runtime from Microsoft, then retry.";
+
+/// Why the native webview child never came up, when it didn't. #307 split
+/// the old plain `Option<String>` in two: a missing WebView2 runtime on
+/// Windows gets the full-content explanation with a retry action, while
+/// any other engine failure keeps the small red banner above an empty
+/// pane, exactly as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupFailure {
+    /// Windows: `wry::webview_version()` found no WebView2 Runtime installed.
+    RuntimeMissing,
+    /// Any other engine-start failure, carrying the message for the banner.
+    Failed(String),
+}
+
+impl StartupFailure {
+    /// The one-line text for the host-facing startup-error contract (#131):
+    /// every flavor reports `Some`, so `browser.open` answers `ok:false`
+    /// for a dead surface no matter why it is dead.
+    fn message(&self) -> &str {
+        match self {
+            Self::RuntimeMissing => RUNTIME_MISSING_MESSAGE,
+            Self::Failed(error) => error,
+        }
+    }
+
+    /// The generic red banner's text. A missing runtime renders no banner:
+    /// the full-content explanation replaces the content instead.
+    fn banner_text(&self) -> Option<&str> {
+        match self {
+            Self::RuntimeMissing => None,
+            Self::Failed(error) => Some(error),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AddressEditor {
     text: String,
@@ -1178,7 +1217,11 @@ pub struct BrowserSurface {
     /// rather than a back-reference -- but the engine keeps using the
     /// directory it names, so dropping it early would pull the profile out
     /// from under a live webview.
-    _web_context: WebContext,
+    ///
+    /// An `Option` so a retry (#307) can hand the context to the engine
+    /// build while the surface's GPUI lease is released, then take it back;
+    /// see `take_retry_attempt`.
+    _web_context: Option<WebContext>,
     /// F-BRW-01: native-side geometry correction, calibrated once against
     /// the child bounds reported by wry; see [`SharedScaleCorrection`].
     webview_scale_correction: SharedScaleCorrection,
@@ -1197,7 +1240,77 @@ pub struct BrowserSurface {
     /// the reason is written here rather than left to be re-derived.
     #[allow(dead_code)]
     pump_task: Option<Task<()>>,
-    startup_error: Option<String>,
+    /// Why the native child never came up, if it didn't; see [`StartupFailure`].
+    startup_failure: Option<StartupFailure>,
+}
+
+/// #307: whether the platform's own webview runtime is absent. Only
+/// Windows answers this today: WebView2 is a machine-level Microsoft
+/// component an installed Sirio can legitimately lack (the installer's
+/// bootstrap attempt is deliberately non-fatal — its most common failure
+/// is simply having no network), and wry's version probe is exactly the
+/// "is it there" question. Everywhere else the runtime ships with the
+/// OS, and this reports `false`, so nothing about the surface changes.
+fn webview_runtime_missing() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        wry::webview_version().is_err()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// #307: what a retry's engine build needs in hand while the surface's
+/// lease is released — the profile context taken out of the surface, the
+/// shared event sink the new webview must feed, and the address to load.
+struct RetryAttempt {
+    web_context: WebContext,
+    web_events: SharedWebEvents,
+    address: String,
+}
+
+impl RetryAttempt {
+    /// Runs the actual engine creation, off the surface's lease (see
+    /// `take_retry_attempt` for why that matters). Probes the runtime
+    /// first, the same way `new` does: still absent means the explanation
+    /// stands, and the context is handed back untouched.
+    fn build(self, window: &Window) -> RetryOutcome {
+        let RetryAttempt {
+            mut web_context,
+            web_events,
+            address,
+        } = self;
+        if webview_runtime_missing() {
+            return RetryOutcome {
+                webview: None,
+                failure: Some(StartupFailure::RuntimeMissing),
+                web_context: Some(web_context),
+            };
+        }
+        match build_production_webview_for_platform(window, &address, &web_events, &mut web_context)
+        {
+            Ok(webview) => RetryOutcome {
+                webview: Some(webview),
+                failure: None,
+                web_context: Some(web_context),
+            },
+            Err(error) => RetryOutcome {
+                webview: None,
+                failure: Some(StartupFailure::Failed(error)),
+                web_context: Some(web_context),
+            },
+        }
+    }
+}
+
+/// #307: the result of a retry's engine build, plus the profile context
+/// handed back for the surface to keep holding.
+struct RetryOutcome {
+    webview: Option<WebView>,
+    failure: Option<StartupFailure>,
+    web_context: Option<WebContext>,
 }
 
 impl BrowserSurface {
@@ -1220,14 +1333,22 @@ impl BrowserSurface {
         // WebView2 writes `<exe>.WebView2\EBWebView` beside the binary, which
         // an installed Sirio under Program Files cannot create.
         let mut web_context = WebContext::new(browser_profile_dir());
-        let (webview, startup_error) = match build_production_webview_for_platform(
-            window,
-            state.address(),
-            &web_events,
-            &mut web_context,
-        ) {
-            Ok(webview) => (Some(webview), startup_error),
-            Err(error) => (None, Some(error)),
+        // #307: a Windows machine without the WebView2 Runtime gets a full
+        // explanation in place of the content, not an engine error it can't
+        // act on. The probe runs before the build: it answers the one
+        // question the build error cannot -- "is the runtime there at all".
+        let (webview, startup_failure) = if webview_runtime_missing() {
+            (None, Some(StartupFailure::RuntimeMissing))
+        } else {
+            match build_production_webview_for_platform(
+                window,
+                state.address(),
+                &web_events,
+                &mut web_context,
+            ) {
+                Ok(webview) => (Some(webview), startup_error.map(StartupFailure::Failed)),
+                Err(error) => (None, Some(StartupFailure::Failed(error))),
+            }
         };
         let webview = Rc::new(RefCell::new(webview));
         // #255: armed on first render, never here -- see `ensure_pump_task`.
@@ -1242,13 +1363,13 @@ impl BrowserSurface {
             address_blink: sirio_ui::caret::Blink::new(),
             address_caret_visible: false,
             webview,
-            _web_context: web_context,
+            _web_context: Some(web_context),
             webview_scale_correction: Rc::new(Cell::new(None)),
             webview_visible: initial_native_visibility(),
             web_events,
             events: Vec::new(),
             pump_task,
-            startup_error,
+            startup_failure,
         }
     }
 
@@ -1382,8 +1503,105 @@ impl BrowserSurface {
     /// initial address that forced the `https://example.com` fallback), if
     /// any. Distinct from [`BrowserState::error`], which tracks in-flight
     /// navigation failures after construction.
+    ///
+    /// Every failure flavor reports `Some` here — including #307's missing
+    /// WebView2 runtime — so the host's `browser.open` keeps answering
+    /// `ok:false` for a dead surface no matter why it is dead.
     pub fn startup_error(&self) -> Option<&str> {
-        self.startup_error.as_deref()
+        self.startup_failure.as_ref().map(StartupFailure::message)
+    }
+
+    /// #307: takes out of the surface everything a retry's engine build
+    /// needs, so the build can run while NO GPUI lease on this surface is
+    /// held. That release is the whole point: creating a WebView2 pumps the
+    /// platform message loop (#255), and a task queued for this surface —
+    /// the address caret's blink — must be able to lease it during the pump
+    /// instead of panicking on a double lease. Returns `None` when there is
+    /// no profile context to hand the engine, i.e. retrying cannot even be
+    /// attempted.
+    fn take_retry_attempt(&mut self) -> Option<RetryAttempt> {
+        Some(RetryAttempt {
+            web_context: self._web_context.take()?,
+            web_events: self.web_events.clone(),
+            address: self.state.address().to_owned(),
+        })
+    }
+
+    /// #307: installs a retry's outcome. A live webview — whose mirror
+    /// starts mapped exactly as in `new`, because wry maps the child on
+    /// creation — or the failure to explain: the same runtime-missing
+    /// explanation stands, or a new engine failure takes the banner. The
+    /// pump task re-arms by itself from the next `render`, through the same
+    /// `should_arm_pump` guard that closes surfaces stay closed behind.
+    fn install_retry(&mut self, outcome: RetryOutcome, cx: &mut Context<Self>) {
+        self._web_context = outcome.web_context;
+        self.startup_failure = outcome.failure;
+        if let Some(webview) = outcome.webview {
+            self.webview_visible = initial_native_visibility();
+            *self.webview.borrow_mut() = Some(webview);
+        }
+        cx.notify();
+    }
+
+    /// #307: the full-content explanation a Windows machine without the
+    /// WebView2 Runtime sees, with its one action. Rendered in place of the
+    /// webview region — not as a banner — so the pane cannot be mistaken
+    /// for an empty one, and the failure names the one thing that fixes it.
+    fn render_runtime_missing(&self, theme: Theme, entity: gpui::Entity<Self>) -> impl IntoElement {
+        div()
+            .id("browser-runtime-missing")
+            .debug_selector(|| "browser-runtime-missing".to_owned())
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.0))
+            .px(px(24.0))
+            .child(
+                div()
+                    .text_size(theme.typography.headline)
+                    .text_color(theme.title)
+                    .child("Sirio needs the Microsoft Edge WebView2 Runtime"),
+            )
+            .child(
+                div()
+                    .max_w(px(520.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child(RUNTIME_MISSING_MESSAGE),
+            )
+            .child(
+                div()
+                    .id("browser-runtime-retry")
+                    .debug_selector(|| "browser-runtime-retry".to_owned())
+                    .h(px(30.0))
+                    .px(px(14.0))
+                    .mt(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.title)
+                    .hover(|style| style.bg(theme.row_hover))
+                    // The rebuild must NOT run under this surface's GPUI
+                    // lease: creating a WebView2 pumps the platform message
+                    // loop (#255), and a task queued for this surface — the
+                    // address caret's blink — would re-enter the lease and
+                    // panic. Take what the build needs out, build lease-free,
+                    // then reinstall the outcome.
+                    .on_click(move |_, window, cx| {
+                        let Some(attempt) =
+                            entity.update(cx, |surface, _| surface.take_retry_attempt())
+                        else {
+                            return;
+                        };
+                        let outcome = attempt.build(window);
+                        entity.update(cx, |surface, cx| surface.install_retry(outcome, cx));
+                    })
+                    .child("Retry"),
+            )
     }
 
     /// Records an out-of-band navigation failure (e.g. a control-socket
@@ -1886,20 +2104,26 @@ impl Render for BrowserSurface {
             .bg(theme.chat_surface)
             .text_color(theme.title)
             .child(self.render_toolbar(theme, entity.clone()))
-            .when_some(self.startup_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .id("browser-error")
-                        .debug_selector(|| "browser-error".to_owned())
-                        .w_full()
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .bg(theme.tab_error)
-                        .text_color(theme.canvas)
-                        .text_size(theme.typography.footnote)
-                        .child(error),
-                )
-            })
+            .when_some(
+                self.startup_failure
+                    .as_ref()
+                    .and_then(StartupFailure::banner_text)
+                    .map(str::to_owned),
+                |this, error| {
+                    this.child(
+                        div()
+                            .id("browser-error")
+                            .debug_selector(|| "browser-error".to_owned())
+                            .w_full()
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .bg(theme.tab_error)
+                            .text_color(theme.canvas)
+                            .text_size(theme.typography.footnote)
+                            .child(error),
+                    )
+                },
+            )
             .when_some(self.state.error().map(str::to_owned), |this, error| {
                 this.child(
                     div()
@@ -1960,13 +2184,20 @@ impl Render for BrowserSurface {
             })
             // The native child is the final layout region, not a sibling
             // overlapped by GPUI. This is the option-1 z-order contract.
-            .child(
+            // #307: with the WebView2 runtime absent there is no child at
+            // all, and the region explains itself instead of sitting empty.
+            .child({
+                let runtime_missing =
+                    matches!(self.startup_failure, Some(StartupFailure::RuntimeMissing));
                 div()
                     .id("browser-webview-region")
                     .relative()
                     .flex_1()
-                    .child(webview),
-            )
+                    .when(runtime_missing, |region| {
+                        region.child(self.render_runtime_missing(theme, entity.clone()))
+                    })
+                    .when(!runtime_missing, |region| region.child(webview))
+            })
     }
 }
 
@@ -2854,5 +3085,52 @@ mod tests {
 
         assert_eq!(editor.text(), "https://www.example.com");
         assert_eq!(editor.selection(), 12..12);
+    }
+
+    /// #307: on a Windows machine without the WebView2 Runtime the browser
+    /// surface explains itself instead of failing quietly. The message is
+    /// the whole feature: it must name the runtime, own that Sirio could
+    /// not install it, and point at the one retry action. (The button
+    /// itself is GPUI chrome needing a live window; the words are the part
+    /// that can be pinned here.)
+    #[test]
+    fn runtime_missing_message_names_the_runtime_and_the_failed_install() {
+        let message = StartupFailure::RuntimeMissing.message();
+        assert!(
+            message.contains("Microsoft Edge WebView2 Runtime"),
+            "the message must name the runtime: {message}"
+        );
+        assert!(
+            message.contains("could not install"),
+            "the message must own the failed install: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("retry"),
+            "the message must point at the retry action: {message}"
+        );
+    }
+
+    /// #307: a runtime-missing surface shows the explanation *in place of
+    /// the content*; the generic red banner above it would be a second,
+    /// redundant message about the same failure.
+    #[test]
+    fn runtime_missing_shows_the_explanation_not_the_error_banner() {
+        assert!(StartupFailure::RuntimeMissing.banner_text().is_none());
+    }
+
+    #[test]
+    fn an_engine_failure_keeps_the_generic_error_banner() {
+        let failure = StartupFailure::Failed("WebView2 child failed: boom".to_owned());
+        assert_eq!(failure.banner_text(), Some("WebView2 child failed: boom"));
+        assert_eq!(failure.message(), "WebView2 child failed: boom");
+    }
+
+    /// AC "with the runtime present, nothing changes", for the platforms
+    /// that do not probe: only Windows can classify the runtime as missing,
+    /// and everywhere else the surface behaves exactly as before.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_platforms_never_classify_the_runtime_as_missing() {
+        assert!(!webview_runtime_missing());
     }
 }
