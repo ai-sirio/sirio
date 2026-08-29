@@ -12,7 +12,7 @@ pub fn agent_skill_install_command() -> SkillInstallCommand {
         args: vec![
             "skills".into(),
             "add".into(),
-            "e-palmisano/sirio".into(),
+            "ai-sirio/sirio".into(),
             "--skill".into(),
             "sirio".into(),
             "-a".into(),
@@ -35,7 +35,7 @@ mod tests {
             vec![
                 "skills",
                 "add",
-                "e-palmisano/sirio",
+                "ai-sirio/sirio",
                 "--skill",
                 "sirio",
                 "-a",

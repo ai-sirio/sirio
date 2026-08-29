@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" />
   <img src="https://img.shields.io/badge/Rust-2024%20edition-orange?style=flat-square" alt="Rust 2024 edition" />
-  <a href="https://github.com/e-palmisano/sirio"><img src="https://img.shields.io/github/stars/e-palmisano/sirio?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
+  <a href="https://github.com/ai-sirio/sirio"><img src="https://img.shields.io/github/stars/ai-sirio/sirio?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
   <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" /></a>
 </p>
 
@@ -65,7 +65,7 @@ Sirio automatically provisions [`skills/sirio/SKILL.md`](skills/sirio/SKILL.md) 
 For supported Skills CLI agents outside a launched Sirio worktree, install the public package with:
 
 ```bash
-npx skills add e-palmisano/sirio --skill sirio -a claude-code,codex,opencode,pi -y
+npx skills add ai-sirio/sirio --skill sirio -a claude-code,codex,opencode,pi -y
 ```
 
 `sirioctl panel` returns panel UUIDs. Capture them and address every operation explicitly with `--id`; use `--from` only to identify the UUID of the panel being split.
