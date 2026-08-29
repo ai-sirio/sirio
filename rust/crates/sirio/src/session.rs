@@ -2012,6 +2012,7 @@ mod tests {
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
+            updates_enabled: true,
             resume_agent_sessions: false,
             auto_naming: true,
             limit_chat_history: false,

@@ -73,6 +73,44 @@ impl UsageBarPrefs {
     }
 }
 
+/// The update facts the host supplies to the two UI surfaces. The updater
+/// owns checking, downloading and applying; this crate only renders its
+/// result and emits user intent back to the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    Disabled,
+    NotDue,
+    Checking,
+    UpToDate,
+    Available { version: String, notes: String },
+    Ready { version: String, notes: String },
+    Failed { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateState {
+    /// A per-install opt-out. The host must use this to suppress polling and
+    /// downloading as well as the indicator.
+    pub enabled: bool,
+    /// Host-supplied channel, kept as text so this crate stays independent of
+    /// `sirio_control` and `sirio_update`.
+    pub channel: String,
+    pub status: UpdateStatus,
+    /// Host-formatted local time, e.g. `14 minutes ago`.
+    pub last_checked: Option<String>,
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel: String::new(),
+            status: UpdateStatus::NotDue,
+            last_checked: None,
+        }
+    }
+}
+
 /// Plain data source for [`StatusBar`]: the worktree context shown at the
 /// right edge. The usage numbers come from the real fetchers, not here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,10 +144,16 @@ pub struct StatusBar {
     /// [`StatusBar::apply_preferences`] whenever the settings surface
     /// changes.
     prefs: UsageBarPrefs,
+    /// Host-owned update state. The bar only renders the available/ready
+    /// states and routes the click to the existing Settings callback.
+    update_state: UpdateState,
     /// Lazily armed on first render (the constructor has no context to spawn
     /// with).
     refresh_task_started: bool,
     on_settings: Option<Rc<dyn Fn()>>,
+    /// Host callback for opening the General update detail. Falls back to
+    /// `on_settings` when a host does not need a distinct destination.
+    on_update: Option<Rc<dyn Fn()>>,
     on_refresh: Option<Rc<dyn Fn()>>,
 }
 
@@ -123,14 +167,42 @@ impl StatusBar {
             ollama_cloud: ProviderUsageState::Loading,
             refresh_interval: REFRESH_INTERVAL,
             prefs: UsageBarPrefs::default(),
+            update_state: UpdateState::default(),
             refresh_task_started: false,
             on_settings: None,
+            on_update: None,
             on_refresh: None,
         }
     }
 
     pub fn new_with_default_context() -> Self {
         Self::new(UsageBarData::default_context())
+    }
+
+    /// The current host-owned update state, for the host and tests.
+    pub fn update_state(&self) -> &UpdateState {
+        &self.update_state
+    }
+
+    /// Supplies the host-owned update state shown in the bar.
+    pub fn with_update_state(mut self, state: UpdateState) -> Self {
+        self.update_state = state;
+        self
+    }
+
+    /// Replaces the host-owned update state without starting any updater work.
+    pub fn apply_update_state(&mut self, state: UpdateState, cx: &mut Context<Self>) {
+        self.update_state = state;
+        cx.notify();
+    }
+
+    /// Whether the quiet status-bar indicator should be drawn.
+    fn update_indicator_visible(state: &UpdateState) -> bool {
+        state.enabled
+            && matches!(
+                state.status,
+                UpdateStatus::Available { .. } | UpdateStatus::Ready { .. }
+            )
     }
 
     /// Sets the preferences the bar starts with, derived from the settings
@@ -154,6 +226,13 @@ impl StatusBar {
 
     pub fn on_settings(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_settings = Some(Rc::new(callback));
+        self
+    }
+
+    /// Installs the host callback used by the update indicator. Hosts should
+    /// route it to Settings → General rather than starting an update.
+    pub fn on_update(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_update = Some(Rc::new(callback));
         self
     }
 
@@ -353,6 +432,7 @@ impl Render for StatusBar {
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();
+        let update_settings = self.on_update.clone().or(settings.clone());
         let refresh_entity = cx.entity();
 
         let icon_button = |id: &'static str, icon: Icon| {
@@ -487,6 +567,26 @@ impl Render for StatusBar {
                 Self::segment_text("Ollama Cloud", &self.ollama_cloud),
             ));
         }
+        if Self::update_indicator_visible(&self.update_state) {
+            left = left.child(
+                div()
+                    .id("status-update-indicator")
+                    .debug_selector(|| "status-update-indicator".into())
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.tab_focus_accent)
+                    .hover(|style| style.opacity(0.9))
+                    .on_click(move |_, _, _| {
+                        if let Some(callback) = &update_settings {
+                            callback();
+                        }
+                    })
+                    .child(IconElement::new(Icon::Sparkles, IconSize::XSmall))
+                    .child(text!(id = "status-update-label", "Update available")),
+            );
+        }
 
         div()
             .id("sirio-status-bar")
@@ -542,7 +642,7 @@ fn dim(color: Rgba) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::VisualTestContext;
+    use gpui::{Modifiers, VisualTestContext};
     use sirio_usage::{ProviderUsage, UsageWindow};
 
     /// #199: "not implemented on this platform" is a different fact from
@@ -882,6 +982,67 @@ mod tests {
     /// dimmed, without a panic or a stuck `cx.notify()`, across two calls on
     /// a real `Context<StatusBar>` (not a bare `reduce()` call with no
     /// entity behind it).
+    #[test]
+    fn update_indicator_requires_an_enabled_available_update() {
+        let available = UpdateState {
+            enabled: true,
+            channel: "stable".into(),
+            status: UpdateStatus::Available {
+                version: "0.7.0".into(),
+                notes: "notes".into(),
+            },
+            last_checked: Some("10 minutes ago".into()),
+        };
+        assert!(StatusBar::update_indicator_visible(&available));
+
+        let disabled = UpdateState {
+            enabled: false,
+            ..available.clone()
+        };
+        assert!(!StatusBar::update_indicator_visible(&disabled));
+
+        let checking = UpdateState {
+            status: UpdateStatus::Checking,
+            ..available
+        };
+        assert!(!StatusBar::update_indicator_visible(&checking));
+    }
+
+    /// Ticket #316: the indicator is a quiet status-bar affordance. Its
+    /// click only reaches the host's Settings callback; it does not invoke
+    /// an updater operation in this crate.
+    #[gpui::test]
+    async fn available_update_indicator_opens_host_settings_callback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let settings_calls = std::rc::Rc::new(std::cell::RefCell::new(0));
+        let spy = settings_calls.clone();
+        let update = UpdateState {
+            enabled: true,
+            channel: "stable".into(),
+            status: UpdateStatus::Available {
+                version: "0.7.0".into(),
+                notes: String::new(),
+            },
+            last_checked: Some("now".into()),
+        };
+        let window = cx.add_window(|_window, _cx| {
+            StatusBar::new_with_default_context()
+                .with_update_state(update)
+                .on_settings(move || *spy.borrow_mut() += 1)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let indicator = cx
+            .debug_bounds("status-update-indicator")
+            .expect("available update draws the status indicator");
+        cx.simulate_click(indicator.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*settings_calls.borrow(), 1);
+    }
+
     #[gpui::test]
     async fn a_real_timeout_after_a_real_success_dims_the_live_entity(
         cx: &mut gpui::TestAppContext,
