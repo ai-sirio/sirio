@@ -31,8 +31,12 @@
 //!
 //! # Linux (#314)
 //!
-//! Not implemented here yet. Until it lands, calling [`apply`] on Linux is
-//! an error rather than a silent no-op.
+//! A verified download is an AppImage; it is applied by **renaming over the
+//! running image** (see [`linux`]). Self-location reads `$APPIMAGE` — inside
+//! an AppImage `current_exe()` points into the ephemeral squashfs mount, not
+//! the file to replace — and its absence is the "this is not an install"
+//! signal. The running instance carries on until the user relaunches, like
+//! macOS.
 //!
 //! Both platform modules are compiled on every target so their logic and
 //! tests run everywhere; the only `#[cfg(target_os)]` in this crate is the
@@ -68,7 +72,8 @@ pub enum ApplyError {
     /// The installer (or swap mechanism) could not be started.
     #[error("the update could not be applied because it failed to start: {0}")]
     Launch(String),
-    /// The macOS bundle swap failed; the previous version is back in place.
+    /// The swap failed; the previous version is back in place (macOS) or
+    /// untouched (Linux, where the rename is atomic).
     #[error("the update could not be swapped into place: {0}")]
     Swap(String),
     /// The macOS swap failed *and* the previous version could not be put
@@ -98,7 +103,9 @@ pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
     return windows::apply(update, &real_launch);
     #[cfg(target_os = "macos")]
     return macos::apply(update);
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    return linux::apply(update);
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = update;
         Err(ApplyError::UnsupportedPlatform)
@@ -117,6 +124,7 @@ fn real_launch(path: &Path, args: &[&str]) -> Result<(), String> {
     windows::spawn_silent(path, args).map(|_child| ())
 }
 
+pub mod linux;
 pub mod macos;
 mod windows;
 
