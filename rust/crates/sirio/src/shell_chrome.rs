@@ -48,6 +48,15 @@ impl ShellMaterial {
     }
 }
 
+/// #58: the center terminal panel never takes the shell focus treatment, even
+/// when the keyboard is genuinely inside it — the pane's own contents are the
+/// focus indicator there, and a ring around the whole terminal is noise.
+///
+/// A named constant rather than a `false` literal with a comment beside it, so
+/// the decision is something a test can assert instead of something a reader
+/// has to notice.
+pub(crate) const CENTER_PANEL_FOCUS_VISIBLE: bool = false;
+
 pub(crate) fn panel_border(theme: &Theme, focus_visible: bool) -> gpui::Rgba {
     if focus_visible {
         theme.panel_focus_ring
@@ -64,14 +73,18 @@ pub(crate) fn focus_is_keyboard_visible(
     window.last_input_was_keyboard() && focus_handle.contains_focused(window, cx)
 }
 
+/// A shell panel, with keyboard focus shown as a single brightened border.
+///
+/// This used to paint a second, absolutely-positioned ring inside the border
+/// as well. Two rings in the accent coral was the loudest thing on screen; one
+/// border in a neutral says the same thing — this pane has the keyboard —
+/// without competing with the pane's own contents for attention.
 pub(crate) fn panel(
     id: &'static str,
     focus_handle: &FocusHandle,
     focus_visible: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
-    let focus_ring_id = format!("{id}-focus-ring");
-
     div()
         .id(id)
         .debug_selector(move || id.into())
@@ -83,18 +96,6 @@ pub(crate) fn panel(
         .rounded(theme.radii.shell_panel)
         .overflow_hidden()
         .track_focus(focus_handle)
-        .when(focus_visible, |this| {
-            this.child(
-                div()
-                    .id(focus_ring_id.clone())
-                    .debug_selector(move || focus_ring_id.clone())
-                    .absolute()
-                    .inset_0()
-                    .border_1()
-                    .border_color(theme.panel_focus_ring)
-                    .rounded(theme.radii.shell_panel),
-            )
-        })
 }
 
 #[cfg(test)]

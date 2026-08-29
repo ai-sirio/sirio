@@ -2609,6 +2609,29 @@ impl Sidebar {
         }
     }
 
+    /// The tint of a tab row's icon.
+    ///
+    /// A branded agent mark is drawn in its brand, exactly as the reference
+    /// draws one `AgentIcon` wherever a tab is listed. A tab with no agent —
+    /// an unstarted chat, a plain terminal — used to fall back to
+    /// `tab_needs_input`, spending the "answer me" amber as a decorative
+    /// tint, so an idle terminal wore the colour of an agent genuinely
+    /// waiting on the reader. It takes `meta` instead: the same grey the
+    /// worktree rows it sits under already use.
+    ///
+    /// Lifted out of the row body because a colour chosen inline is a colour
+    /// no test can reach — which is exactly how the amber survived the first
+    /// pass at this collision.
+    fn tab_row_icon_color(
+        agent_brand: Option<AgentBrandColor>,
+        has_agent_icon: bool,
+        theme: Theme,
+    ) -> Rgba {
+        agent_brand
+            .filter(|_| has_agent_icon)
+            .map_or(theme.meta, AgentBrandColor::color)
+    }
+
     fn row_icon(row: &SidebarRow) -> Icon {
         match row.kind {
             RowKind::Project => Icon::FolderFill,
@@ -2731,7 +2754,7 @@ impl Sidebar {
             // always append. `caret_shown` already folds in the field being
             // focused and the blink phase.
             .when(focused, |this| {
-                this.child(caret::bar(px(14.0), theme.accent, caret_shown))
+                this.child(caret::bar(px(14.0), theme.caret, caret_shown))
             })
     }
 
@@ -3054,7 +3077,7 @@ impl Sidebar {
                             }),
                     )
                     .when(name_focused, |this| {
-                        this.child(caret::bar(px(14.0), theme.accent, caret_visible))
+                        this.child(caret::bar(px(14.0), theme.caret, caret_visible))
                     }),
             )
             .when(!card.is_git, |this| {
@@ -3290,7 +3313,7 @@ impl Sidebar {
                             }),
                     )
                     .when(focused, |this| {
-                        this.child(caret::bar(px(14.0), theme.accent, caret_visible))
+                        this.child(caret::bar(px(14.0), theme.caret, caret_visible))
                     }),
             )
     }
@@ -3386,7 +3409,7 @@ impl Sidebar {
                                     }),
                             )
                             .when(focused, |this| {
-                                this.child(caret::bar(px(14.0), theme.accent, caret_visible))
+                                this.child(caret::bar(px(14.0), theme.caret, caret_visible))
                             }),
                     )
                     .child(
@@ -3507,13 +3530,9 @@ impl Sidebar {
                 .as_ref()
                 .map(|icon| icon.tint.resolve(theme))
                 .unwrap_or_else(|| Self::project_color(&title)),
-            // A brand mark is drawn in its brand, exactly as the reference
-            // draws one `AgentIcon` wherever a tab is listed. Only a
-            // non-agent tab keeps the surface tint.
-            RowKind::Tab => row
-                .agent_brand
-                .filter(|_| row.agent_icon.is_some())
-                .map_or(theme.tab_needs_input, AgentBrandColor::color),
+            RowKind::Tab => {
+                Self::tab_row_icon_color(row.agent_brand, row.agent_icon.is_some(), theme)
+            }
             RowKind::Worktree | RowKind::NewWorktree => theme.meta,
         };
         let text_color = if selected {
@@ -4079,7 +4098,7 @@ impl Render for Sidebar {
                                 filter_text
                             })
                             .when(filter_is_focused, |this| {
-                                this.child(caret::bar(px(12.0), theme.accent, field_caret_visible))
+                                this.child(caret::bar(px(12.0), theme.caret, field_caret_visible))
                             }),
                     ),
             )
@@ -5962,6 +5981,37 @@ mod tests {
                     "{agent} running must not paint the needs-input colour"
                 );
             }
+        }
+    }
+
+    /// The third face of the same collision, and the one that outlived the
+    /// first fix: a tab row with **no** agent.
+    ///
+    /// `running_tint_never_equals_a_status_colour_and_names_the_agent` pins
+    /// the branded half. The unbranded half fell back to `tab_needs_input`,
+    /// so a plain terminal row and an agent waiting on an answer were the
+    /// same amber — the very thing that test exists to forbid, one branch
+    /// over.
+    #[test]
+    fn a_tab_row_without_an_agent_never_borrows_the_needs_input_amber() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let plain = Sidebar::tab_row_icon_color(None, false, theme);
+            assert_eq!(plain, theme.meta, "a tab with no agent takes the row grey");
+            assert_ne!(
+                plain, theme.tab_needs_input,
+                "an idle tab must not wear the colour of one waiting on an answer"
+            );
+
+            // A brand only reaches the tint when there is a mark to draw it on.
+            assert_eq!(
+                Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), true, theme),
+                AgentBrandColor::Codex.color()
+            );
+            assert_eq!(
+                Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), false, theme),
+                theme.meta,
+                "a brand with no mark to paint falls back like any other tab"
+            );
         }
     }
 

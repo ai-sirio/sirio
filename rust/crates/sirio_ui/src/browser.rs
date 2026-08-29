@@ -2332,7 +2332,7 @@ impl Element for AddressTextElement {
                     point(line_origin.x + line.x_for_index(caret), line_origin.y),
                     size(px(1.0), line_height),
                 ),
-                self.theme.tab_focus_accent,
+                self.theme.caret,
             ))
         } else {
             None

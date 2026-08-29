@@ -2,7 +2,6 @@
 //! their status glyphs.
 
 use super::*;
-use gpui::Rgba;
 
 impl RightPanel {
     pub(super) fn render_activity(
@@ -45,7 +44,7 @@ impl RightPanel {
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
-        let status = activity_status(surface.status, theme);
+        let status = super::status_color(surface.status, theme);
         let status_name = match surface.status {
             ActivityStatus::Idle => "idle",
             ActivityStatus::Running => "running",
@@ -74,7 +73,7 @@ impl RightPanel {
             .child(
                 div()
                     .w(px(15.0))
-                    .text_color(theme.tab_focus_accent)
+                    .text_color(theme.title)
                     .child(IconElement::new(surface.icon, IconSize::Small)),
             )
             .child(
@@ -118,16 +117,6 @@ impl RightPanel {
                     })
                     .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title)),
             )
-    }
-}
-
-fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
-    match status {
-        ActivityStatus::Idle => theme.meta,
-        ActivityStatus::Running => theme.accent,
-        ActivityStatus::NeedsInput => theme.tab_needs_input,
-        ActivityStatus::Done => theme.tab_done,
-        ActivityStatus::Error => theme.tab_error,
     }
 }
 

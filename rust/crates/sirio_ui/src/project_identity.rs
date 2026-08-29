@@ -777,7 +777,7 @@ impl ProjectIconPicker {
             .child(
                 div()
                     .debug_selector(|| "project-icon-emoji-caret".into())
-                    .child(caret::bar(px(18.0), theme.accent, self.emoji_caret_visible)),
+                    .child(caret::bar(px(18.0), theme.caret, self.emoji_caret_visible)),
             );
 
         let commit_entity = entity.clone();
@@ -942,7 +942,7 @@ impl ProjectIconPicker {
                                     })
                                     .child(caret::bar(
                                         px(14.0),
-                                        theme.accent,
+                                        theme.caret,
                                         self.emoji_grid_caret_visible,
                                     )),
                             ),
@@ -1125,7 +1125,7 @@ impl ProjectIconPicker {
                 let caret_id = format!("project-icon-{id_prefix}-caret");
                 div()
                     .debug_selector(move || caret_id.clone())
-                    .child(caret::bar(px(16.0), theme.accent, caret_visible))
+                    .child(caret::bar(px(16.0), theme.caret, caret_visible))
             });
 
         let mut row = div()
