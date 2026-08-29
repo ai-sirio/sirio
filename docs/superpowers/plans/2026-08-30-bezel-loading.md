@@ -447,9 +447,9 @@ git commit -m "feat(ui): add the Bezel loading adapter"
 
 **Files:**
 - Modify: `rust/crates/sirio_ui/src/chat.rs:84-102` (delete `GENERATING_SPINNER_FRAMES`, `GENERATING_SPINNER_CYCLE`, `generating_spinner_frame`)
-- Modify: `rust/crates/sirio_ui/src/chat.rs:4926-4984` (the `Entry::Thought` arm)
-- Modify: `rust/crates/sirio_ui/src/chat.rs:8076-8106` (the streaming indicator sibling of the transcript)
-- Modify: `rust/crates/sirio_ui/src/chat.rs:9011-9026` (delete `generating_spinner_cycles_through_all_ten_frames_in_one_second`)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:4928-4986` (the `Entry::Thought` render arm)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:8078-8108` (the streaming indicator sibling of the transcript)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:9013-9028` (delete `generating_spinner_cycles_through_all_ten_frames_in_one_second`)
 
 **Interfaces:**
 - Consumes: `loading::thinking_indicator`, `loading::thought_label`, `loading::THINKING_GLYPH`.
@@ -493,7 +493,7 @@ Expected: FAIL to compile — `crate::loading` is reachable but `set_streaming_f
 
 - [ ] **Step 3: Replace the braille spinner with the adapter**
 
-At `chat.rs:8076-8106`, keep the `.when(self.streaming, ...)` structure, the `chat-generating-spinner` id, the `debug_selector`, the `max_w(px(TRANSCRIPT_WIDTH))`, and the "transient by construction" comment — all of that is still true. Replace only the child:
+At `chat.rs:8078-8108`, keep the `.when(self.streaming, ...)` structure, the `chat-generating-spinner` id, the `debug_selector`, the `max_w(px(TRANSCRIPT_WIDTH))`, and the "transient by construction" comment — all of that is still true. Replace only the child:
 
 ```rust
 .child(
@@ -556,8 +556,8 @@ git commit -m "feat(chat): replace the braille spinner with the Activity reasoni
 ## Task 7: Retire the rotating streaming border
 
 **Files:**
-- Modify: `rust/crates/sirio_ui/src/chat.rs:69-77` (the three `STREAMING_BORDER_*` constants), `104-109` (`streaming_border_angle`), `6037-6068` (the border lifecycle in `render_composer`)
-- Modify: `rust/crates/sirio_ui/src/chat.rs:8931-8940`, `9376-9384`, `9386-9430`, `9595-9640` (the four border tests)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:69-77` (the three `STREAMING_BORDER_*` constants), `104-109` (`streaming_border_angle`), `6045-6076` (the border lifecycle in `render_composer`)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:8933-8942`, `9378-9386`, `9388-9432`, `9597-9642` (the four border tests)
 
 **Interfaces:**
 - Consumes: Task 6 (the indicator that replaces this signal).
@@ -619,8 +619,8 @@ git commit -m "refactor(chat): retire the rotating streaming border"
 ## Task 8: Live transcript geometry
 
 **Files:**
-- Modify: `rust/crates/sirio_ui/src/chat.rs:53` (`TRANSCRIPT_WIDTH`), `62` (`USER_PILL_MAX_WIDTH`), and the transcript container around `7865-8174`
-- Modify: `rust/crates/sirio_ui/src/conformance.rs:300-334`
+- Modify: `rust/crates/sirio_ui/src/chat.rs:53` (`TRANSCRIPT_WIDTH`), `63` (`USER_PILL_MAX_WIDTH`), and the transcript container around `7867-8176` (its `max_w(px(TRANSCRIPT_WIDTH))` call sites are `7477`, `7705`, `7902`, `7932`, `7958`, `8031`)
+- Modify: `rust/crates/sirio_ui/src/conformance.rs:306-340`
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -649,7 +649,7 @@ fn the_live_transcript_follows_the_bezel_transcript_pattern() {
 }
 ```
 
-Update the second assertion in the waku-components test at `conformance.rs:329-334` the same way, and its comment: the pill is now the Bezel 440, radius and padding unchanged.
+Update the second assertion in the waku-components test at `conformance.rs:335-340` the same way, and its comment: the pill is now the Bezel 440, radius and padding unchanged.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -675,7 +675,7 @@ pub(crate) const USER_PILL_MAX_WIDTH: f32 = 440.0;
 
 - [ ] **Step 4: Apply the transcript padding and gaps**
 
-On the transcript container around `chat.rs:7895-8073`: `24px` horizontal padding, `28px` vertical padding, `10px` between turns, and `8px` between a work zone and its answer. Do not touch the list's virtualization, `ListSizingBehavior::Auto`, or the tail-follow behavior — they are acceptance constraints.
+On the transcript container around `chat.rs:7897-8075`: `24px` horizontal padding, `28px` vertical padding, `10px` between turns, and `8px` between a work zone and its answer. Do not touch the list's virtualization, `ListSizingBehavior::Auto`, or the tail-follow behavior — they are acceptance constraints.
 
 - [ ] **Step 5: Run the suites**
 
@@ -698,7 +698,7 @@ git commit -m "feat(chat): move the live transcript onto Bezel geometry"
 ## Task 9: Tool-row and work-zone grammar
 
 **Files:**
-- Modify: `rust/crates/sirio_ui/src/chat.rs:5663-5835` (`render_tool_call_card`) and `5887-5969` (`render_tool_call_group`)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:5671-5843` (`render_tool_call_card`) and `5898-5980` (`render_tool_call_group`)
 
 **Interfaces:**
 - Consumes: Task 8's geometry, `loading::THINKING_GLYPH`.
@@ -763,7 +763,7 @@ git commit -m "feat(chat): give tool runs the Bezel work-zone grammar"
 ## Task 10: Diff paint conventions
 
 **Files:**
-- Modify: `rust/crates/sirio_ui/src/chat.rs:4520-4670` (the diff renderer)
+- Modify: `rust/crates/sirio_ui/src/chat.rs:4530-4680` (`render_tool_diff`)
 
 **Interfaces:**
 - Consumes: Task 8's `TRANSCRIPT_WIDTH`.
@@ -830,7 +830,7 @@ git commit -m "feat(chat): adopt the Bezel diff paint conventions"
 ## Task 11: First-load surfaces
 
 **Files:**
-- Modify: `rust/crates/sirio_ui/src/changes.rs:1888-1917` (`render_body`'s loading branch)
+- Modify: `rust/crates/sirio_ui/src/changes.rs:1898-1927` (`render_body`'s loading branch, id `changes-loading` at `1907`)
 - Modify: `rust/crates/sirio_ui/src/right_panel/mod.rs` (the `settled == false` placeholder)
 - Modify: `rust/crates/sirio_ui/src/file_view.rs` (the `ViewState` loading branch)
 - Modify: `rust/crates/sirio_ui/src/right_panel/history.rs:150-230` (the `load_task` first load)
@@ -880,7 +880,7 @@ Keep the `changes-loading` id, the three-state structure, and the `git_task.is_s
 
 - [ ] **Step 4: Apply the same grammar to the other three**
 
-History gates its first load on "`load_task` in flight with no rows yet" and gets the full loader plus subordinate rows; its refresh is Task 12's. `right_panel/mod.rs` gates on `settled == false` (never on "a walk is in flight" — read the comment at `mod.rs:175-192`, it exists because that mistake was made once); `file_view.rs` gates on its `ViewState` loading variant; `project_forms.rs` gates on the create task. Each keeps its own copy: `Loading files…`, `Loading file…`, `Creating project…`, centered in its surface. Error and Retry keep precedence everywhere.
+History gates its first load on "`load_task` in flight with no rows yet" and gets the full loader plus subordinate rows; its refresh is Task 12's. `right_panel/mod.rs` gates on `settled == false` (never on "a walk is in flight" — read the comment at `mod.rs:195-212`, it exists because that mistake was made once); `file_view.rs` gates on its `ViewState` loading variant; `project_forms.rs` gates on the create task. Each keeps its own copy: `Loading files…`, `Loading file…`, `Creating project…`, centered in its surface. Error and Retry keep precedence everywhere.
 
 - [ ] **Step 5: Run the suites**
 
@@ -975,7 +975,7 @@ git commit -m "feat(ui): adopt the compact and determinate loading treatments"
 
 **Files:**
 - Create: `rust/crates/sirio/assets/fonts/Geist-Regular.ttf`, `Geist-Medium.ttf`, `GeistMono-Regular.ttf`, `OFL.txt`
-- Modify: `rust/crates/sirio_theme/src/lib.rs:980-1070` (the non-macOS candidate lists)
+- Modify: `rust/crates/sirio_theme/src/lib.rs:993-1050` (the non-macOS `UI_FAMILY_CANDIDATES` at `993` and `CODE_FAMILY_CANDIDATES` at `1021`; leave `TERMINAL_FAMILY_CANDIDATES` at `1051` alone)
 - Modify: `rust/crates/sirio/src/main.rs` (registration before the first window opens)
 - Modify: `rust/crates/sirio/build.rs`, `Scripts/build-app-bundle.sh` (packaging)
 
@@ -1044,7 +1044,7 @@ git commit -m "feat(theme): bundle Geist and Geist Mono for Windows and Linux"
 
 ## Task 14: Date separators — verify feasibility before implementing
 
-The spec's §2 and §5 both call for date separators in the live transcript. `Entry` (`chat.rs:209-292`) carries no timestamp on any variant, so this is the one requirement in the spec that cannot be met without touching the persisted transcript model — which the spec's own goals section excludes. Resolve that contradiction before writing code.
+The spec's §2 and §5 both call for date separators in the live transcript. `Entry` (`chat.rs:211-294`) carries no timestamp on any variant, so this is the one requirement in the spec that cannot be met without touching the persisted transcript model — which the spec's own goals section excludes. Resolve that contradiction before writing code.
 
 **Files:**
 - Modify: `rust/crates/sirio_ui/src/chat.rs` (only if Step 2 finds a truthful timestamp)
