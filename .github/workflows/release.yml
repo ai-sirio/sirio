@@ -78,8 +78,16 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # This step has no `shell:` key, so it runs as `bash -e {0}` -- pipefail
+          # is off, and the pipeline's exit status is sed's (0), not grep's or
+          # head's. The `|| true` below is not load-bearing for that reason today,
+          # but it keeps the empty-identity guard reachable if this step ever gains
+          # an explicit `shell: bash` (as the windows job's Package step already
+          # does), which turns pipefail on -- otherwise a failed grep/head would
+          # abort the substitution instead of falling through to the guard, at the
+          # worst possible moment: signing on a freshly cut release.
           CODESIGN_IDENTITY=$(security find-identity -v -p codesigning ci.keychain \
-            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/')
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/' || true)
           if [ -z "$CODESIGN_IDENTITY" ]; then
             echo "error: no Developer ID Application identity in ci.keychain" >&2
             exit 1
