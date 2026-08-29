@@ -59,6 +59,7 @@ jobs:
           bash Scripts/Tests/test-check-release-version.sh
           bash Scripts/Tests/test-build-dmg.sh
           bash Scripts/Tests/test-build-app-bundle.sh
+          bash Scripts/Tests/test-build-appimage.sh
           bash Scripts/Tests/test-release-workflow.sh
           bash Scripts/Tests/test-generate-changelog.sh
 
@@ -231,12 +232,19 @@ jobs:
         with:
           version: 0.15.2
 
+      # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"`
+      # unconditionally, so a runner without it fails before compiling a
+      # single crate, in a way that looks nothing like its cause (spec §1.5).
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Install GUI build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             pkg-config \
             libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
             libwayland-dev \
             libxkbcommon-dev \
             libxcb1-dev
@@ -255,16 +263,17 @@ jobs:
         env:
           VERSION: ${{ needs.macos.outputs.version }}
         run: |
-          STAGING="sirio-${VERSION}-x86_64-linux"
-          mkdir -p "$STAGING"
-          cp rust/target/release/sirio rust/target/release/sirioctl "$STAGING/"
-          tar -czf "${STAGING}.tar.gz" "$STAGING"
-          echo "path=${STAGING}.tar.gz" >> "$GITHUB_OUTPUT"
+          Scripts/build-appimage.sh \
+            rust/target/release/sirio \
+            rust/target/release/sirioctl \
+            "$VERSION" \
+            "build/Sirio-${VERSION}-x86_64.AppImage"
+          echo "path=build/Sirio-${VERSION}-x86_64.AppImage" >> "$GITHUB_OUTPUT"
 
-      - name: Upload the tarball
+      - name: Upload the AppImage
         uses: actions/upload-artifact@v4
         with:
-          name: linux-tarball
+          name: linux-appimage
           path: ${{ steps.package.outputs.path }}
           if-no-files-found: error
 
