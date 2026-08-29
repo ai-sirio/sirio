@@ -60,6 +60,7 @@ jobs:
           bash Scripts/Tests/test-build-dmg.sh
           bash Scripts/Tests/test-build-app-bundle.sh
           bash Scripts/Tests/test-release-workflow.sh
+          bash Scripts/Tests/test-generate-changelog.sh
 
       # There was an `Unlock login keychain` step here, inherited verbatim from
       # the Swift-era pipeline. It is gone on purpose, and should not come back
