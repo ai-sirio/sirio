@@ -11,6 +11,10 @@ sirio_theme.workspace = true
 sirio_project.workspace = true
 anyhow.workspace = true
 futures = "0.3"
+# #301 (R2.2): the pane decodes Kitty image pixels with the same `image`
+# 0.25.10 the `sirio` binary already links (R2.1 — no second PNG stack;
+# libghostty-vt's own optional `png` feature stays off).
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 libghostty-vt = "0.2.1"
 portable-pty = "0.9"
 parking_lot = "0.12"
