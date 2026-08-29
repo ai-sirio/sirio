@@ -28,7 +28,8 @@ use gpui::{
 use image::{Frame, RgbaImage};
 use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{
-    DecodePng, DecodedImage, ImageFormat, PlacementIterator,
+    DecodePng, DecodedImage, Graphics, ImageFormat, Layer, PlacementIteration,
+    PlacementIterator,
 };
 use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
@@ -442,7 +443,7 @@ enum TerminalCommand {
     Snapshot(std::sync::mpsc::Sender<(Vec<Vec<SnapshotCell>>, (usize, usize))>),
     /// #301: every visible Kitty placement for this frame as plain owned data
     /// (R2.3 — geometry plus raw pixels; never decoded on the owner thread).
-    KittyPlaces(std::sync::mpsc::Sender<Vec<KittyPlacement>>),
+    KittyPlaces(std::sync::mpsc::Sender<KittyPlacementBuckets>),
     Text(std::sync::mpsc::Sender<String>),
     /// #259: the text under a selected range, formatted by the emulator
     /// rather than re-extracted here -- it knows about soft wrapping and
@@ -711,71 +712,141 @@ struct KittyPlacement {
     pixel_height: u32,
 }
 
+/// #302 R3.1: the three z-bands Kitty defines for placement rendering.
+/// `All` means "no filter" — it is not a fourth bucket — so prepaint carries
+/// exactly these three lists. Bucketing happens in [`collect_kitty_placements`]
+/// through the iterator's own `set_layer` filter, one walk per band; the
+/// emulator decides membership, the pane never re-classifies (R3.5).
+#[derive(Debug, Default)]
+struct KittyPlacementBuckets {
+    below_bg: Vec<KittyPlacement>,
+    below_text: Vec<KittyPlacement>,
+    above_text: Vec<KittyPlacement>,
+}
+
 /// #301 R2.3: copies every visible, non-virtual Kitty placement plus its
-/// image's plain pixel bytes out of the emulator. Runs on the owner thread;
-/// nothing here decodes — the decode lands in `prepaint` ([`decode_kitty_image`]),
-/// off the thread that drains the PTY.
-fn collect_kitty_placements(terminal: &mut Terminal<'_, '_>) -> Vec<KittyPlacement> {
+/// image's plain pixel bytes out of the emulator — three z-band buckets via
+/// the emulator's own `set_layer` filter (#302 R3.1). Runs on the owner
+/// thread; nothing here decodes — the decode lands in `prepaint`
+/// ([`decode_kitty_image`]), off the thread that drains the PTY.
+fn collect_kitty_placements(terminal: &mut Terminal<'_, '_>) -> KittyPlacementBuckets {
     let Ok(graphics) = terminal.kitty_graphics() else {
-        return Vec::new();
+        return KittyPlacementBuckets::default();
     };
     let Ok(mut iterator) = PlacementIterator::new() else {
-        return Vec::new();
-    };
-    let Ok(mut iteration) = iterator.update(&graphics) else {
-        return Vec::new();
+        return KittyPlacementBuckets::default();
     };
 
-    let mut places = Vec::new();
-    // Image data is shared across placements of one image; copy it once per
-    // (image_id, generation) per frame.
+    let mut buckets = KittyPlacementBuckets::default();
+    // Shared across the three z-band walks: image bytes copy at most once
+    // per (image_id, generation) per frame, no matter how many placements
+    // of the image are visible (R2.3's shape, kept across layers by #302).
     let mut seen: Vec<(u32, u64)> = Vec::new();
-    while let Some(placement) = iteration.next() {
-        let Ok(image_id) = placement.image_id() else {
+    // R3.1: bucketing is the emulator's own `set_layer` filter — a fresh
+    // iteration per band, never a re-classification by reading placement
+    // fields (R3.5). `All` is "no filter", not a fourth bucket.
+    for layer in [Layer::BelowBg, Layer::BelowText, Layer::AboveText] {
+        let Ok(mut iteration) = iterator.update(&graphics) else {
             continue;
         };
-        let Some(image) = graphics.image(image_id) else {
-            continue;
-        };
-        let Ok(generation) = image.generation() else {
-            continue;
-        };
-        // One geometry call per placement, not piecemeal field reads (R3.5).
-        let Ok(info) = placement.placement_render_info(&image, terminal) else {
-            continue;
-        };
-        // `viewport_visible` is false for placements fully off-screen AND for
-        // virtual (Unicode-placeholder) placements — the placeholder protocol
-        // is out of scope, so filtering on it covers both.
-        if !info.viewport_visible {
+        if iteration.set_layer(layer).is_err() {
             continue;
         }
-        let Ok(format) = image.format() else {
-            continue;
-        };
-        let data = if seen.contains(&(image_id, generation)) {
-            Vec::new()
-        } else {
-            seen.push((image_id, generation));
-            match image.data() {
-                Ok(data) => data.to_vec(),
-                Err(_) => Vec::new(),
+        while let Some(placement) = iteration.next() {
+            let Some(place) = copy_kitty_placement(placement, &graphics, terminal, &mut seen)
+            else {
+                continue;
+            };
+            match layer {
+                Layer::BelowBg => buckets.below_bg.push(place),
+                Layer::BelowText => buckets.below_text.push(place),
+                Layer::AboveText => buckets.above_text.push(place),
+                Layer::All => unreachable!("we never walk without a z-band filter"),
             }
-        };
-        places.push(KittyPlacement {
-            image_id,
-            generation,
-            format,
-            width: image.width().unwrap_or(0),
-            height: image.height().unwrap_or(0),
-            viewport_col: info.viewport_col,
-            viewport_row: info.viewport_row,
-            pixel_width: info.pixel_width,
-            pixel_height: info.pixel_height,
-            data,
-        });
+        }
     }
-    places
+    buckets
+}
+
+/// #301 R2.3: copies ONE visible placement out of the emulator as plain
+/// owned data. The `!Send` borrows (`Graphics<'t>`, `Image<'t>`,
+/// `PlacementIteration`) all die in [`collect_kitty_placements`]; what
+/// survives is only numbers and a byte buffer. `seen` is the
+/// (image_id, generation) set shared across the three z-band walks (#302):
+/// the first walk to meet an image copies its bytes, later walks leave
+/// `data` empty and the prepaint cache reuses the key instead (R4.1).
+fn copy_kitty_placement(
+    placement: &PlacementIteration<'_, '_>,
+    graphics: &Graphics<'_>,
+    terminal: &Terminal<'_, '_>,
+    seen: &mut Vec<(u32, u64)>,
+) -> Option<KittyPlacement> {
+    let Ok(image_id) = placement.image_id() else {
+        return None;
+    };
+    let Some(image) = graphics.image(image_id) else {
+        return None;
+    };
+    let Ok(generation) = image.generation() else {
+        return None;
+    };
+    // One geometry call per placement, not piecemeal field reads (R3.5).
+    let Ok(info) = placement.placement_render_info(&image, terminal) else {
+        return None;
+    };
+    // `viewport_visible` is false for placements fully off-screen AND for
+    // virtual (Unicode-placeholder) placements — the placeholder protocol
+    // is out of scope, so filtering on it covers both.
+    if !info.viewport_visible {
+        return None;
+    }
+    let Ok(format) = image.format() else {
+        return None;
+    };
+    let data = if seen.contains(&(image_id, generation)) {
+        Vec::new()
+    } else {
+        seen.push((image_id, generation));
+        match image.data() {
+            Ok(data) => data.to_vec(),
+            Err(_) => Vec::new(),
+        }
+    };
+    Some(KittyPlacement {
+        image_id,
+        generation,
+        format,
+        width: image.width().unwrap_or(0),
+        height: image.height().unwrap_or(0),
+        viewport_col: info.viewport_col,
+        viewport_row: info.viewport_row,
+        pixel_width: info.pixel_width,
+        pixel_height: info.pixel_height,
+        data,
+    })
+}
+
+/// #302 R3.3: maps a placement's UNTRUNCATED viewport geometry to pane
+/// pixels — the origin may be negative when the placement is scrolled
+/// partially above the pane's top edge — and `Window::paint_image` derives
+/// `visible_bounds` plus the atlas sub-rect from the pane bounds itself.
+/// Never clamp here: clamping the origin and shrinking the size in the
+/// attempt to "fix" the clip produces a squashed image, not a cropped one.
+fn kitty_image_bounds(
+    pane: Bounds<Pixels>,
+    cell_width: Pixels,
+    place: &KittyPlacement,
+) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            pane.origin.x + cell_width * place.viewport_col as f32,
+            pane.origin.y + LINE_HEIGHT * place.viewport_row as f32,
+        ),
+        size(
+            px(place.pixel_width as f32),
+            px(place.pixel_height as f32),
+        ),
+    )
 }
 
 /// #301 R2.5: converts one stored Kitty image into a BGRA `RenderImage`.
@@ -1599,17 +1670,18 @@ impl TerminalHandle {
         reply_rx.recv().unwrap_or((Vec::new(), (usize::MAX, 0)))
     }
 
-    /// #301: every visible Kitty placement for this frame, copied off the
-    /// owner thread as plain data (R2.3). Empty when the emulator holds no
-    /// Kitty graphics or the terminal is gone.
-    fn kitty_places(&self) -> Vec<KittyPlacement> {
+    /// #301 + #302 R3.1: every visible Kitty placement for this frame,
+    /// already bucketed into the three z-bands by the owner thread's
+    /// `set_layer` walks, copied as plain data (R2.3). Empty buckets when
+    /// the emulator holds no Kitty graphics or the terminal is gone.
+    fn kitty_places(&self) -> KittyPlacementBuckets {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if self
             .commands
             .send(TerminalCommand::KittyPlaces(reply_tx))
             .is_err()
         {
-            return Vec::new();
+            return KittyPlacementBuckets::default();
         }
         reply_rx.recv().unwrap_or_default()
     }
@@ -3189,10 +3261,15 @@ struct TerminalPaintState {
     backgrounds: Vec<PaintQuad>,
     lines: Vec<(ShapedLine, gpui::Point<Pixels>)>,
     cursor: Option<PaintQuad>,
-    /// #301: Kitty placements for this frame, in paint order — the minimal
-    /// R3.1/R3.2 slice paints ONE list after `lines` (above text), not yet
-    /// the three z-layer buckets of the next ticket.
-    kitty_images: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    /// #302 R3.1/R3.2: Kitty placements for this frame, bucketed into the
+    /// three z-bands Kitty defines (`All` means "no filter", so never a
+    /// fourth list — `set_layer` did the bucketing on the owner thread) and
+    /// drained at the three insertion points of the existing paint order:
+    /// `BelowBg` before `backgrounds`, `BelowText` between `backgrounds` and
+    /// `lines`, `AboveText` after `lines`.
+    kitty_below_bg: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    kitty_below_text: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    kitty_above_text: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
     /// #301 R2.6: placements whose image the pane refused to decode, painted
     /// as a visible placeholder so a dropped image is never
     /// indistinguishable from a missing renderer.
@@ -3390,35 +3467,36 @@ impl Element for TerminalElement {
             )
         });
 
-        // #301: Kitty placements. The owner thread already copied plain
-        // pixels + geometry (`kitty_places`, R2.3); decode and cache happen
-        // HERE on the UI thread, never on the PTY owner thread. The cache
-        // lives beside the pane's other state (R4.3) so a steady frame
-        // reuses the decoded `RenderImage` (R4.1/R4.2). The round trip is
-        // taken before the lock so the cache is not held across a blocking
-        // channel call.
-        let kitty_places = self.terminal.kitty_places();
+        // #301 + #302 R3.1: Kitty placements arrive pre-bucketed by the
+        // emulator's own `set_layer` walks (the three z-bands; `All` is not
+        // a bucket). The owner thread already copied plain pixels + geometry
+        // (`kitty_places`, R2.3); decode and cache happen HERE on the UI
+        // thread, never on the PTY owner thread. The cache lives beside the
+        // pane's other state (R4.3) so a steady frame reuses the decoded
+        // `RenderImage` (R4.1/R4.2). The round trip is taken before the lock
+        // so the cache is not held across a blocking channel call. The three
+        // lists are drained in R3.2's order by `paint`.
+        let kitty_buckets = self.terminal.kitty_places();
         let mut kitty_cache = self.terminal.kitty_images.lock();
-        let mut kitty_images = Vec::new();
+        let mut kitty_below_bg = Vec::new();
+        let mut kitty_below_text = Vec::new();
+        let mut kitty_above_text = Vec::new();
         let mut kitty_refused = Vec::new();
-        for place in kitty_places {
-            // R3.3: keep the untruncated placement geometry — the row can be
-            // negative (scrolled partly off the top) — and let
-            // `Window::paint_image` derive the clipped region from the pane
-            // bounds at paint time.
-            let image_bounds = Bounds::new(
-                point(
-                    bounds.origin.x + cell_width * place.viewport_col as f32,
-                    bounds.origin.y + LINE_HEIGHT * place.viewport_row as f32,
-                ),
-                size(
-                    px(place.pixel_width as f32),
-                    px(place.pixel_height as f32),
-                ),
-            );
-            match kitty_get_or_decode(&mut kitty_cache, &place) {
-                Some(image) => kitty_images.push((image_bounds, image)),
-                None => kitty_refused.push(image_bounds),
+        for (layer_bucket, bucket) in [
+            (&mut kitty_below_bg, kitty_buckets.below_bg),
+            (&mut kitty_below_text, kitty_buckets.below_text),
+            (&mut kitty_above_text, kitty_buckets.above_text),
+        ] {
+            for place in bucket {
+                // R3.3: keep the untruncated placement geometry — the row
+                // can be negative (scrolled partly off the top) — and let
+                // `Window::paint_image` derive the clipped region from the
+                // pane bounds at paint time. Clamping here would squash.
+                let image_bounds = kitty_image_bounds(bounds, cell_width, &place);
+                match kitty_get_or_decode(&mut kitty_cache, &place) {
+                    Some(image) => layer_bucket.push((image_bounds, image)),
+                    None => kitty_refused.push(image_bounds),
+                }
             }
         }
         drop(kitty_cache);
@@ -3427,7 +3505,9 @@ impl Element for TerminalElement {
             backgrounds,
             lines,
             cursor,
-            kitty_images,
+            kitty_below_bg,
+            kitty_below_text,
+            kitty_above_text,
             kitty_refused,
         }
     }
@@ -3443,20 +3523,44 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            // #302 R3.2: the three insertion points in the existing paint
+            // order — BelowBg before `backgrounds`, BelowText between
+            // `backgrounds` and `lines`, AboveText after `lines`. No
+            // interleave-by-z pass: the emulator's `set_layer` bucketing
+            // already fixed each placement's relative order.
+            // `paint_image` intersects the full placement bounds with the
+            // pane and derives the clipped atlas sub-rect itself (R3.3); the
+            // content mask above already clips to the pane. Background quads
+            // under a placement still paint (R3.4), since Kitty images carry
+            // alpha — suppressing the cells would show the window behind
+            // wherever the image is transparent.
+            for (image_bounds, image) in state.kitty_below_bg.drain(..) {
+                let _ = window.paint_image(
+                    bounds,
+                    image_bounds,
+                    Corners::default(),
+                    image,
+                    0,
+                    false,
+                );
+            }
             for background in state.backgrounds.drain(..) {
                 window.paint_quad(background);
+            }
+            for (image_bounds, image) in state.kitty_below_text.drain(..) {
+                let _ = window.paint_image(
+                    bounds,
+                    image_bounds,
+                    Corners::default(),
+                    image,
+                    0,
+                    false,
+                );
             }
             for (line, origin) in state.lines.drain(..) {
                 let _ = line.paint(origin, LINE_HEIGHT, gpui::TextAlign::Left, None, window, cx);
             }
-            // #301: the single placement list, painted after `lines` — the
-            // minimal R3.1/R3.2 slice (existing order: backgrounds, lines,
-            // images, cursor). `paint_image` intersects the full placement
-            // bounds with the pane and derives the clipped atlas sub-rect
-            // itself (R3.3); the content mask above already clips to the
-            // pane. Background quads under a placement still paint (R3.4),
-            // since Kitty images carry alpha.
-            for (image_bounds, image) in state.kitty_images.drain(..) {
+            for (image_bounds, image) in state.kitty_above_text.drain(..) {
                 let _ = window.paint_image(
                     bounds,
                     image_bounds,
@@ -4461,9 +4565,10 @@ mod tests {
         advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;/wAA\x1b\\");
         advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=1,C=1\x1b\\");
 
-        let places = collect_kitty_placements(&mut term);
-        assert_eq!(places.len(), 1, "one placement for one image");
-        let first = &places[0];
+        let buckets = collect_kitty_placements(&mut term);
+        // Default z is 0, the AboveText band (R3.1).
+        assert_eq!(buckets.above_text.len(), 1, "one placement for one image");
+        let first = &buckets.above_text[0];
         assert_eq!(first.image_id, 1);
         assert_eq!(first.format, libghostty_vt::kitty::graphics::ImageFormat::Rgb);
         assert_eq!(&first.data, &[0xFF, 0x00, 0x00], "RGB pixels, verbatim");
@@ -4476,12 +4581,135 @@ mod tests {
         // Retransmit the same image id with different pixels: same id, new
         // generation, new bytes — the cache must treat this as a new image.
         advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;AAD/\x1b\\");
-        let places = collect_kitty_placements(&mut term);
-        assert_eq!(places.len(), 1);
-        let second = &places[0];
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.above_text.len(), 1);
+        let second = &buckets.above_text[0];
         assert_eq!(second.image_id, 1);
         assert_ne!(second.generation, generation_1, "retransmit bumps the generation");
         assert_eq!(&second.data, &[0x00, 0x00, 0xFF], "blue now");
+    }
+
+    /// #302 R3.1: the iterator's own `set_layer` filter does the bucketing —
+    /// one walk per Kitty z-band, never a re-classification by the pane.
+    /// `All` is "no filter", so the prepaint state carries exactly three
+    /// lists (below background / below text / above text).
+    #[test]
+    fn kitty_layers_bucket_placements_by_z_index() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // Three images, three distinct z-bands (kitty spec: default 0 lands
+        // above text; z < i32::MIN/2 sits below the cell background).
+        for (id, z) in [(1, -2_000_000_000i32), (2, -1), (3, 5)] {
+            advance_headless(
+                &mut term,
+                format!("\x1b_Ga=t,f=24,s=1,v=1,i={id},q=2;/wAA\x1b\\").as_bytes(),
+            );
+            advance_headless(
+                &mut term,
+                format!("\x1b_Ga=p,q=2,i={id},C=1,z={z}\x1b\\").as_bytes(),
+            );
+        }
+
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.below_bg.len(), 1, "z < i32::MIN/2 lands BelowBg");
+        assert_eq!(buckets.below_text.len(), 1, "i32::MIN/2 <= z < 0 lands BelowText");
+        assert_eq!(buckets.above_text.len(), 1, "z >= 0 lands AboveText");
+        assert_eq!(buckets.below_bg[0].image_id, 1);
+        assert_eq!(buckets.below_text[0].image_id, 2);
+        assert_eq!(buckets.above_text[0].image_id, 3);
+    }
+
+    /// #302: the copy-once-per-(image_id, generation) contract (#301 R2.3)
+    /// survives the bucket split — the three `set_layer` walks share one
+    /// `seen` set, so an image placed on two layers still copies its bytes
+    /// exactly once, on the first walk that sees it. The later placement
+    /// reuses the render cache key instead of re-copying pixels.
+    #[test]
+    fn kitty_image_bytes_copied_once_across_layers() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // One 2x1 RGB image, placed twice: once below text, once above.
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=2,v=1,i=4,q=2;/wAAAAD/\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=4,C=1,z=-1\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=4,C=1,z=5\x1b\\");
+
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.below_text.len(), 1, "one placement below text");
+        assert_eq!(buckets.above_text.len(), 1, "one placement above text");
+        // Walk order (BelowBg, BelowText, AboveText) is also prepaint's
+        // decode order, so the first-walked placement carries the bytes.
+        assert!(
+            !buckets.below_text[0].data.is_empty(),
+            "the first walk copies the pixels"
+        );
+        assert!(
+            buckets.above_text[0].data.is_empty(),
+            "the same image on another layer reuses the cache key, no second copy"
+        );
+    }
+
+    /// #302 R3.3 (acceptance, geometry half): an image scrolled so part of
+    /// it sticks above the pane's top edge keeps its FULL, untruncated
+    /// geometry — negative `viewport_row`, still visible, pixel size intact.
+    /// The clip stays with `Window::paint_image` (visible-bounds intersection
+    /// plus atlas sub-rect), never a hand-clamped source rect.
+    #[test]
+    fn kitty_scrolled_half_offscreen_keeps_untruncated_geometry() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // An 8x36-px image (one 8px column, two 18px rows — 2x the height
+        // of a line) placed at the top row, auto-sized from its aspect.
+        let mut pixels = Vec::new();
+        for _ in 0..(8 * 36) {
+            pixels.extend_from_slice(&[0xFF, 0x00, 0x00]);
+        }
+        advance_headless(&mut term, b"\x1b[H");
+        advance_headless(
+            &mut term,
+            format!("\x1b_Ga=t,f=24,s=8,v=36,i=9,q=2;{}", base64_encode(&pixels)).as_bytes(),
+        );
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=9,C=1,z=0\x1b\\");
+        // Push one screenful plus one line: the top row of the image enters
+        // the scrollback and the placement stands half above the pane's top
+        // edge (measured: visible, viewport_row=-1, full 8x36 size).
+        for _ in 0..24 {
+            advance_headless(&mut term, b"Z\r\n");
+        }
+        let before = collect_kitty_placements(&mut term);
+        // Change the scroll position while the image is still visible.
+        term.scroll_viewport(ScrollViewport::Delta(-1));
+        let after = collect_kitty_placements(&mut term);
+
+        // The placement surviving the walk proves `viewport_visible` was true
+        // (fully-off-screen placements are filtered inside the copy-out), so
+        // BEFORE the scroll change it is half off the top with negative row.
+        assert_eq!(
+            before.above_text.len(),
+            1,
+            "one placement, half above the pane's top edge"
+        );
+        let half_out = &before.above_text[0];
+        assert!(half_out.viewport_row < 0, "top rows sit above the viewport");
+        assert_eq!(
+            (half_out.pixel_width, half_out.pixel_height),
+            (8, 36),
+            "geometry is NOT truncated to the visible part"
+        );
+        // After the scroll-position change the placement is still collected
+        // with the same untruncated geometry.
+        assert_eq!(after.above_text.len(), 1, "still one placement after scrolling");
+        assert_eq!(
+            (after.above_text[0].pixel_width, after.above_text[0].pixel_height),
+            (8, 36),
+            "scroll change keeps the untruncated geometry"
+        );
+        // The painter feeds this untruncated placement to `paint_image` with
+        // the pane rect as the clip: negative origin, full size.
+        let pane = Bounds::new(point(px(10.0), px(20.0)), size(px(640.0), px(432.0)));
+        let image_bounds = kitty_image_bounds(pane, px(8.0), half_out);
+        assert!(image_bounds.origin.y < pane.origin.y, "origin stays negative");
+        assert_eq!(image_bounds.size.height, px(36.0), "height stays full");
+        assert_eq!(image_bounds.size.width, px(8.0), "width stays full");
     }
 
     /// #301 acceptance: the decode produces BGRA pixels with R/B swapped for
@@ -4654,9 +4882,9 @@ mod tests {
         advance_headless(&mut term, format!("\x1b_Ga=t,f=100,s=1,v=1,i=7,q=2;{b64}\x1b\\").as_bytes());
         advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=7,C=1\x1b\\");
 
-        let places = collect_kitty_placements(&mut term);
-        assert_eq!(places.len(), 1, "the PNG image stored and placed");
-        let place = &places[0];
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.above_text.len(), 1, "the PNG image stored and placed");
+        let place = &buckets.above_text[0];
         assert_eq!(place.image_id, 7);
         assert_eq!(
             place.format,
