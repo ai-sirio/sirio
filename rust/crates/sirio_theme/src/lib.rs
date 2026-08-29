@@ -28,7 +28,7 @@
 //! treats a missing or silent portal as **dark**, not light. macOS keeps the
 //! old behavior: `NSAppearance` is synchronous and authoritative there.
 
-use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, size};
+use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
 use std::collections::HashSet;
 
 /// Pop!_OS COSMIC design tokens, consumed by [`Theme::cosmic`] — every
@@ -640,15 +640,23 @@ impl Default for Radii {
 /// [`Self::cluster_start`] exist only to lay out the three dots
 /// `titlebar.rs::traffic_light` draws — and per
 /// `docs/linux-rewrite/tasks/P102-the-top-bar-belongs-to-the-os.md`, that
-/// happens when `Window::window_decorations()` reports
-/// `Decorations::Client` (nothing else will decorate the window then).
-/// Under `Decorations::Server` — including macOS, where AppKit owns the
-/// controls — none of these fallback fields are read; the icon cluster uses
-/// `macos_traffic_light_cluster_inset` on macOS and `traffic_light_inset`
-/// elsewhere as its leading edge (see `titlebar.rs`'s
-/// `cluster_leading_gap`). `bar_height` and `cluster_button_gap` are
-/// unaffected either way — they size the row and the always-drawn icon
-/// cluster respectively, neither of which is a window control.
+/// happens in exactly one case: `titlebar.rs`'s `WindowControls::
+/// TrafficLights`, i.e. the platform reported that nothing else will ever
+/// decorate this window.
+///
+/// The other three outcomes read none of them, and differ only in the
+/// cluster's leading edge: `WindowControls::MacosNative` reserves
+/// `macos_traffic_light_cluster_inset` for AppKit's own controls, while
+/// `OsDrawnAbove` (a window manager drew its titlebar above this row) and
+/// `WindowsCaption` (the caption buttons live at the *trailing* edge, so
+/// nothing precedes the cluster) both start at `traffic_light_inset`. See
+/// `WindowControls::cluster_leading_gap`.
+///
+/// `bar_height` and `cluster_button_gap` are unaffected by any of it —
+/// they size the row and the always-drawn icon cluster respectively,
+/// neither of which is a window control. `bar_height` doubles as the
+/// caption buttons' height (their width is
+/// [`WindowsCaption::button_width`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserChrome {
     /// The bar's total height (comet: 38px).
@@ -745,6 +753,75 @@ impl Default for BrowserChrome {
             macos_traffic_light_cluster_inset: px(80.0),
             traffic_light_cluster_gap: px(8.0),
             cluster_button_gap: px(2.0),
+        }
+    }
+}
+
+/// The Windows caption buttons' own spec — the little `titlebar.rs` draws
+/// where the platform suppressed its native caption (see that module's
+/// `WindowControls::WindowsCaption`).
+///
+/// # Why this is not COSMIC
+///
+/// Only what the design system genuinely cannot express lives here. The
+/// neutral buttons — minimize and maximize — read `cosmic.semantic.
+/// icon_button` like every other icon button on this bar, and that is
+/// fidelity, not a compromise: Windows 11 draws *their* hover as a neutral
+/// veil that follows the light/dark theme. The close button is the one
+/// exception, because its red is a **system constant** that says "this
+/// closes the window" in every Windows app regardless of the app's theme.
+///
+/// `cosmic.semantic.destructive` cannot stand in for it. In dark mode that
+/// token is `#FFA09A` — a pale salmon whose `on` colour is **black**,
+/// i.e. a light fill carrying dark text; the Windows red is a saturated
+/// fill carrying **white** text. The two run in opposite contrast
+/// directions, so substituting one for the other does not give a different
+/// red, it gives a pink close button with a black glyph. In light mode the
+/// same token flips to `#890418`, a dark maroon, so the two appearances
+/// would not even resemble each other.
+///
+/// # Measured, not transcribed
+///
+/// Zed's `platform_windows.rs` hardcodes `#E81123`, the older Win32/UWP
+/// value. These numbers were sampled from the pixels of a real native
+/// close button on Windows 11 (build 26200) with the cursor held over it,
+/// and agree with WinUI's own `CloseButtonBackgroundPointerOver`. Zed also
+/// *derives* its pressed state as `hover.opacity(0.8)`; the measurement
+/// puts the real ratio nearer 0.92, so [`Self::close_pressed`] carries the
+/// sampled value rather than a derivation that reads visibly duller.
+///
+/// # Appearance-independent
+///
+/// Unlike [`ThemeColors`], this group is a single `default()` for both
+/// appearances: the red is a system constant, and white-on-saturated-red
+/// is forced by contrast. Everything here that *should* follow the theme —
+/// the resting glyph, the neutral hover, the disabled treatment — comes
+/// from `icon_button`, which is already resolved per appearance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowsCaption {
+    /// Width of one caption button. Zed's own measurement; the height is
+    /// [`BrowserChrome::bar_height`], so the button fills the row and the
+    /// top-right corner stays clickable edge-to-edge (Fitts).
+    pub button_width: Pixels,
+    /// Type size for the Segoe glyph drawn inside the button.
+    pub glyph_size: Pixels,
+    /// Close-button fill on hover. Sampled: `#C42B1C`.
+    pub close_hover: Rgba,
+    /// Close-button fill while held. Sampled: `#B42A1B` — **not**
+    /// `close_hover` at 0.8, see the struct docs.
+    pub close_pressed: Rgba,
+    /// Glyph colour drawn over `close_hover`/`close_pressed`.
+    pub close_on: Rgba,
+}
+
+impl Default for WindowsCaption {
+    fn default() -> Self {
+        Self {
+            button_width: px(36.0),
+            glyph_size: px(10.0),
+            close_hover: rgb(0xC42B1C),
+            close_pressed: rgb(0xB42A1B),
+            close_on: rgb(0xFFFFFF),
         }
     }
 }
@@ -1117,6 +1194,10 @@ pub struct Theme {
     /// button-cluster geometry, distinct from `Spacing`'s waku-era chrome
     /// tokens (see [`BrowserChrome`]'s own docs for why they don't merge).
     pub browser_chrome: BrowserChrome,
+    /// The Windows caption buttons' own spec — geometry plus the one
+    /// colour COSMIC cannot express (see [`WindowsCaption`]). Read only by
+    /// the `WindowControls::WindowsCaption` branch of `titlebar.rs`.
+    pub windows_caption: WindowsCaption,
     /// Typography tokens.
     pub typography: Typography,
     /// Shared opacity for translucent surfaces.
@@ -1347,6 +1428,7 @@ impl Theme {
             radii: Radii::default(),
             cosmic: cosmic::CosmicTheme::resolve(mode, appearance),
             browser_chrome: BrowserChrome::default(),
+            windows_caption: WindowsCaption::default(),
             typography: Typography::default(),
             translucent_surface_opacity: Self::surface_opacity(true),
             translucency_enabled: false,
@@ -2848,6 +2930,37 @@ mod tests {
     #[test]
     fn theme_carries_browser_chrome() {
         assert_eq!(Theme::dark().browser_chrome, BrowserChrome::default());
+    }
+
+    /// The caption-button spec sampled from a real Windows 11 close
+    /// button (build 26200), pinned so a future edit has to be a
+    /// deliberate re-measurement rather than a drift back to the value
+    /// Zed happens to carry.
+    #[test]
+    fn windows_caption_matches_the_measured_windows_11_spec() {
+        let caption = WindowsCaption::default();
+        assert_eq!(caption.button_width, px(36.0));
+        assert_eq!(caption.glyph_size, px(10.0));
+        assert_eq!(
+            caption.close_hover,
+            rgb(0xC42B1C),
+            "sampled under the cursor; Zed's #E81123 is the older Win32/UWP value"
+        );
+        assert_eq!(
+            caption.close_pressed,
+            rgb(0xB42A1B),
+            "sampled while held -- NOT close_hover at 0.8, which reads visibly duller"
+        );
+        assert_eq!(caption.close_on, rgb(0xFFFFFF));
+    }
+
+    /// The close red is a system constant, so unlike every adaptive token
+    /// on this theme it must resolve identically in both appearances --
+    /// everything that should follow the theme comes from `icon_button`.
+    #[test]
+    fn windows_caption_is_the_same_in_both_appearances() {
+        assert_eq!(Theme::dark().windows_caption, WindowsCaption::default());
+        assert_eq!(Theme::light().windows_caption, WindowsCaption::default());
     }
 }
 
