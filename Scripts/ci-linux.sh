@@ -256,6 +256,11 @@ run_root_stage "test-crash-freeze-supervise.py" env PYTHONDONTWRITEBYTECODE=1 \
 run_root_stage "test-visual-sweep.sh" env PYTHONDONTWRITEBYTECODE=1 \
     bash Scripts/Tests/test-visual-sweep.sh
 
+run_root_stage "test-check-release-version.sh" bash Scripts/Tests/test-check-release-version.sh
+run_root_stage "test-build-dmg.sh"             bash Scripts/Tests/test-build-dmg.sh
+run_root_stage "test-build-app-bundle.sh"      bash Scripts/Tests/test-build-app-bundle.sh
+run_root_stage "test-release-workflow.sh"      bash Scripts/Tests/test-release-workflow.sh
+
 # The critics' own instrument. Both of these guard leaks that have already cost
 # this machine real resources — 184 orphaned virtual-pointers at once, and before
 # that a disk filled to within hours of full — and both failures are invisible

@@ -24,6 +24,25 @@ BINARY="$1"
 VERSION="$2"
 APP_PATH="$3"
 
+if [ -z "$APP_PATH" ]; then
+  echo "error: output app path must not be empty" >&2
+  exit 1
+fi
+
+# Guarded for the same reason as the two beside it, and nothing more: the
+# release pipeline cannot reach this today, because `check-release-version.sh`
+# either prints a non-empty version or exits non-zero. The case this closes is a
+# hand-run invocation -- which the whole script exists to make easy -- where the
+# caller passes a variable they forgot to set. It is worth closing because it is
+# silent: an empty second argument substitutes into `<string></string>` for both
+# CFBundleShortVersionString and CFBundleVersion, which is a well-formed plist,
+# so `codesign`, `notarytool` and `hdiutil` all accept it. The result installs
+# and launches; it just has no version anywhere a user or Sparkle can read one.
+if [ -z "$VERSION" ]; then
+  echo "error: version must not be empty" >&2
+  exit 1
+fi
+
 if [ ! -f "$BINARY" ]; then
   echo "error: binary not found at $BINARY" >&2
   exit 1
