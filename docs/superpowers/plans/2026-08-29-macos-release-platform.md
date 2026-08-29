@@ -456,7 +456,11 @@ for value in dev.sirio.Sirio 15.0 public.app-category.developer-tools; do
 done
 
 # The version belongs in both CFBundleShortVersionString and CFBundleVersion.
-COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST")
+# `|| true` is load-bearing: `grep -c` exits 1 when it counts zero matches, so
+# without it this bare assignment aborts under `set -e` — in precisely the
+# regression the assertion exists to catch — and the FAIL message below is never
+# printed.
+COUNT=$(grep -c '<string>0.6.0</string>' "$PLIST" || true)
 if [ "$COUNT" != "2" ]; then
   echo "FAIL: expected the version in both version keys, found $COUNT" >&2
   cat "$PLIST" >&2
@@ -516,6 +520,14 @@ fi
 BINARY="$1"
 VERSION="$2"
 APP_PATH="$3"
+
+# The argument-count check above admits an empty third argument, which would
+# reach the `rm -rf "$APP_PATH"` below. This is the only destructive operation
+# in the release scripts, so it gets its own guard.
+if [ -z "$APP_PATH" ]; then
+  echo "error: output app path must not be empty" >&2
+  exit 1
+fi
 
 if [ ! -f "$BINARY" ]; then
   echo "error: binary not found at $BINARY" >&2
