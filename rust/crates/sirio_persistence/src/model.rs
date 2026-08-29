@@ -397,6 +397,9 @@ pub struct AppSettings {
     pub file_icon_theme: FileIconTheme,
     /// "controlSocket.enabled" — default: true.
     pub control_socket_enabled: bool,
+    /// "updates.enabled" — default: true. A real per-install opt-out: when
+    /// false, the host does not poll, download, or show its update indicator.
+    pub updates_enabled: bool,
     /// "session.resumeAgentSessions" — default: true.
     pub resume_agent_sessions: bool,
     /// "general.autoNaming" — default: false.
@@ -445,6 +448,7 @@ impl Default for AppSettings {
             terminal_font_size: 13,
             file_icon_theme: FileIconTheme::SfSymbols,
             control_socket_enabled: true,
+            updates_enabled: true,
             resume_agent_sessions: true,
             auto_naming: false,
             limit_chat_history: true,
@@ -474,6 +478,7 @@ pub mod settings_keys {
     pub const TERMINAL_FONT_SIZE: &str = "appearance.terminalFontSize";
     pub const FILE_ICON_THEME: &str = "appearance.fileIconTheme";
     pub const CONTROL_SOCKET_ENABLED: &str = "controlSocket.enabled";
+    pub const UPDATES_ENABLED: &str = "updates.enabled";
     pub const RESUME_AGENT_SESSIONS: &str = "session.resumeAgentSessions";
     pub const AUTO_NAMING: &str = "general.autoNaming";
     pub const LIMIT_CHAT_HISTORY: &str = "chat.limitHistory";

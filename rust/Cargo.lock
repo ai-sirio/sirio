@@ -6513,14 +6513,17 @@ dependencies = [
  "sirio_acp",
  "sirio_activity",
  "sirio_agents",
+ "sirio_apply",
  "sirio_control",
  "sirio_git",
  "sirio_persistence",
  "sirio_project",
  "sirio_registry",
+ "sirio_release",
  "sirio_terminal",
  "sirio_theme",
  "sirio_ui",
+ "sirio_update",
  "windows-sys 0.61.2",
 ]
 
