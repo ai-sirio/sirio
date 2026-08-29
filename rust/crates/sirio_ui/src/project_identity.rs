@@ -17,6 +17,7 @@ use gpui::{
 use sirio_theme::Theme;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::caret;
 use crate::controls;
 use crate::settings::AgentAccentColor;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -307,6 +308,14 @@ pub struct ProjectIconPicker {
     emoji_grid_open: bool,
     emoji_grid_query: String,
     emoji_grid_focus: FocusHandle,
+    /// One blink shared by every field in the picker: only one of them can
+    /// hold focus at a time, so one timer is all the surface ever needs —
+    /// the same arrangement `sidebar.rs` and `settings.rs` use.
+    field_blink: caret::Blink,
+    emoji_caret_visible: bool,
+    emoji_grid_caret_visible: bool,
+    github_caret_visible: bool,
+    favicon_caret_visible: bool,
     on_change: Option<Rc<dyn Fn(ProjectIcon)>>,
     on_change_with_context: Option<Rc<dyn Fn(ProjectIcon, &mut Context<Self>)>>,
     /// Test-only substitute for the OS file picker `choose_local_png`
@@ -339,6 +348,11 @@ impl ProjectIconPicker {
             emoji_grid_open: false,
             emoji_grid_query: String::new(),
             emoji_grid_focus: cx.focus_handle(),
+            field_blink: caret::Blink::new(),
+            emoji_caret_visible: false,
+            emoji_grid_caret_visible: false,
+            github_caret_visible: false,
+            favicon_caret_visible: false,
             on_change: None,
             on_change_with_context: None,
             #[cfg(test)]
@@ -435,7 +449,14 @@ impl ProjectIconPicker {
         cx.notify();
     }
 
+    /// Blink timer tick shared by every text field in the picker.
+    fn flip_field_blink(&mut self, cx: &mut Context<Self>) {
+        self.field_blink.flip();
+        cx.notify();
+    }
+
     fn on_emoji_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.emoji_draft.pop();
@@ -519,6 +540,7 @@ impl ProjectIconPicker {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.github_draft.pop();
@@ -556,6 +578,7 @@ impl ProjectIconPicker {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.field_blink.wake();
         let key = event.keystroke.key.as_str();
         if key == "backspace" || key == "delete" {
             self.favicon_draft.pop();
@@ -750,7 +773,12 @@ impl ProjectIconPicker {
             .child(text!(
                 id = "project-icon-emoji-draft",
                 self.emoji_draft.clone()
-            ));
+            ))
+            .child(
+                div()
+                    .debug_selector(|| "project-icon-emoji-caret".into())
+                    .child(caret::bar(px(18.0), theme.accent, self.emoji_caret_visible)),
+            );
 
         let commit_entity = entity.clone();
         let open_picker_entity = entity.clone();
@@ -906,7 +934,18 @@ impl ProjectIconPicker {
                                 "Search emoji…".to_owned()
                             } else {
                                 self.emoji_grid_query.clone()
-                            }),
+                            })
+                            .child(
+                                div()
+                                    .debug_selector(|| {
+                                        "project-icon-emoji-grid-caret".into()
+                                    })
+                                    .child(caret::bar(
+                                        px(14.0),
+                                        theme.accent,
+                                        self.emoji_grid_caret_visible,
+                                    )),
+                            ),
                     )
                     .child(
                         div()
@@ -979,6 +1018,7 @@ impl ProjectIconPicker {
                 "github",
                 "GitHub user or repository",
                 &self.github_draft,
+                self.github_caret_visible,
                 &self.github_focus,
                 &self.github_error,
                 entity.clone(),
@@ -992,6 +1032,7 @@ impl ProjectIconPicker {
                 "favicon",
                 "Domain, like example.com",
                 &self.favicon_draft,
+                self.favicon_caret_visible,
                 &self.favicon_focus,
                 &self.favicon_error,
                 entity.clone(),
@@ -1034,6 +1075,7 @@ impl ProjectIconPicker {
         id_prefix: &'static str,
         placeholder: &'static str,
         draft: &str,
+        caret_visible: bool,
         focus: &FocusHandle,
         error: &Option<String>,
         entity: Entity<Self>,
@@ -1078,7 +1120,13 @@ impl ProjectIconPicker {
             .on_key_down(move |event, window, cx| {
                 key_entity.update(cx, |picker, cx| on_key(picker, event, window, cx));
             })
-            .child(text!(id = format!("project-icon-{id_prefix}-draft"), shown));
+            .child(text!(id = format!("project-icon-{id_prefix}-draft"), shown))
+            .child({
+                let caret_id = format!("project-icon-{id_prefix}-caret");
+                div()
+                    .debug_selector(move || caret_id.clone())
+                    .child(caret::bar(px(16.0), theme.accent, caret_visible))
+            });
 
         let mut row = div()
             .flex()
@@ -1110,9 +1158,28 @@ impl ProjectIconPicker {
 }
 
 impl Render for ProjectIconPicker {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let entity = cx.entity();
+
+        // Focus decides which field shows a bar; the shared blink decides
+        // whether it is lit this frame. `schedule` is armed on "some field
+        // is focused" so exactly one timer runs no matter which is active.
+        let emoji_focused = self.emoji_focus.is_focused(window);
+        let emoji_grid_focused = self.emoji_grid_focus.is_focused(window);
+        let github_focused = self.github_focus.is_focused(window);
+        let favicon_focused = self.favicon_focus.is_focused(window);
+        caret::schedule(
+            &mut self.field_blink,
+            emoji_focused || emoji_grid_focused || github_focused || favicon_focused,
+            Self::flip_field_blink,
+            cx,
+        );
+        let lit = self.field_blink.visible();
+        self.emoji_caret_visible = emoji_focused && lit;
+        self.emoji_grid_caret_visible = emoji_grid_focused && lit;
+        self.github_caret_visible = github_focused && lit;
+        self.favicon_caret_visible = favicon_focused && lit;
 
         let mode_switch = controls::segmented(
             "project-icon-mode",
@@ -1670,6 +1737,56 @@ mod tests {
         assert!(
             cx.debug_bounds("project-icon-emoji-grid").is_none(),
             "picking a swatch closes the grid"
+        );
+    }
+
+    /// Every field in the picker takes typed characters through its own
+    /// `on_*_key`, and not one of them drew an insertion bar — across all
+    /// three modes. The caret follows focus, so exactly one is ever lit.
+    #[gpui::test]
+    async fn every_identity_text_field_draws_a_caret_while_it_holds_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let (picker, _captured, cx) = picker_view_with_capture(cx);
+        picker.update(cx, |picker, cx| picker.set_mode(1, cx));
+        refresh_frame(cx);
+
+        let field = cx
+            .debug_bounds("project-icon-emoji-field")
+            .expect("Emoji mode draws its typed field");
+        cx.simulate_click(field.center(), Modifiers::none());
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("project-icon-emoji-caret").is_some(),
+            "the emoji field accepts typing, so it must show where it lands"
+        );
+        assert!(
+            picker.read_with(&cx.cx, |picker, _| picker.emoji_caret_visible),
+            "and the bar must be lit while that field holds focus"
+        );
+
+        picker.update(cx, |picker, cx| picker.set_mode(2, cx));
+        refresh_frame(cx);
+
+        let field = cx
+            .debug_bounds("project-icon-github-field")
+            .expect("Avatar mode draws the GitHub field");
+        cx.simulate_click(field.center(), Modifiers::none());
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("project-icon-github-caret").is_some()
+                && cx.debug_bounds("project-icon-favicon-caret").is_some(),
+            "both Avatar-mode fields draw a bar"
+        );
+        assert!(
+            picker.read_with(&cx.cx, |picker, _| picker.github_caret_visible),
+            "the clicked field's bar is lit"
+        );
+        assert!(
+            !picker.read_with(&cx.cx, |picker, _| picker.favicon_caret_visible),
+            "and its neighbour's is dark — a caret is a claim about where              typing lands, so only one may be lit at a time"
         );
     }
 

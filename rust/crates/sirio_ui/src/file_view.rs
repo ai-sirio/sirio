@@ -104,6 +104,10 @@ pub struct FileView {
     /// instead of blinking off mid-interaction.
     editor_blink: caret::Blink,
     editor_caret_sig: (usize, Option<(usize, usize)>),
+    /// Whether the last drawn frame painted the insertion bar — the same
+    /// `field_caret_visible`/`modal_caret_visible` shape the other editable
+    /// surfaces keep, so the blink is observable without reading pixels.
+    editor_caret_visible: bool,
 }
 
 /// Emitted so the shell can act on a gesture that started inside this tab
@@ -165,6 +169,7 @@ impl FileView {
             dragging: false,
             editor_blink: caret::Blink::new(),
             editor_caret_sig: (0, None),
+            editor_caret_visible: false,
         }
     }
 
@@ -808,13 +813,19 @@ impl Render for FileView {
             self.editor_blink.wake();
             self.editor_caret_sig = caret_sig;
         }
-        let caret_visible = editor_focused && self.effective_mode() != MarkdownMode::Preview;
+        let caret_active = editor_focused && self.effective_mode() != MarkdownMode::Preview;
         caret::schedule(
             &mut self.editor_blink,
-            caret_visible,
+            caret_active,
             Self::flip_editor_blink,
             cx,
         );
+        // The focus gate is what `caret::schedule` arms the timer on; the
+        // paint gate additionally folds in the blink phase. Passing the
+        // folded value to `schedule` instead would read a dark bar as
+        // "unfocused" and latch the caret permanently on.
+        self.editor_caret_visible = caret_active && self.editor_blink.visible();
+        let caret_visible = self.editor_caret_visible;
         let caret_offset = self.caret.min(match &self.state {
             ViewState::Ready(editor) => editor.buffer().len(),
             _ => 0,
@@ -2247,6 +2258,46 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         (cx, entity)
+    }
+
+    /// Drives one blink cycle of the source surface's insertion bar.
+    /// `caret::schedule` keeps the surface's `Blink` ticking, but the gate
+    /// that decides whether the bar is painted never read that state back,
+    /// so a focused editor drew a permanently-solid bar — the one thing a
+    /// caret must not be.
+    #[gpui::test]
+    async fn the_editor_caret_blinks_while_the_source_surface_holds_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("txt", "hello\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+        });
+        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            view.read_with(&cx.cx, |view, _| view.editor_caret_visible),
+            "a focused source surface paints its insertion bar"
+        );
+
+        cx.cx.executor().advance_clock(caret::BLINK_INTERVAL);
+        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            !view.read_with(&cx.cx, |view, _| view.editor_caret_visible),
+            "one blink interval later the bar must be dark — a bar that never \
+             goes dark is a decoration, not a caret"
+        );
     }
 
     #[gpui::test]

@@ -100,9 +100,19 @@ pub(crate) struct GitHistory {
     pub(crate) search_regex: bool,
     pub(crate) search_case_sensitive: bool,
     pub(crate) search_blink: crate::caret::Blink,
+    /// Whether the last drawn frame lit the search field's bar. Kept as its
+    /// own field, rather than read straight off `search_blink`, because
+    /// `caret::schedule` parks an unfocused surface's blink at *visible* —
+    /// so the blink phase alone says nothing about whether a bar belongs on
+    /// screen. Focus × phase does.
+    pub(crate) search_caret_visible: bool,
     /// The pathspec being typed. Free text rather than a directory picker: a
     /// pathspec is more expressive than a picker, and git validates it.
     pub(crate) path_draft: String,
+    /// The Paths popup's own caret state — a separate surface from the
+    /// search field, so it owns a separate blink and a separate timer.
+    pub(crate) path_blink: crate::caret::Blink,
+    pub(crate) path_caret_visible: bool,
     /// The panel's current width, pushed in by the host each render. The
     /// view has no way to measure its own container, and guessing from the
     /// last drawn frame would lag a frame behind every drag.
@@ -152,7 +162,10 @@ impl GitHistory {
             search_regex: false,
             search_case_sensitive: false,
             search_blink: crate::caret::Blink::new(),
+            search_caret_visible: false,
             path_draft: String::new(),
+            path_blink: crate::caret::Blink::new(),
+            path_caret_visible: false,
             panel_width: 405.0,
             search_task: None,
             search_generation: 0,
@@ -499,10 +512,17 @@ impl GitHistory {
         cx.notify();
     }
 
+    /// Blink timer tick for the Paths popup's free-text row.
+    fn flip_path_blink(&mut self, cx: &mut Context<Self>) {
+        self.path_blink.flip();
+        cx.notify();
+    }
+
     /// Key handling for the pathspec row: the same shape as
     /// [`GitHistory::on_search_key`], but with no debounce to schedule —
     /// git validates the pathspec only when it is applied.
     pub(crate) fn on_path_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        self.path_blink.wake();
         match event.keystroke.key.as_str() {
             "enter" => self.set_path_filter(cx),
             "escape" => {
@@ -543,6 +563,14 @@ impl Render for GitHistory {
             Self::flip_search_blink,
             cx,
         );
+        self.search_caret_visible = search_focused && self.search_blink.visible();
+        let path_focused = self
+            .path_focus
+            .as_ref()
+            .expect("just initialized")
+            .is_focused(window);
+        crate::caret::schedule(&mut self.path_blink, path_focused, Self::flip_path_blink, cx);
+        self.path_caret_visible = path_focused && self.path_blink.visible();
 
         let toolbar = history_toolbar::render_toolbar(
             history_toolbar::toolbar_layout(self.panel_width),
@@ -1541,6 +1569,97 @@ mod tests {
         let (_, meta) = commit_tooltip_text(&tooltip_fixture(Vec::new()));
 
         assert!(meta.ends_with("0123456"), "meta was {meta:?}");
+    }
+
+    /// An insertion bar is a claim about where typing lands, so a field
+    /// that cannot receive typing must not draw one. `caret::schedule`
+    /// parks an unfocused surface's blink at *visible* (nothing is meant to
+    /// read it), and the search row rendered straight off that phase — so
+    /// the History toolbar showed a permanently-solid bar in a field that
+    /// had never been focused.
+    #[gpui::test]
+    async fn the_search_caret_stays_dark_until_the_field_is_focused(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let history =
+            cx.update(|window, _| window.root::<GitHistory>().flatten().expect("history root"));
+
+        assert!(
+            !history.read_with(&cx.cx, |history, _| history.search_caret_visible),
+            "an unfocused search field must not claim to be taking input"
+        );
+
+        cx.update(|window, cx| {
+            history.update(cx, |history, cx| {
+                let handle = history.search_focus_handle().clone();
+                handle.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            history.read_with(&cx.cx, |history, _| history.search_caret_visible),
+            "and focusing it must light the bar"
+        );
+    }
+
+    /// The Paths popup is a free-text row with its own focus handle and its
+    /// own key handler, so it is a text field by every measure except the
+    /// one the user checks: it drew no insertion bar at all.
+    #[gpui::test]
+    async fn the_paths_field_draws_a_caret_while_it_holds_focus(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let history =
+            cx.update(|window, _| window.root::<GitHistory>().flatten().expect("history root"));
+
+        history.update(&mut cx.cx, |history, cx| {
+            history.open_chip = Some(history_toolbar::FilterChip::Paths);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("history-path-field").is_some(),
+            "fixture invariant: the Paths popup must be open for this test to \
+             exercise anything"
+        );
+
+        cx.update(|window, cx| {
+            history.update(cx, |history, cx| {
+                let handle = history.path_focus_handle().clone();
+                handle.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("history-path-caret").is_some(),
+            "a focused free-text row must show where the next character lands"
+        );
+        assert!(
+            history.read_with(&cx.cx, |history, _| history.path_caret_visible),
+            "and the bar must be lit, not merely present in layout"
+        );
     }
 
     /// A filter that matches nothing must not claim the repository is empty.
