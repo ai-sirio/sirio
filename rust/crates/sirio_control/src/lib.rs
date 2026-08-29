@@ -27,6 +27,68 @@
 /// reports.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Which release channel a binary belongs to, compiled in at build time.
+///
+/// `Stable` is what a user gets, built from a tag; `Nightly` is built from
+/// `main` on a schedule; `Dev` is not a channel at all — it is what every
+/// build gets when the release job did not pass `SIRIO_RELEASE_CHANNEL`,
+/// and it refuses to update rather than pretending to belong somewhere
+/// (spec §3.3). Runtime discovery was rejected on purpose: a channel read
+/// from a settings file is a channel the user can edit.
+///
+/// This is the contract the updater (#311) and the nightly release
+/// pipeline (#317) build on: they read [`ReleaseChannel::RELEASE_CHANNEL`]
+/// — or pass `SIRIO_RELEASE_CHANNEL=stable|nightly` — and gate the whole
+/// update path on [`ReleaseChannel::updates_enabled`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseChannel {
+    Stable,
+    Nightly,
+    Dev,
+}
+
+impl ReleaseChannel {
+    /// Resolves the channel from the value the release job passes through
+    /// `SIRIO_RELEASE_CHANNEL`. `None` (env unset) and any unknown value
+    /// both resolve to [`ReleaseChannel::Dev`] — the safe default is the
+    /// one that never updates.
+    pub const fn from_env_value(value: Option<&str>) -> Self {
+        // Byte matching because `str` patterns are not allowed in const fns
+        // on stable; `as_bytes` is const-stable.
+        let bytes: &[u8] = match value {
+            Some(value) => value.as_bytes(),
+            None => &[],
+        };
+        match bytes {
+            b"stable" => Self::Stable,
+            b"nightly" => Self::Nightly,
+            _ => Self::Dev,
+        }
+    }
+
+    /// The compile-time channel of the binary this constant is compiled
+    /// into. Defined here and only here so every reader — the app,
+    /// `sirioctl`, the updater — sees one value: an `option_env!` re-read
+    /// in a second crate could go stale across cached builds.
+    pub const RELEASE_CHANNEL: Self = Self::from_env_value(option_env!("SIRIO_RELEASE_CHANNEL"));
+
+    /// Lowercase wire form, used by `system.capabilities` and Settings.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Nightly => "nightly",
+            Self::Dev => "dev",
+        }
+    }
+
+    /// Whether the update path may run at all. Only a real channel
+    /// updates; a dev build refuses (spec §3.3: "a dev build is not a
+    /// channel").
+    pub const fn updates_enabled(self) -> bool {
+        !matches!(self, Self::Dev)
+    }
+}
+
 /// Formats the human-readable output for `sirioctl version`.
 pub fn format_version_lines(cli_version: &str, app_version: Option<&str>) -> Vec<String> {
     let mut lines = vec![format!("sirioctl {cli_version}")];
@@ -165,6 +227,91 @@ mod tests {
     fn version_output_omits_the_warning_for_a_matching_pair() {
         let lines = format_version_lines("cli-version", Some("cli-version"));
         assert!(lines.iter().all(|line| !line.starts_with("warning:")));
+    }
+
+    use super::ReleaseChannel;
+
+    #[test]
+    fn env_value_selects_the_compiled_channel() {
+        assert_eq!(
+            ReleaseChannel::from_env_value(Some("stable")),
+            ReleaseChannel::Stable
+        );
+        assert_eq!(
+            ReleaseChannel::from_env_value(Some("nightly")),
+            ReleaseChannel::Nightly
+        );
+    }
+
+    #[test]
+    fn unset_or_unknown_env_value_falls_back_to_dev() {
+        assert_eq!(ReleaseChannel::from_env_value(None), ReleaseChannel::Dev);
+        assert_eq!(
+            ReleaseChannel::from_env_value(Some("")),
+            ReleaseChannel::Dev
+        );
+        assert_eq!(
+            ReleaseChannel::from_env_value(Some("preview")),
+            ReleaseChannel::Dev
+        );
+        assert_eq!(
+            ReleaseChannel::from_env_value(Some("STABLE")),
+            ReleaseChannel::Dev
+        );
+    }
+
+    #[test]
+    fn a_dev_build_refuses_updates_and_a_real_channel_does_not() {
+        assert!(!ReleaseChannel::Dev.updates_enabled());
+        assert!(ReleaseChannel::Stable.updates_enabled());
+        assert!(ReleaseChannel::Nightly.updates_enabled());
+    }
+
+    #[test]
+    fn channel_wire_form_round_trips_through_the_env_value() {
+        for channel in [
+            ReleaseChannel::Stable,
+            ReleaseChannel::Nightly,
+            ReleaseChannel::Dev,
+        ] {
+            assert_eq!(
+                ReleaseChannel::from_env_value(Some(channel.as_str())),
+                channel
+            );
+        }
+    }
+
+    #[test]
+    fn the_compiled_channel_is_the_env_value_the_build_saw() {
+        assert_eq!(
+            ReleaseChannel::RELEASE_CHANNEL,
+            ReleaseChannel::from_env_value(option_env!("SIRIO_RELEASE_CHANNEL"))
+        );
+    }
+
+    /// Spec §3.5 (the Zed post-mortem): a Stable release whose channel
+    /// silently fell back to the dev default would update never and look
+    /// exactly like the bug that started this. The release job compiles with
+    /// `SIRIO_RELEASE_CHANNEL=stable` and runs this suite, so the gate
+    /// asserts both halves: the compiled constant really is Stable and
+    /// updating is enabled. Outside that job the test is a no-op — local
+    /// builds are dev builds by design.
+    ///
+    /// `option_env!` is not rebuild-tracked, so the release job must compile
+    /// with the variable set (a fresh target directory, as CI does) — a stale
+    /// dev-compiled binary fails here loudly instead of passing falsely.
+    #[test]
+    fn release_gate_stable_build_carries_the_stable_channel_with_updates_enabled() {
+        if std::env::var("SIRIO_RELEASE_CHANNEL").as_deref() != Ok("stable") {
+            return;
+        }
+        assert_eq!(
+            ReleaseChannel::RELEASE_CHANNEL,
+            ReleaseChannel::Stable,
+            "SIRIO_RELEASE_CHANNEL=stable did not reach the compiled channel constant"
+        );
+        assert!(ReleaseChannel::Stable.updates_enabled());
+        assert!(ReleaseChannel::RELEASE_CHANNEL.updates_enabled());
     }
 
     #[test]
