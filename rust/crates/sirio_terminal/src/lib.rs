@@ -512,6 +512,10 @@ struct TerminalHandle {
     /// which is rebuilt every prepaint — so a steady frame costs a hash
     /// lookup per placement instead of a re-decode.
     kitty_images: Arc<Mutex<HashMap<(u32, u64), Arc<RenderImage>>>>,
+    /// #303 R2.6: latched by the owner-thread PNG decoder so a failed ingest
+    /// still produces a visible refusal indicator in the pane. PNG failures
+    /// do not create a stored placement for `kitty_refused` to inspect.
+    kitty_decode_failed: Arc<AtomicBool>,
     /// #43: refreshed once per owner-thread poll-loop iteration from
     /// `terminal.is_mouse_tracking()`. The view reads it to decide
     /// Sirio-gesture vs encode without a blocking round-trip into the !Send
@@ -674,6 +678,7 @@ struct TerminalThreadInputs {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     mouse_tracking: Arc<AtomicBool>,
+    kitty_decode_failed: Arc<AtomicBool>,
 }
 
 /// #301: one visible Kitty placement, copied off the owner thread as plain
@@ -789,8 +794,8 @@ fn collect_kitty_placements(terminal: &mut Terminal<'_, '_>) -> Vec<KittyPlaceme
 /// plain bytes (R2.3). Returns `None` for a payload the pane refuses:
 /// unexpected formats, or a length that cannot match the announced dimensions
 /// (R2.4 — a stored image is never compressed, so the length check IS the
-/// decompression ceiling). The caller paints a visible placeholder for
-/// `None` (R2.6).
+/// decompression ceiling is enforced by [`KittyPngDecoder`]). The caller
+/// paints a visible placeholder for `None` (R2.6).
 fn decode_kitty_image(
     format: ImageFormat,
     width: u32,
@@ -847,7 +852,19 @@ fn decode_kitty_image(
 /// (`graphics_image.zig` `complete`/`decodePng`). R2.1 keeps libghostty's own
 /// optional `png` feature off, so this uses the workspace `image` crate — the
 /// tree still has exactly one PNG implementation.
-struct KittyPngDecoder;
+struct KittyPngDecoder {
+    failure_flag: Arc<AtomicBool>,
+}
+
+impl KittyPngDecoder {
+    fn new() -> Self {
+        Self::with_failure_flag(Arc::new(AtomicBool::new(false)))
+    }
+
+    fn with_failure_flag(failure_flag: Arc<AtomicBool>) -> Self {
+        Self { failure_flag }
+    }
+}
 
 impl DecodePng for KittyPngDecoder {
     fn decode_png<'alloc>(
@@ -855,11 +872,27 @@ impl DecodePng for KittyPngDecoder {
         alloc: &'alloc Allocator<'_>,
         data: &[u8],
     ) -> Option<DecodedImage<'alloc>> {
-        let image = image::load_from_memory(data).ok()?.into_rgba8();
+        let mut reader = image::ImageReader::with_format(
+            std::io::Cursor::new(data),
+            image::ImageFormat::Png,
+        );
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(KITTY_DECOMPRESSED_MAX_BYTES);
+        reader.limits(limits);
+        let image = match reader.decode() {
+            Ok(image) => image.into_rgba8(),
+            Err(_) => {
+                self.failure_flag.store(true, Ordering::Release);
+                return None;
+            }
+        };
         let (width, height) = image.dimensions();
         // The output buffer must be allocated with ghostty's allocator — the
         // emulator takes ownership and frees it through the same one.
-        let mut out = Bytes::new_with_alloc(alloc, image.as_raw().len()).ok()?;
+        let Some(mut out) = Bytes::new_with_alloc(alloc, image.as_raw().len()).ok() else {
+            self.failure_flag.store(true, Ordering::Release);
+            return None;
+        };
         out.copy_from_slice(image.as_raw());
         Some(DecodedImage {
             width,
@@ -929,6 +962,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             master,
             mut child,
             mouse_tracking,
+            kitty_decode_failed,
         } = inputs;
 
         // libghostty-vt never writes to the pty itself; it hands the
@@ -964,8 +998,10 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
         // refused by ghostty without one, and R2.1 keeps the crate's own `png`
         // feature off, so the decoder is the workspace `image` crate.
         apply_kitty_ingest_limits(&mut terminal);
-        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(KittyPngDecoder)))
-            .expect("terminal owner thread: registering the Kitty PNG decoder");
+        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(
+            KittyPngDecoder::with_failure_flag(kitty_decode_failed),
+        )))
+        .expect("terminal owner thread: registering the Kitty PNG decoder");
 
         // Allocated once and reused every frame; they live and die on this
         // thread like everything else libghostty-vt owns.
@@ -1087,8 +1123,8 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                 last_title = title.to_string();
                 let _ = event_tx.unbounded_send(TerminalEvent::Title(title.to_string()));
             }
-            if !child_exit_reported {
-                if let Ok(Some(status)) = child.try_wait() {
+            if !child_exit_reported
+                && let Ok(Some(status)) = child.try_wait() {
                     child_exit_reported = true;
                     // portable-pty reports a signalled exit as a signal
                     // *name* string, not a number, so a signalled child
@@ -1100,7 +1136,6 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     };
                     let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
                 }
-            }
 
             // #43: refresh the shared tracking gate once per poll-loop
             // iteration so the view can decide Sirio-gesture vs encode from a
@@ -1446,6 +1481,7 @@ impl TerminalHandle {
         // Shared before the thread spawns and handed to both the owner loop
         // (writer) and the handle (reader) below.
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
+        let kitty_decode_failed = Arc::new(AtomicBool::new(false));
         spawn_terminal_thread(TerminalThreadInputs {
             cols: COLS,
             rows: ROWS,
@@ -1456,6 +1492,7 @@ impl TerminalHandle {
             master: pair.master,
             child,
             mouse_tracking: mouse_tracking_flag.clone(),
+            kitty_decode_failed: kitty_decode_failed.clone(),
         });
 
         Ok((
@@ -1468,6 +1505,7 @@ impl TerminalHandle {
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
                 kitty_images: Arc::new(Mutex::new(HashMap::new())),
+                kitty_decode_failed,
                 mouse_tracking: mouse_tracking_flag,
                 selection: Arc::new(Mutex::new(None)),
                 selection_anchor: Arc::new(Mutex::new(None)),
@@ -2039,6 +2077,9 @@ const EVENT_COALESCE_CAP: usize = 100;
 /// worth of screenshots before ghostty itself evicts oldest.
 const KITTY_APC_MAX_BYTES: usize = 32 * 1024 * 1024;
 const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
+/// #303 R2.4: cap image decoder allocations, including the decompressed
+/// RGBA output, before a compressed PNG can expand into an unbounded buffer.
+const KITTY_DECOMPRESSED_MAX_BYTES: u64 = KITTY_IMAGE_STORAGE_LIMIT;
 
 /// #301 R2.6: the wash for a placement whose image the pane refused to
 /// decode — a silent drop is indistinguishable from the renderer being
@@ -2049,6 +2090,13 @@ const KITTY_REFUSED_COLOR: Hsla = Hsla {
     l: 0.5,
     a: 0.7,
 };
+
+/// #303 R2.6: PNG decoding can fail before libghostty stores a placement, so
+/// there is no image geometry to use for the normal refusal wash. Keep the
+/// indicator small and anchored inside the pane; the content mask clips it.
+fn kitty_refused_indicator_bounds(pane: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(pane.origin, size(px(16.0), px(16.0)))
+}
 
 /// Bounds the snapshot sent to the activity matcher. Persistence still keeps
 /// the complete scrollback, but matching an agent prompt only needs the last
@@ -3150,7 +3198,7 @@ impl TerminalView {
         }
         if let TerminalState::Running(terminal) = &self.terminal {
             let scroll = (!event.keystroke.modifiers.modified())
-                .then(|| match key.as_str() {
+                .then_some(match key.as_str() {
                     "pageup" | "page_up" => Some(SirioScroll::PageUp),
                     "pagedown" | "page_down" => Some(SirioScroll::PageDown),
                     _ => None,
@@ -3401,6 +3449,9 @@ impl Element for TerminalElement {
         let mut kitty_cache = self.terminal.kitty_images.lock();
         let mut kitty_images = Vec::new();
         let mut kitty_refused = Vec::new();
+        if self.terminal.kitty_decode_failed.load(Ordering::Acquire) {
+            kitty_refused.push(kitty_refused_indicator_bounds(bounds));
+        }
         for place in kitty_places {
             // R3.3: keep the untruncated placement geometry — the row can be
             // negative (scrolled partly off the top) — and let
@@ -4582,6 +4633,55 @@ mod tests {
         assert_eq!(&third.as_bytes(0).unwrap()[0..3], &[0xFF, 0x00, 0x00]);
     }
 
+    /// #303 R2.4: a small-on-the-wire PNG must be refused before its full
+    /// decompressed pixel buffer can be allocated.
+    #[test]
+    fn kitty_png_decoder_rejects_compressed_images_over_decompression_limit() {
+        let png =
+            image::RgbaImage::from_pixel(4097, 4096, image::Rgba([0x12, 0x34, 0x56, 0xFF]));
+        let mut encoded = Vec::new();
+        png.write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+            .expect("encode the compressed test image");
+        assert!(
+            encoded.len() < 1024 * 1024,
+            "solid image should be much smaller compressed than decompressed"
+        );
+
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut decoder = KittyPngDecoder::with_failure_flag(failed.clone());
+        assert!(
+            decoder
+                .decode_png(&libghostty_vt::alloc::Allocator::GLOBAL, &encoded)
+                .is_none(),
+            "the decompressed image exceeds the Kitty decoder ceiling"
+        );
+        assert!(
+            failed.load(Ordering::Acquire),
+            "a refused decode must be available to the pane for visible reporting"
+        );
+    }
+
+    /// #303 R2.6: a malformed PNG is refused and leaves the visible refusal
+    /// indicator that the paint path overlays in the pane.
+    #[test]
+    fn kitty_png_decode_failure_is_visible_to_the_paint_path() {
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut decoder = KittyPngDecoder::with_failure_flag(failed.clone());
+        assert!(
+            decoder
+                .decode_png(&libghostty_vt::alloc::Allocator::GLOBAL, b"not a PNG")
+                .is_none(),
+            "malformed PNG must be refused"
+        );
+        assert!(failed.load(Ordering::Acquire));
+
+        let pane = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(50.0)));
+        let indicator = kitty_refused_indicator_bounds(pane);
+        assert_eq!(indicator.origin, pane.origin);
+        assert!(indicator.size.width > px(0.0));
+        assert!(indicator.size.height > px(0.0));
+    }
+
     /// #301: omp transmits PNG (f=100) — measured in the shipped pi-tui
     /// (`encodeKittyTransmit` emits `a=t,f=100`), and ghostty refuses to
     /// store a PNG unless a decoder is registered (`graphics_image.zig`
@@ -4599,7 +4699,7 @@ mod tests {
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .expect("encode PNG");
 
-        let mut decoder = KittyPngDecoder;
+        let mut decoder = KittyPngDecoder::new();
         let decoded = decoder
             .decode_png(&libghostty_vt::alloc::Allocator::GLOBAL, &png)
             .expect("PNG decodes via the image crate");
@@ -4640,8 +4740,10 @@ mod tests {
     /// owner thread makes) is what the emulator actually calls.
     #[test]
     fn kitty_png_transmit_reaches_the_placement_walk_as_rgba() {
-        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(KittyPngDecoder)))
-            .expect("register decoder on this thread");
+        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(
+            KittyPngDecoder::new(),
+        )))
+        .expect("register decoder on this thread");
         let mut png = Vec::new();
         image::RgbaImage::from_raw(1, 1, vec![0x12, 0x34, 0x56, 0xFF])
             .expect("1x1 buffer")
