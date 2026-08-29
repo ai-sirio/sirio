@@ -23,6 +23,7 @@
 - **Test style:** `Scripts/Tests/test-<name>.sh`, a `mktemp -d` fixture with `trap 'rm -rf "$FIXTURE"' EXIT`, assertions that `echo "FAIL: ..." >&2; exit 1`, ending with `echo "PASS: <what>"`. Executables that exist only on macOS are stubbed into `$FIXTURE/bin` and put first on `PATH` — the pattern `Scripts/Tests/test-ci.sh` already uses for `cargo`.
 - **Commits:** Conventional Commits, lower-case imperative subject.
 - **`Scripts/ci.sh` must print `CI OK`** before a PR is opened.
+- **Every new script must be committed executable**, and `chmod +x` alone is not enough: this checkout has `core.fileMode = false`, so the mode never reaches the git object. Use `git update-index --chmod=+x <file>` and confirm with `git ls-files -s` that it reads `100755`, matching every existing script in `Scripts/`. A script committed `100644` fails on Linux and macOS with "Permission denied" while working fine on Windows.
 
 ## File Structure
 
@@ -182,6 +183,19 @@ if "$CHECK_SCRIPT" "v0.6.0" "$FIXTURE/missing.toml" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Covers the branch the `|| true` above makes reachable. Without that guard this
+# path exits 1 with empty stderr, so asserting the exit code alone would pass
+# against the broken version too — the `error:` prefix is the real assertion.
+printf '[workspace]\nresolver = "2"\n' > "$FIXTURE/no-version.toml"
+if STDERR=$("$CHECK_SCRIPT" "v0.6.0" "$FIXTURE/no-version.toml" 2>&1 >/dev/null); then
+  echo "FAIL: a Cargo.toml with no workspace version must exit non-zero" >&2
+  exit 1
+fi
+case "$STDERR" in
+  *error:*) ;;
+  *) echo "FAIL: expected an 'error:' message on stderr, got '$STDERR'" >&2; exit 1 ;;
+esac
+
 echo "PASS: release version check"
 ```
 
@@ -223,7 +237,11 @@ TAG_VERSION="${TAG#v}"
 # `[workspace.package]`'s version is the only top-level `version = ` assignment
 # in this file; every dependency version is inline inside a `{ ... }` table, so
 # an anchored match cannot pick the wrong one.
-CARGO_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed -E 's/^version = "([^"]+)".*/\1/')
+# The `|| true` is load-bearing. Without it a `grep` that matches nothing makes
+# the whole substitution fail under `set -e` + `pipefail`, killing the script on
+# this line — before the `-z` guard below can report anything. The failure would
+# be exit 1 with completely empty stderr.
+CARGO_VERSION=$(grep -m1 '^version = ' "$CARGO_TOML" | sed -E 's/^version = "([^"]+)".*/\1/' || true)
 
 if [ -z "$CARGO_VERSION" ]; then
   echo "error: could not find a workspace version in $CARGO_TOML" >&2
