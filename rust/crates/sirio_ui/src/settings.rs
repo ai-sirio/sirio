@@ -1310,6 +1310,11 @@ impl Settings {
         cx.notify();
     }
 
+    /// The current host-owned update facts, for the host and tests.
+    pub fn update_state(&self) -> &UpdateState {
+        &self.update_state
+    }
+
     /// Wires the durable account-identity cache (F-PERSIST-DB-06). Call
     /// once, right after construction: a provider whose live discovery
     /// already failed by then (offline, or the CLI binary transiently

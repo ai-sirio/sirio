@@ -24,6 +24,7 @@ sirio_activity.workspace = true
 sirio_control.workspace = true
 sirio_release.workspace = true
 sirio_update.workspace = true
+sirio_apply.workspace = true
 sirio_git.workspace = true
 serde.workspace = true
 serde_json.workspace = true
