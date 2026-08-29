@@ -243,6 +243,12 @@ jobs:
         with:
           version: 0.15.2
 
+      # rust/.cargo/config.toml sets rustc-wrapper = "sccache" unconditionally;
+      # a job without it fails before compiling a single crate, in a way that
+      # looks nothing like its cause (spec §1.5). ubuntu-22.04 does not ship it.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Install GUI build dependencies
         run: |
           sudo apt-get update
