@@ -4,7 +4,7 @@
 
 **Goal:** Make macOS Sirio's reference release platform, producing a signed and notarized DMG on every version tag, with Linux and Windows artifacts released behind it.
 
-**Architecture:** Three bash scripts in `Scripts/` split the release into independently runnable pieces — version check, `.app` bundling, DMG packaging — and `.github/workflows/release.yml` wires them into three jobs where Linux and Windows declare `needs: macos`. Two of the three scripts already exist in git history and come back nearly verbatim; only the `.app` bundling is new, replacing what Xcode used to do.
+**Architecture:** Three bash scripts in `Scripts/` split the release into independently runnable pieces — version check, `.app` bundling, DMG packaging — and `.github/workflows/release.yml` wires them into four jobs where Linux and Windows declare `needs: macos` and a fourth publishes what all three produced. Two of the three scripts already exist in git history and come back nearly verbatim; only the `.app` bundling is new, replacing what Xcode used to do.
 
 **Tech Stack:** bash, GitHub Actions, `codesign`/`notarytool`/`stapler` (Xcode command line tools), `hdiutil`, cargo, Zig 0.15.2.
 
@@ -36,7 +36,7 @@
 | `Scripts/build-app-bundle.sh` | New. Wraps an already-compiled binary into a signed `Sirio.app`. |
 | `Scripts/Tests/test-build-app-bundle.sh` | New. Asserts bundle layout, `Info.plist` keys and the hardened-runtime flag, with `codesign` stubbed. |
 | `Scripts/Tests/test-release-workflow.sh` | New. Asserts the job graph and the pins that silently rot. |
-| `.github/workflows/release.yml` | Rewritten: three jobs, `needs: macos`. |
+| `.github/workflows/release.yml` | Rewritten: four jobs (`macos`, `linux`, `windows`, `publish`), `needs: macos`. |
 | `Scripts/ci-linux.sh` | Modified: runs the four new tests beside the ones it already runs. |
 | `CLAUDE.md` | Modified: "What this is" and "Commands". |
 
@@ -637,7 +637,7 @@ git commit -m "feat(release): build a signed .app bundle around the rust binary"
 
 ---
 
-### Task 5: Rewrite `release.yml` as three jobs
+### Task 5: Rewrite `release.yml` as four jobs
 
 **Files:**
 - Modify: `.github/workflows/release.yml` (full rewrite)
@@ -736,18 +736,37 @@ name: Release
 # job that signs and notarizes. Linux and Windows declare `needs: macos` so a
 # broken macOS build stops the release rather than producing artifacts nobody
 # will publish. See docs/superpowers/specs/2026-08-29-macos-release-platform-design.md
+#
+# NOT YET VERIFIED: the workspace has never been compiled for macOS. Phase 0 of
+# the spec -- `Scripts/ci.sh` printing `CI OK` on a real Mac -- was deliberately
+# deferred by the maintainer and is not in this branch. Do not push a `v*.*.*`
+# tag until it has passed there: this workflow is triggered only by such a tag,
+# so the first thing an unverified macOS build breaks is a release that is
+# already public.
 on:
   push:
     tags:
       - 'v*.*.*'
 
+# Read at the top level, so the three build jobs inherit read only. `macos` in
+# particular compiles and runs build scripts and test binaries from roughly 400
+# third-party crates on the maintainer's personal, non-ephemeral Mac; handing
+# that a repo-write token buys nothing, because no build job calls the API. The
+# write scope lives on `publish` alone, which is the only job that does.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   macos:
     runs-on: [self-hosted, macOS, arm64]
-    timeout-minutes: 60
+    # 120, not 60. The first release runs on a cold self-hosted runner and has
+    # to fit a full debug `cargo build --workspace` plus `cargo test
+    # --workspace` (the CI gate), then a *second, separate* release compile:
+    # `--target aarch64-apple-darwin` uses its own target directory, so nothing
+    # from the gate is reused. Then the Apple round-trips on top. The warm
+    # `~/.cargo` and `target/` that make 60 minutes plausible only exist from
+    # the second release onward.
+    timeout-minutes: 120
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -774,11 +793,26 @@ jobs:
           bash Scripts/Tests/test-build-app-bundle.sh
           bash Scripts/Tests/test-release-workflow.sh
 
-      - name: Unlock login keychain
-        env:
-          MAC_LOGIN_KEYCHAIN_PASSWORD: ${{ secrets.MAC_LOGIN_KEYCHAIN_PASSWORD }}
-        run: security unlock-keychain -p "$MAC_LOGIN_KEYCHAIN_PASSWORD" login.keychain-db
-
+      # There was an `Unlock login keychain` step here, inherited verbatim from
+      # the Swift-era pipeline. It is gone on purpose, and should not come back
+      # with the next copy-paste from git history.
+      #
+      # `da9d18da` added it because the Swift app's `KeychainCredentialStore`
+      # made the CI gate fail intermittently against a locked keychain. That
+      # class went with the Swift app. The only macOS keychain use left in the
+      # Rust workspace is `keychain_cookie` in
+      # `rust/crates/sirio_usage/src/opencode_go.rs`, which shells out to
+      # `security find-generic-password` and returns `None` on any failure -- a
+      # locked keychain cannot fail the gate through it.
+      #
+      # What the step did cost was real: it unlocked the maintainer's personal
+      # login keychain, with its password in the environment, before every one
+      # of the ~400 crates' build scripts and test binaries ran. Nothing
+      # downstream needs it either -- this workflow creates its own
+      # `ci.keychain` and puts it first in the search list, `codesign` finds the
+      # identity there, `notarytool` authenticates with the API key file, and
+      # `stapler` needs no credentials at all. The `MAC_LOGIN_KEYCHAIN_PASSWORD`
+      # secret is therefore no longer referenced anywhere in this workflow.
       - name: Run CI gate
         run: Scripts/ci.sh
 
@@ -810,8 +844,16 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # This step has no `shell:` key, so it runs as `bash -e {0}` -- pipefail
+          # is off, and the pipeline's exit status is sed's (0), not grep's or
+          # head's. The `|| true` below is not load-bearing for that reason today,
+          # but it keeps the empty-identity guard reachable if this step ever gains
+          # an explicit `shell: bash` (as the windows job's Package step already
+          # does), which turns pipefail on -- otherwise a failed grep/head would
+          # abort the substitution instead of falling through to the guard, at the
+          # worst possible moment: signing on a freshly cut release.
           CODESIGN_IDENTITY=$(security find-identity -v -p codesigning ci.keychain \
-            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/')
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/' || true)
           if [ -z "$CODESIGN_IDENTITY" ]; then
             echo "error: no Developer ID Application identity in ci.keychain" >&2
             exit 1
@@ -846,6 +888,47 @@ jobs:
           DMG_PATH="build/Sirio-${VERSION}.dmg"
           Scripts/build-dmg.sh "$APP_PATH" Sirio "$DMG_PATH"
           echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+
+      # Yes, this is a second Apple round-trip, and it costs another few minutes
+      # of wall clock on every release. It is worth it because a notarization
+      # ticket is per-artifact: the one stapled onto Sirio.app above says nothing
+      # about the DMG that now contains it. The DMG is what the user downloads,
+      # so the DMG is what carries the quarantine flag and what Gatekeeper
+      # evaluates first -- and an unnotarized container is refused before the
+      # stapled .app inside it is ever reachable.
+      #
+      # Stapling rather than relying on the ticket being fetched is the other
+      # half: with the ticket embedded, Gatekeeper resolves the check entirely
+      # offline. Without it, first open needs a live call to Apple, which is
+      # exactly the moment -- a new user, an unfamiliar app, a corporate proxy or
+      # no network -- when a failure reads as "this app is broken".
+      #
+      # No `--options runtime` here, unlike the .app: the hardened runtime is a
+      # property of an executable's code signature, and a disk image has no code
+      # to harden. Its signature exists to establish provenance, nothing more.
+      #
+      # The identity is derived exactly as in `Build the signed .app` above --
+      # same command, same `|| true`, same empty-identity guard. See that step's
+      # comment for why the `|| true` is there and why the guard has to stay
+      # reachable; the two must not drift into variants of each other.
+      - name: Sign, notarize and staple the DMG
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
+        run: |
+          CODESIGN_IDENTITY=$(security find-identity -v -p codesigning ci.keychain \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/' || true)
+          if [ -z "$CODESIGN_IDENTITY" ]; then
+            echo "error: no Developer ID Application identity in ci.keychain" >&2
+            exit 1
+          fi
+          codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG_PATH"
+          echo "$ASC_API_KEY_P8" | base64 --decode > AuthKey.p8
+          xcrun notarytool submit "$DMG_PATH" --key AuthKey.p8 --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" --wait
+          xcrun stapler staple "$DMG_PATH"
+          rm -f AuthKey.p8
 
       - name: Upload the DMG
         uses: actions/upload-artifact@v4
@@ -968,6 +1051,12 @@ jobs:
   publish:
     needs: [macos, linux, windows]
     runs-on: ubuntu-22.04
+    # The only job that talks to the GitHub API, so the only one that needs the
+    # write scope the top-level `permissions:` deliberately withholds. It builds
+    # nothing and runs no third-party code: it downloads the artifacts the other
+    # three produced and calls `gh release create`.
+    permissions:
+      contents: write
     timeout-minutes: 15
     steps:
       - name: Checkout
