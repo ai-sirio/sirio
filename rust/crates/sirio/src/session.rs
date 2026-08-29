@@ -2064,6 +2064,7 @@ mod tests {
                 ("general.autoNaming".into(), "true".into()),
                 ("general.summarizerAgent".into(), "codex".into()),
                 ("session.resumeAgentSessions".into(), "false".into()),
+                ("updates.enabled".into(), "true".into()),
                 ("usage.claudeVisible".into(), "false".into()),
                 ("usage.codexVisible".into(), "false".into()),
                 ("usage.ollamaVisible".into(), "true".into()),
