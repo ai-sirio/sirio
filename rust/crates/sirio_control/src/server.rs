@@ -241,7 +241,7 @@ impl ControlServer {
             path: self.socket_path.clone(),
             detail: format!("could not create socket directory: {error}"),
         })?;
-        // Never chmod an existing directory supplied by TILLER_SOCKET (it
+        // Never chmod an existing directory supplied by SIRIO_SOCKET (it
         // may be a shared directory such as /tmp). New leaf directories are
         // ours, so make those private before binding the socket.
         if !parent_was_present {

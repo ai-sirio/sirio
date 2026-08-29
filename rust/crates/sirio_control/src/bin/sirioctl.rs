@@ -50,7 +50,7 @@ fn main() {
         }
     };
 
-    // --socket overrides $TILLER_SOCKET, which overrides the default path.
+    // --socket overrides $SIRIO_SOCKET, which overrides the default path.
     let environment = current_environment();
     let socket = parsed
         .value("socket")
@@ -145,7 +145,7 @@ fn usage() {
          \x20 session-ref --session s --ref r   report an agent-native session reference\n\
          \n\
          options:\n\
-         \x20 --socket <path>   socket path (default: $TILLER_SOCKET or app support)\n\
+         \x20 --socket <path>   socket path (default: $SIRIO_SOCKET or app support)\n\
          \x20 --json            output raw JSON\n\
          \x20 --stdin-json      (notify) read a hook JSON payload from stdin and extract the agent session id"
     );
@@ -336,8 +336,15 @@ fn cmd_identify(
     parsed: &ParsedArgs,
     environment: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let worktree = environment.get("TILLER_WORKTREE_ID").map(String::as_str);
-    let pane = environment.get("TILLER_PANE_ID").map(String::as_str);
+    // A shell opened before the rebrand still carries the old names.
+    let worktree = environment
+        .get("SIRIO_WORKTREE_ID")
+        .or_else(|| environment.get("TILLER_WORKTREE_ID"))
+        .map(String::as_str);
+    let pane = environment
+        .get("SIRIO_PANE_ID")
+        .or_else(|| environment.get("TILLER_PANE_ID"))
+        .map(String::as_str);
     let response = require_ok(
         socket,
         &sirio_control::protocol::request::system_identify(worktree, pane),

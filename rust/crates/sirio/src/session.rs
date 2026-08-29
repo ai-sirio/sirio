@@ -149,7 +149,7 @@ const AGENT_COLOR_KEY_PREFIX: &str = "agent-color:";
 /// Where this process's session database lives.
 ///
 /// Resolution order:
-/// 1. `$TILLER_DB` — explicit override (tests, demos, a power user).
+/// 1. `$SIRIO_DB` — explicit override (tests, demos, a power user).
 /// 2. A git checkout containing the running binary: the database is scoped
 ///    to that checkout. Several checkouts of the app on one machine
 ///    (worktrees, agents building each of them) can never write each
@@ -169,10 +169,11 @@ const AGENT_COLOR_KEY_PREFIX: &str = "agent-color:";
 /// foreign tables behind. The rewrite keeps its own state until it replaces
 /// the Swift app outright. On Linux the stable root is the XDG state directory.
 pub fn database_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("TILLER_DB") {
+    if let Some(path) = std::env::var_os("SIRIO_DB") {
         return PathBuf::from(path);
     }
     let root = app_support_root();
+    migrate_legacy_state_root(&root);
     let exe = std::env::current_exe().unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default();
     let path = database_path_for(&root, &exe, &cwd, cfg!(debug_assertions));
@@ -189,7 +190,7 @@ pub fn database_path() -> PathBuf {
 /// session database is.
 ///
 /// Derived from [`database_path`]'s own directory rather than re-deriving the
-/// rule, so the three cases it already handles -- the `TILLER_DB` override, the
+/// rule, so the three cases it already handles -- the `SIRIO_DB` override, the
 /// checkout containing the running binary, the stable installed location --
 /// hold here by construction and cannot drift apart later.
 ///
@@ -209,17 +210,44 @@ fn browser_profile_path_for(database: &Path) -> PathBuf {
         .join("browser")
 }
 
-/// The root under which every TillerRust database lives: the stable
+/// The root under which every Sirio database lives: the stable
 /// `sirio.sqlite` for installed binaries plus a `checkouts/` subtree with
 /// one directory per development checkout. Linux uses XDG_STATE_HOME (or
 /// `$HOME/.local/state`); Windows uses LOCALAPPDATA (it has no XDG layout);
 /// macOS retains Application Support.
+/// Moves a pre-rebrand `TillerRust` state directory to its new name, once.
+///
+/// Every session, chat transcript and browser profile the app has ever written
+/// lives under this root. Starting fresh at the new path would present as
+/// total data loss, so the directory is renamed rather than recreated. The
+/// rename is atomic, and a no-op on every later launch because the new root
+/// exists by then.
+fn migrate_legacy_state_root(root: &Path) {
+    if root.exists() {
+        return;
+    }
+    let Some(parent) = root.parent() else {
+        return;
+    };
+    let legacy = parent.join("TillerRust");
+    if !legacy.exists() {
+        return;
+    }
+    if let Err(error) = std::fs::rename(&legacy, root) {
+        eprintln!(
+            "[session] could not migrate {} to {}: {error}",
+            legacy.display(),
+            root.display()
+        );
+    }
+}
+
 fn app_support_root() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join("Library/Application Support/TillerRust"))
-            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"))
+            .map(|home| PathBuf::from(home).join("Library/Application Support/Sirio"))
+            .unwrap_or_else(|| std::env::temp_dir().join("Sirio"))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -235,8 +263,8 @@ fn app_support_root_for(environment: &std::collections::BTreeMap<String, String>
         environment
             .get("HOME")
             .map(PathBuf::from)
-            .map(|home| home.join("Library/Application Support/TillerRust"))
-            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"))
+            .map(|home| home.join("Library/Application Support/Sirio"))
+            .unwrap_or_else(|| std::env::temp_dir().join("Sirio"))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -272,13 +300,13 @@ fn app_support_root_for(environment: &std::collections::BTreeMap<String, String>
                 }
             })
             .unwrap_or_else(std::env::temp_dir);
-        state_home.join("TillerRust")
+        state_home.join("Sirio")
     }
 }
 
 /// Resolves where this process's session database lives.
 ///
-/// - `$TILLER_DB` always wins and is used verbatim (handled by the caller).
+/// - `$SIRIO_DB` always wins and is used verbatim (handled by the caller).
 /// - Otherwise, if the running binary — or, for debug builds, the process
 ///   working directory — sits inside a git checkout, the database is scoped
 ///   to that checkout: every checkout of the app on a machine gets its own
@@ -3037,6 +3065,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pre_rebrand_state_directory_is_carried_over_not_abandoned() {
+        let base = std::env::temp_dir().join(format!("sirio-migrate-{}", std::process::id()));
+        let legacy = base.join("TillerRust");
+        let current = base.join("Sirio");
+        std::fs::create_dir_all(&legacy).expect("seed the pre-rebrand root");
+        std::fs::write(legacy.join("sirio.sqlite"), b"session state")
+            .expect("seed a database inside it");
+
+        migrate_legacy_state_root(&current);
+
+        assert!(!legacy.exists(), "the old root is moved, not copied");
+        assert_eq!(
+            std::fs::read(current.join("sirio.sqlite")).expect("the database came across"),
+            b"session state",
+            "existing session state must survive the rename"
+        );
+
+        // Second launch: the new root exists, so nothing is touched.
+        std::fs::create_dir_all(&legacy).expect("a stray old root reappears");
+        migrate_legacy_state_root(&current);
+        assert!(legacy.exists(), "an existing new root makes this a no-op");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_session_state_uses_xdg_state_home_and_documented_fallback() {
@@ -3049,14 +3103,14 @@ mod tests {
         ]);
         assert_eq!(
             app_support_root_for(&environment),
-            PathBuf::from("/run/user/1000/state/TillerRust")
+            PathBuf::from("/run/user/1000/state/Sirio")
         );
 
         let fallback =
             std::collections::BTreeMap::from([("HOME".to_string(), "/home/alice".to_string())]);
         assert_eq!(
             app_support_root_for(&fallback),
-            PathBuf::from("/home/alice/.local/state/TillerRust")
+            PathBuf::from("/home/alice/.local/state/Sirio")
         );
     }
 }

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 /// Deterministic Linux project defaults. An explicit environment override is
 /// useful for tests and portable installations; XDG data is the normal base.
 pub fn default_project_base() -> PathBuf {
-    if let Some(path) = std::env::var_os("TILLER_PROJECTS_DIR").filter(|value| !value.is_empty()) {
+    if let Some(path) = std::env::var_os("SIRIO_PROJECTS_DIR").filter(|value| !value.is_empty()) {
         return PathBuf::from(path);
     }
     if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {

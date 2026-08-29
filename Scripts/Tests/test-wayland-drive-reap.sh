@@ -3,7 +3,7 @@
 # helpers, and does it spare another lane's?
 #
 # Both halves matter. The first is the leak this test was written for: under
-# TILLER_WL_KEEP, cleanup() returns early by design, so the only thing that ever
+# SIRIO_WL_KEEP, cleanup() returns early by design, so the only thing that ever
 # removes a helper is the *next* invocation's startup reap. Before 2026-08-19
 # that reap covered sirio and sway and nothing else, and a KEEP-mode critic
 # driving one fixed label accumulated 20 dbus-daemons, 18 virtual-pointers and
@@ -33,10 +33,10 @@ eval "$FN"
 # errexit inside the assignment. Without it the exact failure this test exists to
 # report — the reap lines gone from the script — exits 1 in silence, which is
 # indistinguishable from the test itself being broken.
-CALLS="$(grep -E '^kill_ours TILLER_WL_LABEL "\$LABEL" ' "$SCRIPT" || true)"
+CALLS="$(grep -E '^kill_ours SIRIO_WL_LABEL "\$LABEL" ' "$SCRIPT" || true)"
 [[ -n "$CALLS" ]] || {
-    echo "FAIL: no startup reap keyed on TILLER_WL_LABEL in $SCRIPT." >&2
-    echo "      Without it, every TILLER_WL_KEEP invocation leaks its helpers." >&2
+    echo "FAIL: no startup reap keyed on SIRIO_WL_LABEL in $SCRIPT." >&2
+    echo "      Without it, every SIRIO_WL_KEEP invocation leaks its helpers." >&2
     exit 1
 }
 for helper in dbus-daemon virtual-pointer wtype; do
@@ -81,7 +81,7 @@ spawn() { # label helper -> echoes pid
     # *close*, not for the subshell to exit — a decoy inheriting that pipe holds
     # it open for its full lifetime, so the assignment below would block for 300
     # seconds on a process that started instantly.
-    env TILLER_WL_LABEL="$label" "$TMP/$helper" 300 </dev/null >/dev/null 2>&1 &
+    env SIRIO_WL_LABEL="$label" "$TMP/$helper" 300 </dev/null >/dev/null 2>&1 &
     echo $!
 }
 

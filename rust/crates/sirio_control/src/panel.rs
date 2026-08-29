@@ -926,6 +926,8 @@ fn child_exec(
         let pane = std::ffi::CString::new(pane_id)
             .unwrap_or_else(|_| CString::new("pane-invalid").expect("literal has no nul"));
         let term = std::ffi::CString::new("xterm-256color").expect("literal has no nul");
+        libc::setenv(c"SIRIO_PANE_ID".as_ptr(), pane.as_ptr(), 1);
+        // Same pre-rebrand alias the terminal crate exports.
         libc::setenv(c"TILLER_PANE_ID".as_ptr(), pane.as_ptr(), 1);
         libc::setenv(c"TERM".as_ptr(), term.as_ptr(), 1);
 

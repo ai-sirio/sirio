@@ -16,7 +16,7 @@
 //! writing into the user's *login keyring* are ambient credential
 //! mutations no human approved, an unlocked-keyring prompt can block a
 //! headless session, and a keyring-backed store cannot be pointed at a
-//! hermetic fixture. `TILLER_CREDENTIALS` overrides the file path, which
+//! hermetic fixture. `SIRIO_CREDENTIALS` overrides the file path, which
 //! is what tests and the capture lane use for isolation.
 
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ pub enum CredentialStoreError {
         /// The underlying filesystem error.
         source: std::io::Error,
     },
-    /// No `TILLER_CREDENTIALS`, no `XDG_DATA_HOME` and no platform fallback
+    /// No `SIRIO_CREDENTIALS`, no `XDG_DATA_HOME` and no platform fallback
     /// (`LOCALAPPDATA` on Windows, `HOME` on POSIX): there is nowhere to put
     /// the store.
     NoHome,
@@ -79,14 +79,14 @@ impl CredentialStore {
         Self { path: path.into() }
     }
 
-    /// The store at the environment's path: `$TILLER_CREDENTIALS` if set,
+    /// The store at the environment's path: `$SIRIO_CREDENTIALS` if set,
     /// else `$XDG_DATA_HOME/sirio/credentials.json`, else the platform
     /// fallback — `%LOCALAPPDATA%\Sirio\credentials.json` on Windows
     /// (where `HOME` is ignored entirely), `$HOME/.local/share/sirio/credentials.json`
     /// on POSIX.
     pub fn from_env() -> Result<Self, CredentialStoreError> {
         resolve_store_path(
-            std::env::var_os("TILLER_CREDENTIALS").as_deref(),
+            std::env::var_os("SIRIO_CREDENTIALS").as_deref(),
             std::env::var_os("XDG_DATA_HOME").as_deref(),
             std::env::var_os("HOME").as_deref(),
             std::env::var_os("LOCALAPPDATA").as_deref(),
@@ -355,7 +355,7 @@ mod tests {
             )
             .unwrap(),
             PathBuf::from("/tmp/x.json"),
-            "TILLER_CREDENTIALS wins"
+            "SIRIO_CREDENTIALS wins"
         );
         assert_eq!(
             resolve_store_path(

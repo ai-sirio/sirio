@@ -25,7 +25,7 @@
 //! # Configuring the deadline
 //!
 //! The default budget ([`DEFAULT_GIT_TIMEOUT`]) applies whenever the
-//! `TILLER_GIT_TIMEOUT_MS` environment variable is unset or unparseable.
+//! `SIRIO_GIT_TIMEOUT_MS` environment variable is unset or unparseable.
 //! The variable overrides the budget for the *default* path only (every
 //! public call in this crate); an explicit budget passed to
 //! [`run_with_timeout`] is always honored as given, so the deadline-enforcement
@@ -95,7 +95,7 @@ pub const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Environment variable that overrides [`DEFAULT_GIT_TIMEOUT`], in
 /// milliseconds. See the module docs for the semantics: only the default
 /// path is affected, and only while the variable is set.
-const TIMEOUT_ENV_VAR: &str = "TILLER_GIT_TIMEOUT_MS";
+const TIMEOUT_ENV_VAR: &str = "SIRIO_GIT_TIMEOUT_MS";
 
 /// How often the runner polls the child while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -137,7 +137,7 @@ const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 /// Overrides [`DEFAULT_OUTPUT_LIMIT_BYTES`], mirroring the timeout override
 /// above. Tests use it so they can prove the limit without generating ten
 /// megabytes of real output.
-const OUTPUT_LIMIT_ENV_VAR: &str = "TILLER_GIT_OUTPUT_LIMIT_BYTES";
+const OUTPUT_LIMIT_ENV_VAR: &str = "SIRIO_GIT_OUTPUT_LIMIT_BYTES";
 
 /// A per-thread cap that outranks the environment, for the one test that needs
 /// to prove the limit is really wired into the runner.
@@ -532,7 +532,7 @@ pub(crate) fn run(args: &[&str], cwd: &Path) -> Result<GitOutput, GitError> {
     run_with_timeout(args, cwd, configured_timeout())
 }
 
-/// The deadline for default-path invocations: the `TILLER_GIT_TIMEOUT_MS`
+/// The deadline for default-path invocations: the `SIRIO_GIT_TIMEOUT_MS`
 /// override when set and parseable, else [`DEFAULT_GIT_TIMEOUT`]. Consulted
 /// per call so an override set mid-process (a test process, or an operator
 /// changing an environment) takes effect without coordination.
@@ -750,7 +750,7 @@ mod tests {
     fn git_timeout_fires() {
         use std::os::unix::fs::PermissionsExt;
 
-        if std::env::var_os("TILLER_GIT_TIMEOUT_TEST").is_none() {
+        if std::env::var_os("SIRIO_GIT_TIMEOUT_TEST").is_none() {
             let scratch = scratch_dir();
             let fake_dir = scratch.join("fake-bin");
             std::fs::create_dir_all(&fake_dir).expect("create fake bin dir");
@@ -768,7 +768,7 @@ mod tests {
                     "--nocapture",
                     "--test-threads=1",
                 ])
-                .env("TILLER_GIT_TIMEOUT_TEST", "1")
+                .env("SIRIO_GIT_TIMEOUT_TEST", "1")
                 .env(
                     "PATH",
                     format!("{}:{}", fake_dir.display(), path.to_string_lossy()),

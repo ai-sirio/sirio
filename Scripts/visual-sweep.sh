@@ -188,15 +188,15 @@ printf 'untracked fixture content\n' >"$FIXTURE/untracked.md"
 printf 'fixture git status:\n'
 git -C "$FIXTURE" status --short
 
-export TILLER_SOCKET="$SOCKET"
-export TILLER_DB="$DATABASE"
+export SIRIO_SOCKET="$SOCKET"
+export SIRIO_DB="$DATABASE"
 
 if [[ "$STATE_ONLY" -eq 1 ]]; then
     (cd "$FIXTURE" && exec env -u DISPLAY -u WAYLAND_DISPLAY \
-        TILLER_SOCKET="$SOCKET" TILLER_DB="$DATABASE" "$BIN" >"$APP_LOG" 2>&1) &
+        SIRIO_SOCKET="$SOCKET" SIRIO_DB="$DATABASE" "$BIN" >"$APP_LOG" 2>&1) &
 else
     (cd "$FIXTURE" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" \
-        GPUI_X11_SCALE_FACTOR=1 TILLER_SOCKET="$SOCKET" TILLER_DB="$DATABASE" \
+        GPUI_X11_SCALE_FACTOR=1 SIRIO_SOCKET="$SOCKET" SIRIO_DB="$DATABASE" \
         "$BIN" >"$APP_LOG" 2>&1) &
 fi
 APP_PID=$!

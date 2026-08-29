@@ -1,5 +1,5 @@
 //! Integration tests against a REAL unix socket in a temp directory
-//! (set via $TILLER_SOCKET). Every trap only exists on a real socket: an
+//! (set via $SIRIO_SOCKET). Every trap only exists on a real socket: an
 //! idle client, a mid-request disconnect, an oversized line, concurrent
 //! clients, and a stale socket file.
 
@@ -276,7 +276,7 @@ impl ControlHandler for TestHandler {
     }
 }
 
-/// A test server bound to a socket under a temp dir (via $TILLER_SOCKET).
+/// A test server bound to a socket under a temp dir (via $SIRIO_SOCKET).
 struct TestServer {
     server: ControlServer,
     /// Kept alive so the socket's parent directory outlives the server.
@@ -729,7 +729,7 @@ fn stop_removes_the_socket_file_and_stops_accepting() {
 #[test]
 fn server_creates_missing_parent_for_platform_default_style_socket() {
     let dir = TempDir::new("parent");
-    let socket_path = dir.path().join("runtime/TillerRust/control.sock");
+    let socket_path = dir.path().join("runtime/Sirio/control.sock");
     let server = ControlServer::new(socket_path.clone(), TestHandler::new());
 
     server.start().expect("server creates socket parent");
@@ -754,7 +754,7 @@ fn sirioctl(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let binary = env!("CARGO_BIN_EXE_sirioctl");
     Command::new(binary)
         .args(args)
-        .env("TILLER_SOCKET", socket_path)
+        .env("SIRIO_SOCKET", socket_path)
         .output()
         .expect("sirioctl runs")
 }
@@ -1440,9 +1440,9 @@ fn sirioctl_identify_reads_environment_context() {
     let binary = env!("CARGO_BIN_EXE_sirioctl");
     let output = Command::new(binary)
         .args(["identify"])
-        .env("TILLER_SOCKET", &server.socket_path)
-        .env("TILLER_WORKTREE_ID", "wt-1")
-        .env("TILLER_PANE_ID", "pane-1")
+        .env("SIRIO_SOCKET", &server.socket_path)
+        .env("SIRIO_WORKTREE_ID", "wt-1")
+        .env("SIRIO_PANE_ID", "pane-1")
         .output()
         .expect("sirioctl runs");
     assert!(output.status.success());
@@ -1574,7 +1574,7 @@ fn sirioctl_fails_cleanly_when_no_server_is_running() {
     let dead_path = dir.path().join("dead.sock");
     let output = Command::new(env!("CARGO_BIN_EXE_sirioctl"))
         .args(["ping"])
-        .env("TILLER_SOCKET", &dead_path)
+        .env("SIRIO_SOCKET", &dead_path)
         .output()
         .expect("sirioctl runs");
     assert!(!output.status.success(), "must fail when nothing listens");

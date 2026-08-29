@@ -2,8 +2,8 @@
 //! the agent hooks report status back. Ported from the Swift
 //! `SirioControl` package.
 //!
-//! The server listens on a unix socket — `$TILLER_SOCKET` when set, otherwise
-//! `$XDG_RUNTIME_DIR/TillerRust/control.sock`, falling back to the XDG state
+//! The server listens on a unix socket — `$SIRIO_SOCKET` when set, otherwise
+//! `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state
 //! directory when no runtime directory exists (see [`protocol`]). The Swift
 //! original defaulted to `~/Library/Application Support/Sirio/control.sock`;
 //! that path is history, not current behaviour. It dispatches line-delimited
@@ -100,7 +100,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn display_endpoint_on_unix_is_the_path() {
-        let path = Path::new("/run/user/1000/TillerRust/control.sock");
+        let path = Path::new("/run/user/1000/Sirio/control.sock");
         assert_eq!(super::display_endpoint(path), path.display().to_string());
     }
 
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn display_endpoint_on_windows_is_the_pipe_name() {
         let endpoint = super::display_endpoint(Path::new(
-            r"C:\Users\alice\AppData\Local\TillerRust\control.sock",
+            r"C:\Users\alice\AppData\Local\Sirio\control.sock",
         ));
         assert!(endpoint.starts_with(r"\\.\pipe\"), "{endpoint}");
     }

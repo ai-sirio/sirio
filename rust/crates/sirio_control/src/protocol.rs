@@ -92,11 +92,17 @@ pub mod rows {
     }
 }
 
-/// The default control socket path: `$TILLER_SOCKET` if set, otherwise the
+/// The default control socket path: `$SIRIO_SOCKET` if set, otherwise the
 /// platform's private runtime location. Linux uses `$XDG_RUNTIME_DIR` and
 /// falls back to the XDG state directory when no runtime directory exists.
 pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
-    if let Some(override_path) = environment.get("TILLER_SOCKET") {
+    // `TILLER_SOCKET` is still honoured: agent hooks and shells started before
+    // the rebrand carry it in their environment, and the socket is how they
+    // reach the app at all. The new name wins when both are set.
+    if let Some(override_path) = environment
+        .get("SIRIO_SOCKET")
+        .or_else(|| environment.get("TILLER_SOCKET"))
+    {
         return override_path.clone();
     }
 
@@ -113,7 +119,7 @@ pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
     {
         let root = absolute_environment_path(environment, "XDG_RUNTIME_DIR")
             .unwrap_or_else(|| xdg_state_home(environment));
-        root.join("TillerRust")
+        root.join("Sirio")
             .join("control.sock")
             .to_string_lossy()
             .into_owned()
@@ -566,13 +572,13 @@ mod tests {
         ]);
         assert_eq!(
             default_socket_path(&runtime),
-            "/run/user/1000/TillerRust/control.sock"
+            "/run/user/1000/Sirio/control.sock"
         );
 
         let fallback = BTreeMap::from([("HOME".to_string(), "/home/alice".to_string())]);
         assert_eq!(
             default_socket_path(&fallback),
-            "/home/alice/.local/state/TillerRust/control.sock"
+            "/home/alice/.local/state/Sirio/control.sock"
         );
     }
 

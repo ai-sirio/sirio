@@ -7,7 +7,7 @@
 # verification claim.
 #
 # Nor is CI OK an ACP claim by default. The one real-agent ACP test in the tree is
-# #[ignore]d and runs only with TILLER_ACP_REAL=1 (see the stage below). Without it
+# #[ignore]d and runs only with SIRIO_ACP_REAL=1 (see the stage below). Without it
 # this gate is green whether or not an agent can be connected at all.
 set -Eeuo pipefail
 
@@ -61,8 +61,8 @@ mkdir -p "$LOG_DIR" "$SMOKE_DIR"
 
 # The directory is unique and created atomically, so the socket path cannot
 # collide with another agent's live Sirio instance or be raced into existence.
-export TILLER_SOCKET="$RUN_DIR/sirio.sock"
-export TILLER_DB="$RUN_DIR/sirio.sqlite"
+export SIRIO_SOCKET="$RUN_DIR/sirio.sock"
+export SIRIO_DB="$RUN_DIR/sirio.sqlite"
 
 APP_PID=""
 PANE_ID=""
@@ -87,7 +87,7 @@ cleanup() {
     local status=$?
     trap - EXIT INT TERM
 
-    if [[ -n "${PANE_ID:-}" ]] && [[ -S "$TILLER_SOCKET" ]] && [[ -x "$CTL_BIN" ]]; then
+    if [[ -n "${PANE_ID:-}" ]] && [[ -S "$SIRIO_SOCKET" ]] && [[ -x "$CTL_BIN" ]]; then
         timeout 3 "$CTL_BIN" panel close --id "$PANE_ID" >/dev/null 2>&1 || true
     fi
     for pgid in "${PANE_GROUPS[@]}"; do
@@ -115,7 +115,7 @@ cleanup() {
         kill -KILL -- "-$pgid" 2>/dev/null || true
     done
 
-    [[ -e "$TILLER_SOCKET" ]] && rm -f "$TILLER_SOCKET"
+    [[ -e "$SIRIO_SOCKET" ]] && rm -f "$SIRIO_SOCKET"
     rm -rf "$RUN_DIR"
     exit "$status"
 }
@@ -242,11 +242,11 @@ done
 # Opt-in rather than default: an agent pane without credentials must still be able
 # to reach a green gate, or it learns to ignore the gate (the same reasoning as the
 # sccache fallback above). Verified passing 2026-08-13 in 8.16s.
-if [ "${TILLER_ACP_REAL:-0}" = "1" ]; then
-    run_cargo_stage "real ACP acceptance (TILLER_ACP_REAL=1)" \
+if [ "${SIRIO_ACP_REAL:-0}" = "1" ]; then
+    run_cargo_stage "real ACP acceptance (SIRIO_ACP_REAL=1)" \
         cargo test -p sirio_acp --test real_claude -- --ignored
 else
-    echo "SKIP: real ACP acceptance — set TILLER_ACP_REAL=1 to exercise it"
+    echo "SKIP: real ACP acceptance — set SIRIO_ACP_REAL=1 to exercise it"
 fi
 
 run_root_stage "test-crash-supervise.py" env PYTHONDONTWRITEBYTECODE=1 \
@@ -298,7 +298,7 @@ run_root_stage "test-x11-unmap-needs-a-flush.sh" env PYTHONDONTWRITEBYTECODE=1 \
 #
 #  SKIP -- rust-std itself is not installed for the triple (`rustup target list --installed`
 #  doesn't list it). This is a one-command, always-fixable, per-contributor setup gap that
-#  cannot regress from a code change, so it is treated the same way the TILLER_ACP_REAL stage
+#  cannot regress from a code change, so it is treated the same way the SIRIO_ACP_REAL stage
 #  above is: skip loudly, name the exact fix (`rustup target add <triple>`), and let a
 #  contributor who hasn't opted in yet still reach a green gate. A maintained CI runner installs
 #  the target once, permanently, so the skip path is a laptop convenience, not a hole CI lives
@@ -477,13 +477,13 @@ capture_panel_groups() {
 [[ -x "$CTL_BIN" ]] || smoke_failure "missing sirioctl binary at $CTL_BIN"
 
 setsid env -u DISPLAY -u WAYLAND_DISPLAY \
-    TILLER_SOCKET="$TILLER_SOCKET" TILLER_DB="$TILLER_DB" \
+    SIRIO_SOCKET="$SIRIO_SOCKET" SIRIO_DB="$SIRIO_DB" \
     "$APP_BIN" >"$APP_LOG" 2>&1 &
 APP_PID=$!
 
 socket_ready=0
 for _ in $(seq 1 150); do
-    if [[ -S "$TILLER_SOCKET" ]]; then
+    if [[ -S "$SIRIO_SOCKET" ]]; then
         socket_ready=1
         break
     fi
@@ -500,7 +500,7 @@ capture_panel_groups
 # the persisted project catalog -- being launched inside a git checkout is not by itself
 # enough for `current-workspace` to see one, the same way `Scripts/visual-sweep.sh` already
 # has to `project add` its fixture before any `workspace.current`/`workspace.select` call.
-# $TILLER_DB above is a fresh, empty, per-run database, so without this the very next call
+# $SIRIO_DB above is a fresh, empty, per-run database, so without this the very next call
 # always reports "no current workspace" -- not a failure of anything this gate is testing.
 smoke_capture project-add "$CTL_BIN" project add "$ROOT" >/dev/null
 

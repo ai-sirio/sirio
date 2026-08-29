@@ -4,7 +4,7 @@
 //! call. Run it deliberately:
 //!
 //! ```sh
-//! TILLER_LIVE_OMP=1 cargo test -p sirio_agents --test omp_live -- --ignored --nocapture
+//! SIRIO_LIVE_OMP=1 cargo test -p sirio_agents --test omp_live -- --ignored --nocapture
 //! ```
 //!
 //! Why this test exists rather than a hand-typed shell transcript: every
@@ -24,7 +24,7 @@ use sirio_agents::{AgentAdapter, OhMyPiAdapter};
 const PANE: &str = "11111111-2222-3333-4444-555555555555";
 
 fn live_enabled() -> bool {
-    std::env::var("TILLER_LIVE_OMP").is_ok_and(|value| value == "1")
+    std::env::var("SIRIO_LIVE_OMP").is_ok_and(|value| value == "1")
 }
 
 /// A stand-in for `sirioctl` that appends its argv to `notify.log`, so
@@ -66,10 +66,10 @@ fn run(command: &str, cwd: &Path) -> std::process::Output {
 /// hook, the adapter's launch command loads it, and a real session drives
 /// the badge through start, turn and shutdown.
 #[test]
-#[ignore = "launches a real omp session; set TILLER_LIVE_OMP=1"]
+#[ignore = "launches a real omp session; set SIRIO_LIVE_OMP=1"]
 fn live_session_drives_the_badge_through_start_turn_and_shutdown() {
     if !live_enabled() {
-        eprintln!("skipped: set TILLER_LIVE_OMP=1 to drive a real omp session");
+        eprintln!("skipped: set SIRIO_LIVE_OMP=1 to drive a real omp session");
         return;
     }
     let worktree = scratch_dir("session");
@@ -115,10 +115,10 @@ fn live_session_drives_the_badge_through_start_turn_and_shutdown() {
 
 /// F-AGENT-OMP-03: the summarizer command produces a summary on stdout.
 #[test]
-#[ignore = "launches a real omp session; set TILLER_LIVE_OMP=1"]
+#[ignore = "launches a real omp session; set SIRIO_LIVE_OMP=1"]
 fn live_summarizer_command_prints_to_stdout() {
     if !live_enabled() {
-        eprintln!("skipped: set TILLER_LIVE_OMP=1 to drive a real omp session");
+        eprintln!("skipped: set SIRIO_LIVE_OMP=1 to drive a real omp session");
         return;
     }
     let worktree = scratch_dir("summarizer");

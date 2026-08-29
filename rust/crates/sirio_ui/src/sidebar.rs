@@ -9,7 +9,7 @@
 //! background executor (never the render thread), and inserts the new row
 //! without a refresh; a hover "×" on a worktree row removes it. The fixture
 //! project "sirio" is backed by the repository given in
-//! `TILLER_SIDEBAR_REPO`; projects without a repository path are not offered
+//! `SIRIO_SIDEBAR_REPO`; projects without a repository path are not offered
 //! a New Worktree row, exactly like non-git projects.
 
 use std::cell::RefCell;
@@ -604,7 +604,7 @@ impl Sidebar {
         // runs from when provided; without one, no New Worktree row is
         // offered (a project with no repository path behaves like a non-git
         // project).
-        let sirio_repo = std::env::var_os("TILLER_SIDEBAR_REPO").map(PathBuf::from);
+        let sirio_repo = std::env::var_os("SIRIO_SIDEBAR_REPO").map(PathBuf::from);
         Self::new_with_repo(cx, sirio_repo)
     }
 
@@ -1651,7 +1651,7 @@ impl Sidebar {
     /// deterministic default-project-location proposal — mirrors Swift's
     /// `ProjectDefaults.defaultProjectsRoot()` seeding `CreateNewProjectView`'s
     /// `parentDir` (`App/AddProjectSheet.swift:291`). A user with no
-    /// configured default sees `$TILLER_PROJECTS_DIR`, else
+    /// configured default sees `$SIRIO_PROJECTS_DIR`, else
     /// `$XDG_DATA_HOME/Sirio/projects`, else `$HOME/Sirio/projects` —
     /// `sirio_project::default_project_base()` is the single source of
     /// truth for that proposal; forms remain free to override it via
@@ -4777,7 +4777,7 @@ mod tests {
     /// F-CORE-DOM-03: the Clone/Create forms must propose
     /// `sirio_project::default_project_base()`'s deterministic default —
     /// not some independent HOME/temp_dir guess — and the proposal must
-    /// track a Linux-specific override (`TILLER_PROJECTS_DIR`), matching
+    /// track a Linux-specific override (`SIRIO_PROJECTS_DIR`), matching
     /// the VERIFY clause's "observe the proposed project location ...
     /// repeat with a Linux replacement root and confirm it is
     /// deterministic". Serialized on `env_lock` because it mutates process
@@ -4787,13 +4787,13 @@ mod tests {
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
 
-        let saved_projects_dir = std::env::var_os("TILLER_PROJECTS_DIR");
+        let saved_projects_dir = std::env::var_os("SIRIO_PROJECTS_DIR");
         let saved_xdg = std::env::var_os("XDG_DATA_HOME");
 
         // No overrides configured: falls back through to $HOME/Sirio/projects,
         // exactly what `sirio_project::default_project_base()` returns.
         unsafe {
-            std::env::remove_var("TILLER_PROJECTS_DIR");
+            std::env::remove_var("SIRIO_PROJECTS_DIR");
             std::env::remove_var("XDG_DATA_HOME");
         }
         assert_eq!(
@@ -4802,24 +4802,24 @@ mod tests {
             "with no overrides, the sidebar's proposed parent must equal the deterministic default"
         );
 
-        // A Linux replacement root (TILLER_PROJECTS_DIR) changes the
+        // A Linux replacement root (SIRIO_PROJECTS_DIR) changes the
         // proposal deterministically, and the sidebar must track it rather
         // than proposing a fixed HOME-derived path of its own.
         let replacement = std::env::temp_dir().join("sirio-f-core-dom-03-replacement-root");
         unsafe {
-            std::env::set_var("TILLER_PROJECTS_DIR", &replacement);
+            std::env::set_var("SIRIO_PROJECTS_DIR", &replacement);
         }
         assert_eq!(
             Sidebar::project_form_parent(),
             replacement,
-            "TILLER_PROJECTS_DIR must be honored as the proposed location"
+            "SIRIO_PROJECTS_DIR must be honored as the proposed location"
         );
 
         unsafe {
-            std::env::remove_var("TILLER_PROJECTS_DIR");
+            std::env::remove_var("SIRIO_PROJECTS_DIR");
             match saved_projects_dir {
-                Some(value) => std::env::set_var("TILLER_PROJECTS_DIR", value),
-                None => std::env::remove_var("TILLER_PROJECTS_DIR"),
+                Some(value) => std::env::set_var("SIRIO_PROJECTS_DIR", value),
+                None => std::env::remove_var("SIRIO_PROJECTS_DIR"),
             }
             match saved_xdg {
                 Some(value) => std::env::set_var("XDG_DATA_HOME", value),
@@ -4943,8 +4943,8 @@ mod tests {
         // the git-call timeout so a loaded machine can't turn this into a
         // flake.
         // SAFETY: test process; the only reader is the crate's per-call
-        // `TILLER_GIT_TIMEOUT_MS` lookup.
-        unsafe { std::env::set_var("TILLER_GIT_TIMEOUT_MS", "120000") };
+        // `SIRIO_GIT_TIMEOUT_MS` lookup.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
         let repo = scratch_repo("context-menu-remove");
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
@@ -5256,9 +5256,9 @@ mod tests {
         // flake. Widen the budget for this process — the production default
         // is untouched; the override only applies while this variable is set.
         // SAFETY: test process; the only reader is the crate's per-call
-        // `TILLER_GIT_TIMEOUT_MS` lookup, and a wider budget can only turn a
+        // `SIRIO_GIT_TIMEOUT_MS` lookup, and a wider budget can only turn a
         // would-be timeout into a pass.
-        unsafe { std::env::set_var("TILLER_GIT_TIMEOUT_MS", "120000") };
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
         let repo = scratch_repo("remove");
 
         cx.update(Theme::init);

@@ -11,7 +11,7 @@ fn main() {
     let working_directory = std::env::current_dir().expect("current directory");
     application().run(move |cx: &mut App| {
         Theme::init(cx);
-        if std::env::var("TILLER_THEME").as_deref() == Ok("light") {
+        if std::env::var("SIRIO_THEME").as_deref() == Ok("light") {
             Theme::set_mode(ThemeMode::Light, cx);
         }
         let bounds = Bounds::centered(None, size(px(1100.), px(700.)), cx);

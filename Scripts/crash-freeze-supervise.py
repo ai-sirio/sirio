@@ -180,19 +180,19 @@ def pixel_digest(path: Path) -> str | None:
 
 
 def default_socket_path(environment: dict[str, str]) -> Path:
-    override = environment.get("TILLER_SOCKET")
+    override = environment.get("SIRIO_SOCKET")
     if override:
         return Path(override)
     runtime = environment.get("XDG_RUNTIME_DIR")
     if runtime and Path(runtime).is_absolute():
-        return Path(runtime) / "TillerRust" / "control.sock"
+        return Path(runtime) / "Sirio" / "control.sock"
     state = environment.get("XDG_STATE_HOME")
     if state and Path(state).is_absolute():
         root = Path(state)
     else:
         home = environment.get("HOME", "/tmp")
         root = Path(home) / ".local" / "state"
-    return root / "TillerRust" / "control.sock"
+    return root / "Sirio" / "control.sock"
 
 
 def check_liveness(sirioctl: Path, socket: Path) -> Liveness:
@@ -493,7 +493,7 @@ def run() -> int:
     child_env["DISPLAY"] = args.display
     child_env.pop("WAYLAND_DISPLAY", None)
     child_env["GPUI_X11_SCALE_FACTOR"] = "1"
-    child_env["TILLER_SOCKET"] = str(args.socket)
+    child_env["SIRIO_SOCKET"] = str(args.socket)
     child_env.setdefault("RUST_BACKTRACE", "full")
 
     log_fd = os.open(output_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)

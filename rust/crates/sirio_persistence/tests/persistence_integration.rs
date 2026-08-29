@@ -512,8 +512,8 @@ fn chat_transcript_survives_process_relaunch_with_tool_and_permission_outcome() 
 
     let write = std::process::Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", "chat_relaunch_helper", "--nocapture"])
-        .env("TILLER_PERSISTENCE_CHAT_HELPER", &path)
-        .env("TILLER_PERSISTENCE_CHAT_MODE", "write")
+        .env("SIRIO_PERSISTENCE_CHAT_HELPER", &path)
+        .env("SIRIO_PERSISTENCE_CHAT_MODE", "write")
         .output()
         .expect("spawn transcript writer");
     assert!(
@@ -524,8 +524,8 @@ fn chat_transcript_survives_process_relaunch_with_tool_and_permission_outcome() 
 
     let read = std::process::Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", "chat_relaunch_helper", "--nocapture"])
-        .env("TILLER_PERSISTENCE_CHAT_HELPER", &path)
-        .env("TILLER_PERSISTENCE_CHAT_MODE", "read")
+        .env("SIRIO_PERSISTENCE_CHAT_HELPER", &path)
+        .env("SIRIO_PERSISTENCE_CHAT_MODE", "read")
         .output()
         .expect("spawn transcript reader");
     assert!(
@@ -542,10 +542,10 @@ fn chat_transcript_survives_process_relaunch_with_tool_and_permission_outcome() 
 
 #[test]
 fn chat_relaunch_helper() {
-    let Ok(database_path) = std::env::var("TILLER_PERSISTENCE_CHAT_HELPER") else {
+    let Ok(database_path) = std::env::var("SIRIO_PERSISTENCE_CHAT_HELPER") else {
         return;
     };
-    let mode = std::env::var("TILLER_PERSISTENCE_CHAT_MODE").expect("chat helper mode");
+    let mode = std::env::var("SIRIO_PERSISTENCE_CHAT_MODE").expect("chat helper mode");
     let path = Path::new(&database_path);
 
     match mode.as_str() {
@@ -1487,16 +1487,16 @@ fn db_schema_version(path: &Path) -> i64 {
 /// and the partial unique index, prints `OK`, and exits 0. Any failure exits
 /// non-zero with the reason on stderr.
 ///
-/// Triggered by the `TILLER_PERSISTENCE_HELPER` environment variable, so the
+/// Triggered by the `SIRIO_PERSISTENCE_HELPER` environment variable, so the
 /// parent can re-execute this test binary as the child (`current_exe`). When
 /// the variable is absent this is a no-op test.
 #[test]
 fn helper_process() {
-    let Ok(database_path) = std::env::var("TILLER_PERSISTENCE_HELPER") else {
+    let Ok(database_path) = std::env::var("SIRIO_PERSISTENCE_HELPER") else {
         return;
     };
-    let go_file = std::env::var("TILLER_PERSISTENCE_GO").expect("go file env");
-    let ready_file = std::env::var("TILLER_PERSISTENCE_READY").expect("ready file env");
+    let go_file = std::env::var("SIRIO_PERSISTENCE_GO").expect("go file env");
+    let ready_file = std::env::var("SIRIO_PERSISTENCE_READY").expect("ready file env");
 
     std::fs::write(&ready_file, "ready")
         .unwrap_or_else(|error| helper_fail(3, &format!("cannot write ready file: {error}")));
@@ -1557,13 +1557,13 @@ fn helper_process() {
 /// child quits after saving disjoint records to the same SQLite file.
 #[test]
 fn writer_process() {
-    let Ok(database_path) = std::env::var("TILLER_PERSISTENCE_WRITER") else {
+    let Ok(database_path) = std::env::var("SIRIO_PERSISTENCE_WRITER") else {
         return;
     };
-    let go_file = std::env::var("TILLER_PERSISTENCE_WRITER_GO").expect("writer go file env");
+    let go_file = std::env::var("SIRIO_PERSISTENCE_WRITER_GO").expect("writer go file env");
     let ready_file =
-        std::env::var("TILLER_PERSISTENCE_WRITER_READY").expect("writer ready file env");
-    let writer_id = std::env::var("TILLER_PERSISTENCE_WRITER_ID").expect("writer id env");
+        std::env::var("SIRIO_PERSISTENCE_WRITER_READY").expect("writer ready file env");
+    let writer_id = std::env::var("SIRIO_PERSISTENCE_WRITER_ID").expect("writer id env");
 
     std::fs::write(&ready_file, "ready").unwrap_or_else(|error| {
         helper_fail(7, &format!("cannot write writer ready file: {error}"))
@@ -1621,9 +1621,9 @@ fn wait_until(deadline: std::time::Instant, what: &str, mut ready: impl FnMut() 
 fn spawn_helper(dir: &Path, database_path: &Path, ready: &Path, go: &Path) -> std::process::Child {
     std::process::Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", "helper_process", "--nocapture"])
-        .env("TILLER_PERSISTENCE_HELPER", database_path)
-        .env("TILLER_PERSISTENCE_GO", go)
-        .env("TILLER_PERSISTENCE_READY", ready)
+        .env("SIRIO_PERSISTENCE_HELPER", database_path)
+        .env("SIRIO_PERSISTENCE_GO", go)
+        .env("SIRIO_PERSISTENCE_READY", ready)
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1640,10 +1640,10 @@ fn spawn_writer(
 ) -> std::process::Child {
     std::process::Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", "writer_process", "--nocapture"])
-        .env("TILLER_PERSISTENCE_WRITER", database_path)
-        .env("TILLER_PERSISTENCE_WRITER_GO", go)
-        .env("TILLER_PERSISTENCE_WRITER_READY", ready)
-        .env("TILLER_PERSISTENCE_WRITER_ID", writer_id)
+        .env("SIRIO_PERSISTENCE_WRITER", database_path)
+        .env("SIRIO_PERSISTENCE_WRITER_GO", go)
+        .env("SIRIO_PERSISTENCE_WRITER_READY", ready)
+        .env("SIRIO_PERSISTENCE_WRITER_ID", writer_id)
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

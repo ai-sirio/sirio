@@ -54,7 +54,7 @@ fn ensure_generous_timeout() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         // SAFETY: test process, set once, before any concurrent reader.
-        unsafe { std::env::set_var("TILLER_GIT_TIMEOUT_MS", "120000") };
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
     });
 }
 

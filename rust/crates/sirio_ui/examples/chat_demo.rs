@@ -1,7 +1,7 @@
 //! Opens the chat surface wired to a real ACP agent.
 //!
 //! Agent defaults to the same `npx` command as `sirio_acp`'s smoke test;
-//! override with `TILLER_ACP_PROGRAM=/path/to/agent`. The window is centered
+//! override with `SIRIO_ACP_PROGRAM=/path/to/agent`. The window is centered
 //! unless `CHAT_DEMO_AT=x,y` places it at explicit screen coordinates (handy
 //! for driving the demo with cliclick on a busy screen).
 
@@ -40,7 +40,7 @@ fn main() {
             },
             |_, cx| {
                 cx.new(|cx| {
-                    Chat::launch_from_env(cx).expect("set TILLER_ACP_PROGRAM to run the chat demo")
+                    Chat::launch_from_env(cx).expect("set SIRIO_ACP_PROGRAM to run the chat demo")
                 })
             },
         )

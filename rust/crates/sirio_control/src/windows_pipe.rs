@@ -21,14 +21,14 @@
 //!
 //! # Pipe naming (the mapping from the unix world)
 //!
-//! Callers hand us the same path they would on Linux/macOS: `$TILLER_SOCKET`
+//! Callers hand us the same path they would on Linux/macOS: `$SIRIO_SOCKET`
 //! verbatim when the environment overrides it, otherwise the platform
 //! default from [`crate::protocol::default_socket_path`] (XDG runtime/state
 //! directories). Both are mapped deterministically onto the named-pipe
 //! namespace, because NT pipe names cannot be arbitrary filesystem paths:
 //!
 //! - a path already under `\.\pipe\` is used as-is;
-//! - anything else becomes `\.\pipe\TillerRust\<user-SID>-<sanitized>-<fnv1a64>`,
+//! - anything else becomes `\.\pipe\Sirio\<user-SID>-<sanitized>-<fnv1a64>`,
 //!   where `<user-SID>` scopes the name to the calling user, `<sanitized>`
 //!   is the path with characters illegal in a pipe name replaced, and
 //!   `<fnv1a64>` is a hash of the *full* path, keeping distinct paths
@@ -36,7 +36,7 @@
 //!   the 256-character NT pipe-name limit.
 //!
 //! The user-SID component is load-bearing, not cosmetic. Without it the
-//! default path (`/tmp/TillerRust/control.sock` when no XDG/HOME env is
+//! default path (`/tmp/Sirio/control.sock` when no XDG/HOME env is
 //! set — the norm for GUI processes) derives a name that is identical for
 //! every user on the machine and guessable from the source: an attacker
 //! could pre-create it and silently harvest every Layer-A hook payload
@@ -46,7 +46,7 @@
 //! user's Sirio just works), and nobody can pre-squat a name they cannot
 //! derive for their victim.
 //!
-//! `$TILLER_SOCKET=/tmp/x/control.sock` therefore lands on the same pipe
+//! `$SIRIO_SOCKET=/tmp/x/control.sock` therefore lands on the same pipe
 //! for the app and for `sirioctl` *of the same user*, whatever their
 //! working directories — the override semantics carry over unchanged from
 //! unix. An explicit `\.\pipe\…` override passes through verbatim and
@@ -93,9 +93,9 @@ use windows_sys::Win32::System::Threading::{
 /// the `\.\pipe\` prefix. Our derived names stay comfortably below it.
 const MAX_PIPE_NAME_CHARS: usize = 256;
 
-/// Prefix for derived pipe names — the TillerRust directory name carried
-/// over from the unix default path (`$XDG_RUNTIME_DIR/TillerRust/…`).
-const PIPE_NAMESPACE: &str = r"\\.\pipe\TillerRust\";
+/// Prefix for derived pipe names — the Sirio directory name carried
+/// over from the unix default path (`$XDG_RUNTIME_DIR/Sirio/…`).
+const PIPE_NAMESPACE: &str = r"\\.\pipe\Sirio\";
 
 // SAFETY: a HANDLE is an opaque integer, not a pointer into anyone's
 // memory — moving these types across threads is exactly what the accept/
@@ -169,7 +169,7 @@ impl std::fmt::Display for ClientConnectError {
 ///
 /// Pure and deterministic: the app and `sirioctl` derive the same name
 /// from the same path with no shared state, which is what makes
-/// `$TILLER_SOCKET` overrides work identically on both sides. Fails only
+/// `$SIRIO_SOCKET` overrides work identically on both sides. Fails only
 /// when the process token cannot be read — refuse closed: a name derived
 /// without the user component would silently reintroduce the machine-global
 /// predictability the SID exists to prevent.
@@ -1149,13 +1149,13 @@ mod tests {
             pipe_name_for_path(b).expect("derive a name"),
             "distinct paths, distinct names"
         );
-        assert!(name_a.starts_with(r"\\.\pipe\TillerRust\"));
+        assert!(name_a.starts_with(r"\\.\pipe\Sirio\"));
         assert!(name_a.len() <= MAX_PIPE_NAME_CHARS, "{name_a}");
 
         // The security property, and the reason this function became
         // fallible: the name carries the CURRENT USER's SID. Without it the
         // default path — no XDG_*/HOME exists on native Windows, so it falls
-        // back to the literal "/tmp/TillerRust/control.sock" — derived to ONE
+        // back to the literal "/tmp/Sirio/control.sock" — derived to ONE
         // machine-global name. That was predictable enough for a local user
         // to create the pipe first and harvest everything sirioctl wrote to
         // it, and it also broke a second user's Sirio, which contended for
@@ -1167,7 +1167,7 @@ mod tests {
         );
 
         // An explicit pipe path passes through untouched — the Windows
-        // counterpart of $TILLER_SOCKET naming an exact socket file.
+        // counterpart of $SIRIO_SOCKET naming an exact socket file.
         assert_eq!(
             pipe_name_for_path(Path::new(r"\\.\pipe\custom")).expect("passthrough"),
             r"\\.\pipe\custom"

@@ -75,24 +75,24 @@
 #     shot settings-general
 #   '
 #
-# Env: TILLER_WL_LABEL  names this instance and all its /tmp paths (default: wl-$$).
-#      TILLER_WL_BIN    drive a specific binary instead of rust/target/debug/sirio. A critic
+# Env: SIRIO_WL_LABEL  names this instance and all its /tmp paths (default: wl-$$).
+#      SIRIO_WL_BIN    drive a specific binary instead of rust/target/debug/sirio. A critic
 #      judging one wave must not have the binary swapped under it by a builder rebuilding the
 #      shared target dir mid-drive, so pin a snapshot: cp the binary to /tmp and point here.
-#      TILLER_WL_KEEP=1 leaves the compositor and app running after the actions finish.
-#      TILLER_WL_PROTOCOL_LOG=1 adds WAYLAND_DEBUG=1 to the app's own environment, so APP_LOG
+#      SIRIO_WL_KEEP=1 leaves the compositor and app running after the actions finish.
+#      SIRIO_WL_PROTOCOL_LOG=1 adds WAYLAND_DEBUG=1 to the app's own environment, so APP_LOG
 #      carries the app's ONE Wayland connection's wire trace — every wl_keyboard/wl_pointer event
 #      in true arrival order. Off by default: it is verbose and only worth paying for when a
 #      question is specifically about event ORDER (e.g. was a modifier applied before a click's
 #      button event reached the app), which no screenshot can answer.
-#      TILLER_WL_PORTAL=1 runs an XDG portal on this instance's private bus, so rows that open a
+#      SIRIO_WL_PORTAL=1 runs an XDG portal on this instance's private bus, so rows that open a
 #      native folder picker (Add Project, worktree location) actually work. Off by default because
 #      it costs two more processes and most rows never touch a portal.
-#      TILLER_WL_HOST_DBUS=1 opts OUT of the private bus and shares the caller's. Read the note
+#      SIRIO_WL_HOST_DBUS=1 opts OUT of the private bus and shares the caller's. Read the note
 #      above the bus setup before using it: on a desktop login this is what puts a real "Open
 #      Folder" window on the operator's own screen.
-#      TILLER_WL_ATTACH=1 attaches to an ALREADY-RUNNING TILLER_WL_KEEP=1 session for this same
-#      TILLER_WL_LABEL instead of restarting anything: it skips the start-of-run pre-kill and the
+#      SIRIO_WL_ATTACH=1 attaches to an ALREADY-RUNNING SIRIO_WL_KEEP=1 session for this same
+#      SIRIO_WL_LABEL instead of restarting anything: it skips the start-of-run pre-kill and the
 #      compositor/app boot entirely, re-derives the compositor's wayland display from its own log
 #      (nothing else survives across invocations — KEEP leaves the processes running, not this
 #      script's shell, so no variable does), and reuses the existing control socket, app process
@@ -100,7 +100,7 @@
 #      invocations — e.g. open a context menu in call 1, click one of its items in call 2 — against
 #      the SAME process, which a plain KEEP relaunch cannot do (every invocation, KEEP included,
 #      kills and reboots both the compositor and the app). It never tears anything down on exit,
-#      whether or not TILLER_WL_KEEP is also set: an attach invocation must not disturb the
+#      whether or not SIRIO_WL_KEEP is also set: an attach invocation must not disturb the
 #      session it attached to. It fails loudly (exit 7) rather than silently doing nothing when
 #      there is nothing to attach to — a dead app, a missing control socket, a missing input FIFO,
 #      or (for a keyboard verb) no live virtual-keyboard process — because a `ctl`/`shot`-only KEEP
@@ -109,20 +109,20 @@
 #      conjure a device that was never created.
 #
 # Exit: 0 ok · 2 no binary · 3 compositor never came up · 4 app died · 5 first frame blank
-#       6 the session bus could not be isolated · 7 TILLER_WL_ATTACH=1 had nothing to attach to
+#       6 the session bus could not be isolated · 7 SIRIO_WL_ATTACH=1 had nothing to attach to
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTDIR="${1:?usage: wayland-drive.sh <outdir> '<actions>' [settle]}"
 ACTIONS="${2:-}"
 SETTLE="${3:-6}"
-LABEL="${TILLER_WL_LABEL:-wl-$$}"
-BIN="${TILLER_WL_BIN:-$ROOT/rust/target/debug/sirio}"
-# Attach to an already-running TILLER_WL_KEEP=1 session for this label instead of booting a new
+LABEL="${SIRIO_WL_LABEL:-wl-$$}"
+BIN="${SIRIO_WL_BIN:-$ROOT/rust/target/debug/sirio}"
+# Attach to an already-running SIRIO_WL_KEEP=1 session for this label instead of booting a new
 # one. See the header comment above for the full contract; ATTACH short-circuits every boot step
 # below (pre-kill, sway, dbus, the app launch) in favour of finding and verifying what is already
 # there, and fails loudly (exit 7) when it isn't.
-ATTACH="${TILLER_WL_ATTACH:-0}"
+ATTACH="${SIRIO_WL_ATTACH:-0}"
 MIN_COLORS=200
 # Standalone crate (deliberately outside rust/'s workspace — see Scripts/xdnd-source/Cargo.toml)
 # providing the `xdnd` action's real wl_data_device_manager drag SOURCE. Built on first use, not
@@ -193,7 +193,7 @@ kill_ours() {
     kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
   done
 }
-# Read-only twin of kill_ours, for TILLER_WL_ATTACH=1: find a process that names THIS instance
+# Read-only twin of kill_ours, for SIRIO_WL_ATTACH=1: find a process that names THIS instance
 # without touching it. Prints its pid and returns 0 on a match, prints nothing and returns 1 on
 # none — attach mode uses this to tell "already running, safe to reuse" from "nothing here, fail
 # loudly" instead of ever assuming.
@@ -206,7 +206,7 @@ find_ours() {
 }
 # Everything Sirio spawned in a pane -- the agent CLIs a critic launches over ACP, and whatever
 # those spawn in turn -- inherits Sirio's environment, and an inherited environ SURVIVES
-# REPARENTING. So `TILLER_SOCKET=$SOCK` in /proc/N/environ identifies this lane's descendants
+# REPARENTING. So `SIRIO_SOCKET=$SOCK` in /proc/N/environ identifies this lane's descendants
 # exactly, including the ones whose parent already died and left them on init. A descendant walk
 # (pgrep -P) cannot: reparented children are precisely the ones it loses.
 #
@@ -224,20 +224,20 @@ kill_lane_descendants() {
     [ -r "/proc/$p/environ" ] || continue
     env=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null) || continue
     case $'\n'"$env" in
-      *$'\n'"TILLER_SOCKET=$SOCK"$'\n'*|*$'\n'"TILLER_SOCKET=$SOCK") kill "$p" 2>/dev/null ;;
+      *$'\n'"SIRIO_SOCKET=$SOCK"$'\n'*|*$'\n'"SIRIO_SOCKET=$SOCK") kill "$p" 2>/dev/null ;;
     esac
   done
 }
 cleanup() {
   [ "$ATTACH" = "1" ] && {
     # Never tear down a session this invocation did not create — that is the entire point of
-    # attaching. This fires whether or not TILLER_WL_KEEP is also set; an attach run leaves
+    # attaching. This fires whether or not SIRIO_WL_KEEP is also set; an attach run leaves
     # everything it found exactly as it found it, on every exit path including a failure partway
     # through setup.
     echo "NOTE: attach mode — leaving $LABEL exactly as found (SOCK=$SOCK WAYLAND_DISPLAY=${WD:-<not yet resolved>} VP_FIFO=$VP_FIFO)"
     return 0
   }
-  [ -n "${TILLER_WL_KEEP:-}" ] && {
+  [ -n "${SIRIO_WL_KEEP:-}" ] && {
     echo "NOTE: leaving $LABEL running (SOCK=$SOCK WAYLAND_DISPLAY=$WD VP_FIFO=$VP_FIFO)"
     # The bus daemon stays too, and it is the one leftover an environment scan
     # will not find: it is the *server*, so it carries no
@@ -250,10 +250,10 @@ cleanup() {
   [ -n "${VP_PID:-}" ] && kill "$VP_PID" 2>/dev/null || true
   [ -n "${VK_PID:-}" ] && kill "$VK_PID" 2>/dev/null || true
   kill_lane_descendants
-  # Match the binary's real process name, not the literal "sirio": TILLER_WL_BIN lets a critic
+  # Match the binary's real process name, not the literal "sirio": SIRIO_WL_BIN lets a critic
   # drive a renamed snapshot (/tmp/L3-sirio), and pgrep -x never matched those, so every pinned
   # instance leaked past cleanup and survived `pkill -x sirio` too.
-  kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
+  kill_ours SIRIO_SOCKET "$SOCK" "$(basename "$BIN")"
   kill_ours SWAYSOCK "$SWAYSOCK" sway
   # The bus goes last: the portal backends above are its clients and exit when
   # it does, and killing it first would strand them looking for a socket that
@@ -270,20 +270,20 @@ trap cleanup EXIT
 # Same `$(basename "$BIN")` as cleanup() above, and for the same reason: the literal
 # "sirio" never matches a renamed snapshot. This start-of-run pre-kill is the more
 # important of the two call sites, because cleanup() deliberately does not run under
-# TILLER_WL_KEEP -- so under a KEEP session this is the *only* thing standing between
+# SIRIO_WL_KEEP -- so under a KEEP session this is the *only* thing standing between
 # a relaunch and two live instances sharing one database.
 #
-# None of it runs under TILLER_WL_ATTACH=1. Attaching means reusing exactly what this label
+# None of it runs under SIRIO_WL_ATTACH=1. Attaching means reusing exactly what this label
 # already has running — the app, the compositor, the dbus-daemon, the virtual-pointer, the
 # virtual-keyboard — so killing any of it here would defeat the whole point before the script even
 # gets to the part that looks for something to attach to.
 if [ "$ATTACH" = "1" ]; then
   :
 else
-kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
+kill_ours SIRIO_SOCKET "$SOCK" "$(basename "$BIN")"
 kill_ours SWAYSOCK "$SWAYSOCK" sway
 # The three helpers below leak wherever cleanup() does not run, and cleanup()
-# deliberately does not run under TILLER_WL_KEEP. The app and the compositor are
+# deliberately does not run under SIRIO_WL_KEEP. The app and the compositor are
 # safe because the two lines above reap them at startup; these three had no such
 # line, so a critic re-invoking this script with one fixed label accumulated one
 # of each per invocation.
@@ -294,20 +294,20 @@ kill_ours SWAYSOCK "$SWAYSOCK" sway
 # a new one every 50-90s — the invocation cadence — which is what identifies this
 # as a per-invocation leak rather than a per-pass one.
 #
-# `TILLER_WL_LABEL` is the key for all three: every child of this script inherits
+# `SIRIO_WL_LABEL` is the key for all three: every child of this script inherits
 # it (dbus-daemon keeps it through `env -u WAYLAND_DISPLAY -u DISPLAY`, verified
 # in /proc/N/environ), and it is the one identifier the bus daemon carries — being
 # the *server*, it has no DBUS_SESSION_BUS_ADDRESS of its own to match on. When the
-# caller leaves TILLER_WL_LABEL unset, LABEL falls back to `wl-$$`, no process
+# caller leaves SIRIO_WL_LABEL unset, LABEL falls back to `wl-$$`, no process
 # carries that, and these three find nothing — correct, because a per-PID label
 # cannot have stale siblings in the first place.
 #
 # comm-scoping via kill_ours' `pgrep -x` is what keeps this safe: this script's own
 # comm is `bash`, so it can never match itself, and a critic that exports
-# TILLER_WL_LABEL into its own shell is not at risk either.
-kill_ours TILLER_WL_LABEL "$LABEL" dbus-daemon
-kill_ours TILLER_WL_LABEL "$LABEL" virtual-pointer
-kill_ours TILLER_WL_LABEL "$LABEL" wtype
+# SIRIO_WL_LABEL into its own shell is not at risk either.
+kill_ours SIRIO_WL_LABEL "$LABEL" dbus-daemon
+kill_ours SIRIO_WL_LABEL "$LABEL" virtual-pointer
+kill_ours SIRIO_WL_LABEL "$LABEL" wtype
 fi
 
 W1=1715 H1=972          # the two sizes shot() alternates between; see the repaint note below
@@ -316,19 +316,19 @@ OUTPUT_W="$W1" OUTPUT_H="$H1"
 if [ "$ATTACH" = "1" ]; then
   # Nothing gets booted. Verify the compositor this label already has is really there, then
   # re-derive the wayland display it announced — the ONE thing about it that does not survive
-  # across invocations, because TILLER_WL_KEEP leaves the compositor process running, not this
+  # across invocations, because SIRIO_WL_KEEP leaves the compositor process running, not this
   # script's own shell, so no variable carries it forward. SWAYLOG is the only durable record.
   [ -S "$SWAYSOCK" ] || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no compositor socket at $SWAYSOCK for label '$LABEL' — nothing to attach to. Start a TILLER_WL_KEEP=1 session under this label first." >&2
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no compositor socket at $SWAYSOCK for label '$LABEL' — nothing to attach to. Start a SIRIO_WL_KEEP=1 session under this label first." >&2
     exit 7
   }
   find_ours SWAYSOCK "$SWAYSOCK" sway >/dev/null || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no live sway process owns $SWAYSOCK — a stale socket, nothing to attach to." >&2
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no live sway process owns $SWAYSOCK — a stale socket, nothing to attach to." >&2
     exit 7
   }
   WD="$(sed -n "s/.*Running compositor on wayland display '\([^']*\)'.*/\1/p" "$SWAYLOG" | head -1)"
   [ -n "$WD" ] || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but $SWAYLOG never recorded a wayland display — nothing to attach to." >&2
+    echo "FAIL: SIRIO_WL_ATTACH=1 but $SWAYLOG never recorded a wayland display — nothing to attach to." >&2
     exit 7
   }
   export XDG_RUNTIME_DIR=/run/user/"$(id -u)"
@@ -362,21 +362,21 @@ EOF
 # running on the private bus a picker request fails instead of succeeding
 # somewhere it shouldn't, which is the right failure: a row that "passed" by
 # opening a dialog on the operator's desktop was never testing this app in the
-# first place. Set TILLER_WL_PORTAL=1 to get a portal on the private bus, for
+# first place. Set SIRIO_WL_PORTAL=1 to get a portal on the private bus, for
 # rows that genuinely need the picker to work.
 #
 # The daemon is started with WAYLAND_DISPLAY and DISPLAY stripped, and that is
 # load-bearing rather than tidy. A session bus *activates* services on demand
 # from the system's .service files, so a portal backend can appear on this bus
-# without TILLER_WL_PORTAL — measured: an app asking for
+# without SIRIO_WL_PORTAL — measured: an app asking for
 # org.freedesktop.portal.Desktop had dbus-daemon start one unprompted. An
 # activated service inherits the daemon's environment, so if that carried a
 # display, an auto-started backend would open its window there. Stripped, it
 # has nowhere to draw and exits 1, which is the containment. Run from a desktop
 # terminal without this, "private bus" would still have put a window on the
 # operator's screen.
-if [ "${TILLER_WL_HOST_DBUS:-0}" = "1" ]; then
-  echo "WARN: TILLER_WL_HOST_DBUS=1 — this instance shares the caller's session bus." >&2
+if [ "${SIRIO_WL_HOST_DBUS:-0}" = "1" ]; then
+  echo "WARN: SIRIO_WL_HOST_DBUS=1 — this instance shares the caller's session bus." >&2
   echo "      A native picker opened here reaches the real desktop." >&2
 elif command -v dbus-daemon >/dev/null 2>&1; then
   # Naming the socket ourselves rather than parsing --print-address: the address
@@ -397,7 +397,7 @@ elif command -v dbus-daemon >/dev/null 2>&1; then
   fi
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_SOCK"
   unset DBUS_SESSION_BUS_PID DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE
-  if [ "${TILLER_WL_PORTAL:-0}" = "1" ] && [ -x /usr/libexec/xdg-desktop-portal ]; then
+  if [ "${SIRIO_WL_PORTAL:-0}" = "1" ] && [ -x /usr/libexec/xdg-desktop-portal ]; then
     /usr/libexec/xdg-desktop-portal >>"$DBUS_LOG" 2>&1 &
     PORTAL_PIDS="$!"
     for backend in /usr/libexec/xdg-desktop-portal-gtk /usr/libexec/xdg-desktop-portal-gnome; do
@@ -409,7 +409,7 @@ elif command -v dbus-daemon >/dev/null 2>&1; then
   fi
 else
   echo "FAIL: dbus-daemon is not installed, so this lane cannot isolate the session bus." >&2
-  echo "      Install it, or set TILLER_WL_HOST_DBUS=1 to accept reaching the real desktop." >&2
+  echo "      Install it, or set SIRIO_WL_HOST_DBUS=1 to accept reaching the real desktop." >&2
   exit 6
 fi
 
@@ -490,17 +490,17 @@ start_virtual_keyboard() {
   # The press/release happens before Sirio starts; -s then keeps wtype (and its virtual keyboard)
   # connected without leaving Shift held. Later type/key commands use the already-advertised seat.
   #
-  # The hold has to outlive the drive. At the old 10 minutes, a TILLER_WL_KEEP session that ran
+  # The hold has to outlive the drive. At the old 10 minutes, a SIRIO_WL_KEEP session that ran
   # longer lost ALL keyboard input silently — every type/key/chord still exited 0 and nothing
   # reached the app, which reads exactly like the app ignoring input and has already been recorded
   # as a false negative. Four hours, overridable.
-  wtype -M shift -m shift -s "${TILLER_WL_KEYBOARD_HOLD_MS:-14400000}" -k Shift_L >"$VK_LOG" 2>&1 &
+  wtype -M shift -m shift -s "${SIRIO_WL_KEYBOARD_HOLD_MS:-14400000}" -k Shift_L >"$VK_LOG" 2>&1 &
   VK_PID=$!
   sleep 0.1
   kill -0 "$VK_PID" 2>/dev/null || { cat "$VK_LOG" >&2; return 1; }
 }
 
-# TILLER_WL_ATTACH=1 twins of the two functions above: never create a device, only find and reuse
+# SIRIO_WL_ATTACH=1 twins of the two functions above: never create a device, only find and reuse
 # one this label already has running — and fail loudly, not silently, when there is none. This is
 # the exact case the trap table already records: a KEEP session started with a `ctl`/`shot`-only
 # action string never ran start_virtual_pointer/start_virtual_keyboard at all, so it has NO input
@@ -508,15 +508,15 @@ start_virtual_keyboard() {
 # false "it worked". These functions turn that into an explicit, non-zero FAIL instead.
 attach_virtual_pointer() {
   [ -p "$VP_FIFO" ] || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no virtual-pointer FIFO at $VP_FIFO for label '$LABEL'." >&2
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no virtual-pointer FIFO at $VP_FIFO for label '$LABEL'." >&2
     echo "      The session you attached to was never started with a pointer verb" >&2
     echo "      (click/move/rightclick/down/up/drag/scroll/modclick/xdnd) in its OWN action" >&2
     echo "      string, so it has no input device bound at all -- attaching cannot conjure one." >&2
     echo "      Tear it down and reissue a KEEP session whose first invocation includes one." >&2
     return 1
   }
-  find_ours TILLER_WL_LABEL "$LABEL" virtual-pointer >/dev/null || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no live virtual-pointer process for label '$LABEL' -- the FIFO exists at $VP_FIFO but nothing is serving it (its process died)." >&2
+  find_ours SIRIO_WL_LABEL "$LABEL" virtual-pointer >/dev/null || {
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no live virtual-pointer process for label '$LABEL' -- the FIFO exists at $VP_FIFO but nothing is serving it (its process died)." >&2
     return 1
   }
   verify_nested_sway || return 1
@@ -532,8 +532,8 @@ attach_virtual_pointer() {
 }
 
 attach_virtual_keyboard() {
-  find_ours TILLER_WL_LABEL "$LABEL" wtype >/dev/null || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no live virtual-keyboard (wtype) process for label '$LABEL'." >&2
+  find_ours SIRIO_WL_LABEL "$LABEL" wtype >/dev/null || {
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no live virtual-keyboard (wtype) process for label '$LABEL'." >&2
     echo "      The session you attached to was never started with a keyboard verb" >&2
     echo "      (type/key/title/chord/modclick) in its OWN action string, so it has no input" >&2
     echo "      device bound at all -- attaching cannot conjure one." >&2
@@ -564,7 +564,7 @@ fi
 # DISPLAY must be UNSET, not empty: with it set at all, GPUI takes the X11 path, which under
 # Xvfb/Xephyr has no DRI3 route and presents nothing. A blank frame here is almost always this.
 #
-# TILLER_WL_PROTOCOL_LOG=1 turns on libwayland's own wire tracer (WAYLAND_DEBUG=1) for the app
+# SIRIO_WL_PROTOCOL_LOG=1 turns on libwayland's own wire tracer (WAYLAND_DEBUG=1) for the app
 # process only (never the injectors — their traces would dwarf the app's and bury the question
 # this exists to answer). It interleaves every event the app's ONE Wayland connection receives —
 # wl_keyboard.modifiers, wl_keyboard.key, wl_pointer.button, all of it — in true wire order, in
@@ -577,12 +577,12 @@ if [ "$ATTACH" = "1" ]; then
   # actually alive and actually serving this socket -- a stale socket file from a process that
   # since died is exactly the silent-success shape this mode exists to refuse.
   [ -S "$SOCK" ] || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no control socket at $SOCK for label '$LABEL' — nothing to attach to. Start a TILLER_WL_KEEP=1 session under this label first." >&2
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no control socket at $SOCK for label '$LABEL' — nothing to attach to. Start a SIRIO_WL_KEEP=1 session under this label first." >&2
     exit 7
   }
-  APP_PID="$(find_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")")"
+  APP_PID="$(find_ours SIRIO_SOCKET "$SOCK" "$(basename "$BIN")")"
   [ -n "$APP_PID" ] || {
-    echo "FAIL: TILLER_WL_ATTACH=1 but no live app process owns $SOCK — a stale socket, nothing to attach to." >&2
+    echo "FAIL: SIRIO_WL_ATTACH=1 but no live app process owns $SOCK — a stale socket, nothing to attach to." >&2
     exit 7
   }
   echo "NOTE: attach mode — reusing app pid $APP_PID (label=$LABEL socket=$SOCK)"
@@ -598,7 +598,7 @@ else
 LAUNCH_CWD="/tmp/$LABEL-cwd"
 mkdir -p "$LAUNCH_CWD"
 # Same isolation argument as the cwd above, for the other filesystem footprint the
-# app has. Unset, `TILLER_PROJECTS_DIR` falls back to the app's own default of
+# app has. Unset, `SIRIO_PROJECTS_DIR` falls back to the app's own default of
 # `$HOME/Sirio/projects` -- the user's real home -- so every drive that creates or
 # clones a project writes there. That is not hypothetical: it is where fifteen
 # directories from earlier verification rounds accumulated over two days, and a clone
@@ -609,20 +609,20 @@ mkdir -p "$LAUNCH_CWD"
 # pointing at the app's own default when a row is specifically about where projects
 # land by default. The banner prints whichever is in force so that choice can never be
 # silently wrong.
-if [ -n "${TILLER_PROJECTS_DIR:-}" ]; then
-  echo "NOTE: TILLER_PROJECTS_DIR from the caller: $TILLER_PROJECTS_DIR"
+if [ -n "${SIRIO_PROJECTS_DIR:-}" ]; then
+  echo "NOTE: SIRIO_PROJECTS_DIR from the caller: $SIRIO_PROJECTS_DIR"
 else
-  TILLER_PROJECTS_DIR="/tmp/$LABEL-projects"
-  echo "NOTE: TILLER_PROJECTS_DIR defaulted to $TILLER_PROJECTS_DIR (not \$HOME/Sirio/projects)"
+  SIRIO_PROJECTS_DIR="/tmp/$LABEL-projects"
+  echo "NOTE: SIRIO_PROJECTS_DIR defaulted to $SIRIO_PROJECTS_DIR (not \$HOME/Sirio/projects)"
 fi
-mkdir -p "$TILLER_PROJECTS_DIR"
+mkdir -p "$SIRIO_PROJECTS_DIR"
 ( cd "$LAUNCH_CWD" && exec env -u DISPLAY \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     WAYLAND_DISPLAY="$WD" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
-    TILLER_PROJECTS_DIR="$TILLER_PROJECTS_DIR" \
-    TILLER_DB="$DB" TILLER_SOCKET="$SOCK" \
-    ${TILLER_WL_PROTOCOL_LOG:+WAYLAND_DEBUG=1} \
+    SIRIO_PROJECTS_DIR="$SIRIO_PROJECTS_DIR" \
+    SIRIO_DB="$DB" SIRIO_SOCKET="$SOCK" \
+    ${SIRIO_WL_PROTOCOL_LOG:+WAYLAND_DEBUG=1} \
     "$BIN" ) >"$APP_LOG" 2>&1 &
 # `exec` replaces the subshell, so this is the app's own pid, not a wrapper's.
 APP_PID=$!
@@ -939,14 +939,14 @@ shot() {
   # A fixed `sleep 1` was long enough on the x86 box and is not on a Pi 5 under load: it produced
   # a full-size capture of a window still laid out at W2xH2, black down the right and bottom edges,
   # and coordinates read off such a frame land in dead space. Ask sway instead of guessing.
-  local deadline=$((SECONDS + ${TILLER_WL_RELAYOUT_TIMEOUT:-10})) laid_out=0
+  local deadline=$((SECONDS + ${SIRIO_WL_RELAYOUT_TIMEOUT:-10})) laid_out=0
   while [ "$SECONDS" -lt "$deadline" ]; do
     if swaymsg -s "$SWAYSOCK" -t get_tree 2>/dev/null \
         | grep -q "\"width\": $W1,"; then laid_out=1; break; fi
     sleep 0.2
   done
   [ "$laid_out" = 1 ] || echo "WARN window never relaid out to ${W1}x${H1}; frame may be letterboxed" >&2
-  sleep "${TILLER_WL_REPAINT_SETTLE:-0.6}"
+  sleep "${SIRIO_WL_REPAINT_SETTLE:-0.6}"
   local path
   path="$(printf '%s/%02d-%s.png' "$OUTDIR" "$SHOT_N" "$name")"
   grim -o HEADLESS-1 "$path" 2>/dev/null

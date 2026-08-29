@@ -7744,9 +7744,9 @@ impl SirioWorkspace {
                 })
             }
             None => {
-                if std::env::var_os("TILLER_ACP_PROGRAM").is_none() {
+                if std::env::var_os("SIRIO_ACP_PROGRAM").is_none() {
                     self.show_toast(
-                        "No agent picked and TILLER_ACP_PROGRAM is unset, so there is no \
+                        "No agent picked and SIRIO_ACP_PROGRAM is unset, so there is no \
                          chat to open.",
                         cx,
                     );
@@ -7755,7 +7755,7 @@ impl SirioWorkspace {
                 let tab_id = persistence_id.clone();
                 cx.new(|cx| {
                     Chat::launch_with_persistence(database_path, tab_id, worktree_id, cx)
-                        .expect("checked TILLER_ACP_PROGRAM above")
+                        .expect("checked SIRIO_ACP_PROGRAM above")
                 })
             }
         };
@@ -13840,9 +13840,7 @@ fn sirioctl_binary_name() -> &'static str {
 /// Install subpath of the control CLI under `XDG_DATA_HOME` (or its
 /// per-platform fallbacks).
 fn sirioctl_install_subpath() -> PathBuf {
-    Path::new("TillerRust")
-        .join("bin")
-        .join(sirioctl_binary_name())
+    Path::new("Sirio").join("bin").join(sirioctl_binary_name())
 }
 
 /// Resolve the control CLI used by worktree-local agent hooks.
@@ -21023,10 +21021,7 @@ mod tests {
             .expect("the .exe sibling must resolve");
         assert_eq!(
             resolved,
-            data_home
-                .join("TillerRust")
-                .join("bin")
-                .join("sirioctl.exe")
+            data_home.join("Sirio").join("bin").join("sirioctl.exe")
         );
         assert_eq!(
             std::fs::canonicalize(&resolved).expect("installed sirioctl exists"),
@@ -21358,21 +21353,21 @@ mod tests {
 
     #[test]
     fn boot_settings_honor_sirio_socket_enable_environment_override() {
-        let previous = std::env::var_os("TILLER_SOCKET_ENABLE");
+        let previous = std::env::var_os("SIRIO_SOCKET_ENABLE");
         let settings = AppSettings::default();
 
-        unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", "off") };
+        unsafe { std::env::set_var("SIRIO_SOCKET_ENABLE", "off") };
         assert!(
             !app_settings_with_environment_override(settings.clone()).control_socket_enabled,
             "the boot settings used by control_socket.set_enabled must observe off"
         );
 
-        unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", "on") };
+        unsafe { std::env::set_var("SIRIO_SOCKET_ENABLE", "on") };
         assert!(app_settings_with_environment_override(settings).control_socket_enabled);
 
         match previous {
-            Some(value) => unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", value) },
-            None => unsafe { std::env::remove_var("TILLER_SOCKET_ENABLE") },
+            Some(value) => unsafe { std::env::set_var("SIRIO_SOCKET_ENABLE", value) },
+            None => unsafe { std::env::remove_var("SIRIO_SOCKET_ENABLE") },
         }
     }
 
@@ -21549,7 +21544,7 @@ mod tests {
         executable
     }
 
-    /// Points `TILLER_ACP_PROGRAM` at a stub file so adapter-less chat-tab
+    /// Points `SIRIO_ACP_PROGRAM` at a stub file so adapter-less chat-tab
     /// fixtures exercise tab machinery instead of the (correct) refusal.
     /// Set once, process-lifetime; nothing asserts it stays unset.
     fn ensure_stub_acp_program() {
@@ -21557,7 +21552,7 @@ mod tests {
         ONCE.call_once(|| {
             let stub = std::env::temp_dir().join(format!("sirio-stub-acp-{}", std::process::id()));
             std::fs::write(&stub, b"stub").unwrap();
-            unsafe { std::env::set_var("TILLER_ACP_PROGRAM", &stub) };
+            unsafe { std::env::set_var("SIRIO_ACP_PROGRAM", &stub) };
         });
     }
 

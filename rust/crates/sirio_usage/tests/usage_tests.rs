@@ -229,7 +229,7 @@ fn the_fetch_is_bounded_and_single_attempts_do_not_hang() {
 // F-SET-11 — the three Claude `Unavailable` reasons reached through the
 // *real* PTY/login-shell fetch path, not the pure `transcript_outcome`
 // stand-in above. `fetch_with_env` skips dotfile re-sourcing
-// (`TILLER_USAGE_NO_DOTFILES`) so a `PATH` override actually decides what
+// (`SIRIO_USAGE_NO_DOTFILES`) so a `PATH` override actually decides what
 // `claude` resolves to inside the spawned shell.
 // ---------------------------------------------------------------------------
 
@@ -266,7 +266,7 @@ fn not_installed_is_reachable_through_the_real_shell_when_claude_is_absent_from_
         Duration::from_millis(50),
         Duration::from_secs(5),
         &[
-            ("TILLER_USAGE_NO_DOTFILES", "1"),
+            ("SIRIO_USAGE_NO_DOTFILES", "1"),
             ("PATH", &path),
             // The shell's own "command not found" text is locale-dependent
             // ("comando non trovato" under an Italian locale, observed on
@@ -309,7 +309,7 @@ fn logged_out_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
         Duration::from_millis(0),
         Duration::from_millis(50),
         Duration::from_secs(5),
-        &[("TILLER_USAGE_NO_DOTFILES", "1"), ("PATH", &path)],
+        &[("SIRIO_USAGE_NO_DOTFILES", "1"), ("PATH", &path)],
     );
     assert_eq!(
         outcome,
@@ -329,7 +329,7 @@ fn error_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
         Duration::from_millis(0),
         Duration::from_millis(50),
         Duration::from_secs(5),
-        &[("TILLER_USAGE_NO_DOTFILES", "1"), ("PATH", &path)],
+        &[("SIRIO_USAGE_NO_DOTFILES", "1"), ("PATH", &path)],
     );
     assert_eq!(
         outcome,

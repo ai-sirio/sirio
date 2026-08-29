@@ -1007,6 +1007,10 @@ impl TerminalHandle {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         if let Some(pane_id) = pane_id {
+            command.env("SIRIO_PANE_ID", pane_id);
+            // Scripts and agent skills written before the rebrand read the
+            // pane id under its old name. Exporting both costs one variable
+            // and keeps them working inside a pane they cannot see renamed.
             command.env("TILLER_PANE_ID", pane_id);
         }
         command.cwd(spawn_cwd(working_directory));
@@ -1747,7 +1751,7 @@ impl TerminalView {
     /// context-menu event, so a menu opened in one split cannot act on another.
     /// The first render is deliberately where the PTY is spawned, so callers
     /// may assign this identity immediately after creating the entity and the
-    /// child will inherit `TILLER_PANE_ID`.
+    /// child will inherit `SIRIO_PANE_ID`.
     pub fn set_identity(&mut self, identity: TerminalIdentity) {
         self.identity = identity;
     }
@@ -2220,9 +2224,9 @@ impl TerminalView {
             f32::from(LINE_HEIGHT),
         );
         let link = terminal.link_at(row, column);
-        if std::env::var_os("TILLER_DEBUG_LINK_CLICK").is_some() {
+        if std::env::var_os("SIRIO_DEBUG_LINK_CLICK").is_some() {
             eprintln!(
-                "TILLER_DEBUG_LINK_CLICK pos=({:.1},{:.1}) origin=({:.1},{:.1}) cell_width={:.3} row={} column={} link={:?}",
+                "SIRIO_DEBUG_LINK_CLICK pos=({:.1},{:.1}) origin=({:.1},{:.1}) cell_width={:.3} row={} column={} link={:?}",
                 f32::from(event.position.x),
                 f32::from(event.position.y),
                 f32::from(origin.x),
@@ -4547,7 +4551,7 @@ mod tests {
             program: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "printf 'pane=%s\\n' \"$TILLER_PANE_ID\"; exec sleep 0.1".to_string(),
+                "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 0.1".to_string(),
             ],
         };
         let (handle, mut events) =
@@ -4564,7 +4568,7 @@ mod tests {
 
         assert!(
             String::from_utf8_lossy(&handle.capture_scrollback()).contains("pane=pane-real-env"),
-            "the PTY child must inherit TILLER_PANE_ID"
+            "the PTY child must inherit SIRIO_PANE_ID"
         );
         handle.shutdown();
         let _ = std::fs::remove_dir_all(working_directory);
@@ -5894,7 +5898,7 @@ mod view_tests {
             program: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                "printf 'pane=%s\\n' \"$TILLER_PANE_ID\"; exec sleep 1".to_string(),
+                "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 1".to_string(),
             ],
         };
         let (terminal, cx) = cx.add_window_view(|_, cx| {

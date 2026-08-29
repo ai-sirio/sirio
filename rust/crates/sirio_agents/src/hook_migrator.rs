@@ -158,7 +158,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn only_a_quoted_sirioctl_path_is_rewritten() {
-        let current = r"C:\Users\me\AppData\Local\TillerRust\bin\sirioctl.exe";
+        let current = r"C:\Users\me\AppData\Local\Sirio\bin\sirioctl.exe";
 
         // The shape this migrator will actually meet on Windows: an entry
         // written by a current build — double-quoted, backslashes, `.exe` —

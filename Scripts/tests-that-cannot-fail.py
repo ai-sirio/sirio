@@ -175,7 +175,7 @@ def main():
     # are excluded by name and the exclusion is printed, never silent.
     BY_DESIGN = {
         "helper_process": "documented subprocess entry point; a no-op unless "
-                          "TILLER_PERSISTENCE_HELPER is set",
+                          "SIRIO_PERSISTENCE_HELPER is set",
         "writer_process": "documented subprocess entry point; same contract",
     }
 

@@ -3,7 +3,7 @@
 scroll/follow behaviour live (F-CHAT-20) without depending on a real LLM's
 uncontrolled response cadence.
 
-Point `TILLER_ACP_PROGRAM` at this file (it must be executable) and launch a
+Point `SIRIO_ACP_PROGRAM` at this file (it must be executable) and launch a
 Chat tab: every `session/prompt` streams `LINE_COUNT` predictable
 `agent_message_chunk` lines (`LINE 0001`, `LINE 0002`, ...) spaced
 `INTERVAL_S` apart, then ends the turn. Both are overridable via
