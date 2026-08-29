@@ -15049,7 +15049,7 @@ mod tests {
             vec![
                 "skills",
                 "add",
-                "e-palmisano/sirio",
+                "ai-sirio/sirio",
                 "--skill",
                 "sirio",
                 "-a",

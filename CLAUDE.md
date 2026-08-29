@@ -96,7 +96,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 ### Issue tracker
 
-Issues live in this repo's GitHub Issues (`tillerai/sirio`), driven through the `gh`
+Issues live in this repo's GitHub Issues (`ai-sirio/sirio`), driven through the `gh`
 CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels

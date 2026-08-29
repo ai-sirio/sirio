@@ -44,4 +44,4 @@ This is a product decision reached from a narrow cause. It was taken knowingly:
 the alternative considered was to treat pre-14 as unsupported *for isolation only*
 while the app kept running there, which confines the impact to development
 machines but leaves a silently shared store in the field. That alternative was
-rejected in [#140](https://github.com/tillerai/sirio/issues/140).
+rejected in [#140](https://github.com/tillerai/tiller/issues/140).
