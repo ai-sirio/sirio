@@ -1,0 +1,21 @@
+[package]
+name = "sirio_update"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sirio_control.workspace = true
+sirio_registry.workspace = true
+sirio_release.workspace = true
+semver = "1"
+thiserror = "2"
+ureq = "3.4"
+
+[dev-dependencies]
+base64 = "0.22.1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json.workspace = true
+sha2 = "0.10"
