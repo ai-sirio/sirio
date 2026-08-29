@@ -1,0 +1,11 @@
+[package]
+name = "sirio_apply"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The hand-off contract: this crate consumes a `VerifiedUpdate` and applies
+# the staged artifact; it never downloads or verifies anything itself.
+sirio_update.workspace = true
+thiserror = "2"

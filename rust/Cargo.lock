@@ -6553,6 +6553,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_apply"
+version = "0.6.0"
+dependencies = [
+ "sirio_update",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "sirio_control"
 version = "0.6.0"
 dependencies = [
