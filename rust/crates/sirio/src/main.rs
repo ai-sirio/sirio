@@ -1630,6 +1630,12 @@ impl ControlHandler for AppControlHandler {
                         ),
                         ("version".to_string(), sirio_control::VERSION.to_string()),
                         (
+                            "channel".to_string(),
+                            sirio_control::ReleaseChannel::RELEASE_CHANNEL
+                                .as_str()
+                                .to_string(),
+                        ),
+                        (
                             "socketEnabled".to_string(),
                             self.socket_info.enabled().to_string(),
                         ),
@@ -14740,6 +14746,7 @@ fn main() {
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
                         .with_version(sirio_control::VERSION)
+                        .with_channel(sirio_control::ReleaseChannel::RELEASE_CHANNEL.as_str())
                         .with_browser_origins(browser_origins_for_settings.clone())
                         .with_database_path(database_path_for_settings.clone())
                         .on_install_skill({
@@ -22633,6 +22640,23 @@ mod tests {
                 .and_then(|result| result.get("version"))
                 .is_some_and(|version| !version.is_empty()),
             "capabilities must report the running Sirio version"
+        );
+        assert!(
+            capabilities
+                .result
+                .as_ref()
+                .and_then(|result| result.get("channel"))
+                .is_some_and(|channel| !channel.is_empty()),
+            "capabilities must report the release channel"
+        );
+        assert_eq!(
+            capabilities
+                .result
+                .as_ref()
+                .and_then(|result| result.get("channel"))
+                .map(String::as_str),
+            Some(sirio_control::ReleaseChannel::RELEASE_CHANNEL.as_str()),
+            "capabilities must report the compiled-in channel"
         );
         let advertised: Vec<_> = methods
             .iter()
