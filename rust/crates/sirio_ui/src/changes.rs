@@ -2517,9 +2517,25 @@ mod tests {
 
     /// Pumps the test executors until `condition` holds or the budget is
     /// exhausted.
+    /// Pump iterations before a wait helper gives up.
+    ///
+    /// Each iteration sleeps 10ms of REAL time, because the conditions these
+    /// helpers wait on are satisfied by real `git` subprocesses that the test
+    /// executor's virtual clock cannot advance. The budget is therefore a
+    /// wall-clock timeout, and it has to survive a loaded machine: under
+    /// `cargo test --workspace` these tests run alongside every other crate's
+    /// test binary, all competing for CPU and disk with their own `git`
+    /// processes. The old 600 (6s) was enough on an idle machine and flaked
+    /// under that load.
+    ///
+    /// Raising it costs nothing when tests pass — a satisfied condition returns
+    /// on the next iteration — and only buys patience when they would otherwise
+    /// fail for lack of it.
+    const PUMP_BUDGET: usize = 3000;
+
     fn pump_until(cx: &TestAppContext, mut condition: impl FnMut() -> bool) {
         cx.executor().allow_parking();
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if condition() {
                 return;
             }
@@ -2619,7 +2635,7 @@ mod tests {
         mut condition: impl FnMut(&ChangesTab) -> bool,
     ) {
         cx.cx.executor().allow_parking();
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if tab.read_with(&cx.cx, |tab, _| condition(tab)) {
                 return;
             }
@@ -3158,7 +3174,7 @@ mod tests {
         std::fs::remove_dir_all(dir.0.join(".git")).expect("remove .git");
         cx.update(|_, app| tab.update(app, |tab, cx| tab.refresh(cx)));
         let tab_ref = tab.clone();
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if cx.read(|app| tab_ref.read_with(app, |tab, _| tab.git_error.is_some())) {
                 break;
             }
@@ -3191,7 +3207,7 @@ mod tests {
             .debug_bounds("changes-retry")
             .expect("the retry button is visible");
         cx.simulate_click(retry.center(), Modifiers::none());
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if cx.read(|app| tab_ref.read_with(app, |tab, _| tab.git_error.is_none())) {
                 break;
             }
