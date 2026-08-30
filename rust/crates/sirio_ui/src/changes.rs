@@ -393,6 +393,14 @@ pub struct ChangesTab {
     /// Expanded collapsed-context bands, keyed by (section, path, run key).
     expanded_bands: HashSet<(ChangeSection, PathBuf, usize)>,
     git_task: Option<Task<()>>,
+    /// Whether a snapshot load has ever completed, successfully or not.
+    ///
+    /// The full-surface loader is a *first-load* treatment: once the panel has
+    /// shown real content it must never blank back to an orb, and a clean repo
+    /// must settle on its empty-state message rather than flashing the loader
+    /// on every refresh. `git_task.is_some()` cannot express that — it is also
+    /// true for the second refresh of a repo that simply has nothing to show.
+    has_loaded: bool,
     git_error: Option<String>,
     /// Paths whose diff failed to load, keyed like `diffs`. Kept separate so
     /// the expanded row can name the failure instead of showing nothing.
@@ -476,6 +484,7 @@ impl ChangesTab {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
@@ -575,6 +584,7 @@ impl ChangesTab {
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
+                tab.has_loaded = true;
                 match result {
                     Ok(snapshot) => {
                         tab.apply_snapshot(snapshot);
@@ -648,6 +658,7 @@ impl ChangesTab {
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
+                tab.has_loaded = true;
                 match outcome {
                     (Ok(()), Some(Ok(snapshot))) => tab.apply_snapshot(snapshot),
                     (Err(error), _) => tab.git_error = Some(error.to_string()),
@@ -1934,7 +1945,7 @@ impl ChangesTab {
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
         }
-        if self.git_task.is_some() && self.entries.is_empty() {
+        if !self.has_loaded && self.entries.is_empty() {
             return div()
                 .id("changes-loading")
                 .debug_selector(|| "changes-loading".into())
@@ -2939,7 +2950,12 @@ mod tests {
         let (mut cx, tab) = changes_view(cx, dir.0.clone());
         cx.cx
             .update(|app| tab.update(app, |tab, cx| tab.refresh(cx)));
-        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none());
+        // `git_task.is_none()` is not the condition this test means: it is also
+        // true in the window between `refresh` being called and the task being
+        // spawned, so the assertions below could run against a first-load
+        // loader that has not started yet. Wait for the load to have actually
+        // completed.
+        wait_for_tab(&cx, &tab, |tab| tab.has_loaded);
         cx.cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
@@ -3734,6 +3750,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             refresh_started: false,
             embedded_in_panel: false,
@@ -3794,6 +3811,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             refresh_started: false,
             embedded_in_panel: false,
@@ -4075,6 +4093,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
