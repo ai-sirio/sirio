@@ -68,7 +68,11 @@
 set -euo pipefail
 
 BASE="${1:?usage: gate-no-value-change.sh <base-ref>}"
-PATTERN='\b0x[0-9A-Fa-f]+\b|\b[0-9]+\.[0-9]+f?\b'
+# No \b here: git grep uses POSIX ERE, which has no word-boundary escape --
+# `\b` silently matches nothing and the gate would pass on everything. The
+# boundaries are not needed anyway: the same pattern runs over both snapshots,
+# so any partial match is partial identically on both sides.
+PATTERN='0x[0-9A-Fa-f]+|[0-9]+\.[0-9]+f?'
 
 before="$(mktemp)"; after="$(mktemp)"
 trap 'rm -f "$before" "$after"' EXIT
