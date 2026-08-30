@@ -14421,6 +14421,29 @@ fn app_icon() -> Arc<image::RgbaImage> {
     Arc::new(image)
 }
 
+/// Registers the bundled Geist and Geist Mono faces with the text system.
+/// Windows and Linux only — macOS is the reference release platform and
+/// keeps SF Pro / SF Mono, so this never runs there.
+///
+/// Must run before [`Theme::init`]: `Theme::install` resolves and caches
+/// `UI_FAMILY`/`CODE_FAMILY` from `TextSystem::all_font_names()` on its
+/// first call, so a font registered afterwards would never be seen and the
+/// resolution would fall through to the JetBrains chain for the rest of the
+/// process's life.
+#[cfg(not(target_os = "macos"))]
+fn register_fonts(cx: &App) {
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
+        std::borrow::Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Regular.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Medium.ttf")),
+        std::borrow::Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/GeistMono-Regular.ttf"
+        )),
+    ];
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        eprintln!("[fonts] failed to register Geist: {error}");
+    }
+}
+
 fn main() {
     // First statement in the process, and it has to stay first. `gpui`
     // decides X11 vs Wayland by reading the environment
@@ -14461,6 +14484,10 @@ fn main() {
     }
 
     application().run(|cx: &mut App| {
+        // Must land before `Theme::init` — see `register_fonts`'s own doc
+        // comment for why the order is load-bearing.
+        #[cfg(not(target_os = "macos"))]
+        register_fonts(cx);
         Theme::init(cx);
 
         // Restore the stored layout; a missing, corrupt or newer-schema
