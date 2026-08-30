@@ -73,23 +73,23 @@ Re-exported at `bezel::ui::widgets::Controls` (`bezel-ui-0.1.3/src/widgets/mod.r
 
 ### `popover::redacted_rows`
 
-Matches the gallery form exactly, published at `bezel::ui::popover::redacted_rows` (`bezel-ui-0.1.3/src/popover.rs:1143`):
+Published at `bezel::ui::popover::redacted_rows` (`bezel-ui-0.1.3/src/popover.rs:1143`):
 
 ```rust
 pub fn redacted_rows(
-    id: &'static str,
-    theme: &Theme,
+    _id: &'static str,
+    _theme: &Theme,
     count: usize,
     painter: Painter,
     cx: &mut gpui::App,
 ) -> AnyElement
 ```
 
-(Parameters named `_id`/`_theme` in the body since they're unused there, but the public signature keeps `id`/`theme` — the underscore is a body-local binding choice, not part of the signature.)
+The underscore-prefixed parameters indicate the function currently ignores these two arguments.
 
 ### `loaders::mini_gradient_spinner`
 
-Matches the gallery form exactly, published at `bezel::ui::loaders::mini_gradient_spinner` (same file as `orb`):
+Matches the gallery form almost exactly, published at `bezel::ui::loaders::mini_gradient_spinner` (`bezel-ui-0.1.3/src/loaders.rs:105`):
 
 ```rust
 pub fn mini_gradient_spinner(
@@ -99,6 +99,8 @@ pub fn mini_gradient_spinner(
     cx: &mut App,
 ) -> impl IntoElement
 ```
+
+Differences from the gallery signature: the id parameter is named `key: impl Into<SharedString>` rather than `id`, and the cell parameter is named `cell_px: f32` rather than `cell`; same positions and roles.
 
 ### Shared clock: `motion::PulseClock`
 
