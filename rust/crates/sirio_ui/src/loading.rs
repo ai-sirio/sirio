@@ -8,10 +8,11 @@
 use std::time::Duration;
 
 use bezel::motion::Painter;
-use bezel::ui::widgets::Controls;
 use bezel::ui::loaders;
+use bezel::ui::popover;
+use bezel::ui::widgets::Controls;
 use gpui::{
-    div, px, AnyElement, App, Div, InteractiveElement, IntoElement, ParentElement, Styled, Window,
+    div, px, AnyElement, App, Div, IntoElement, ParentElement, Styled, Window,
 };
 use sirio_theme::Theme;
 
@@ -24,9 +25,9 @@ pub const COMPACT_MINI_CELL: f32 = 2.5;
 /// Determinate progress: track thickness and the width the gallery demos.
 pub const PROGRESS_TRACK: f32 = 4.0;
 pub const PROGRESS_MAX_WIDTH: f32 = 280.0;
-/// A subordinate skeleton: three rows, never the sole activity signal.
-pub const SKELETON_ROW_HEIGHT: f32 = 28.0;
-pub const SKELETON_ROW_GAP: f32 = 6.0;
+/// A subordinate skeleton: three rows, never the sole activity signal. Its
+/// geometry belongs to Bezel's `popover::redacted_rows`: 28px rows, 6px gaps,
+/// and 4px vertical padding.
 pub const SKELETON_ROWS: usize = 3;
 
 /// The label for a settled reasoning header.
@@ -139,24 +140,8 @@ pub fn skeleton_rows(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let _bezel_theme = bezel_theme(theme);
-    let delta = bezel::motion::pulse_delta(&bezel::motion::PULSE, painter(window), cx);
-    let wash = bezel::theme::ink(0.04);
-    div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .gap(px(SKELETON_ROW_GAP))
-        .py(px(4.0))
-        .children((0..count).map(move |index| {
-            let phase = bezel::motion::phase::staggered_phase(delta, index, 0.08);
-            div()
-                .h(px(SKELETON_ROW_HEIGHT))
-                .rounded(px(bezel::theme::Theme::control_radius()))
-                .bg(wash)
-                .opacity(0.35 + 0.4 * bezel::motion::phase::pulse_wave(phase))
-        }))
-        .into_any_element()
+    let bezel_theme = bezel_theme(theme);
+    popover::redacted_rows(id, &bezel_theme, count, painter(window), cx)
 }
 
 #[cfg(test)]
@@ -213,8 +198,6 @@ mod tests {
         assert_eq!(COMPACT_MINI_CELL, 2.5);
         assert_eq!(PROGRESS_TRACK, 4.0);
         assert_eq!(PROGRESS_MAX_WIDTH, 280.0);
-        assert_eq!(SKELETON_ROW_HEIGHT, 28.0);
-        assert_eq!(SKELETON_ROW_GAP, 6.0);
         assert_eq!(SKELETON_ROWS, 3);
     }
 }
