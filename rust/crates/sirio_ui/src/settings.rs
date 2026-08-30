@@ -2,6 +2,7 @@
 
 use crate::caret;
 use crate::controls;
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
 use gpui::{
@@ -3412,12 +3413,21 @@ impl Settings {
         }
     }
 
-    fn render_agents(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> gpui::Div {
+    fn render_agents(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         // F-SET-16: filtering hides non-matching rows but must not renumber
         // the ones that stay — `settings-agent-row-{index}` ids are keyed to
         // the original `provider_availability` position, and an existing
         // test asserts against those exact indices.
         let query = self.agent_search.trim().to_lowercase();
+        let first_load = self.provider_availability.is_empty()
+            && self.agent_registry_error.is_none()
+            && query.is_empty();
         let mut agent_rows = controls::card(theme);
         let mut first_visible_row = true;
         for (index, availability) in self.provider_availability.iter().enumerate() {
@@ -3514,26 +3524,40 @@ impl Settings {
                     _ => None,
                 }
             };
-            let install_button = action.map(|(event, label)| {
-                let install_entity = entity.clone();
-                div()
-                    .id(("settings-agent-install", index))
-                    .debug_selector(move || format!("settings-agent-install-{index}"))
-                    .px(px(8.0))
-                    .py(px(3.0))
-                    .rounded(theme.radii.row_card)
-                    .text_size(theme.typography.caption2)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
-                    .bg(theme.primary_action_bg)
-                    .hover(|style| style.bg(theme.row_hover))
-                    .on_click(move |_, _, cx| {
-                        install_entity.update(cx, |_, cx| {
-                            cx.emit(event.clone());
-                        });
-                    })
-                    .child(text!(id = ("settings-agent-install-label", index), label))
-            });
+            let install_control = if matches!(install_state, Some(InstallState::InFlight)) {
+                Some(
+                    div()
+                        .id(("settings-agent-install-spinner", index))
+                        .debug_selector(move || format!("settings-agent-install-spinner-{index}"))
+                        .w(px(28.0))
+                        .h(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(loading::compact("settings-install-spinner", window, cx)),
+                )
+            } else {
+                action.map(|(event, label)| {
+                    let install_entity = entity.clone();
+                    div()
+                        .id(("settings-agent-install", index))
+                        .debug_selector(move || format!("settings-agent-install-{index}"))
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(theme.radii.row_card)
+                        .text_size(theme.typography.caption2)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.title)
+                        .bg(theme.primary_action_bg)
+                        .hover(|style| style.bg(theme.row_hover))
+                        .on_click(move |_, _, cx| {
+                            install_entity.update(cx, |_, cx| {
+                                cx.emit(event.clone());
+                            });
+                        })
+                        .child(text!(id = ("settings-agent-install-label", index), label))
+                })
+            };
             let mut row_container = div()
                 .id(("settings-agent-row", index))
                 .debug_selector(move || format!("settings-agent-row-{index}"))
@@ -3571,7 +3595,7 @@ impl Settings {
                             &source,
                             theme,
                         ))
-                        .children(install_button),
+                        .children(install_control),
                     theme,
                 ));
             if let Some(note) = installed_integrity_note(&source) {
@@ -3736,7 +3760,31 @@ impl Settings {
                     .child(text!(error)),
             );
         }
-        surface.child(agent_rows)
+        if first_load {
+            surface.child(
+                div()
+                    .id("settings-agents-loading")
+                    .debug_selector(|| "settings-agents-loading".to_string())
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(theme.spacing.card_gap)
+                    .text_size(theme.typography.headline)
+                    .text_color(theme.subtitle)
+                    .child(loading::indeterminate(
+                        "settings-agents-loading-orb",
+                        loading::GENERIC_ORB,
+                        &theme,
+                        window,
+                        cx,
+                    ))
+                    .child("Loading agents…"),
+            )
+        } else {
+            surface.child(agent_rows)
+        }
     }
 
     /// The summarizer agent trigger (F-SET-05): a button showing the
@@ -4570,7 +4618,7 @@ impl Render for Settings {
             SettingsCategory::AiProviders => {
                 self.render_ai_providers(theme, entity.clone(), window)
             }
-            SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window),
+            SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window, cx),
             SettingsCategory::General => self.render_general(theme, entity.clone()),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
             SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),

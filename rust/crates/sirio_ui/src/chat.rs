@@ -32,12 +32,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use crate::caret;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::editor::Language;
 use crate::file_view::{CodeSpanKind, code_spans};
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
@@ -47,10 +47,11 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 /// assistant-authored chat prose.
 pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
-/// The transcript's content column maximum — waku's measured
-/// `CONTENT_MAX_WIDTH` 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md`
-/// §A.2); below that limit, the column takes the pane's width.
-pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
+/// The transcript's content column maximum — the Bezel Transcript pattern's
+/// 700 (spec §2). Settings and the markdown column keep waku's 720; this one
+/// column follows Bezel because the live transcript is what the migration
+/// copies.
+pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 const TOOL_CALL_GROUP_GAP: f32 = 6.0;
@@ -58,55 +59,9 @@ const TOOL_CALL_GROUP_CHEVRON_WIDTH: f32 = 12.0;
 const TOOL_CALL_GROUP_MEMBER_INDENT: f32 =
     CARD_H_PADDING + TOOL_CALL_GROUP_CHEVRON_WIDTH + TOOL_CALL_GROUP_GAP;
 
-/// The user turn's pill: rounded, right-aligned, capped at waku's bubble
-/// width. The assistant reply has no container at all.
-pub(crate) const USER_PILL_MAX_WIDTH: f32 = 540.0;
-
-/// F-CHAT-59: the composer's streaming border completes one revolution
-/// every two seconds, continuous and un-eased — matches the retired Swift
-/// reference's `withAnimation(.linear(duration: 2).repeatForever(autoreverses:
-/// false))` (`docs/superpowers/plans/2026-08-09-composer-agent-colors.md`).
-const STREAMING_BORDER_REVOLUTION: Duration = Duration::from_secs(2);
-/// Repaint cadence while the streaming border rotates — the same 16ms/60fps
-/// interval `BrowserView` already uses for its own frame-driven redraw.
-const STREAMING_BORDER_TICK: Duration = Duration::from_millis(16);
-/// Thickness of the rotating ring drawn around the composer card while
-/// streaming. Matching the static 1px border keeps the composer's footprint
-/// and its contents stationary while the ring is shown.
-const STREAMING_BORDER_WIDTH: Pixels = px(1.0);
-
-/// #239: the generating spinner's frames, taken from Zed's
-/// `SpinnerVariant::Dots` (`ui/src/components/label/spinner_label.rs`) — the
-/// benchmark this surface is measured against. The issue calls it a
-/// "three-dot" indicator; Zed's `Dots` is this ten-frame braille cycle, and
-/// the issue body's "match Zed's `SpinnerVariant::Dots`" settles which one
-/// was meant.
-const GENERATING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// One full cycle of [`GENERATING_SPINNER_FRAMES`], matching Zed's 1000ms for
-/// the same variant — so 100ms a frame.
-const GENERATING_SPINNER_CYCLE: Duration = Duration::from_millis(1000);
-
-/// The spinner glyph for a turn that has been streaming for `elapsed`.
-///
-/// Pure, so the cycle is testable without a window. Deliberately samples a
-/// clock rather than owning an animation: while a turn streams, the composer's
-/// streaming border already has a repaint timer in flight and already records
-/// the turn's start instant, so this rides that one timer instead of adding a
-/// second. That is the same one-timer-per-surface discipline the border and
-/// the composer caret follow, and it is what keeps an idle-but-streaming chat
-/// affordable on a Raspberry Pi 5.
-fn generating_spinner_frame(elapsed: Duration) -> &'static str {
-    let frame_ms = GENERATING_SPINNER_CYCLE.as_millis() / GENERATING_SPINNER_FRAMES.len() as u128;
-    let index = (elapsed.as_millis() / frame_ms) % GENERATING_SPINNER_FRAMES.len() as u128;
-    GENERATING_SPINNER_FRAMES[index as usize]
-}
-
-/// Degrees of rotation for a streaming-border revolution `progress`
-/// (`0.0` = start of a revolution, `1.0` = one full turn) — continuous
-/// linear rotation, no easing.
-fn streaming_border_angle(progress: f64) -> f64 {
-    progress * 360.0
-}
+/// The user turn's bubble: rounded, right-aligned, capped at the Bezel
+/// Activity pattern's 440. The assistant reply has no container at all.
+pub(crate) const USER_PILL_MAX_WIDTH: f32 = 440.0;
 
 actions!(
     chat_composer,
@@ -1016,13 +971,12 @@ pub struct Chat {
     model_search_blink: caret::Blink,
     model_search_caret_visible: bool,
     streaming: bool,
-    /// Wall-clock origin of the current streaming-border revolution, read
-    /// through `cx.background_executor().now()` so it stays fakeable under
-    /// tests. `None` whenever `streaming` is false — the next turn always
-    /// starts the rotation fresh rather than resuming a stale phase.
-    streaming_border_started_at: Option<Instant>,
-    /// Whether a streaming-border repaint timer is already in flight — same
-    /// one-timer-per-surface discipline as `composer_blink`/`caret::schedule`.
+    /// Retired with the rotating streaming border: the shared Bezel clock
+    /// drives the reasoning header now, so this stays permanently `false`.
+    /// Kept as a regression guard — a repaint timer reappearing here would
+    /// mean a Chat-owned animation crept back in. Read only by that guard
+    /// test, hence the lint allowance.
+    #[allow(dead_code)]
     streaming_border_timer_pending: bool,
     /// D-CHAT-03: the draft committed (Enter) while a turn streams, to be
     /// sent as the next user turn when the turn ends — one slot, latest
@@ -1289,7 +1243,6 @@ impl Chat {
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
-            streaming_border_started_at: None,
             streaming_border_timer_pending: false,
             queued_item: None,
             connecting: false,
@@ -4536,6 +4489,14 @@ impl Chat {
         let typography = theme.typography;
         let lines = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text);
         let total = lines.len();
+        let added = lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Added { .. }))
+            .count();
+        let removed = lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Removed { .. }))
+            .count();
         let shown = lines
             .into_iter()
             .take(DIFF_PREVIEW_MAX_LINES)
@@ -4549,50 +4510,46 @@ impl Chat {
         let open_entity = entity.clone();
         let header_id = format!("{id_prefix}-open");
         let header_selector = header_id.clone();
-        let mut column = div()
+        let scroll_id = format!("{id_prefix}-scroll");
+        let mut scroll = div()
+            .id(SharedString::from(scroll_id))
             .w_full()
+            .overflow_x_scroll()
             .flex()
             .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(colors.code_inset_fill)
-            .py(px(6.0))
-            .child(
-                div()
-                    .id(SharedString::from(header_id))
-                    .debug_selector(move || header_selector.clone())
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(typography.footnote)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.file_link)
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.text_color(colors.title))
-                    .px(px(10.0))
-                    .pb(px(4.0))
-                    .on_click(move |_, _, cx| {
-                        open_entity.update(cx, |_, cx| {
-                            cx.emit(ChatEvent::OpenFile(open_path.clone()));
-                        });
-                    })
-                    .child(
-                        IconElement::new(Icon::File, IconSize::Small).text_color(colors.file_link),
-                    )
-                    .child(diff.path.display().to_string()),
-            );
+            .items_start()
+            .gap(px(8.0));
         for (index, line) in shown.iter().enumerate() {
+            // Bezel's gallery diff uses a 10% success/danger wash, not the
+            // 12% `VEIL_MID` `sirio_theme::diff_*_background` tokens (those
+            // stay theme-wide and out of this task's `chat.rs`-only scope),
+            // so the wash is built locally from the same solid colour.
             let (prefix, text_color, background) = match line {
                 DiffLine::Context { .. } => (" ", colors.primary_text_color, None),
                 DiffLine::Removed { .. } => (
                     "-",
                     colors.diff_deletion,
-                    Some(colors.diff_deletion_background),
+                    Some(Rgba {
+                        a: 0.10,
+                        ..colors.diff_deletion
+                    }),
                 ),
                 DiffLine::Added { .. } => (
                     "+",
                     colors.diff_addition,
-                    Some(colors.diff_addition_background),
+                    Some(Rgba {
+                        a: 0.10,
+                        ..colors.diff_addition
+                    }),
                 ),
+            };
+            // The lockstep diff keeps `old_index`/`new_index` in sync at
+            // every `Context` line, so its single stored `number` is both
+            // columns there; `Removed`/`Added` exist on only one side.
+            let (old_number, new_number) = match line {
+                DiffLine::Context { number, .. } => (number.to_string(), number.to_string()),
+                DiffLine::Removed { number, .. } => (number.to_string(), String::new()),
+                DiffLine::Added { number, .. } => (String::new(), number.to_string()),
             };
             let text = line.text().to_string();
             let body = match selection
@@ -4627,45 +4584,116 @@ impl Chat {
                 .debug_selector(move || row_selector.clone())
                 .flex()
                 .items_start()
+                .min_w_full()
                 .px(px(10.0))
+                .py(px(1.0))
                 .font_family(typography.code_family)
-                .text_size(typography.code_size)
-                .line_height(typography.code_line_height)
+                .text_size(px(12.0))
+                .line_height(px(18.0))
                 .text_color(text_color)
                 .child(
+                    // One debug selector spans both columns: existing
+                    // callers (F-CHAT-31) address a row's gutter as a
+                    // single element, and that selector should not have to
+                    // change just because the gutter now has two fields.
                     div()
                         .debug_selector(move || number_selector.clone())
                         .flex_none()
-                        .w(px(DIFF_GUTTER_WIDTH))
-                        .pr(px(8.0))
                         .flex()
-                        .justify_end()
-                        .text_color(colors.meta)
-                        .child(line.number().to_string()),
+                        .child(
+                            div()
+                                .w(px(DIFF_GUTTER_WIDTH))
+                                .pr(px(4.0))
+                                .flex()
+                                .justify_end()
+                                .text_color(colors.meta)
+                                .child(old_number),
+                        )
+                        .child(
+                            div()
+                                .w(px(DIFF_GUTTER_WIDTH))
+                                .pr(px(8.0))
+                                .flex()
+                                .justify_end()
+                                .text_color(colors.meta)
+                                .child(new_number),
+                        ),
                 )
                 .child(div().flex_none().w(px(12.0)).child(prefix))
                 .child(
                     div()
                         .debug_selector(move || text_selector.clone())
-                        .flex_1()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
                         .child(body),
                 );
             if let Some(background) = background {
                 row = row.bg(background);
             }
-            column = column.child(row);
+            scroll = scroll.child(row);
         }
         if total > DIFF_PREVIEW_MAX_LINES {
-            column = column.child(
+            scroll = scroll.child(
                 div()
+                    .min_w_full()
                     .text_size(typography.caption2)
                     .text_color(colors.meta)
                     .px(px(10.0))
-                    .pt(px(4.0))
                     .child(format!("… {} more lines", total - DIFF_PREVIEW_MAX_LINES)),
             );
         }
-        column.into_any_element()
+        div()
+            .w_full()
+            // Never the standalone gallery's 760 -- the diff takes the
+            // transcript's own width, per `diff_column_width`.
+            .max_w(px(diff_column_width(TRANSCRIPT_WIDTH)))
+            .flex()
+            .flex_col()
+            .rounded(theme.radii.code_block)
+            .bg(colors.code_inset_fill)
+            .py(px(6.0))
+            .child(
+                div()
+                    .id(SharedString::from(header_id))
+                    .debug_selector(move || header_selector.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.file_link)
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.text_color(colors.title))
+                    .px(px(10.0))
+                    .pb(px(4.0))
+                    .on_click(move |_, _, cx| {
+                        open_entity.update(cx, |_, cx| {
+                            cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                        });
+                    })
+                    .child(
+                        IconElement::new(Icon::File, IconSize::Small).text_color(colors.file_link),
+                    )
+                    .child(diff.path.display().to_string())
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_color(colors.diff_addition)
+                                    .child(format!("+{added}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(colors.diff_deletion)
+                                    .child(format!("-{removed}")),
+                            ),
+                    ),
+            )
+            .child(scroll)
+            .into_any_element()
     }
 
     /// F-CHAT-32: an edit tool call ends with an actionable file summary.
@@ -4932,20 +4960,29 @@ impl Chat {
                         .id(("thought-toggle", entry_index))
                         .debug_selector(move || format!("thought-toggle-{entry_index}"))
                         .flex()
+                        .flex_row()
                         .items_center()
-                        .gap(px(4.0))
+                        .gap(px(6.0))
+                        .px(px(4.0))
+                        .py(px(5.0))
                         .cursor(CursorStyle::PointingHand)
                         .hover(|style| style.text_color(colors.title))
                         .child(
-                            IconElement::new(
-                                if expanded {
-                                    Icon::ChevronDown
-                                } else {
-                                    Icon::ChevronRight
-                                },
-                                IconSize::XSmall,
-                            )
-                            .text_color(colors.meta),
+                            div()
+                                .flex()
+                                .w(px(loading::THINKING_GLYPH))
+                                .justify_center()
+                                .child(
+                                    IconElement::new(
+                                        if expanded {
+                                            Icon::ChevronDown
+                                        } else {
+                                            Icon::ChevronRight
+                                        },
+                                        IconSize::XSmall,
+                                    )
+                                    .text_color(colors.meta),
+                                ),
                         )
                         .child(
                             div()
@@ -4956,7 +4993,7 @@ impl Chat {
                                 .child(if expanded {
                                     "Thinking".to_string()
                                 } else {
-                                    thought_summary(&text)
+                                    loading::thought_label(None)
                                 }),
                         )
                         .on_click(move |_, _, cx| {
@@ -4968,7 +5005,15 @@ impl Chat {
                 if expanded {
                     column = column.child(
                         div()
-                            .pl(px(14.0))
+                            .id(("thought-body", entry_index))
+                            .relative()
+                            .border_l_1()
+                            .border_color(colors.hairline)
+                            .pl(px(12.0))
+                            .pr(px(14.0))
+                            .max_h(px(160.0))
+                            .gap(px(4.0))
+                            .overflow_y_scroll()
                             .text_size(typography.callout)
                             .line_height(px(19.0))
                             .text_color(colors.subtitle)
@@ -4979,7 +5024,24 @@ impl Chat {
                                 format!("thought-entry-{entry_index}"),
                                 source_start,
                                 Some(&interaction),
-                            )),
+                            ))
+                            .child(
+                                // The 20px top fade is painted over the
+                                // scrollable body rather than masked, so
+                                // selection and the scrollbar hit-test still
+                                // see the full text underneath it.
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .right_0()
+                                    .h(px(20.0))
+                                    .bg(linear_gradient(
+                                        180.0,
+                                        linear_color_stop(colors.chat_surface, 0.0),
+                                        linear_color_stop(colors.chat_surface.opacity(0.0), 1.0),
+                                    )),
+                            ),
                     );
                 }
                 column.into_any_element()
@@ -5712,19 +5774,30 @@ impl Chat {
             )
             .child(
                 div()
+                    .flex_none()
                     .text_size(typography.footnote)
                     .text_color(colors.meta)
                     .child(kind),
             )
             .child(
+                // Bezel step-row grammar: verb (above), then this detail
+                // slot, then duration-or-status pinned right. `min_w_0` +
+                // `text_ellipsis` keep the row single-line — a long title
+                // truncates instead of pushing the status off the row.
                 div()
                     .flex_1()
+                    .min_w_0()
+                    .text_ellipsis()
                     .text_size(typography.callout)
                     .text_color(colors.title)
                     .child(title),
             )
             .child(
+                // Sirio has no per-call duration today, so this is always the
+                // status; failed and cancelled keep their own words and never
+                // read as finished.
                 div()
+                    .flex_none()
                     .text_size(typography.footnote)
                     .text_color(colors.meta)
                     .child(status),
@@ -5934,7 +6007,7 @@ impl Chat {
                     .text_size(typography.callout)
                     .text_color(colors.subtitle)
                     .italic()
-                    .child(format!("{count} steps")),
+                    .child(tool_group_label(count)),
             )
             .on_click(move |_, _, cx| {
                 toggle_entity.update(cx, |chat, cx| {
@@ -6035,39 +6108,6 @@ impl Chat {
         let can_send = self.can_send();
         let entity = cx.entity();
         let entity_for_focus = entity.clone();
-
-        // F-CHAT-59: while streaming, the ring's rotation angle is derived
-        // from wall-clock elapsed time (not accumulated per-tick) so it's
-        // always frame-accurate regardless of render cadence; a repaint
-        // timer just wakes the view often enough to sample it, the same
-        // one-timer-per-surface discipline `caret::schedule` uses for the
-        // composer's own blink.
-        let streaming_border_deg = if self.streaming {
-            let started_at = *self
-                .streaming_border_started_at
-                .get_or_insert_with(|| cx.background_executor().now());
-            if !self.streaming_border_timer_pending {
-                self.streaming_border_timer_pending = true;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(STREAMING_BORDER_TICK).await;
-                    let _ = this.update(cx, |chat, cx| {
-                        chat.streaming_border_timer_pending = false;
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            let elapsed = cx
-                .background_executor()
-                .now()
-                .saturating_duration_since(started_at);
-            let progress = elapsed.as_secs_f64() / STREAMING_BORDER_REVOLUTION.as_secs_f64() % 1.0;
-            Some(streaming_border_angle(progress))
-        } else {
-            self.streaming_border_started_at = None;
-            self.streaming_border_timer_pending = false;
-            None
-        };
 
         // The composer's insertion caret. A cursor move or edit since the
         // last frame wakes the blink (the bar must be solid right after the
@@ -7475,17 +7515,13 @@ impl Chat {
             .relative()
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
-            // #242: the border is always present, so the card's box is the
-            // same size whether a turn is streaming or not. It used to be
-            // added only when idle, which cost the card 2px of height the
-            // moment a turn began -- invisible in width, where `w_full` pins
-            // it, but a visible twitch in height twice per turn. While
-            // streaming it goes transparent instead of away: the visible rim
-            // is the rotating ring drawn just outside the card.
+            // #242: the border is always present and the same color whether
+            // a turn is streaming or not, so the card's box never moves.
+            // The rotating ring that used to mark a streaming turn is
+            // retired (Task 7) — the shared Activity clock lives in the
+            // reasoning header now (Task 6).
             .border_1()
-            .border_color(if self.streaming {
-                colors.hairline.opacity(0.0)
-            } else if focused {
+            .border_color(if focused {
                 colors.selection_ring
             } else {
                 colors.hairline
@@ -7682,57 +7718,7 @@ impl Chat {
             .children(mode_picker)
             .children(context_popover);
 
-        // F-CHAT-59: while streaming, an outer ring adds the rotating
-        // orange highlight around the otherwise-unchanged card above —
-        // `linear_gradient`'s angle sweeping continuously is what reads as
-        // rotation; the card's own opaque `colors.composer` fill covers
-        // everything inside the ring's `STREAMING_BORDER_WIDTH` padding, so
-        // nothing needs punching out by hand.
-        match streaming_border_deg {
-            Some(angle) => {
-                let streaming_orange = rgb(0xf5a623);
-                div()
-                    .id("composer-streaming-ring")
-                    .debug_selector(|| "composer-streaming-ring".into())
-                    // #110 turned every transcript-width site into a maximum
-                    // rather than a fixed width; this ring was missed, and
-                    // being the outermost element of the composer it held the
-                    // whole column open at 720px inside a narrower pane —
-                    // clipping the composer's own controls and the transcript
-                    // bubbles above off the left edge, but only while an agent
-                    // was streaming, which is why an idle frame looked fine.
-                    .w_full()
-                    .max_w(px(TRANSCRIPT_WIDTH))
-                    // #242: the ring is drawn AROUND the card, not by padding
-                    // it inward. It used to wrap `composer_card` with
-                    // `.p(STREAMING_BORDER_WIDTH)`, which cost the card 2px in
-                    // each dimension and shifted it 1px down and right every
-                    // time a turn started -- the exact opposite of what
-                    // `STREAMING_BORDER_WIDTH`'s comment promised, and a twitch
-                    // the user saw twice per turn. Positioned absolutely and
-                    // inset by -1px it paints the same rim while taking part
-                    // in no layout at all, so the composer's rectangle is
-                    // identical streaming or idle.
-                    .relative()
-                    .child(
-                        div()
-                            .absolute()
-                            .top(-STREAMING_BORDER_WIDTH)
-                            .left(-STREAMING_BORDER_WIDTH)
-                            .right(-STREAMING_BORDER_WIDTH)
-                            .bottom(-STREAMING_BORDER_WIDTH)
-                            .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
-                            .bg(linear_gradient(
-                                angle as f32,
-                                linear_color_stop(streaming_orange.opacity(0.15), 0.0),
-                                linear_color_stop(streaming_orange, 1.0),
-                            )),
-                    )
-                    .child(composer_card)
-                    .into_any_element()
-            }
-            None => composer_card.into_any_element(),
-        }
+        composer_card.into_any_element()
     }
 }
 
@@ -7900,7 +7886,8 @@ impl Render for Chat {
                     .debug_selector(|| "chat-transcript".into())
                     .w_full()
                     .max_w(px(TRANSCRIPT_WIDTH))
-                    .pt(px(22.0))
+                    .px(px(24.0))
+                    .py(px(28.0))
                     .flex_1()
                     .flex()
                     .key_context("ChatTranscript")
@@ -7930,7 +7917,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(8.0))
+                                            .pb(px(10.0))
                                             .child(Chat::render_turn_fold_row(
                                                 turn_id,
                                                 label,
@@ -7956,7 +7943,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(8.0))
+                                            .pb(px(10.0))
                                             .child(
                                                 div()
                                                     .id(("turn-refold", turn_id))
@@ -8025,6 +8012,10 @@ impl Render for Chat {
                                             ..
                                         })
                                     );
+                                    // Bezel Transcript pattern §2: a work
+                                    // zone sits 8px from the answer that
+                                    // follows it, tighter than the 10px
+                                    // between turns elsewhere in the list.
                                     return div()
                                         .id(("chat-entry", entry_index))
                                         .w_full()
@@ -8053,7 +8044,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(8.0))
+                                            .pb(px(10.0))
                                             .child(Chat::render_entry(
                                                 entry,
                                                 entry_index,
@@ -8081,19 +8072,7 @@ impl Render for Chat {
             // be spliced in and out every turn and could be persisted or
             // duplicated. Living outside the list makes "never part of the
             // transcript" structural instead of a rule to maintain.
-            //
-            // The clock is read, never started — `render_composer` already owns
-            // the instant and the repaint timer for the streaming border, so no
-            // second timer is armed here (see `generating_spinner_frame`).
             .when(self.streaming, |this| {
-                let elapsed = self
-                    .streaming_border_started_at
-                    .map(|started_at| {
-                        cx.background_executor()
-                            .now()
-                            .saturating_duration_since(started_at)
-                    })
-                    .unwrap_or_default();
                 this.child(
                     div()
                         .id("chat-generating-spinner")
@@ -8101,9 +8080,25 @@ impl Render for Chat {
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
                         .pt(px(6.0))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.colors.subtitle)
-                        .child(generating_spinner_frame(elapsed)),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(4.0))
+                        .py(px(5.0))
+                        .child(
+                            div()
+                                .flex()
+                                .w(px(loading::THINKING_GLYPH))
+                                .justify_center()
+                                .child(loading::thinking_indicator("chat-thinking", &theme, window, cx)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(theme.colors.subtitle)
+                                .child("Thinking"),
+                        ),
                 )
             })
             .child(
@@ -8463,23 +8458,6 @@ fn option_hash(option: &AnswerOption) -> usize {
     })
 }
 
-/// F-CHAT-21: the one-line summary shown on a collapsed thought — text
-/// flattened to a single line and capped so it never wraps the header row.
-const THOUGHT_SUMMARY_MAX_CHARS: usize = 72;
-
-fn thought_summary(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.is_empty() {
-        return "Thinking…".to_string();
-    }
-    if flat.chars().count() <= THOUGHT_SUMMARY_MAX_CHARS {
-        flat
-    } else {
-        let truncated: String = flat.chars().take(THOUGHT_SUMMARY_MAX_CHARS).collect();
-        format!("{truncated}…")
-    }
-}
-
 /// F-CHAT-22: the `[start, end]` bounds (inclusive) of the consecutive run
 /// of `Entry::ToolCall` entries that `index` belongs to, when that run has
 /// more than one member. Returns `None` for a lone tool call or an index
@@ -8498,6 +8476,17 @@ fn tool_call_run_bounds(entries: &[Entry], index: usize) -> Option<(usize, usize
         end += 1;
     }
     (end > start).then_some((start, end))
+}
+
+/// The header for a run of consecutive tool calls, in the Bezel Transcript
+/// pattern's words. Pure, so the singular/plural split is testable without a
+/// window.
+fn tool_group_label(count: usize) -> String {
+    if count == 1 {
+        "Worked · 1 step".to_string()
+    } else {
+        format!("Worked · {count} steps")
+    }
 }
 
 /// F-CHAT-22, turn half: how many of the most recent turns stay open. Swift's
@@ -8670,6 +8659,10 @@ enum DiffLine {
 }
 
 impl DiffLine {
+    // `render_tool_diff` now reads `number` directly per-variant to split it
+    // into old/new columns, so this accessor's only remaining caller is
+    // `diff_preview_lines_number_each_side_against_its_own_file` below.
+    #[allow(dead_code)]
     fn number(&self) -> usize {
         match self {
             Self::Context { number, .. }
@@ -8691,10 +8684,25 @@ impl DiffLine {
 /// rewrite should not make the transcript unusable.
 const DIFF_PREVIEW_MAX_LINES: usize = 60;
 
-/// Width of a diff preview's line-number gutter. Swift reserves 30pt for a
-/// `%3d` field plus 8pt of trailing padding; four digits is the realistic
-/// worst case in a file this preview would ever show.
+/// Width of each of a diff preview's two line-number columns (old, then
+/// new). Swift reserves 30pt for a `%3d` field plus 8pt of trailing padding;
+/// four digits is the realistic worst case in a file this preview would
+/// ever show.
 const DIFF_GUTTER_WIDTH: f32 = 34.0;
+
+/// The gallery's standalone Diff pattern is drawn at 760. Recorded so the
+/// number in the spec has a home in the code, and so the rule below can say
+/// what it is *not* doing. Read only by the regression test guarding that
+/// rule, hence the lint allowance.
+#[allow(dead_code)]
+const DIFF_STANDALONE_REFERENCE: f32 = 760.0;
+
+/// A diff inside the transcript uses the width it is given. It never forces
+/// the standalone 760 -- the transcript column is narrower, and a diff that
+/// overflowed it would scroll the whole turn sideways.
+fn diff_column_width(available: f32) -> f32 {
+    available
+}
 
 /// Everything a drawn diff preview needs beyond the diff itself (F-CHAT-31).
 struct DiffPreviewContext {
@@ -8929,13 +8937,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    #[test]
-    fn streaming_border_angle_completes_one_linear_revolution() {
-        assert_eq!(streaming_border_angle(0.0), 0.0);
-        assert_eq!(streaming_border_angle(0.5), 180.0);
-        assert_eq!(streaming_border_angle(1.0), 360.0);
-    }
-
     /// #216: a strict `>` is not enough here. The reported symptom was `###`
     /// at 16px against a 15px body — one pixel, visually indistinguishable
     /// from a bold paragraph, yet it satisfies `>`. The floor is the decided
@@ -9006,25 +9007,12 @@ mod tests {
         }
     }
 
-    /// #239: the cycle is Zed's — ten frames over 1000ms, so 100ms each. Spelt
-    /// out glyph by glyph rather than by index, so a reordering of the frame
-    /// table fails here instead of silently changing the animation.
+    /// Sirio has no truthful per-thought duration today, so the label is the
+    /// deterministic one. If a duration is ever threaded through, this test
+    /// is what says the other branch is allowed.
     #[test]
-    fn generating_spinner_cycles_through_all_ten_frames_in_one_second() {
-        assert_eq!(generating_spinner_frame(Duration::from_millis(0)), "⠋");
-        assert_eq!(generating_spinner_frame(Duration::from_millis(100)), "⠙");
-        assert_eq!(generating_spinner_frame(Duration::from_millis(150)), "⠙");
-        assert_eq!(generating_spinner_frame(Duration::from_millis(900)), "⠏");
-        assert_eq!(
-            generating_spinner_frame(Duration::from_millis(1000)),
-            "⠋",
-            "the cycle wraps at one second"
-        );
-        assert_eq!(
-            generating_spinner_frame(Duration::from_millis(1100)),
-            "⠙",
-            "and keeps cycling on later revolutions"
-        );
+    fn a_settled_reasoning_header_never_invents_an_elapsed_time() {
+        assert_eq!(crate::loading::thought_label(None), "Thought");
     }
 
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
@@ -9040,6 +9028,40 @@ mod tests {
         });
         cx.update(|window, _| window.refresh());
         (chat, cx)
+    }
+
+    /// #239: the indicator shown while a turn streams is the Activity-derived
+    /// reasoning header (Task 6), not a Chat-owned animation.
+    #[gpui::test]
+    async fn the_running_reasoning_header_shows_the_thinking_indicator(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "a streaming turn shows the Activity-derived indicator"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_composer_arms_no_repaint_timer_while_streaming(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                !chat.streaming_border_timer_pending,
+                "the streaming border timer is retired; the shared clock drives the indicator"
+            );
+        });
     }
 
     /// #239: the indicator is shown for exactly as long as a turn is in
@@ -9374,29 +9396,14 @@ mod tests {
         VisualTestContext::from_window(window.into(), cx)
     }
 
-    #[test]
-    fn streaming_border_angle_rotates_one_revolution() {
-        assert_eq!(streaming_border_angle(0.0), 0.0);
-        assert_eq!(streaming_border_angle(0.5), 180.0);
-        assert_eq!(streaming_border_angle(1.0), 360.0);
-
-        let angles = [0.0, 0.25, 0.5, 0.75, 0.999].map(streaming_border_angle);
-        assert!(angles.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
+    /// #239/Task 7: the rotating streaming border is retired, so the
+    /// composer's border is the same footprint and color idle or streaming —
+    /// nothing wraps the card, and nothing shifts the draft text inside it.
     #[gpui::test]
-    async fn the_rotating_border_wraps_the_composer_only_while_streaming(cx: &mut TestAppContext) {
+    async fn the_composer_has_no_rotating_border_while_streaming(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &[]);
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("composer-streaming-ring").is_none(),
-            "an idle composer keeps its static border"
-        );
-        // The static border lives on the card itself, the animated one on a
-        // wrapper the card sits inside — so the card's own width legitimately
-        // differs by the wrapper's inset. What must not move is the card's
-        // outer footprint and the text the user is typing inside it.
         let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
         let idle_input = cx
             .debug_bounds("composer-input")
@@ -9408,19 +9415,17 @@ mod tests {
         });
         refresh_frame(cx);
 
-        let wrapper = cx
-            .debug_bounds("composer-streaming-ring")
-            .expect("a working agent wraps the composer in the animated border");
+        let streaming_card = cx.debug_bounds("composer").expect("the composer is drawn");
         let streaming_input = cx
             .debug_bounds("composer-input")
             .expect("the composer input is drawn");
         assert_eq!(
-            idle_card.size, wrapper.size,
-            "the animated border must occupy exactly the footprint the static one did"
+            idle_card, streaming_card,
+            "the composer's footprint does not move when a turn starts streaming"
         );
         assert_eq!(
             idle_input, streaming_input,
-            "the draft text must not shift when the animated border takes over"
+            "the draft text must not shift when a turn starts streaming"
         );
 
         chat.update(cx, |chat, cx| {
@@ -9429,9 +9434,10 @@ mod tests {
         });
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("composer-streaming-ring").is_none(),
-            "the static border returns the moment streaming ends"
+        let idle_again = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert_eq!(
+            idle_card, idle_again,
+            "the composer's footprint is unchanged after streaming ends"
         );
     }
 
@@ -9587,14 +9593,12 @@ mod tests {
         );
     }
 
-    /// #159: the animated border was the last transcript-width element laid
-    /// out at a *fixed* 720px after #110 turned the other eight into maxima.
-    /// Being the outermost element of the composer, it held the whole column
-    /// open inside a narrower pane, clipping the composer's own controls and
-    /// the transcript bubbles off the left edge — and only while an agent was
-    /// streaming, so an idle frame looked perfectly fine.
+    /// #159/Task 7: the retired animated border used to be the last
+    /// transcript-width element laid out at a *fixed* 720px, holding a
+    /// narrow pane open. With the border gone, the composer itself must
+    /// still track the narrow pane the same way idle or streaming.
     #[gpui::test]
-    async fn the_rotating_border_shrinks_with_a_narrow_pane(cx: &mut TestAppContext) {
+    async fn a_narrow_pane_draws_no_rotating_border(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &[]);
         cx.simulate_resize(size(px(595.0), px(600.0)));
         refresh_frame(cx);
@@ -9612,14 +9616,12 @@ mod tests {
         });
         refresh_frame(cx);
 
-        let ring = cx
-            .debug_bounds("composer-streaming-ring")
-            .expect("a working agent wraps the composer in the animated border");
+        let streaming_card = cx.debug_bounds("composer").expect("the composer is drawn");
         assert_eq!(
-            ring.size.width, idle_card.size.width,
-            "the animated border must track the pane exactly as the static one \r
-             does, not hold it open at the transcript width: idle={idle_card:?} \r
-             streaming={ring:?}"
+            streaming_card, idle_card,
+            "the composer's border tracks the narrow pane the same way idle \
+             or streaming, not held open at the transcript width: \
+             idle={idle_card:?} streaming={streaming_card:?}"
         );
     }
 
@@ -11914,6 +11916,12 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_run_is_labelled_as_a_work_zone() {
+        assert_eq!(tool_group_label(1), "Worked · 1 step");
+        assert_eq!(tool_group_label(4), "Worked · 4 steps");
+    }
+
+    #[test]
     fn collapsed_tool_row_text_names_a_relative_location_and_line() {
         let cwd = Path::new("/workspace");
         let locations = vec![ToolCallLocationInfo {
@@ -12020,26 +12028,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn thought_summary_flattens_and_caps_long_text() {
-        assert_eq!(thought_summary(""), "Thinking…");
-        assert_eq!(thought_summary("short thought"), "short thought");
-        assert_eq!(
-            thought_summary("line one\nline two"),
-            "line one line two",
-            "collapsed summary flattens newlines to one line"
-        );
-        let long = "word ".repeat(30);
-        let summary = thought_summary(&long);
-        assert!(
-            summary.chars().count() <= THOUGHT_SUMMARY_MAX_CHARS + 1,
-            "summary must stay within the cap plus the ellipsis: {summary:?}"
-        );
-        assert!(
-            summary.ends_with('…'),
-            "truncated summary keeps the ellipsis marker"
-        );
-    }
 
     /// F-CHAT-23: text output past the cap is truncated to its tail, not
     /// its head — a long run's result or error usually lands at the end.
@@ -14797,6 +14785,15 @@ mod tests {
             [PathBuf::from("src/lib.rs"), PathBuf::from("src/other.rs")],
             "each location opens its own file, not the card's first one"
         );
+    }
+
+    #[test]
+    fn a_diff_in_the_transcript_takes_the_column_rather_than_the_standalone_760() {
+        // The gallery's standalone Diff pattern references 760; inside a 700
+        // transcript the diff uses the width it has (spec §3).
+        assert!(DIFF_STANDALONE_REFERENCE > TRANSCRIPT_WIDTH);
+        assert_eq!(diff_column_width(TRANSCRIPT_WIDTH), TRANSCRIPT_WIDTH);
+        assert_eq!(diff_column_width(400.0), 400.0);
     }
 
     /// F-CHAT-31: the diff preview's header path opens the file, its rows

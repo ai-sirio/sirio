@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::controls;
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// Context lines fetched for each change. Generous enough that the
@@ -392,6 +393,14 @@ pub struct ChangesTab {
     /// Expanded collapsed-context bands, keyed by (section, path, run key).
     expanded_bands: HashSet<(ChangeSection, PathBuf, usize)>,
     git_task: Option<Task<()>>,
+    /// Whether a snapshot load has ever completed, successfully or not.
+    ///
+    /// The full-surface loader is a *first-load* treatment: once the panel has
+    /// shown real content it must never blank back to an orb, and a clean repo
+    /// must settle on its empty-state message rather than flashing the loader
+    /// on every refresh. `git_task.is_some()` cannot express that — it is also
+    /// true for the second refresh of a repo that simply has nothing to show.
+    has_loaded: bool,
     git_error: Option<String>,
     /// Paths whose diff failed to load, keyed like `diffs`. Kept separate so
     /// the expanded row can name the failure instead of showing nothing.
@@ -475,6 +484,7 @@ impl ChangesTab {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
@@ -574,6 +584,7 @@ impl ChangesTab {
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
+                tab.has_loaded = true;
                 match result {
                     Ok(snapshot) => {
                         tab.apply_snapshot(snapshot);
@@ -647,6 +658,7 @@ impl ChangesTab {
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
+                tab.has_loaded = true;
                 match outcome {
                     (Ok(()), Some(Ok(snapshot))) => tab.apply_snapshot(snapshot),
                     (Err(error), _) => tab.git_error = Some(error.to_string()),
@@ -1593,12 +1605,16 @@ impl ChangesTab {
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let stage_entity = entity.clone();
         let discard_entity = entity.clone();
         let expand_entity = entity.clone();
         let collapse_entity = entity.clone();
+        let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
+        let refreshing = self.git_task.is_some();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -1649,6 +1665,31 @@ impl ChangesTab {
                     });
                 },
             ))
+            .when(refreshing, |this| {
+                this.child(
+                    div()
+                        .id("changes-refresh")
+                        .debug_selector(|| "changes-refresh".to_owned())
+                        .w(px(28.0))
+                        .h(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(loading::compact("changes-refresh-spinner", window, cx)),
+                )
+            })
+            .when(!refreshing, |this| {
+                this.child(action_icon_button(
+                    Icon::RefreshCw,
+                    "Refresh",
+                    "changes-refresh",
+                    "refresh-changes".to_owned(),
+                    theme,
+                    move |cx| {
+                        refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
+                    },
+                ))
+            })
             .child(action_icon_button(
                 Icon::ExpandVertical,
                 "Expand All",
@@ -1898,21 +1939,40 @@ impl ChangesTab {
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
         }
-        if self.git_task.is_some() && self.entries.is_empty() {
+        if !self.has_loaded && self.entries.is_empty() {
             return div()
                 .id("changes-loading")
+                .debug_selector(|| "changes-loading".into())
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
                 .text_color(theme.subtitle)
+                .child(loading::indeterminate(
+                    "changes-loading-orb",
+                    loading::GENERIC_ORB,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .child("Loading changes…")
+                .child(loading::skeleton_rows(
+                    "changes-skeleton",
+                    loading::SKELETON_ROWS,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .into_any_element();
         }
         let sections = self.section_rows(mode);
@@ -2039,8 +2099,8 @@ impl Render for ChangesTab {
             .flex()
             .flex_col()
             .bg(theme.background)
-            .child(self.render_toolbar(entity.clone(), theme, mode))
-            .child(self.render_body(entity, theme, mode))
+            .child(self.render_toolbar(entity.clone(), theme, mode, _window, cx))
+            .child(self.render_body(entity, theme, mode, _window, cx))
     }
 }
 
@@ -2457,9 +2517,25 @@ mod tests {
 
     /// Pumps the test executors until `condition` holds or the budget is
     /// exhausted.
+    /// Pump iterations before a wait helper gives up.
+    ///
+    /// Each iteration sleeps 10ms of REAL time, because the conditions these
+    /// helpers wait on are satisfied by real `git` subprocesses that the test
+    /// executor's virtual clock cannot advance. The budget is therefore a
+    /// wall-clock timeout, and it has to survive a loaded machine: under
+    /// `cargo test --workspace` these tests run alongside every other crate's
+    /// test binary, all competing for CPU and disk with their own `git`
+    /// processes. The old 600 (6s) was enough on an idle machine and flaked
+    /// under that load.
+    ///
+    /// Raising it costs nothing when tests pass — a satisfied condition returns
+    /// on the next iteration — and only buys patience when they would otherwise
+    /// fail for lack of it.
+    const PUMP_BUDGET: usize = 3000;
+
     fn pump_until(cx: &TestAppContext, mut condition: impl FnMut() -> bool) {
         cx.executor().allow_parking();
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if condition() {
                 return;
             }
@@ -2559,7 +2635,7 @@ mod tests {
         mut condition: impl FnMut(&ChangesTab) -> bool,
     ) {
         cx.cx.executor().allow_parking();
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if tab.read_with(&cx.cx, |tab, _| condition(tab)) {
                 return;
             }
@@ -2817,6 +2893,67 @@ mod tests {
         );
     }
 
+    /// The first snapshot has no stale entries to preserve, so it gets the
+    /// full-surface loading treatment while the background git task is in
+    /// flight.
+    #[gpui::test]
+    async fn a_first_load_shows_the_generic_loader_over_an_empty_list(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| {
+                tab.git_task.is_some() && tab.entries.is_empty()
+            }),
+            "the assertion must cover the empty first-load state, before git has published a snapshot"
+        );
+        tab.update(&mut cx.cx, |tab, cx| {
+            // Hold the task open so the test cannot race a fast git snapshot.
+            tab.git_task = Some(cx.spawn(async move |_this, _cx| {
+                std::future::pending::<()>().await;
+            }));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("changes-loading").is_some(),
+            "an empty first load draws the loading surface"
+        );
+    }
+
+    /// A refresh after a snapshot has landed keeps the last known rows on
+    /// screen. The compact refresh indicator belongs inside that stale list;
+    /// the full-surface first-load state must not flash over it.
+    #[gpui::test]
+    async fn a_refresh_keeps_the_settled_list_visible(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| {
+            tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
+        });
+        cx.cx.run_until_parked();
+
+        tab.update(&mut cx.cx, |tab, cx| tab.refresh(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-list").is_some(),
+            "a refresh preserves the stale changes list"
+        );
+        assert!(
+            cx.debug_bounds("changes-loading").is_none(),
+            "a refresh with stale entries does not replace the list with a full-surface loader"
+        );
+    }
+
     /// F-CHG-02: a clean repo (or a worktree just closed and reopened with
     /// nothing to show) must draw a real "No changes" message instead of
     /// silently falling through to a blank `changes-list` with zero
@@ -2829,7 +2966,12 @@ mod tests {
         let (mut cx, tab) = changes_view(cx, dir.0.clone());
         cx.cx
             .update(|app| tab.update(app, |tab, cx| tab.refresh(cx)));
-        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none());
+        // `git_task.is_none()` is not the condition this test means: it is also
+        // true in the window between `refresh` being called and the task being
+        // spawned, so the assertions below could run against a first-load
+        // loader that has not started yet. Wait for the load to have actually
+        // completed.
+        wait_for_tab(&cx, &tab, |tab| tab.has_loaded);
         cx.cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
@@ -3032,7 +3174,7 @@ mod tests {
         std::fs::remove_dir_all(dir.0.join(".git")).expect("remove .git");
         cx.update(|_, app| tab.update(app, |tab, cx| tab.refresh(cx)));
         let tab_ref = tab.clone();
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if cx.read(|app| tab_ref.read_with(app, |tab, _| tab.git_error.is_some())) {
                 break;
             }
@@ -3065,7 +3207,7 @@ mod tests {
             .debug_bounds("changes-retry")
             .expect("the retry button is visible");
         cx.simulate_click(retry.center(), Modifiers::none());
-        for _ in 0..600 {
+        for _ in 0..PUMP_BUDGET {
             if cx.read(|app| tab_ref.read_with(app, |tab, _| tab.git_error.is_none())) {
                 break;
             }
@@ -3624,6 +3766,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             refresh_started: false,
             embedded_in_panel: false,
@@ -3684,6 +3827,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             refresh_started: false,
             embedded_in_panel: false,
@@ -3965,6 +4109,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            has_loaded: false,
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,

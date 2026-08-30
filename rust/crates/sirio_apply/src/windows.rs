@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{ApplyError, Launcher};
+use super::{ApplyError, Launcher, expected_install_dir, self_locate_at};
 use sirio_update::VerifiedUpdate;
 
 /// The installer is a GUI-subsystem binary, so no console would flash even
@@ -15,24 +15,6 @@ use sirio_update::VerifiedUpdate;
 /// window of its own under any circumstances (`CREATE_NO_WINDOW`, 0x08000000).
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// The directory a Windows install of Sirio lives in: the Inno
-/// `DefaultDirName={localappdata}\Programs\Sirio` from `Scripts/build-inno.sh`
-/// (#310). Anything else — a dev build, a copied binary — is not an install
-/// the updater can update in place.
-pub fn expected_install_dir(local_app_data: &Path) -> PathBuf {
-    local_app_data.join("Programs").join("Sirio")
-}
-
-/// Pure self-location check: `sirio.exe` must be running directly out of the
-/// expected install directory.
-pub fn self_locate_at(exe_path: &Path, expected_dir: &Path) -> Result<PathBuf, ApplyError> {
-    let exe_dir = exe_path.parent().ok_or(ApplyError::InstallNotFound)?;
-    if exe_dir != expected_dir {
-        return Err(ApplyError::InstallNotFound);
-    }
-    Ok(expected_dir.to_path_buf())
-}
 
 /// Self-location for the real process. Refusing is the healthy outcome for a
 /// dev build, so no fallback path guessing happens here — the download-page

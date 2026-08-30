@@ -5,10 +5,13 @@
 //! would put two unrelated concerns in one place.
 
 use gpui::{
-    Entity, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    App, Entity, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use sirio_theme::Theme;
+
+use crate::loading;
+use gpui::prelude::FluentBuilder as _;
 
 use super::history::GitHistory;
 
@@ -478,6 +481,8 @@ pub(super) fn render_toolbar(
     history: &GitHistory,
     entity: Entity<GitHistory>,
     theme: Theme,
+    window: &mut Window,
+    cx: &mut App,
 ) -> impl IntoElement {
     let search = render_search_row(
         &history.search_draft,
@@ -550,13 +555,29 @@ pub(super) fn render_toolbar(
         }
     }
 
+    let refreshing = history.is_loading();
     let mut toolbar = div().w_full().flex_none().flex();
     if layout == ToolbarLayout::OneRow {
         toolbar = toolbar.flex_row().items_center().gap(px(6.0));
     } else {
         toolbar = toolbar.flex_col().gap(px(4.0));
     }
-    toolbar.child(search).child(chip_row)
+    toolbar
+        .child(search)
+        .child(chip_row)
+        .when(refreshing, |this| {
+            this.child(
+                div()
+                    .id("history-refresh")
+                    .debug_selector(|| "history-refresh".to_owned())
+                    .w(px(28.0))
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(loading::compact("history-refresh-spinner", window, cx)),
+            )
+        })
 }
 
 #[cfg(test)]
