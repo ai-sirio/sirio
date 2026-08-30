@@ -32,7 +32,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use crate::caret;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
@@ -62,26 +61,6 @@ const TOOL_CALL_GROUP_MEMBER_INDENT: f32 =
 /// The user turn's pill: rounded, right-aligned, capped at waku's bubble
 /// width. The assistant reply has no container at all.
 pub(crate) const USER_PILL_MAX_WIDTH: f32 = 540.0;
-
-/// F-CHAT-59: the composer's streaming border completes one revolution
-/// every two seconds, continuous and un-eased — matches the retired Swift
-/// reference's `withAnimation(.linear(duration: 2).repeatForever(autoreverses:
-/// false))` (`docs/superpowers/plans/2026-08-09-composer-agent-colors.md`).
-const STREAMING_BORDER_REVOLUTION: Duration = Duration::from_secs(2);
-/// Repaint cadence while the streaming border rotates — the same 16ms/60fps
-/// interval `BrowserView` already uses for its own frame-driven redraw.
-const STREAMING_BORDER_TICK: Duration = Duration::from_millis(16);
-/// Thickness of the rotating ring drawn around the composer card while
-/// streaming. Matching the static 1px border keeps the composer's footprint
-/// and its contents stationary while the ring is shown.
-const STREAMING_BORDER_WIDTH: Pixels = px(1.0);
-
-/// Degrees of rotation for a streaming-border revolution `progress`
-/// (`0.0` = start of a revolution, `1.0` = one full turn) — continuous
-/// linear rotation, no easing.
-fn streaming_border_angle(progress: f64) -> f64 {
-    progress * 360.0
-}
 
 actions!(
     chat_composer,
@@ -991,13 +970,12 @@ pub struct Chat {
     model_search_blink: caret::Blink,
     model_search_caret_visible: bool,
     streaming: bool,
-    /// Wall-clock origin of the current streaming-border revolution, read
-    /// through `cx.background_executor().now()` so it stays fakeable under
-    /// tests. `None` whenever `streaming` is false — the next turn always
-    /// starts the rotation fresh rather than resuming a stale phase.
-    streaming_border_started_at: Option<Instant>,
-    /// Whether a streaming-border repaint timer is already in flight — same
-    /// one-timer-per-surface discipline as `composer_blink`/`caret::schedule`.
+    /// Retired with the rotating streaming border: the shared Bezel clock
+    /// drives the reasoning header now, so this stays permanently `false`.
+    /// Kept as a regression guard — a repaint timer reappearing here would
+    /// mean a Chat-owned animation crept back in. Read only by that guard
+    /// test, hence the lint allowance.
+    #[allow(dead_code)]
     streaming_border_timer_pending: bool,
     /// D-CHAT-03: the draft committed (Enter) while a turn streams, to be
     /// sent as the next user turn when the turn ends — one slot, latest
@@ -1264,7 +1242,6 @@ impl Chat {
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
-            streaming_border_started_at: None,
             streaming_border_timer_pending: false,
             queued_item: None,
             connecting: false,
@@ -6045,39 +6022,6 @@ impl Chat {
         let entity = cx.entity();
         let entity_for_focus = entity.clone();
 
-        // F-CHAT-59: while streaming, the ring's rotation angle is derived
-        // from wall-clock elapsed time (not accumulated per-tick) so it's
-        // always frame-accurate regardless of render cadence; a repaint
-        // timer just wakes the view often enough to sample it, the same
-        // one-timer-per-surface discipline `caret::schedule` uses for the
-        // composer's own blink.
-        let streaming_border_deg = if self.streaming {
-            let started_at = *self
-                .streaming_border_started_at
-                .get_or_insert_with(|| cx.background_executor().now());
-            if !self.streaming_border_timer_pending {
-                self.streaming_border_timer_pending = true;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(STREAMING_BORDER_TICK).await;
-                    let _ = this.update(cx, |chat, cx| {
-                        chat.streaming_border_timer_pending = false;
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            let elapsed = cx
-                .background_executor()
-                .now()
-                .saturating_duration_since(started_at);
-            let progress = elapsed.as_secs_f64() / STREAMING_BORDER_REVOLUTION.as_secs_f64() % 1.0;
-            Some(streaming_border_angle(progress))
-        } else {
-            self.streaming_border_started_at = None;
-            self.streaming_border_timer_pending = false;
-            None
-        };
-
         // The composer's insertion caret. A cursor move or edit since the
         // last frame wakes the blink (the bar must be solid right after the
         // user interacts), then exactly one toggle timer is armed while the
@@ -7484,17 +7428,13 @@ impl Chat {
             .relative()
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
-            // #242: the border is always present, so the card's box is the
-            // same size whether a turn is streaming or not. It used to be
-            // added only when idle, which cost the card 2px of height the
-            // moment a turn began -- invisible in width, where `w_full` pins
-            // it, but a visible twitch in height twice per turn. While
-            // streaming it goes transparent instead of away: the visible rim
-            // is the rotating ring drawn just outside the card.
+            // #242: the border is always present and the same color whether
+            // a turn is streaming or not, so the card's box never moves.
+            // The rotating ring that used to mark a streaming turn is
+            // retired (Task 7) — the shared Activity clock lives in the
+            // reasoning header now (Task 6).
             .border_1()
-            .border_color(if self.streaming {
-                colors.hairline.opacity(0.0)
-            } else if focused {
+            .border_color(if focused {
                 colors.selection_ring
             } else {
                 colors.hairline
@@ -7691,57 +7631,7 @@ impl Chat {
             .children(mode_picker)
             .children(context_popover);
 
-        // F-CHAT-59: while streaming, an outer ring adds the rotating
-        // orange highlight around the otherwise-unchanged card above —
-        // `linear_gradient`'s angle sweeping continuously is what reads as
-        // rotation; the card's own opaque `colors.composer` fill covers
-        // everything inside the ring's `STREAMING_BORDER_WIDTH` padding, so
-        // nothing needs punching out by hand.
-        match streaming_border_deg {
-            Some(angle) => {
-                let streaming_orange = rgb(0xf5a623);
-                div()
-                    .id("composer-streaming-ring")
-                    .debug_selector(|| "composer-streaming-ring".into())
-                    // #110 turned every transcript-width site into a maximum
-                    // rather than a fixed width; this ring was missed, and
-                    // being the outermost element of the composer it held the
-                    // whole column open at 720px inside a narrower pane —
-                    // clipping the composer's own controls and the transcript
-                    // bubbles above off the left edge, but only while an agent
-                    // was streaming, which is why an idle frame looked fine.
-                    .w_full()
-                    .max_w(px(TRANSCRIPT_WIDTH))
-                    // #242: the ring is drawn AROUND the card, not by padding
-                    // it inward. It used to wrap `composer_card` with
-                    // `.p(STREAMING_BORDER_WIDTH)`, which cost the card 2px in
-                    // each dimension and shifted it 1px down and right every
-                    // time a turn started -- the exact opposite of what
-                    // `STREAMING_BORDER_WIDTH`'s comment promised, and a twitch
-                    // the user saw twice per turn. Positioned absolutely and
-                    // inset by -1px it paints the same rim while taking part
-                    // in no layout at all, so the composer's rectangle is
-                    // identical streaming or idle.
-                    .relative()
-                    .child(
-                        div()
-                            .absolute()
-                            .top(-STREAMING_BORDER_WIDTH)
-                            .left(-STREAMING_BORDER_WIDTH)
-                            .right(-STREAMING_BORDER_WIDTH)
-                            .bottom(-STREAMING_BORDER_WIDTH)
-                            .rounded(theme.radii.composer + STREAMING_BORDER_WIDTH)
-                            .bg(linear_gradient(
-                                angle as f32,
-                                linear_color_stop(streaming_orange.opacity(0.15), 0.0),
-                                linear_color_stop(streaming_orange, 1.0),
-                            )),
-                    )
-                    .child(composer_card)
-                    .into_any_element()
-            }
-            None => composer_card.into_any_element(),
-        }
+        composer_card.into_any_element()
     }
 }
 
@@ -8925,13 +8815,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    #[test]
-    fn streaming_border_angle_completes_one_linear_revolution() {
-        assert_eq!(streaming_border_angle(0.0), 0.0);
-        assert_eq!(streaming_border_angle(0.5), 180.0);
-        assert_eq!(streaming_border_angle(1.0), 360.0);
-    }
-
     /// #216: a strict `>` is not enough here. The reported symptom was `###`
     /// at 16px against a 15px body — one pixel, visually indistinguishable
     /// from a bold paragraph, yet it satisfies `>`. The floor is the decided
@@ -9040,6 +8923,23 @@ mod tests {
             cx.debug_bounds("chat-generating-spinner").is_some(),
             "a streaming turn shows the Activity-derived indicator"
         );
+    }
+
+    #[gpui::test]
+    async fn the_composer_arms_no_repaint_timer_while_streaming(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                !chat.streaming_border_timer_pending,
+                "the streaming border timer is retired; the shared clock drives the indicator"
+            );
+        });
     }
 
     /// #239: the indicator is shown for exactly as long as a turn is in
@@ -9374,29 +9274,14 @@ mod tests {
         VisualTestContext::from_window(window.into(), cx)
     }
 
-    #[test]
-    fn streaming_border_angle_rotates_one_revolution() {
-        assert_eq!(streaming_border_angle(0.0), 0.0);
-        assert_eq!(streaming_border_angle(0.5), 180.0);
-        assert_eq!(streaming_border_angle(1.0), 360.0);
-
-        let angles = [0.0, 0.25, 0.5, 0.75, 0.999].map(streaming_border_angle);
-        assert!(angles.windows(2).all(|pair| pair[0] < pair[1]));
-    }
-
+    /// #239/Task 7: the rotating streaming border is retired, so the
+    /// composer's border is the same footprint and color idle or streaming —
+    /// nothing wraps the card, and nothing shifts the draft text inside it.
     #[gpui::test]
     async fn the_rotating_border_wraps_the_composer_only_while_streaming(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &[]);
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("composer-streaming-ring").is_none(),
-            "an idle composer keeps its static border"
-        );
-        // The static border lives on the card itself, the animated one on a
-        // wrapper the card sits inside — so the card's own width legitimately
-        // differs by the wrapper's inset. What must not move is the card's
-        // outer footprint and the text the user is typing inside it.
         let idle_card = cx.debug_bounds("composer").expect("the composer is drawn");
         let idle_input = cx
             .debug_bounds("composer-input")
@@ -9408,19 +9293,17 @@ mod tests {
         });
         refresh_frame(cx);
 
-        let wrapper = cx
-            .debug_bounds("composer-streaming-ring")
-            .expect("a working agent wraps the composer in the animated border");
+        let streaming_card = cx.debug_bounds("composer").expect("the composer is drawn");
         let streaming_input = cx
             .debug_bounds("composer-input")
             .expect("the composer input is drawn");
         assert_eq!(
-            idle_card.size, wrapper.size,
-            "the animated border must occupy exactly the footprint the static one did"
+            idle_card, streaming_card,
+            "the composer's footprint does not move when a turn starts streaming"
         );
         assert_eq!(
             idle_input, streaming_input,
-            "the draft text must not shift when the animated border takes over"
+            "the draft text must not shift when a turn starts streaming"
         );
 
         chat.update(cx, |chat, cx| {
@@ -9429,9 +9312,10 @@ mod tests {
         });
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("composer-streaming-ring").is_none(),
-            "the static border returns the moment streaming ends"
+        let idle_again = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert_eq!(
+            idle_card, idle_again,
+            "the composer's footprint is unchanged after streaming ends"
         );
     }
 
@@ -9587,12 +9471,10 @@ mod tests {
         );
     }
 
-    /// #159: the animated border was the last transcript-width element laid
-    /// out at a *fixed* 720px after #110 turned the other eight into maxima.
-    /// Being the outermost element of the composer, it held the whole column
-    /// open inside a narrower pane, clipping the composer's own controls and
-    /// the transcript bubbles off the left edge — and only while an agent was
-    /// streaming, so an idle frame looked perfectly fine.
+    /// #159/Task 7: the retired animated border used to be the last
+    /// transcript-width element laid out at a *fixed* 720px, holding a
+    /// narrow pane open. With the border gone, the composer itself must
+    /// still track the narrow pane the same way idle or streaming.
     #[gpui::test]
     async fn the_rotating_border_shrinks_with_a_narrow_pane(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &[]);
@@ -9612,14 +9494,12 @@ mod tests {
         });
         refresh_frame(cx);
 
-        let ring = cx
-            .debug_bounds("composer-streaming-ring")
-            .expect("a working agent wraps the composer in the animated border");
+        let streaming_card = cx.debug_bounds("composer").expect("the composer is drawn");
         assert_eq!(
-            ring.size.width, idle_card.size.width,
-            "the animated border must track the pane exactly as the static one \r
-             does, not hold it open at the transcript width: idle={idle_card:?} \r
-             streaming={ring:?}"
+            streaming_card, idle_card,
+            "the composer's border tracks the narrow pane the same way idle \
+             or streaming, not held open at the transcript width: \
+             idle={idle_card:?} streaming={streaming_card:?}"
         );
     }
 
