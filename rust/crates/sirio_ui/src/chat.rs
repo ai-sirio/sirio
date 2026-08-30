@@ -4489,6 +4489,14 @@ impl Chat {
         let typography = theme.typography;
         let lines = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text);
         let total = lines.len();
+        let added = lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Added { .. }))
+            .count();
+        let removed = lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Removed { .. }))
+            .count();
         let shown = lines
             .into_iter()
             .take(DIFF_PREVIEW_MAX_LINES)
@@ -4502,50 +4510,46 @@ impl Chat {
         let open_entity = entity.clone();
         let header_id = format!("{id_prefix}-open");
         let header_selector = header_id.clone();
-        let mut column = div()
+        let scroll_id = format!("{id_prefix}-scroll");
+        let mut scroll = div()
+            .id(SharedString::from(scroll_id))
             .w_full()
+            .overflow_x_scroll()
             .flex()
             .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(colors.code_inset_fill)
-            .py(px(6.0))
-            .child(
-                div()
-                    .id(SharedString::from(header_id))
-                    .debug_selector(move || header_selector.clone())
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(typography.footnote)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.file_link)
-                    .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.text_color(colors.title))
-                    .px(px(10.0))
-                    .pb(px(4.0))
-                    .on_click(move |_, _, cx| {
-                        open_entity.update(cx, |_, cx| {
-                            cx.emit(ChatEvent::OpenFile(open_path.clone()));
-                        });
-                    })
-                    .child(
-                        IconElement::new(Icon::File, IconSize::Small).text_color(colors.file_link),
-                    )
-                    .child(diff.path.display().to_string()),
-            );
+            .items_start()
+            .gap(px(8.0));
         for (index, line) in shown.iter().enumerate() {
+            // Bezel's gallery diff uses a 10% success/danger wash, not the
+            // 12% `VEIL_MID` `sirio_theme::diff_*_background` tokens (those
+            // stay theme-wide and out of this task's `chat.rs`-only scope),
+            // so the wash is built locally from the same solid colour.
             let (prefix, text_color, background) = match line {
                 DiffLine::Context { .. } => (" ", colors.primary_text_color, None),
                 DiffLine::Removed { .. } => (
                     "-",
                     colors.diff_deletion,
-                    Some(colors.diff_deletion_background),
+                    Some(Rgba {
+                        a: 0.10,
+                        ..colors.diff_deletion
+                    }),
                 ),
                 DiffLine::Added { .. } => (
                     "+",
                     colors.diff_addition,
-                    Some(colors.diff_addition_background),
+                    Some(Rgba {
+                        a: 0.10,
+                        ..colors.diff_addition
+                    }),
                 ),
+            };
+            // The lockstep diff keeps `old_index`/`new_index` in sync at
+            // every `Context` line, so its single stored `number` is both
+            // columns there; `Removed`/`Added` exist on only one side.
+            let (old_number, new_number) = match line {
+                DiffLine::Context { number, .. } => (number.to_string(), number.to_string()),
+                DiffLine::Removed { number, .. } => (number.to_string(), String::new()),
+                DiffLine::Added { number, .. } => (String::new(), number.to_string()),
             };
             let text = line.text().to_string();
             let body = match selection
@@ -4580,45 +4584,116 @@ impl Chat {
                 .debug_selector(move || row_selector.clone())
                 .flex()
                 .items_start()
+                .min_w_full()
                 .px(px(10.0))
+                .py(px(1.0))
                 .font_family(typography.code_family)
-                .text_size(typography.code_size)
-                .line_height(typography.code_line_height)
+                .text_size(px(12.0))
+                .line_height(px(18.0))
                 .text_color(text_color)
                 .child(
+                    // One debug selector spans both columns: existing
+                    // callers (F-CHAT-31) address a row's gutter as a
+                    // single element, and that selector should not have to
+                    // change just because the gutter now has two fields.
                     div()
                         .debug_selector(move || number_selector.clone())
                         .flex_none()
-                        .w(px(DIFF_GUTTER_WIDTH))
-                        .pr(px(8.0))
                         .flex()
-                        .justify_end()
-                        .text_color(colors.meta)
-                        .child(line.number().to_string()),
+                        .child(
+                            div()
+                                .w(px(DIFF_GUTTER_WIDTH))
+                                .pr(px(4.0))
+                                .flex()
+                                .justify_end()
+                                .text_color(colors.meta)
+                                .child(old_number),
+                        )
+                        .child(
+                            div()
+                                .w(px(DIFF_GUTTER_WIDTH))
+                                .pr(px(8.0))
+                                .flex()
+                                .justify_end()
+                                .text_color(colors.meta)
+                                .child(new_number),
+                        ),
                 )
                 .child(div().flex_none().w(px(12.0)).child(prefix))
                 .child(
                     div()
                         .debug_selector(move || text_selector.clone())
-                        .flex_1()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
                         .child(body),
                 );
             if let Some(background) = background {
                 row = row.bg(background);
             }
-            column = column.child(row);
+            scroll = scroll.child(row);
         }
         if total > DIFF_PREVIEW_MAX_LINES {
-            column = column.child(
+            scroll = scroll.child(
                 div()
+                    .min_w_full()
                     .text_size(typography.caption2)
                     .text_color(colors.meta)
                     .px(px(10.0))
-                    .pt(px(4.0))
                     .child(format!("… {} more lines", total - DIFF_PREVIEW_MAX_LINES)),
             );
         }
-        column.into_any_element()
+        div()
+            .w_full()
+            // Never the standalone gallery's 760 -- the diff takes the
+            // transcript's own width, per `diff_column_width`.
+            .max_w(px(diff_column_width(TRANSCRIPT_WIDTH)))
+            .flex()
+            .flex_col()
+            .rounded(theme.radii.code_block)
+            .bg(colors.code_inset_fill)
+            .py(px(6.0))
+            .child(
+                div()
+                    .id(SharedString::from(header_id))
+                    .debug_selector(move || header_selector.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.file_link)
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.text_color(colors.title))
+                    .px(px(10.0))
+                    .pb(px(4.0))
+                    .on_click(move |_, _, cx| {
+                        open_entity.update(cx, |_, cx| {
+                            cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                        });
+                    })
+                    .child(
+                        IconElement::new(Icon::File, IconSize::Small).text_color(colors.file_link),
+                    )
+                    .child(diff.path.display().to_string())
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_color(colors.diff_addition)
+                                    .child(format!("+{added}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(colors.diff_deletion)
+                                    .child(format!("-{removed}")),
+                            ),
+                    ),
+            )
+            .child(scroll)
+            .into_any_element()
     }
 
     /// F-CHAT-32: an edit tool call ends with an actionable file summary.
@@ -8584,6 +8659,10 @@ enum DiffLine {
 }
 
 impl DiffLine {
+    // `render_tool_diff` now reads `number` directly per-variant to split it
+    // into old/new columns, so this accessor's only remaining caller is
+    // `diff_preview_lines_number_each_side_against_its_own_file` below.
+    #[allow(dead_code)]
     fn number(&self) -> usize {
         match self {
             Self::Context { number, .. }
@@ -8605,10 +8684,25 @@ impl DiffLine {
 /// rewrite should not make the transcript unusable.
 const DIFF_PREVIEW_MAX_LINES: usize = 60;
 
-/// Width of a diff preview's line-number gutter. Swift reserves 30pt for a
-/// `%3d` field plus 8pt of trailing padding; four digits is the realistic
-/// worst case in a file this preview would ever show.
+/// Width of each of a diff preview's two line-number columns (old, then
+/// new). Swift reserves 30pt for a `%3d` field plus 8pt of trailing padding;
+/// four digits is the realistic worst case in a file this preview would
+/// ever show.
 const DIFF_GUTTER_WIDTH: f32 = 34.0;
+
+/// The gallery's standalone Diff pattern is drawn at 760. Recorded so the
+/// number in the spec has a home in the code, and so the rule below can say
+/// what it is *not* doing. Read only by the regression test guarding that
+/// rule, hence the lint allowance.
+#[allow(dead_code)]
+const DIFF_STANDALONE_REFERENCE: f32 = 760.0;
+
+/// A diff inside the transcript uses the width it is given. It never forces
+/// the standalone 760 -- the transcript column is narrower, and a diff that
+/// overflowed it would scroll the whole turn sideways.
+fn diff_column_width(available: f32) -> f32 {
+    available
+}
 
 /// Everything a drawn diff preview needs beyond the diff itself (F-CHAT-31).
 struct DiffPreviewContext {
@@ -14691,6 +14785,15 @@ mod tests {
             [PathBuf::from("src/lib.rs"), PathBuf::from("src/other.rs")],
             "each location opens its own file, not the card's first one"
         );
+    }
+
+    #[test]
+    fn a_diff_in_the_transcript_takes_the_column_rather_than_the_standalone_760() {
+        // The gallery's standalone Diff pattern references 760; inside a 700
+        // transcript the diff uses the width it has (spec §3).
+        assert!(DIFF_STANDALONE_REFERENCE > TRANSCRIPT_WIDTH);
+        assert_eq!(diff_column_width(TRANSCRIPT_WIDTH), TRANSCRIPT_WIDTH);
+        assert_eq!(diff_column_width(400.0), 400.0);
     }
 
     /// F-CHAT-31: the diff preview's header path opens the file, its rows
