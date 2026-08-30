@@ -2,12 +2,15 @@
 //! their status glyphs.
 
 use super::*;
+use crate::loading;
 
 impl RightPanel {
     pub(super) fn render_activity(
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if self.activity.is_empty() {
             // F-CHG-20: the empty activity view states the absence instead
@@ -32,6 +35,8 @@ impl RightPanel {
                     index,
                     entity.clone(),
                     theme,
+                    window,
+                    cx,
                 ));
             }
             list.into_any_element()
@@ -43,6 +48,8 @@ impl RightPanel {
         index: usize,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let status = super::status_color(surface.status, theme);
         let status_name = match surface.status {
@@ -102,7 +109,7 @@ impl RightPanel {
                     .debug_selector(move || status_id.clone())
                     .text_size(px(12.0))
                     .text_color(status)
-                    .child(activity_status_glyph(surface.status)),
+                    .child(activity_status_glyph(surface.status, index, window, cx)),
             )
             .child(
                 div()
@@ -120,13 +127,50 @@ impl RightPanel {
     }
 }
 
-fn activity_status_glyph(status: ActivityStatus) -> &'static str {
+fn activity_status_glyph(
+    status: ActivityStatus,
+    index: usize,
+    window: &mut Window,
+    cx: &mut Context<RightPanel>,
+) -> gpui::AnyElement {
+    let status_name = match status {
+        ActivityStatus::Idle => "idle",
+        ActivityStatus::Running => "running",
+        ActivityStatus::NeedsInput => "needs-input",
+        ActivityStatus::Done => "done",
+        ActivityStatus::Error => "error",
+    };
+    let glyph_id = if status == ActivityStatus::Running {
+        format!("activity-running-spinner-{index}")
+    } else {
+        format!("activity-status-glyph-{status_name}-{index}")
+    };
     match status {
-        ActivityStatus::Idle => "○",
-        ActivityStatus::Running => "●",
-        ActivityStatus::NeedsInput => "?",
-        ActivityStatus::Done => "✓",
-        ActivityStatus::Error => "!",
+        ActivityStatus::Running => div()
+            .id(("activity-running-spinner", index))
+            .debug_selector(move || glyph_id.clone())
+            .child(loading::compact("activity-running-spinner", window, cx))
+            .into_any_element(),
+        ActivityStatus::Idle => div()
+            .id(glyph_id.clone())
+            .debug_selector(move || glyph_id.clone())
+            .child("○")
+            .into_any_element(),
+        ActivityStatus::NeedsInput => div()
+            .id(glyph_id.clone())
+            .debug_selector(move || glyph_id.clone())
+            .child("?")
+            .into_any_element(),
+        ActivityStatus::Done => div()
+            .id(glyph_id.clone())
+            .debug_selector(move || glyph_id.clone())
+            .child("✓")
+            .into_any_element(),
+        ActivityStatus::Error => div()
+            .id(glyph_id.clone())
+            .debug_selector(move || glyph_id)
+            .child("!")
+            .into_any_element(),
     }
 }
 
@@ -211,6 +255,12 @@ mod tests {
                         ActivityStatus::NeedsInput,
                     ),
                     ActivitySurface::new(Icon::File, "Idle surface", "/repo", ActivityStatus::Idle),
+                    ActivitySurface::new(
+                        Icon::MessageSquare,
+                        "Running agent",
+                        "/repo",
+                        ActivityStatus::Running,
+                    ),
                 ],
             )
         });
@@ -221,10 +271,22 @@ mod tests {
             cx.debug_bounds("activity-status-needs-input-0").is_some(),
             "NeedsInput reaches a dedicated status marker in the drawn panel"
         );
-        assert_ne!(
-            activity_status_glyph(ActivityStatus::NeedsInput),
-            activity_status_glyph(ActivityStatus::Idle),
-            "NeedsInput is not rendered with Idle's glyph"
+        assert!(
+            cx.debug_bounds("activity-status-glyph-needs-input-0")
+                .is_some(),
+            "NeedsInput draws its own glyph instead of Idle's glyph"
+        );
+        assert!(
+            cx.debug_bounds("activity-status-glyph-idle-1").is_some(),
+            "Idle draws its own glyph instead of NeedsInput's glyph"
+        );
+        assert!(
+            cx.debug_bounds("activity-running-spinner-2").is_some(),
+            "Running draws the compact spinner in its status slot"
+        );
+        assert!(
+            cx.debug_bounds("activity-running-spinner-1").is_none(),
+            "Idle does not draw the running spinner"
         );
     }
 }

@@ -37,6 +37,7 @@ use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
 };
+use crate::loading;
 
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
@@ -713,13 +714,33 @@ impl FileView {
         entity: gpui::Entity<Self>,
         caret_visible: bool,
         caret_offset: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(message) = &self.notice {
             return notice(message.clone(), theme);
         }
 
         match &self.state {
-            ViewState::Loading => notice("Loading file…", theme),
+            ViewState::Loading => div()
+                .id("file-loading")
+                .debug_selector(|| "file-loading".to_owned())
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(theme.spacing.card_gap)
+                .text_color(theme.subtitle)
+                .child(loading::indeterminate(
+                    "file-loading-orb",
+                    loading::GENERIC_ORB,
+                    &theme,
+                    window,
+                    cx,
+                ))
+                .child("Loading file…")
+                .into_any_element(),
             ViewState::Ready(editor) => match editor.status() {
                 LoadStatus::Loaded => {
                     let conflict = editor.conflict();
@@ -841,6 +862,8 @@ impl Render for FileView {
                 cx.entity(),
                 caret_visible,
                 caret_offset,
+                window,
+                cx,
             )))
     }
 }

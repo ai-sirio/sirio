@@ -16,6 +16,7 @@ use sirio_git::{CommitRecord, GitBranches, GitLog, GraphRow, LogFilter, layout};
 use sirio_theme::Theme;
 
 use super::history_toolbar;
+use crate::loading;
 
 /// Commits requested per chunk.
 const CHUNK: usize = 500;
@@ -191,6 +192,12 @@ impl GitHistory {
 
     /// Requests the next chunk. Single-flight: a request while one is in
     /// flight is dropped, not queued.
+    /// Whether a history chunk is currently being fetched. The toolbar uses
+    /// this to show a compact indicator while settled rows remain visible.
+    pub(super) fn is_loading(&self) -> bool {
+        self.load_task.is_some()
+    }
+
     pub(crate) fn load_next_chunk(&mut self, cx: &mut Context<Self>) {
         if self.load_task.is_some() || self.exhausted {
             return;
@@ -569,7 +576,12 @@ impl Render for GitHistory {
             .as_ref()
             .expect("just initialized")
             .is_focused(window);
-        crate::caret::schedule(&mut self.path_blink, path_focused, Self::flip_path_blink, cx);
+        crate::caret::schedule(
+            &mut self.path_blink,
+            path_focused,
+            Self::flip_path_blink,
+            cx,
+        );
         self.path_caret_visible = path_focused && self.path_blink.visible();
 
         let toolbar = history_toolbar::render_toolbar(
@@ -577,6 +589,8 @@ impl Render for GitHistory {
             self,
             entity.clone(),
             theme,
+            window,
+            cx,
         )
         .into_any_element();
 
@@ -617,13 +631,31 @@ impl Render for GitHistory {
                 .into_any_element()
         } else if !self.settled {
             div()
+                .id("history-loading")
+                .debug_selector(|| "history-loading".to_owned())
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(theme.spacing.card_gap)
                 .text_color(theme.meta)
+                .child(loading::indeterminate(
+                    "history-loading-orb",
+                    loading::GENERIC_ORB,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .child("Loading history…")
+                .child(loading::skeleton_rows(
+                    "history-skeleton",
+                    loading::SKELETON_ROWS,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .into_any_element()
         } else if let Some(reason) = self.empty_reason {
             let label = match reason {
