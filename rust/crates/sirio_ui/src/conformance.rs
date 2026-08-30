@@ -305,19 +305,21 @@ fn bars_and_rows_use_the_measured_density() {
     );
 }
 
-/// The content column is the frozen 720 everywhere prose reads: the chat
-/// transcript, the settings surface (was 704 — a value nobody recorded),
-/// and rendered markdown in file tabs (was 800). The user pill is capped
-/// at waku's 540; the composer card pads 14/10.
+/// Settings and the file-tab markdown column keep waku's frozen 720. The chat
+/// transcript no longer does: it follows the Bezel Transcript pattern's 700
+/// (`docs/superpowers/specs/2026-08-29-bezel-loading-design.md` §2).
 #[test]
-fn the_content_column_is_the_frozen_720() {
-    assert_eq!(TRANSCRIPT_WIDTH, 720.0, "chat transcript column");
+fn the_non_chat_content_columns_are_the_frozen_720() {
     assert_eq!(CONTENT_WIDTH, 720.0, "settings content column");
     assert_eq!(MARKDOWN_COLUMN_WIDTH, 720.0, "file-tab markdown column");
-
-    assert_eq!(USER_PILL_MAX_WIDTH, 540.0, "user pill max width (waku 540)");
     assert_eq!(CARD_H_PADDING, 14.0, "composer card px(14)");
     assert_eq!(CARD_V_PADDING, 10.0, "composer card p(10)");
+}
+
+#[test]
+fn the_live_transcript_follows_the_bezel_transcript_pattern() {
+    assert_eq!(TRANSCRIPT_WIDTH, 700.0, "transcript column (Bezel Transcript)");
+    assert_eq!(USER_PILL_MAX_WIDTH, 440.0, "user bubble (Bezel Activity)");
 }
 
 /// The named waku components are the ones the conformance story hinges on;
@@ -333,8 +335,9 @@ fn named_components_keep_their_frozen_geometry() {
     assert_eq!(CARD_H_PADDING, 14.0);
     assert_eq!(CARD_V_PADDING, 10.0);
 
-    // The user pill is max-540, r12, px12/py8 — the container metrics are
-    // frozen; the text deliberately stays at body size (see ledger).
+    // The user pill is now the Bezel 440, r12, px12/py8 — the container
+    // metrics are frozen except for the width; the text deliberately stays
+    // at body size (see ledger).
     assert_eq!(Theme::dark().radii.user_pill, px(12.0));
-    assert_eq!(USER_PILL_MAX_WIDTH, 540.0);
+    assert_eq!(USER_PILL_MAX_WIDTH, 440.0);
 }
