@@ -243,10 +243,10 @@ done
 # PASS, loud and named the same way the rust-std-not-installed precondition above is: a green
 # gate here only means pending_drop and friends actually ran on a host that is Linux/FreeBSD.
 run_gpui_linux_vendor_test_stage() {
-    local stage="cargo test --manifest-path vendor/gpui_linux/Cargo.toml"
+    local stage="cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked"
     local log="$LOG_DIR/gpui_linux_vendor_test.log"
-    if ! (cd "$ROOT/rust" && cargo test --manifest-path vendor/gpui_linux/Cargo.toml) >"$log" 2>&1; then
-        fail_stage "$stage" "$log" "(cd rust && cargo test --manifest-path vendor/gpui_linux/Cargo.toml)"
+    if ! (cd "$ROOT/rust" && cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked) >"$log" 2>&1; then
+        fail_stage "$stage" "$log" "(cd rust && cargo test --manifest-path vendor/gpui_linux/Cargo.toml --locked)"
     fi
     local total_passed
     total_passed=$(grep -oE '[0-9]+ passed' "$log" | awk '{s+=$1} END{print s+0}')
