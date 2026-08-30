@@ -1594,12 +1594,16 @@ impl ChangesTab {
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let stage_entity = entity.clone();
         let discard_entity = entity.clone();
         let expand_entity = entity.clone();
         let collapse_entity = entity.clone();
+        let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
+        let refreshing = self.git_task.is_some();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -1650,6 +1654,31 @@ impl ChangesTab {
                     });
                 },
             ))
+            .when(refreshing, |this| {
+                this.child(
+                    div()
+                        .id("changes-refresh")
+                        .debug_selector(|| "changes-refresh".to_owned())
+                        .w(px(28.0))
+                        .h(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(loading::compact("changes-refresh-spinner", window, cx)),
+                )
+            })
+            .when(!refreshing, |this| {
+                this.child(action_icon_button(
+                    Icon::RefreshCw,
+                    "Refresh",
+                    "changes-refresh",
+                    "refresh-changes".to_owned(),
+                    theme,
+                    move |cx| {
+                        refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
+                    },
+                ))
+            })
             .child(action_icon_button(
                 Icon::ExpandVertical,
                 "Expand All",
@@ -2059,7 +2088,7 @@ impl Render for ChangesTab {
             .flex()
             .flex_col()
             .bg(theme.background)
-            .child(self.render_toolbar(entity.clone(), theme, mode))
+            .child(self.render_toolbar(entity.clone(), theme, mode, _window, cx))
             .child(self.render_body(entity, theme, mode, _window, cx))
     }
 }

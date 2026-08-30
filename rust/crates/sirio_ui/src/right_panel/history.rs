@@ -192,6 +192,12 @@ impl GitHistory {
 
     /// Requests the next chunk. Single-flight: a request while one is in
     /// flight is dropped, not queued.
+    /// Whether a history chunk is currently being fetched. The toolbar uses
+    /// this to show a compact indicator while settled rows remain visible.
+    pub(super) fn is_loading(&self) -> bool {
+        self.load_task.is_some()
+    }
+
     pub(crate) fn load_next_chunk(&mut self, cx: &mut Context<Self>) {
         if self.load_task.is_some() || self.exhausted {
             return;
@@ -583,6 +589,8 @@ impl Render for GitHistory {
             self,
             entity.clone(),
             theme,
+            window,
+            cx,
         )
         .into_any_element();
 
