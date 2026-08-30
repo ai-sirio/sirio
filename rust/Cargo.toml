@@ -58,10 +58,11 @@ publish = false
 # second declaration. Net effect for `x86_64-unknown-linux-gnu`: byte-for-byte the same feature
 # set as before this change. gpui_platform below must enable its own wayland/x11 copies the same
 # way, since they are separate switches from gpui's.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false }
+gpui = { package = "bezel-gpui", version = "=0.3.6", default-features = false }
 # "font-kit" is not Linux-specific (unlike wayland/x11 above) so it stays unconditional here,
 # matching gpui_platform's pre-portability-wave feature set on every platform.
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false, features = ["font-kit"] }
+gpui_platform = { package = "bezel-gpui-platform", version = "=0.3.6", default-features = false, features = ["font-kit"] }
+bezel = { version = "=0.1.3", default-features = false }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -92,9 +93,13 @@ sirio_apply = { path = "crates/sirio_apply" }
 # `gpui_platform` is patched alongside it only because its own `gpui_linux` dependency is a path
 # dependency inside the zed checkout (a different source than this `[patch]` targets), not
 # because gpui_platform's own code changed -- see rust/vendor/gpui_platform/Cargo.toml.
-[patch."https://github.com/zed-industries/zed"]
-gpui_linux = { path = "vendor/gpui_linux" }
-gpui_platform = { path = "vendor/gpui_platform" }
+#
+# The patch itself is gone for now: its git source (the zed rev above) no longer exists in the
+# dependency graph now that gpui/gpui_platform resolve from crates.io, and `vendor/gpui_linux`
+# still holds the zed-era package (named `gpui_linux`, not `bezel-gpui-linux`) so pointing a
+# `[patch.crates-io]` at it today would fail cargo's name check. This comes back as
+# `[patch.crates-io] bezel-gpui-linux = { path = "vendor/gpui_linux" }` once that vendored tree
+# is rebased onto the released `bezel-gpui-linux`.
 
 [profile.dev]
 # Keep dev links and debug-info I/O light; remove this line when full debug info is needed.
