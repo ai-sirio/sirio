@@ -1,0 +1,54 @@
+# Implementation plan — center pane split (#318 map)
+
+Spec: `docs/superpowers/specs/2026-08-29-center-pane-split-design.md`
+
+Standing constraint: a worktree keeps ONE tab list (`self.tabs`); the pane is only
+where a tab is drawn. Membership is derived from `TabKind`, never stored.
+
+## Steps (each compiles before the next)
+
+1. **`PaneRole` in `sirio_project`** — new enum next to `TabKind`;
+   `TabKind::pane_role()`; `appears_in_sidebar()` redefined via `pane_role()`.
+   Tests: routing + sidebar predicate.
+2. **`CenterSplit` replaces `TabGroup`/`TabMachinery`** (+ the removal cascade,
+   which must land in the same compiling unit):
+   - `tab_machinery.rs` → `center_split.rs`; struct `{ primary_active,
+     secondary_active, focused }` — no Vec, no Result, total constructor.
+   - `OpenTab.group_id` deleted (~50 construction sites).
+   - `activate_group` → `set_focused_pane(role)`; `rebuild_tab_machinery` →
+     recompute role actives from `self.tabs`.
+   - Removals: `move_selected_tab_to_new_pane`, `move_selected_tab`,
+     `move_selected_tab_with_machinery`, `MoveTabToOtherPane` action + handler +
+     palette entry + `has_other_pane` gate, "Move to Pane {id}" context items,
+     `TabMachinery::add_group/move_tab/move_candidates/MoveTarget/MoveCandidates`.
+   - Terminal pane cache key: role-keyed (`primary-pane-{id}` / `secondary-pane-{id}`).
+   - `tab.cycle` / `tab.select` re-pointed at the focused role's tabs.
+   - Tests: rewrite tab_machinery tests for CenterSplit; delete/rework the five
+     two-group tests; rethink `drawn_detached_pane_group_offers_the_real_empty_prompt`.
+3. **Layout: one strip per pane** — `center_column` becomes Primary stack
+   (strip+surface) | divider | Secondary stack (strip+surface). Focus underline
+   only on the focused pane's active tab. One `+` (the `TabBar` entity) inside
+   the Primary strip; `×` at the end of the Secondary strip closes its tabs and
+   triggers auto-close. Empty prompt Primary-only.
+4. **`resolve_center_split`** in `panel_layout.rs`; `MIN_CENTER_WIDTH` becomes
+   `min_center_width(secondary_open)`; `resolve_panel_widths` takes it as a
+   parameter. Center divider drag payload writes a ratio; saving reuses
+   `schedule_panel_width_save`.
+5. **Persistence** — `appearance.centerSplitRatio` (default 500, 100..=900) in
+   `AppSettings` + settings plumbing; schema v16
+   `worktree.secondary_pane_open`; restore filter at materialisation (editor
+   tabs restore only if the file exists); pane starts closed when no Secondary
+   tab survives (flag honoured, not overridden).
+6. **`ctrl-shift-b`** through the five sibling points.
+7. **Enter promotes the selected Changes row** in the right sidebar (Files
+   already has `return_opens_the_selected_file_row`).
+8. `Scripts/ci.sh` → `CI OK`, then code review, then commit.
+
+## Invariants to hold
+
+- `close_tab` fallback: nearest remaining tab in the same role.
+- `hide (ctrl-shift-b)` keeps tabs; `×` closes tabs — never conflate.
+- Secondary pane auto-closes when its last tab closes; focus returns to the
+  Primary pane's active tab.
+- The ratio is a projection at render time, never written back by clamping.
+- No drag may move the sidebars; only the center divider drag writes a ratio.
