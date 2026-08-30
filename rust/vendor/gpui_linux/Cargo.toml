@@ -90,12 +90,12 @@ accesskit = { version = "0.24.0", features = ["enumn"] }
 accesskit_unix = "0.21.0"
 anyhow = "1.0.86"
 bytemuck = "1"
-collections = { package = "bezel-zed-collections", version = "0.3.7" }
+collections = { package = "bezel-zed-collections", version = "0.3.6" }
 futures = "0.3.32"
 gpui = { package = "bezel-gpui", version = "0.3.6", default-features = false }
-gpui_util = { package = "bezel-gpui-util", version = "0.3.7" }
+gpui_util = { package = "bezel-gpui-util", version = "0.3.6" }
 gpui_wgpu = { package = "bezel-gpui-wgpu", version = "0.3.6", optional = true, features = ["font-kit"] }
-http_client = { package = "bezel-zed-http-client", version = "0.3.7" }
+http_client = { package = "bezel-zed-http-client", version = "0.3.6" }
 libc = "0.2"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 parking_lot = "0.12.1"
