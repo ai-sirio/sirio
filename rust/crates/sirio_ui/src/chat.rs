@@ -47,10 +47,11 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 /// assistant-authored chat prose.
 pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
-/// The transcript's content column maximum — waku's measured
-/// `CONTENT_MAX_WIDTH` 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md`
-/// §A.2); below that limit, the column takes the pane's width.
-pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
+/// The transcript's content column maximum — the Bezel Transcript pattern's
+/// 700 (spec §2). Settings and the markdown column keep waku's 720; this one
+/// column follows Bezel because the live transcript is what the migration
+/// copies.
+pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 const TOOL_CALL_GROUP_GAP: f32 = 6.0;
@@ -58,9 +59,9 @@ const TOOL_CALL_GROUP_CHEVRON_WIDTH: f32 = 12.0;
 const TOOL_CALL_GROUP_MEMBER_INDENT: f32 =
     CARD_H_PADDING + TOOL_CALL_GROUP_CHEVRON_WIDTH + TOOL_CALL_GROUP_GAP;
 
-/// The user turn's pill: rounded, right-aligned, capped at waku's bubble
-/// width. The assistant reply has no container at all.
-pub(crate) const USER_PILL_MAX_WIDTH: f32 = 540.0;
+/// The user turn's bubble: rounded, right-aligned, capped at the Bezel
+/// Activity pattern's 440. The assistant reply has no container at all.
+pub(crate) const USER_PILL_MAX_WIDTH: f32 = 440.0;
 
 actions!(
     chat_composer,
@@ -7799,7 +7800,8 @@ impl Render for Chat {
                     .debug_selector(|| "chat-transcript".into())
                     .w_full()
                     .max_w(px(TRANSCRIPT_WIDTH))
-                    .pt(px(22.0))
+                    .px(px(24.0))
+                    .py(px(28.0))
                     .flex_1()
                     .flex()
                     .key_context("ChatTranscript")
@@ -7829,7 +7831,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(8.0))
+                                            .pb(px(10.0))
                                             .child(Chat::render_turn_fold_row(
                                                 turn_id,
                                                 label,
@@ -7855,7 +7857,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(8.0))
+                                            .pb(px(10.0))
                                             .child(
                                                 div()
                                                     .id(("turn-refold", turn_id))
@@ -7924,6 +7926,10 @@ impl Render for Chat {
                                             ..
                                         })
                                     );
+                                    // Bezel Transcript pattern §2: a work
+                                    // zone sits 8px from the answer that
+                                    // follows it, tighter than the 10px
+                                    // between turns elsewhere in the list.
                                     return div()
                                         .id(("chat-entry", entry_index))
                                         .w_full()
@@ -7952,7 +7958,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(8.0))
+                                            .pb(px(10.0))
                                             .child(Chat::render_entry(
                                                 entry,
                                                 entry_index,
