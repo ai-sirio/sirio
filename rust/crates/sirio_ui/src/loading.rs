@@ -8,9 +8,11 @@
 use std::time::Duration;
 
 use bezel::motion::Painter;
-use bezel::ui::{loaders, popover};
 use bezel::ui::widgets::Controls;
-use gpui::{AnyElement, App, Div, IntoElement, ParentElement, Styled, Window, div, px};
+use bezel::ui::loaders;
+use gpui::{
+    div, px, AnyElement, App, Div, InteractiveElement, IntoElement, ParentElement, Styled, Window,
+};
 use sirio_theme::Theme;
 
 /// The glyph slot in an Activity-derived reasoning header.
@@ -40,9 +42,13 @@ pub fn thought_label(elapsed: Option<Duration>) -> String {
 
 /// Clamp a caller's fraction into the unit range. A determinate bar shows a
 /// truthful fraction of a known total; a caller that overshoots is pinned, not
-/// panicked.
+/// panicked. `NaN` means the fraction is unknown, so it renders as empty.
 pub fn clamp_fraction(fraction: f32) -> f32 {
-    fraction.clamp(0.0, 1.0)
+    if fraction.is_nan() {
+        0.0
+    } else {
+        fraction.clamp(0.0, 1.0)
+    }
 }
 
 /// Build the Bezel palette expected by its published UI primitives while
@@ -50,9 +56,14 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
 /// theme type, whereas the adapter's public contract intentionally exposes
 /// Sirio's theme type to its callers.
 fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
-    let mut bezel_theme = match theme.appearance {
-        sirio_theme::Appearance::Light => bezel::theme::Theme::light(),
-        sirio_theme::Appearance::Dark => bezel::theme::Theme::dark(),
+    let appearance = match theme.appearance {
+        sirio_theme::Appearance::Light => bezel::theme::Appearance::Light,
+        sirio_theme::Appearance::Dark => bezel::theme::Appearance::Dark,
+    };
+    bezel::theme::set_current_appearance(appearance);
+    let mut bezel_theme = match appearance {
+        bezel::theme::Appearance::Light => bezel::theme::Theme::light(),
+        bezel::theme::Appearance::Dark => bezel::theme::Theme::dark(),
     };
     bezel_theme.accent = theme.colors.accent.into();
     bezel_theme
@@ -104,6 +115,8 @@ pub fn indeterminate(
 
 /// The compact Bezel mini gradient spinner for refresh/status slots.
 pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
+    let theme = *Theme::get(cx);
+    let _bezel_theme = bezel_theme(&theme);
     loaders::mini_gradient_spinner(id, COMPACT_MINI_CELL, painter(window), cx).into_any_element()
 }
 
@@ -126,8 +139,24 @@ pub fn skeleton_rows(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let bezel_theme = bezel_theme(theme);
-    popover::redacted_rows(id, &bezel_theme, count, painter(window), cx)
+    let _bezel_theme = bezel_theme(theme);
+    let delta = bezel::motion::pulse_delta(&bezel::motion::PULSE, painter(window), cx);
+    let wash = bezel::theme::ink(0.04);
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(SKELETON_ROW_GAP))
+        .py(px(4.0))
+        .children((0..count).map(move |index| {
+            let phase = bezel::motion::phase::staggered_phase(delta, index, 0.08);
+            div()
+                .h(px(SKELETON_ROW_HEIGHT))
+                .rounded(px(bezel::theme::Theme::control_radius()))
+                .bg(wash)
+                .opacity(0.35 + 0.4 * bezel::motion::phase::pulse_wave(phase))
+        }))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -142,8 +171,14 @@ mod tests {
 
     #[test]
     fn a_run_with_a_duration_reports_whole_seconds() {
-        assert_eq!(thought_label(Some(Duration::from_millis(4400))), "Thought for 4s");
-        assert_eq!(thought_label(Some(Duration::from_millis(600))), "Thought for 1s");
+        assert_eq!(
+            thought_label(Some(Duration::from_millis(4400))),
+            "Thought for 4s"
+        );
+        assert_eq!(
+            thought_label(Some(Duration::from_millis(600))),
+            "Thought for 1s"
+        );
     }
 
     #[test]
@@ -151,6 +186,24 @@ mod tests {
         assert_eq!(clamp_fraction(-0.5), 0.0);
         assert_eq!(clamp_fraction(1.7), 1.0);
         assert_eq!(clamp_fraction(0.35), 0.35);
+        assert_eq!(clamp_fraction(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn bezel_paint_helpers_follow_sirios_appearance() {
+        let _guard = bezel::theme::lock_appearance();
+
+        let _bezel_theme = bezel_theme(&Theme::light());
+        assert_eq!(
+            bezel::theme::current_appearance(),
+            bezel::theme::Appearance::Light
+        );
+
+        let _bezel_theme = bezel_theme(&Theme::dark());
+        assert_eq!(
+            bezel::theme::current_appearance(),
+            bezel::theme::Appearance::Dark
+        );
     }
 
     #[test]
