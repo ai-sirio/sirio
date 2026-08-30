@@ -3382,7 +3382,6 @@ impl Settings {
             && query.is_empty();
         let mut agent_rows = controls::card(theme);
         let mut first_visible_row = true;
-        let mut install_spinner_rendered = false;
         for (index, availability) in self.provider_availability.iter().enumerate() {
             let source = self.launch_source_for_row(availability.id);
             let row = provider_row(availability, Some(&source));
@@ -3478,24 +3477,17 @@ impl Settings {
                 }
             };
             let install_control = if matches!(install_state, Some(InstallState::InFlight)) {
-                if install_spinner_rendered {
-                    None
-                } else {
-                    install_spinner_rendered = true;
-                    Some(
-                        div()
-                            .id(("settings-agent-install-spinner", index))
-                            .debug_selector(move || {
-                                format!("settings-agent-install-spinner-{index}")
-                            })
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(loading::compact("settings-install-spinner", window, cx)),
-                    )
-                }
+                Some(
+                    div()
+                        .id(("settings-agent-install-spinner", index))
+                        .debug_selector(move || format!("settings-agent-install-spinner-{index}"))
+                        .w(px(28.0))
+                        .h(px(28.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(loading::compact("settings-install-spinner", window, cx)),
+                )
             } else {
                 action.map(|(event, label)| {
                     let install_entity = entity.clone();
