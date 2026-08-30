@@ -66,7 +66,9 @@ The colour renames concentrate heavily: `title` 160, `meta` 117, `subtitle` 77,
 every access whose *name* already matches working untouched.
 
 The facade is kept, not dissolved. `sirio_theme::Theme` remains the single
-access point and gains `bezel::ThemeExt`.
+access point and gains `bezel::theme::ThemeExt` (the `bezel` facade re-exports
+the `theme` module but does not flatten the trait, so `bezel::ThemeExt` does not
+resolve).
 
 ### Four appearance enums
 

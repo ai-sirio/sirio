@@ -1234,7 +1234,10 @@ impl Theme {
 }
 ```
 
-Call it at the end of both `Theme::install` and `Theme::set_mode`.
+Call it at the end of both `Theme::install` and `Theme::set_mode` — these are
+`sirio_theme`'s own methods, not bezel's. bezel has no `Theme::set_mode`; its
+equivalent is the free function `bezel::theme::appearance::set_mode(mode, cx)`
+(`appearance.rs:92`), which Task 21 routes to.
 
 - [ ] **Step 4: Run the test**
 
