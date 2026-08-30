@@ -38,6 +38,7 @@ use crate::caret;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::editor::Language;
 use crate::file_view::{CodeSpanKind, code_spans};
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
@@ -74,32 +75,6 @@ const STREAMING_BORDER_TICK: Duration = Duration::from_millis(16);
 /// streaming. Matching the static 1px border keeps the composer's footprint
 /// and its contents stationary while the ring is shown.
 const STREAMING_BORDER_WIDTH: Pixels = px(1.0);
-
-/// #239: the generating spinner's frames, taken from Zed's
-/// `SpinnerVariant::Dots` (`ui/src/components/label/spinner_label.rs`) — the
-/// benchmark this surface is measured against. The issue calls it a
-/// "three-dot" indicator; Zed's `Dots` is this ten-frame braille cycle, and
-/// the issue body's "match Zed's `SpinnerVariant::Dots`" settles which one
-/// was meant.
-const GENERATING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// One full cycle of [`GENERATING_SPINNER_FRAMES`], matching Zed's 1000ms for
-/// the same variant — so 100ms a frame.
-const GENERATING_SPINNER_CYCLE: Duration = Duration::from_millis(1000);
-
-/// The spinner glyph for a turn that has been streaming for `elapsed`.
-///
-/// Pure, so the cycle is testable without a window. Deliberately samples a
-/// clock rather than owning an animation: while a turn streams, the composer's
-/// streaming border already has a repaint timer in flight and already records
-/// the turn's start instant, so this rides that one timer instead of adding a
-/// second. That is the same one-timer-per-surface discipline the border and
-/// the composer caret follow, and it is what keeps an idle-but-streaming chat
-/// affordable on a Raspberry Pi 5.
-fn generating_spinner_frame(elapsed: Duration) -> &'static str {
-    let frame_ms = GENERATING_SPINNER_CYCLE.as_millis() / GENERATING_SPINNER_FRAMES.len() as u128;
-    let index = (elapsed.as_millis() / frame_ms) % GENERATING_SPINNER_FRAMES.len() as u128;
-    GENERATING_SPINNER_FRAMES[index as usize]
-}
 
 /// Degrees of rotation for a streaming-border revolution `progress`
 /// (`0.0` = start of a revolution, `1.0` = one full turn) — continuous
@@ -4932,20 +4907,29 @@ impl Chat {
                         .id(("thought-toggle", entry_index))
                         .debug_selector(move || format!("thought-toggle-{entry_index}"))
                         .flex()
+                        .flex_row()
                         .items_center()
-                        .gap(px(4.0))
+                        .gap(px(6.0))
+                        .px(px(4.0))
+                        .py(px(5.0))
                         .cursor(CursorStyle::PointingHand)
                         .hover(|style| style.text_color(colors.title))
                         .child(
-                            IconElement::new(
-                                if expanded {
-                                    Icon::ChevronDown
-                                } else {
-                                    Icon::ChevronRight
-                                },
-                                IconSize::XSmall,
-                            )
-                            .text_color(colors.meta),
+                            div()
+                                .flex()
+                                .w(px(loading::THINKING_GLYPH))
+                                .justify_center()
+                                .child(
+                                    IconElement::new(
+                                        if expanded {
+                                            Icon::ChevronDown
+                                        } else {
+                                            Icon::ChevronRight
+                                        },
+                                        IconSize::XSmall,
+                                    )
+                                    .text_color(colors.meta),
+                                ),
                         )
                         .child(
                             div()
@@ -4956,7 +4940,7 @@ impl Chat {
                                 .child(if expanded {
                                     "Thinking".to_string()
                                 } else {
-                                    thought_summary(&text)
+                                    loading::thought_label(None)
                                 }),
                         )
                         .on_click(move |_, _, cx| {
@@ -4968,7 +4952,15 @@ impl Chat {
                 if expanded {
                     column = column.child(
                         div()
-                            .pl(px(14.0))
+                            .id(("thought-body", entry_index))
+                            .relative()
+                            .border_l_1()
+                            .border_color(colors.hairline)
+                            .pl(px(12.0))
+                            .pr(px(14.0))
+                            .max_h(px(160.0))
+                            .gap(px(4.0))
+                            .overflow_y_scroll()
                             .text_size(typography.callout)
                             .line_height(px(19.0))
                             .text_color(colors.subtitle)
@@ -4979,7 +4971,24 @@ impl Chat {
                                 format!("thought-entry-{entry_index}"),
                                 source_start,
                                 Some(&interaction),
-                            )),
+                            ))
+                            .child(
+                                // The 20px top fade is painted over the
+                                // scrollable body rather than masked, so
+                                // selection and the scrollbar hit-test still
+                                // see the full text underneath it.
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .right_0()
+                                    .h(px(20.0))
+                                    .bg(linear_gradient(
+                                        180.0,
+                                        linear_color_stop(colors.chat_surface, 0.0),
+                                        linear_color_stop(colors.chat_surface.opacity(0.0), 1.0),
+                                    )),
+                            ),
                     );
                 }
                 column.into_any_element()
@@ -8081,19 +8090,7 @@ impl Render for Chat {
             // be spliced in and out every turn and could be persisted or
             // duplicated. Living outside the list makes "never part of the
             // transcript" structural instead of a rule to maintain.
-            //
-            // The clock is read, never started — `render_composer` already owns
-            // the instant and the repaint timer for the streaming border, so no
-            // second timer is armed here (see `generating_spinner_frame`).
             .when(self.streaming, |this| {
-                let elapsed = self
-                    .streaming_border_started_at
-                    .map(|started_at| {
-                        cx.background_executor()
-                            .now()
-                            .saturating_duration_since(started_at)
-                    })
-                    .unwrap_or_default();
                 this.child(
                     div()
                         .id("chat-generating-spinner")
@@ -8101,9 +8098,25 @@ impl Render for Chat {
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
                         .pt(px(6.0))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.colors.subtitle)
-                        .child(generating_spinner_frame(elapsed)),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(4.0))
+                        .py(px(5.0))
+                        .child(
+                            div()
+                                .flex()
+                                .w(px(loading::THINKING_GLYPH))
+                                .justify_center()
+                                .child(loading::thinking_indicator("chat-thinking", &theme, window, cx)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(theme.colors.subtitle)
+                                .child("Thinking"),
+                        ),
                 )
             })
             .child(
@@ -8461,23 +8474,6 @@ fn option_hash(option: &AnswerOption) -> usize {
     option.id.bytes().fold(0usize, |acc, byte| {
         acc.wrapping_mul(31).wrapping_add(byte as usize)
     })
-}
-
-/// F-CHAT-21: the one-line summary shown on a collapsed thought — text
-/// flattened to a single line and capped so it never wraps the header row.
-const THOUGHT_SUMMARY_MAX_CHARS: usize = 72;
-
-fn thought_summary(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.is_empty() {
-        return "Thinking…".to_string();
-    }
-    if flat.chars().count() <= THOUGHT_SUMMARY_MAX_CHARS {
-        flat
-    } else {
-        let truncated: String = flat.chars().take(THOUGHT_SUMMARY_MAX_CHARS).collect();
-        format!("{truncated}…")
-    }
 }
 
 /// F-CHAT-22: the `[start, end]` bounds (inclusive) of the consecutive run
@@ -9006,25 +9002,12 @@ mod tests {
         }
     }
 
-    /// #239: the cycle is Zed's — ten frames over 1000ms, so 100ms each. Spelt
-    /// out glyph by glyph rather than by index, so a reordering of the frame
-    /// table fails here instead of silently changing the animation.
+    /// Sirio has no truthful per-thought duration today, so the label is the
+    /// deterministic one. If a duration is ever threaded through, this test
+    /// is what says the other branch is allowed.
     #[test]
-    fn generating_spinner_cycles_through_all_ten_frames_in_one_second() {
-        assert_eq!(generating_spinner_frame(Duration::from_millis(0)), "⠋");
-        assert_eq!(generating_spinner_frame(Duration::from_millis(100)), "⠙");
-        assert_eq!(generating_spinner_frame(Duration::from_millis(150)), "⠙");
-        assert_eq!(generating_spinner_frame(Duration::from_millis(900)), "⠏");
-        assert_eq!(
-            generating_spinner_frame(Duration::from_millis(1000)),
-            "⠋",
-            "the cycle wraps at one second"
-        );
-        assert_eq!(
-            generating_spinner_frame(Duration::from_millis(1100)),
-            "⠙",
-            "and keeps cycling on later revolutions"
-        );
+    fn a_settled_reasoning_header_never_invents_an_elapsed_time() {
+        assert_eq!(crate::loading::thought_label(None), "Thought");
     }
 
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
@@ -9040,6 +9023,23 @@ mod tests {
         });
         cx.update(|window, _| window.refresh());
         (chat, cx)
+    }
+
+    /// #239: the indicator shown while a turn streams is the Activity-derived
+    /// reasoning header (Task 6), not a Chat-owned animation.
+    #[gpui::test]
+    async fn the_running_reasoning_header_shows_the_thinking_indicator(cx: &mut TestAppContext) {
+        let (chat, cx) = spinner_test_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "a streaming turn shows the Activity-derived indicator"
+        );
     }
 
     /// #239: the indicator is shown for exactly as long as a turn is in
@@ -12020,26 +12020,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn thought_summary_flattens_and_caps_long_text() {
-        assert_eq!(thought_summary(""), "Thinking…");
-        assert_eq!(thought_summary("short thought"), "short thought");
-        assert_eq!(
-            thought_summary("line one\nline two"),
-            "line one line two",
-            "collapsed summary flattens newlines to one line"
-        );
-        let long = "word ".repeat(30);
-        let summary = thought_summary(&long);
-        assert!(
-            summary.chars().count() <= THOUGHT_SUMMARY_MAX_CHARS + 1,
-            "summary must stay within the cap plus the ellipsis: {summary:?}"
-        );
-        assert!(
-            summary.ends_with('…'),
-            "truncated summary keeps the ellipsis marker"
-        );
-    }
 
     /// F-CHAT-23: text output past the cap is truncated to its tail, not
     /// its head — a long run's result or error usually lands at the end.
