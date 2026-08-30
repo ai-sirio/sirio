@@ -141,123 +141,182 @@ SF Pro / SF Mono, and `macos_keeps_the_apple_faces` is retargeted or removed.
 
 ## Token mapping
 
-`ThemeColors` has 65 fields. This table is the reviewable artifact: every row is
-grounded in the field's own doc-comment, and rows marked **review** are ones
-where the doc-comment and the bezel name do not obviously agree.
+`ThemeColors` has 65 public fields, but they are **not 65 decisions**. Reading
+`ThemeColors::for_appearance` (`lib.rs:307`) shows the fields are aliases over
+roughly 28 local bindings. The bindings are where the design lives; the fields
+are bookkeeping.
 
-### Group A — self-declared aliases, collapse (9)
+The mapping is therefore two tables: bindings (the decisions) and fields (the
+mechanical resolution). Both are derived from the code, not from doc-comments.
 
-Each of these documents itself as an alias of another field.
+### The veil ladder
 
-| Sirio | Alias of |
-|---|---|
-| `background` | `panel_surface` |
-| `canvas` | `frame_fallback` |
-| `chat_surface` | `panel_surface` |
-| `chrome_tint` | `panel_surface` |
-| `tab_chip_underline` | `panel_border` |
-| `title_selected` | `title` |
-| `selection_fill` | `selected_fill` |
-| `sidebar` | `panel_surface` |
-| `sidebar_border` | `panel_border` |
+Sirio's translucent tokens all come from one helper:
 
-### Group B — direct bezel correspondence (48)
+```rust
+fn veil(alpha: f32, appearance: Appearance) -> Rgba {
+    match appearance {
+        Appearance::Dark => color(1.0, 1.0, 1.0, alpha),
+        Appearance::Light => color(0.0, 0.0, 0.0, alpha),
+    }
+}
 
-| Sirio | bezel | Note |
+const VEIL_FAINT: f32 = 0.05;
+const VEIL_LOW:   f32 = 0.08;
+const VEIL_MID:   f32 = 0.12;
+const VEIL_HIGH:  f32 = 0.18;
+```
+
+Four rungs, each roughly half again the one below — held by
+`the_veil_ladder_is_geometric`.
+
+bezel has the same concept as three free functions in `paint.rs`:
+
+| Sirio | bezel | Difference |
 |---|---|---|
-| `frame_surface` | `band` | **review** — translucent frame material vs bezel's band |
-| `frame_fallback` | `bg` | |
-| `panel_surface` | `surface` | |
-| `panel_border` | `border` | |
-| `panel_focus_ring` | `ring` | |
-| `hairline` | `border` | both are a neutral at 7–8% |
-| `border_strong` | `border_strong` | |
-| `title` | `text` | 160 sites |
-| `tab_focus_accent` | `text` | doc: "the full text neutral" |
-| `primary_text_color` | `text` | |
-| `subtitle` | `text_muted` | 77 sites |
-| `meta` | `text_faint` | 117 sites |
-| `text_ghost` | `text_dim` | |
-| `gauge` | `accent` | bezel's `accent` is `neutral(0.673)` — "indigo-400's lightness, no chroma" |
-| `file_link` | `accent` | same neutral; clickability loses its colour signal (see "The blue") |
-| `git_untracked` | `text_faint` | quieter than staged/modified/conflict, which stay chromatic |
-| `raised` | `surface_raised` | "a step above the surface" |
-| `card_fill` | `surface_card` | |
-| `composer` | `input_bg` | |
-| `filter_field_bg` | `input_bg` | |
-| `row_hover` | `element_hover` | 73 sites |
-| `overlay` | `element_hover` | doc: "generic hover wash — 5% neutral" |
-| `selected_fill` | `element_active` | |
-| `overlay_strong` | `element_active` | doc: "pressed wash — 9%" |
-| `selection_ring` | `ring` | |
-| `selection` | `selection` | text-selection wash, under glyphs |
-| `caret` | `caret` | |
-| `code_text` | `code_text` | |
-| `code_wash` | `code_wash` | |
-| `code_inset_fill` | `code_wash` | **review** — recessed fill vs inline wash |
-| `inverse` | `solid` | |
-| `on_inverse` | `on_solid` | |
-| `primary_pill_bg` | `solid` | **review** — collides with `inverse` |
-| `tab_done` | `success` | |
-| `git_staged` | `success` | |
-| `diff_addition` | `diff_add` | |
-| `tab_needs_input` | `warning` | |
-| `git_modified` | `warning` | |
-| `favorite` | `warning` | doc: "the warning hue at full chroma" |
-| `rail_question` | `warning` | doc: "the one card kind waiting on the reader" |
-| `tab_error` | `danger` | |
-| `git_conflict` | `danger` | |
-| `diff_deletion` | `diff_del` | |
-| `danger_soft` | `danger_muted` | |
-| `diff_hunk_background` | `diff_hunk_bg` | |
-| `rail_task` | `text_faint` | **review** — doc says neutral, exact step unresolved |
-| `rail_edit` | `text_faint` | same neutral as `rail_task` |
-| `rail_tool` | `text_faint` | same neutral as `rail_task` |
+| `veil(a)` as a fill | `ink(a)` | none — `INK_FILL_SCALE = 1.0`, only the tone flips, exactly as `veil` does |
+| `veil(a)` as a border / divider / ring | `hairline(a)` | bezel scales by `INK_HAIRLINE_SCALE = 1.35` in light mode, so a 1px edge survives a bright surround |
+| `veil(a)` as a hover / press wash | `wash(a)` | bezel softens short of pure black/white, so plates read as tinted glass |
 
-#### Two collisions to resolve during Phase 1
+Two values already agree exactly: Sirio's `border` is `veil(VEIL_LOW)` = 0.08 and
+bezel's `border` is `white/0.08`; the same holds for `code_wash`.
 
-- `row_hover` and `overlay` both land on `element_hover`
-- `selected_fill` and `overlay_strong` both land on `element_active`
+The hairline scaling is a behaviour change, not a value copy: Sirio uses the same
+alpha in both appearances, bezel brightens edges in light mode. This is a
+deliberate improvement and is why `hairline` maps to `hairline(a)` rather than to
+`ink(a)`.
 
-Either the pairs are genuinely the same value — in which case they collapse into
-Group A — or bezel lacks a distinction Sirio relies on, in which case one of each
-pair moves to Group C. Resolved by comparing the current values, not by
-argument.
+### Table 1 — bindings (the decisions)
 
-### Group C — no bezel counterpart (8)
+| Sirio binding | Current value | bezel | Note |
+|---|---|---|---|
+| `text` | `#CBCDD4` / `#313A40` | `text` | |
+| `text_secondary` | `#85888F` / `#667379` | `text_muted` | |
+| `text_tertiary` | `#686B71` / `#68757B` | `text_faint` | |
+| `text_ghost` | `#575757` / `#A4A4A4` | `text_dim` | |
+| `frame_fallback` | `#222427` / `#DCE5E9` | `bg` | |
+| `frame_surface` | `softened(frame_fallback, 0.88/0.82)` | `band` | **review** — translucent frame material vs bezel's band |
+| `panel_surface` | `#18191A` / `#F4F7F8` | `surface` | |
+| `panel_border` | `#27292D` / `#CCD8DD` | `border` | opaque today, translucent in bezel — a real value change |
+| `raised` | `#1D1E21` / `#FBFCFC` | `surface_raised` | |
+| `inset` | `scaled(panel_surface, 0.72/0.93)` | `input_bg` | |
+| `selected_fill` | `#2D2F34` / `#D7E2E7` | `element_active` | |
+| `inverse` | `#F4F7F8` / `#18191A` | `solid` | |
+| `on_inverse` | `#313A40` / `#CBCDD4` | `on_solid` | |
+| `terminal_surface` | `scaled(SURFACE_DARK, 0.72)` / white | **retained** | bezel has no terminal-surface concept |
+| `border` | `veil(0.08)` | `border` | exact match |
+| `border_strong` | `veil(0.18)` | `border_strong` | bezel is `white/0.14` — closest rung |
+| `row_hover` | `veil(0.08)` | `element_hover` | bezel is `0.11` |
+| `overlay` | `veil(0.05)` | `wash(0.05)` | the faint rung; bezel has no token at this level |
+| `overlay_strong` | `veil(0.12)` | `wash(0.12)` | between bezel's hover and active |
+| `selection` | `veil(0.18)` | `selection` | bezel's is blue, `hsla(0.66, 0.6, 0.55, 0.35)` |
+| `code_wash` | `veil(0.08)` | `code_wash` | exact match |
+| `warning` | `rgb(0.95,0.72,0.28)` / `rgb(0.67,0.42,0.02)` | `warning` | |
+| `success` | `rgb(0.48,0.78,0.57)` / `rgb(0.10,0.45,0.22)` | `success` | |
+| `danger` | `rgb(0.94,0.43,0.47)` / `rgb(0.68,0.12,0.17)` | `danger` | |
+| `danger_soft` | `softened(danger, 0.12)` | `danger_muted` | |
+| `favorite` | `warning` at full chroma | `warning` | doc: "the warning hue at full chroma" |
+| `gauge` | `rgb(0.55,0.64,1.00)` / `rgb(0.24,0.38,0.78)` | `accent` | C1 — the blue goes; see "The blue" |
+| `accent` | coral, hue 24.3°, sat 0.70, light 0.60/0.40 | **retained**, renamed `brand_coral` | see "The blue" |
+
+**Trivial aliases among the bindings**, collapsing with the fields:
+`composer = raised` · `sidebar_border = panel_border` · `code_text = text`
+
+### Table 2 — fields to bindings (mechanical)
+
+Read directly from the `ThemeColors { .. }` literal. Nothing here is a judgement
+call; it is the current code.
+
+| Binding | Fields resolving to it |
+|---|---|
+| `text` | `title`, `title_selected`, `tab_focus_accent`, `selection_ring`, `primary_text_color`, `caret`, `code_text` |
+| `text_secondary` | `subtitle`, `panel_focus_ring` |
+| `text_tertiary` | `meta` |
+| `text_ghost` | `text_ghost` |
+| `panel_surface` | `panel_surface`, `background`, `chat_surface`, `chrome_tint`, `sidebar` |
+| `panel_border` | `panel_border`, `tab_chip_underline`, `sidebar_border` |
+| `frame_fallback` | `frame_fallback`, `canvas` |
+| `frame_surface` | `frame_surface` |
+| `terminal_surface` | `terminal_surface` |
+| `raised` | `raised`, `composer`, `primary_pill_bg`, `card_fill` |
+| `inset` | `inset`, `filter_field_bg`, `code_inset_fill` |
+| `selected_fill` | `selected_fill`, `selection_fill`, `primary_action_bg` |
+| `border` | `border`, `hairline` |
+| `border_strong` | `border_strong`, `rail_task`, `rail_edit`, `rail_tool` |
+| `row_hover` | `row_hover` |
+| `overlay` | `overlay`, `chat_row_hover` |
+| `overlay_strong` | `overlay_strong` |
+| `selection` | `selection` |
+| `code_wash` | `code_wash`, `diff_hunk_background` |
+| `warning` | `warning` is not a field; `tab_needs_input`, `git_modified`, `rail_question` |
+| `favorite` | `favorite` |
+| `success` | `tab_done`, `git_staged`, `diff_addition` |
+| `danger` | `tab_error`, `git_conflict`, `diff_deletion` |
+| `danger_soft` | `danger_soft` |
+| `gauge` | `gauge`, `git_untracked`, `file_link` |
+| `accent` | `accent` |
+| `inverse` / `on_inverse` | `inverse` / `on_inverse` |
+| `veil(VEIL_MID)` inline | `tree_guide` |
+| `softened(success, VEIL_MID)` inline | `diff_addition_background` |
+| `softened(danger, VEIL_MID)` inline | `diff_deletion_background` |
+
+Total: 65 fields.
+
+### What this changes versus a field-by-field reading
+
+Four rows that a doc-comment reading got wrong, and which the code settles:
+
+| Field | Doc-comment suggested | Code says |
+|---|---|---|
+| `primary_action_bg` | a gap — "must stay distinguishable from `raised`" | `= selected_fill`; the doc is correct and it is simply not `raised` |
+| `primary_pill_bg`, `card_fill` | `solid`, `surface_card` | both `= raised` |
+| `rail_task`, `rail_edit`, `rail_tool` | a neutral text step | `= border_strong` |
+| `chat_row_hover` | derive at lower alpha | `= overlay`, already the lower rung |
+
+There are no collisions to resolve: `row_hover` (0.08) and `overlay` (0.05) are
+different rungs, and `selected_fill` (an opaque hex) and `overlay_strong` (a
+veil) are different kinds of value.
+
+`primary_action_bg` was listed as risk R3's confirmed suspect. It is resolved:
+it is an alias of `selected_fill`, and needs no judgement.
+
+### Group C — no bezel counterpart (2)
+
+After resolving against the code, only two bindings have no bezel home:
 
 | Sirio | Resolution |
 |---|---|
-| `terminal_surface` | retain in `SirioColors` — bezel has no terminal-surface concept |
-| `inset` | derive — "a step below the surface"; bezel has no recessed role |
-| `chat_row_hover` | derive — `element_hover` at lower alpha (doc: 5% vs `row_hover`'s 6%) |
-| `tree_guide` | derive from `border` |
-| `diff_addition_background` | derive — `diff_add` at low alpha, as bezel does for `diff_hunk_bg` |
-| `diff_deletion_background` | derive — `diff_del` at low alpha |
-| `primary_action_bg` | **review** — doc says "must stay distinguishable from `raised`", so explicitly *not* `surface_raised` |
+| `terminal_surface` | retain in `SirioColors` |
 | `accent` → `brand_coral` | retain, **renamed**. Doc: "no role paints it any more"; only the Coral entry of the agent-colour picker reads it. Carries two invariants (clears AA on its own surface; is not any agent's brand). Renamed because `theme.accent` now resolves through `Deref` to bezel's `accent`, which is a different thing. |
+
+`overlay` and `overlay_strong` sit between bezel's rungs rather than outside
+them, and are expressed as `wash(0.05)` and `wash(0.12)` rather than retained as
+tokens.
 
 #### The blue
 
-bezel's palette has no blue role. Its `accent` is `neutral(0.673)` — documented
-as "indigo-400's lightness, no chroma", i.e. the lightness of indigo without the
-indigo. Its chromatic hues are red, amber, emerald and pink (`busy`).
+bezel's palette has no blue role for data. Its `accent` is `neutral(0.673)` —
+documented as "indigo-400's lightness, no chroma", i.e. the lightness of indigo
+without the indigo. Its chromatic hues are red, amber, emerald and pink (`busy`).
+Note that bezel's *text selection* is blue (`hsla(0.66, 0.6, 0.55, 0.35)`), so
+blue does not vanish from the app — only from data and status.
 
-Sirio uses blue for three documented meanings: quantity (`gauge`), clickability
-(`file_link`), and untracked git status. This is not a naming gap but an opposite
-design choice — bezel reserves colour for data and attention and uses contrast
-for identity.
+Sirio uses one blue binding, `gauge`, for three documented meanings: quantity
+(`gauge`), clickability (`file_link`), and untracked git status
+(`git_untracked`).
 
-**Decision (C1):** drop the blue. All three tokens take a neutral from the bezel
-palette:
+**Decision (C1):** drop the blue. `gauge` maps to bezel's `accent` — the neutral
+that sits where an accent colour would, which is exactly what a progress bar
+needs.
 
-- `gauge` → `accent`. bezel's `accent` is the neutral that sits where an accent
-  colour would, which is exactly what a progress bar needs.
-- `file_link` → `accent`, the same emphasis neutral.
-- `git_untracked` → `text_faint`, quieter than the chromatic staged / modified /
-  conflict states.
+`git_untracked` additionally moves off the binding to `text_faint`, quieter than
+the chromatic staged / modified / conflict states.
 
-Rejected: keeping a declared Sirio blue (adds a permanent deviation from the
+**This split is structural, not a value change**, because `git_untracked` and
+`gauge` are the same binding today. It therefore happens in Phase 1 as an
+explicit un-aliasing, not in Phase 2. See Task ordering.
+
+Rejected: keeping a declared Sirio blue (a permanent deviation from the
 palette), and mapping `git_untracked` to `busy` (pink reads as error in a git
 list).
 
@@ -271,11 +330,6 @@ must be carried by underline or hover instead. This is bezel's own convention �
 contrast for identity, colour for data — so it is consistent, but it is a
 behaviour change to verify in Phase 2's visual review, not just a token swap.
 
-Consequence: Sirio's `accent` (brand coral) is renamed `brand_coral`. With
-`Deref` pointing at bezel, `theme.accent` resolves to bezel's neutral accent, so
-the two cannot share a name. The rename also removes a standing ambiguity — the
-field has not been an accent in the design sense since it stopped being painted.
-
 If the coral is ever wanted back as the app accent, the supported route is
 `set_brand` with `Brand { accent: Tint::new(<coral hue>, <chroma>), .. }`, which
 rotates the whole palette coherently, rather than a bespoke token.
@@ -284,12 +338,17 @@ rotates the whole palette coherently, rather than a bespoke token.
 
 ### Phase 1 — Rename. Values frozen.
 
-1. Author and review the 65-row mapping table above; resolve the two Group B
-   collisions and the four **review** rows against current values
-2. Collapse the 9 Group A aliases
-3. Rename `ThemeColors` fields to bezel names
-4. Follow through ~704 call sites; the 21 `.colors` sites lose the prefix
-5. Tests change *names*, never numbers
+1. Review Table 1 (28 bindings); settle the one **review** row
+   (`frame_surface` to `band`) against the current value
+2. Un-alias `git_untracked` from `gauge` — a structural split required by C1,
+   and the only structural change in the whole migration. Values stay identical
+   at this step: `git_untracked` keeps `gauge`'s value under its own binding,
+   and only moves to `text_faint` in Phase 2
+3. Rename the bindings to their bezel names, values unchanged
+4. Rename `ThemeColors` fields; the aliases in Table 2 collapse onto the renamed
+   bindings
+5. Follow through ~704 call sites; the 21 `.colors` sites lose the prefix
+6. Tests change *names*, never numbers
 
 **Gate: no numeric literal changes anywhere in the Phase 1 diff.** Scriptable.
 The provenance tests stay green asserting the same values as before — evidence
@@ -400,10 +459,15 @@ Dark**. Today only `loading.rs` syncs it, for the loaders. After B3 everything
 paints through it: a stale mirror means the light theme draws dark hairlines. A
 single sync point tied to theme install is required, not scattered calls.
 
-**R3 — Group B has no automatic oracle.** The only part of the work no script
-covers. Mitigated by concentration (five names are 69% of sites), but
-`primary_action_bg` is already a confirmed suspect: its doc says "must stay
-distinguishable from `raised`", so it is explicitly not `surface_raised`.
+**R3 — Binding choices have no automatic oracle.** Table 2 (fields to bindings)
+is read from the code and needs no judgement. Table 1 (bindings to bezel) is the
+part no script covers — 28 rows, of which one is marked **review**
+(`frame_surface` to `band`).
+
+This risk shrank once the mapping was derived from `for_appearance` rather than
+from doc-comments: `primary_action_bg`, previously this risk's confirmed suspect,
+turned out to be a plain alias of `selected_fill`. The lesson holds for the rest
+— read the constructor, not the comment.
 
 **R4 — Provenance has already been lost once.** `docs/linux-rewrite/` does not
 exist: both `THEME-PROVENANCE.md` (cited by `ThemeColors`) and `COSMIC-DESIGN.md`
@@ -420,6 +484,6 @@ mean.
 
 ## Open questions
 
-None blocking. The four **review** rows and the two Group B collisions are
-resolved during Phase 1 against current values, which is where the table stops
+None blocking. Table 1's single **review** row (`frame_surface` to `band`) is
+settled during Phase 1 against the current value, which is where the table stops
 being a proposal and becomes a fact.
