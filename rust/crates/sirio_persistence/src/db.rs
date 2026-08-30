@@ -931,6 +931,9 @@ impl AppDatabase {
         if let Some(value) = self.setting_value(settings_keys::CONTROL_SOCKET_ENABLED)? {
             defaults.control_socket_enabled = parse_bool_setting(&value, true);
         }
+        if let Some(value) = self.setting_value(settings_keys::UPDATES_ENABLED)? {
+            defaults.updates_enabled = parse_bool_setting(&value, true);
+        }
         if let Some(value) = self.setting_value(settings_keys::RESUME_AGENT_SESSIONS)? {
             defaults.resume_agent_sessions = parse_bool_setting(&value, true);
         }
@@ -1026,6 +1029,15 @@ impl AppDatabase {
             &transaction,
             settings_keys::CONTROL_SOCKET_ENABLED,
             if settings.control_socket_enabled {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::UPDATES_ENABLED,
+            if settings.updates_enabled {
                 "true"
             } else {
                 "false"

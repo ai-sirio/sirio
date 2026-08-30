@@ -41,6 +41,19 @@ if [ "$(grep -c "version: 0.15.2" "$WORKFLOW")" -lt 2 ]; then
   fail "both hosted runners must pin Zig 0.15.2"
 fi
 
+# rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally, so
+# the linux runner must install it or the job fails before compiling (spec §1.5).
+grep -q "sccache" "$WORKFLOW" || fail "the release workflow must install sccache"
+
+# The linux job builds the AppImage and nothing else: webkit2gtk-4.1 must be
+# installed on the runner so build-appimage.sh can bundle its closure, and no
+# step may still produce the old tarball.
+grep -q "libwebkit2gtk-4.1-dev" "$WORKFLOW" || fail "the linux job must install libwebkit2gtk-4.1-dev"
+grep -qF "Sirio-\${VERSION}-x86_64.AppImage" "$WORKFLOW" || fail "the linux artifact must be Sirio-<version>-x86_64.AppImage"
+if grep -q "tar.gz" "$WORKFLOW"; then
+  fail "the linux job must no longer produce a tarball"
+fi
+
 grep -q "options runtime\|build-app-bundle.sh" "$WORKFLOW" || fail "no app bundling step"
 grep -q "notarytool submit"                    "$WORKFLOW" || fail "no notarization step"
 grep -q "stapler staple"                       "$WORKFLOW" || fail "no stapling step"

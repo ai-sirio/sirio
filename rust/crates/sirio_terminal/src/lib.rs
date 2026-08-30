@@ -5,6 +5,7 @@
 //! faint, invisible.
 
 use std::{
+    collections::HashMap,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
@@ -17,12 +18,18 @@ use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use anyhow::{Context as _, Result};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Element, ElementId, EventEmitter, Font, FontStyle,
-    FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement, Pixels,
-    Point, ScrollDelta, ScrollWheelEvent, ShapedLine, StatefulInteractiveElement,
+    App, Bounds, ClipboardItem, ContentMask, Corners, Element, ElementId, EventEmitter, Font,
+    FontStyle, FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
+    Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, StatefulInteractiveElement,
     StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle, Window, anchored, deferred, div,
     fill, font, point, px, relative, rgba, size,
+};
+use image::{Frame, RgbaImage};
+use libghostty_vt::alloc::{Allocator, Bytes};
+use libghostty_vt::kitty::graphics::{
+    DecodePng, DecodedImage, Graphics, ImageFormat, Layer, PlacementIteration,
+    PlacementIterator,
 };
 use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
@@ -434,6 +441,9 @@ enum TerminalCommand {
     Resize(u16, u16, u16, u16),
     Scroll(SirioScroll),
     Snapshot(std::sync::mpsc::Sender<(Vec<Vec<SnapshotCell>>, (usize, usize))>),
+    /// #301: every visible Kitty placement for this frame as plain owned data
+    /// (R2.3 — geometry plus raw pixels; never decoded on the owner thread).
+    KittyPlaces(std::sync::mpsc::Sender<KittyPlacementBuckets>),
     Text(std::sync::mpsc::Sender<String>),
     /// #259: the text under a selected range, formatted by the emulator
     /// rather than re-extracted here -- it knows about soft wrapping and
@@ -498,6 +508,25 @@ struct TerminalHandle {
     /// even though the origin-subtraction half of the same hit-test was
     /// already correct and unit-tested.
     last_cell_width: Arc<Mutex<Option<Pixels>>>,
+    /// #301/#308 (R4.3): decoded Kitty images keyed `(image_id, generation)`,
+    /// with the eviction bookkeeping (last-painted ticks, last placement
+    /// walk, mutation stamp) beside them. Lives beside the other per-pane
+    /// state — NOT in `TerminalPaintState`, which is rebuilt every prepaint.
+    /// Release runs against it every frame (R4.5) and when the pane closes
+    /// (its `Drop` parks the images in [`KITTY_DROPPED_IMAGES`]).
+    kitty_images: Arc<Mutex<KittyImageCache>>,
+    /// #308 R4.4: the owner thread's Kitty mutation stamp — bumped once per
+    /// poll iteration in which it applied anything to the terminal that
+    /// could change the placement walk (output batch, Feed, scroll, resize;
+    /// content transmits and deletes ride the same bump via `vt_write`).
+    /// `prepaint` re-scans only when this differs: a still pane costs one
+    /// integer comparison per frame, not a channel round trip plus three
+    /// placement walks.
+    kitty_stamp: Arc<AtomicU64>,
+    /// #303 R2.6: latched by the owner-thread PNG decoder so a failed ingest
+    /// still produces a visible refusal indicator in the pane. PNG failures
+    /// do not create a stored placement for `kitty_refused` to inspect.
+    kitty_decode_failed: Arc<AtomicBool>,
     /// #43: refreshed once per owner-thread poll-loop iteration from
     /// `terminal.is_mouse_tracking()`. The view reads it to decide
     /// Sirio-gesture vs encode without a blocking round-trip into the !Send
@@ -660,6 +689,488 @@ struct TerminalThreadInputs {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     mouse_tracking: Arc<AtomicBool>,
+    /// #308 R4.4: the Kitty mutation stamp the view gates its re-scan on;
+    /// bumped in the poll loop whenever this thread mutated the terminal in
+    /// any way that could change the placement walk.
+    kitty_stamp: Arc<AtomicU64>,
+    kitty_decode_failed: Arc<AtomicBool>,
+}
+
+/// #301: one visible Kitty placement, copied off the owner thread as plain
+/// owned data (R2.3, same shape #259 used to keep `Selection` off the paint
+/// path). The `!Send` borrows (`Graphics<'t>`, `Image<'t>`,
+/// `PlacementIteration`) all die inside [`collect_kitty_placements`]; what
+/// survives to `prepaint` is only numbers and a byte buffer.
+#[derive(Debug)]
+struct KittyPlacement {
+    image_id: u32,
+    /// The image's store-generation stamp. The render cache keys on
+    /// `(image_id, generation)` (R4.1) so a retransmitted image is never
+    /// mistaken for the same pixels.
+    generation: u64,
+    /// Pixel format of `data` as stored. Always one of the raw formats —
+    /// never PNG, never compressed: ghostty inflates the transport zlib and
+    /// PNG-decodes at ingest (`graphics_image.zig`'s `Image` doc states a
+    /// stored image has `compression == .none` and is never `.png`).
+    format: ImageFormat,
+    /// Image dimensions in pixels; `data.len` must equal
+    /// `width * height * bytes-per-pixel(format)` (R2.4's hard bound).
+    width: u32,
+    height: u32,
+    /// The image's raw pixels (RGB, RGBA, Gray or GrayAlpha). Shared across
+    /// placements of the same image: copied once per `(image_id, generation)`
+    /// per frame, empty on later placements of the same image.
+    data: Vec<u8>,
+    /// Placement's top-left viewport grid cell — may be negative when
+    /// scrolled partly off the top. R3.3 keeps the untruncated geometry and
+    /// lets `Window::paint_image` derive the clipped atlas region.
+    viewport_col: i32,
+    viewport_row: i32,
+    /// The placement's rendered pixel size (already aspect-corrected).
+    pixel_width: u32,
+    pixel_height: u32,
+}
+
+/// #302 R3.1: the three z-bands Kitty defines for placement rendering.
+/// `All` means "no filter" — it is not a fourth bucket — so prepaint carries
+/// exactly these three lists. Bucketing happens in [`collect_kitty_placements`]
+/// through the iterator's own `set_layer` filter, one walk per band; the
+/// emulator decides membership, the pane never re-classifies (R3.5).
+#[derive(Debug, Default)]
+struct KittyPlacementBuckets {
+    below_bg: Vec<KittyPlacement>,
+    below_text: Vec<KittyPlacement>,
+    above_text: Vec<KittyPlacement>,
+    /// #308: the LIVE placement set — every placement the grid still holds,
+    /// visible or scrolled out, as `(image_id, generation)`. A placement
+    /// scrolled into the scrollback is still pinned and can be scrolled back
+    /// to, so it must NOT be treated as dead (R4.7); it leaves this set only
+    /// when the guest deletes it or the emulator evicts it from its store.
+    /// The render cache reconciles against this set, not the visible one.
+    live: Vec<(u32, u64)>,
+}
+
+/// #301 R2.3: copies every visible, non-virtual Kitty placement plus its
+/// image's plain pixel bytes out of the emulator — three z-band buckets via
+/// the emulator's own `set_layer` filter (#302 R3.1). Runs on the owner
+/// thread; nothing here decodes — the decode lands in `prepaint`
+/// ([`decode_kitty_image`]), off the thread that drains the PTY.
+fn collect_kitty_placements(terminal: &mut Terminal<'_, '_>) -> KittyPlacementBuckets {
+    let Ok(graphics) = terminal.kitty_graphics() else {
+        return KittyPlacementBuckets::default();
+    };
+    let Ok(mut iterator) = PlacementIterator::new() else {
+        return KittyPlacementBuckets::default();
+    };
+
+    let mut buckets = KittyPlacementBuckets::default();
+    // Shared across the three z-band walks: image bytes copy at most once
+    // per (image_id, generation) per frame, no matter how many placements
+    // of the image are visible (R2.3's shape, kept across layers by #302).
+    let mut seen: Vec<(u32, u64)> = Vec::new();
+    // R3.1: bucketing is the emulator's own `set_layer` filter — a fresh
+    // iteration per band, never a re-classification by reading placement
+    // fields (R3.5). `All` is "no filter", not a fourth bucket.
+    for layer in [Layer::BelowBg, Layer::BelowText, Layer::AboveText] {
+        let Ok(mut iteration) = iterator.update(&graphics) else {
+            continue;
+        };
+        if iteration.set_layer(layer).is_err() {
+            continue;
+        }
+        while let Some(placement) = iteration.next() {
+            // #308: record liveness BEFORE the visibility filter — a
+            // scrolled-into-scrollback placement is skipped by the copy-out
+            // but is still pinned and showable, and the cache must know it
+            // is alive so scroll-back stays a cache hit (R4.7). An id that
+            // leaves this set was deleted by the guest or evicted from the
+            // emulator's store: its texture is dead weight (E2).
+            if let Ok(id) = placement.image_id()
+                && let Some(image) = graphics.image(id)
+                && let Ok(generation) = image.generation()
+            {
+                buckets.live.push((id, generation));
+            }
+            let Some(place) = copy_kitty_placement(placement, &graphics, terminal, &mut seen)
+            else {
+                continue;
+            };
+            match layer {
+                Layer::BelowBg => buckets.below_bg.push(place),
+                Layer::BelowText => buckets.below_text.push(place),
+                Layer::AboveText => buckets.above_text.push(place),
+                Layer::All => unreachable!("we never walk without a z-band filter"),
+            }
+        }
+    }
+    buckets
+}
+
+/// #301 R2.3: copies ONE visible placement out of the emulator as plain
+/// owned data. The `!Send` borrows (`Graphics<'t>`, `Image<'t>`,
+/// `PlacementIteration`) all die in [`collect_kitty_placements`]; what
+/// survives is only numbers and a byte buffer. `seen` is the
+/// (image_id, generation) set shared across the three z-band walks (#302):
+/// the first walk to meet an image copies its bytes, later walks leave
+/// `data` empty and the prepaint cache reuses the key instead (R4.1).
+fn copy_kitty_placement(
+    placement: &PlacementIteration<'_, '_>,
+    graphics: &Graphics<'_>,
+    terminal: &Terminal<'_, '_>,
+    seen: &mut Vec<(u32, u64)>,
+) -> Option<KittyPlacement> {
+    let Ok(image_id) = placement.image_id() else {
+        return None;
+    };
+    let Some(image) = graphics.image(image_id) else {
+        return None;
+    };
+    let Ok(generation) = image.generation() else {
+        return None;
+    };
+    // One geometry call per placement, not piecemeal field reads (R3.5).
+    let Ok(info) = placement.placement_render_info(&image, terminal) else {
+        return None;
+    };
+    // `viewport_visible` is false for placements fully off-screen AND for
+    // virtual (Unicode-placeholder) placements — the placeholder protocol
+    // is out of scope, so filtering on it covers both.
+    if !info.viewport_visible {
+        return None;
+    }
+    let Ok(format) = image.format() else {
+        return None;
+    };
+    let data = if seen.contains(&(image_id, generation)) {
+        Vec::new()
+    } else {
+        seen.push((image_id, generation));
+        match image.data() {
+            Ok(data) => data.to_vec(),
+            Err(_) => Vec::new(),
+        }
+    };
+    Some(KittyPlacement {
+        image_id,
+        generation,
+        format,
+        width: image.width().unwrap_or(0),
+        height: image.height().unwrap_or(0),
+        viewport_col: info.viewport_col,
+        viewport_row: info.viewport_row,
+        pixel_width: info.pixel_width,
+        pixel_height: info.pixel_height,
+        data,
+    })
+}
+
+/// #302 R3.3: maps a placement's UNTRUNCATED viewport geometry to pane
+/// pixels — the origin may be negative when the placement is scrolled
+/// partially above the pane's top edge — and `Window::paint_image` derives
+/// `visible_bounds` plus the atlas sub-rect from the pane bounds itself.
+/// Never clamp here: clamping the origin and shrinking the size in the
+/// attempt to "fix" the clip produces a squashed image, not a cropped one.
+fn kitty_image_bounds(
+    pane: Bounds<Pixels>,
+    cell_width: Pixels,
+    place: &KittyPlacement,
+) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            pane.origin.x + cell_width * place.viewport_col as f32,
+            pane.origin.y + LINE_HEIGHT * place.viewport_row as f32,
+        ),
+        size(
+            px(place.pixel_width as f32),
+            px(place.pixel_height as f32),
+        ),
+    )
+}
+
+/// #301 R2.5: converts one stored Kitty image into a BGRA `RenderImage`.
+///
+/// A stored image is always plain pixels (see [`KittyPlacement`]), so this
+/// only sees raw RGB / RGBA / Gray / GrayAlpha. The R/B swap happens here,
+/// before `RenderImage::new`, because Kitty's `f=24`/`f=32` are R-first while
+/// gpui's `RenderImage` is BGRA.
+///
+/// Runs on the UI thread in `prepaint` — the PTY owner thread only copies the
+/// plain bytes (R2.3). Returns `None` for a payload the pane refuses:
+/// unexpected formats, or a length that cannot match the announced dimensions
+/// (R2.4 — a stored image is never compressed, so the length check IS the
+/// decompression ceiling is enforced by [`KittyPngDecoder`]). The caller
+/// paints a visible placeholder for `None` (R2.6).
+fn decode_kitty_image(
+    format: ImageFormat,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Option<RenderImage> {
+    let pixels = u64::from(width) * u64::from(height);
+    let expected = match format {
+        ImageFormat::Rgb => pixels * 3,
+        ImageFormat::Rgba => pixels * 4,
+        ImageFormat::Gray => pixels,
+        ImageFormat::GrayAlpha => pixels * 2,
+        // PNG never survives ingestion and the enum is #[non_exhaustive];
+        // refuse anything else loudly rather than guess a layout.
+        _ => return None,
+    } as usize;
+    if data.len() != expected {
+        return None;
+    }
+
+    let mut bgra = Vec::with_capacity(pixels as usize * 4);
+    match format {
+        ImageFormat::Rgb => {
+            for px in data.chunks_exact(3) {
+                bgra.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
+            }
+        }
+        ImageFormat::Rgba => {
+            for px in data.chunks_exact(4) {
+                bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+        }
+        ImageFormat::Gray => {
+            for &g in data {
+                bgra.extend_from_slice(&[g, g, g, 0xFF]);
+            }
+        }
+        ImageFormat::GrayAlpha => {
+            for px in data.chunks_exact(2) {
+                bgra.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
+            }
+        }
+        _ => return None,
+    }
+    // `Frame` is gpui's texture-frame type (image::Frame); the buffer it
+    // wraps is the swap done above — `RgbaImage` is just bytes with a size.
+    let frame = Frame::new(RgbaImage::from_raw(width, height, bgra)?);
+    Some(RenderImage::new(vec![frame]))
+}
+
+/// #301: `DecodePng` the owner thread registers so PNG transmits (f=100 —
+/// what omp emits — measured in the shipped pi-tui's `encodeKittyTransmit`)
+/// are stored at all: ghostty refuses a PNG unless a decoder is registered
+/// (`graphics_image.zig` `complete`/`decodePng`). R2.1 keeps libghostty's own
+/// optional `png` feature off, so this uses the workspace `image` crate — the
+/// tree still has exactly one PNG implementation.
+struct KittyPngDecoder {
+    failure_flag: Arc<AtomicBool>,
+}
+
+impl KittyPngDecoder {
+    fn new() -> Self {
+        Self::with_failure_flag(Arc::new(AtomicBool::new(false)))
+    }
+
+    fn with_failure_flag(failure_flag: Arc<AtomicBool>) -> Self {
+        Self { failure_flag }
+    }
+}
+
+impl DecodePng for KittyPngDecoder {
+    fn decode_png<'alloc>(
+        &mut self,
+        alloc: &'alloc Allocator<'_>,
+        data: &[u8],
+    ) -> Option<DecodedImage<'alloc>> {
+        let mut reader = image::ImageReader::with_format(
+            std::io::Cursor::new(data),
+            image::ImageFormat::Png,
+        );
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(KITTY_DECOMPRESSED_MAX_BYTES);
+        reader.limits(limits);
+        let image = match reader.decode() {
+            Ok(image) => image.into_rgba8(),
+            Err(_) => {
+                self.failure_flag.store(true, Ordering::Release);
+                return None;
+            }
+        };
+        let (width, height) = image.dimensions();
+        // The output buffer must be allocated with ghostty's allocator — the
+        // emulator takes ownership and frees it through the same one.
+        let Some(mut out) = Bytes::new_with_alloc(alloc, image.as_raw().len()).ok() else {
+            self.failure_flag.store(true, Ordering::Release);
+            return None;
+        };
+        out.copy_from_slice(image.as_raw());
+        Some(DecodedImage {
+            width,
+            height,
+            data: out,
+        })
+    }
+}
+
+/// #301 R1.3: states the pane's Kitty ingest ceilings explicitly instead of
+/// inheriting the emulator's defaults. Applied by the owner thread at spawn
+/// and by the headless test harness, so the tested values are the shipped
+/// ones.
+fn apply_kitty_ingest_limits(terminal: &mut Terminal<'_, '_>) {
+    terminal
+        .set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES))
+        .expect("set the Kitty APC buffer ceiling");
+    terminal
+        .set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
+        .expect("set the Kitty image storage limit");
+}
+
+/// #308 (R4.3/R4.7): the decoded-image render cache for one pane, living
+/// beside the other per-pane state on [`TerminalHandle`] — NOT in
+/// `TerminalPaintState`, which is rebuilt every prepaint. Keys are
+/// `(image_id, generation)` (R4.1, never `image_id` alone: guests reuse ids
+/// and a replaced image must not show stale pixels).
+///
+/// Release is the point of this ticket:
+/// - **R4.5-E1** a replaced image (new generation for a live id) drops the
+///   old key immediately;
+/// - **R4.5-E2** an id that leaves the grid (guest delete, store eviction) is
+///   dead weight — dropped;
+/// - **R4.5-E3** scrollback trims do NOT kill placements (measured), so a
+///   scrolled-out image stays alive here until the atlas cap forces it out
+///   (R4.6) least-recently-**painted** first (R4.7 — nothing on screen is
+///   ever dropped, and the image the user last looked at survives a burst);
+/// - **R4.5-E4** pane close: [`Drop`] parks every remaining image in the
+///   graveyard [`KITTY_DROPPED_IMAGES`], drained into `Window::drop_image`
+///   by the next paint.
+#[derive(Default)]
+struct KittyImageCache {
+    images: HashMap<(u32, u64), Arc<RenderImage>>,
+    /// R4.7: last frame tick in which each key was handed to the paint
+    /// loop. Eviction orders by this value — least-recently-painted, never
+    /// least-recently-added.
+    painted: HashMap<(u32, u64), u64>,
+    /// The cache's own monotonic frame counter; per-frame tick for `painted`.
+    tick: u64,
+    /// R4.4: the last owner-thread mutation stamp this cache was synced to.
+    /// A still pane (stamp unchanged) skips the owner-thread round trip and
+    /// reuses `last_buckets` — one integer comparison per frame, not a
+    /// placement walk.
+    last_stamp: u64,
+    /// The most recent placement walk from the owner thread, kept so a
+    /// steady frame can re-render without re-walking.
+    last_buckets: KittyPlacementBuckets,
+}
+
+/// #308 R4.5-E4: every image a closed pane still held. `Window::drop_image`
+/// needs a live `Window`, which a `Drop` impl never has, so the cache parks
+/// its images here and `TerminalElement::paint` drains them into the window's
+/// atlas each frame. Sirio is single-window, so the atlas that received the
+/// uploads is the one that drops them; a multi-window future would need
+/// per-window routing. A pane closed as the last thing before the window
+/// closes leaks nothing extra: the window's atlas dies with the window.
+static KITTY_DROPPED_IMAGES: Mutex<Vec<Arc<RenderImage>>> = Mutex::new(Vec::new());
+
+impl KittyImageCache {
+    /// Advances the frame counter and returns this frame's tick. Every
+    /// `get_or_decode` in the frame records the tick, so the eviction pass
+    /// can tell exactly which images were painted this frame (R4.7).
+    fn begin_frame(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
+
+    /// #301 R4.1/R4.2 + #308: the render-cache lookup for one placement. A
+    /// hit reuses the cached `RenderImage` (no re-decode, no rebuild — a
+    /// rebuilt image is a new atlas key); a miss decodes and inserts. Either
+    /// way the key is marked painted this tick. Returns `None` for a payload
+    /// the pane refuses (R2.4) — the caller paints a visible placeholder.
+    fn get_or_decode(&mut self, place: &KittyPlacement, tick: u64) -> Option<Arc<RenderImage>> {
+        let key = (place.image_id, place.generation);
+        if let Some(cached) = self.images.get(&key) {
+            self.painted.insert(key, tick);
+            return Some(cached.clone());
+        }
+        let decoded = decode_kitty_image(place.format, place.width, place.height, &place.data)?;
+        let decoded = Arc::new(decoded);
+        self.images.insert(key, decoded.clone());
+        self.painted.insert(key, tick);
+        Some(decoded)
+    }
+
+    /// #308 R4.5 (E1/E2): keys this frame's LIVE placement set says will
+    /// never be shown again:
+    ///
+    /// - the cached generation of an id that is live with a NEWER generation
+    ///   is superseded pixels — the guest retransmitted the id (E1);
+    /// - an id that is not live at all was deleted by the guest or evicted
+    ///   from the emulator's store (E2). `a=d` (placements only) and `a=D`
+    ///   (images too) both land here, as does the store's own storage-limit
+    ///   eviction.
+    ///
+    /// A live id with the same generation is kept even when scrolled out of
+    /// view: it can still be scrolled back to, and dropping it would make
+    /// that scroll-back re-decode (R4.7).
+    fn dead_keys(&self, live: &[(u32, u64)]) -> Vec<(u32, u64)> {
+        let mut live_generation: HashMap<u32, u64> = HashMap::new();
+        for &(id, generation) in live {
+            live_generation.insert(id, generation);
+        }
+        let mut dead = Vec::new();
+        for &(id, generation) in self.images.keys() {
+            match live_generation.get(&id) {
+                Some(&live_generation) if live_generation != generation => dead.push((id, generation)),
+                None => dead.push((id, generation)),
+                Some(_) => {}
+            }
+        }
+        dead
+    }
+
+    /// #308 R4.6/R4.7: when the cache holds more than `cap` images, the
+    /// overflow is evicted least-recently-**painted** first. Keys painted
+    /// this frame (on screen right now) are never candidates — an image the
+    /// user is looking at outlives a burst that scrolled past it, and
+    /// nothing on screen disappears silently (R2.6/#303). This is also the
+    /// scrollback-trim release (E3): trims do not remove placements, so a
+    /// trimmed-away image only leaves the cache here, as the LRU victim once
+    /// newer images crowd it out.
+    /// ponytail: when MORE than `cap` images are visible at once (cache full
+    /// of this-frame paints), no key is evictable and the cache sits at the
+    /// visible count; the 200-image cap makes that state unreachable in
+    /// practice. A byte-budgeted variant could evict painted keys instead,
+    /// at the cost of next-frame re-uploads.
+    fn lru_dead_keys(&self, cap: usize, tick: u64) -> Vec<(u32, u64)> {
+        let over = self.images.len().saturating_sub(cap);
+        if over == 0 {
+            return Vec::new();
+        }
+        let mut candidates: Vec<(u64, (u32, u64))> = self
+            .images
+            .keys()
+            .filter(|key| self.painted.get(key).copied().unwrap_or(0) != tick)
+            .map(|key| (self.painted.get(key).copied().unwrap_or(0), *key))
+            .collect();
+        candidates.sort_unstable();
+        candidates.truncate(over);
+        candidates.into_iter().map(|(_, key)| key).collect()
+    }
+
+    /// Removes a key from the cache, returning its image so the caller can
+    /// hand it to `Window::drop_image`. `None` when the key is already gone.
+    fn remove(&mut self, key: &(u32, u64)) -> Option<Arc<RenderImage>> {
+        self.painted.remove(key);
+        self.images.remove(key)
+    }
+}
+
+impl Drop for KittyImageCache {
+    fn drop(&mut self) {
+        // R4.5-E4: when the last per-pane state dies (pane closed), every
+        // image it still held is parked for the next paint to release from
+        // the window's atlas. Dropping the Arc here without `drop_image`
+        // would leave the GPU texture alive for the process lifetime.
+        if self.images.is_empty() {
+            return;
+        }
+        KITTY_DROPPED_IMAGES
+            .lock()
+            .extend(self.images.drain().map(|(_, image)| image));
+    }
 }
 
 /// Runs a terminal's dedicated owner thread.
@@ -687,6 +1198,8 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             master,
             mut child,
             mouse_tracking,
+            kitty_stamp,
+            kitty_decode_failed,
         } = inputs;
 
         // libghostty-vt never writes to the pty itself; it hands the
@@ -717,6 +1230,16 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             })
             .expect("terminal owner thread: registering the pty-write callback");
 
+        // #301: state the Kitty ingest ceilings explicitly (R1.3) and register
+        // the pane's own PNG decoder — f=100 transmits (what omp emits) are
+        // refused by ghostty without one, and R2.1 keeps the crate's own `png`
+        // feature off, so the decoder is the workspace `image` crate.
+        apply_kitty_ingest_limits(&mut terminal);
+        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(
+            KittyPngDecoder::with_failure_flag(kitty_decode_failed),
+        )))
+        .expect("terminal owner thread: registering the Kitty PNG decoder");
+
         // Allocated once and reused every frame; they live and die on this
         // thread like everything else libghostty-vt owns.
         let mut render = RenderState::new().expect("terminal owner thread: RenderState");
@@ -746,6 +1269,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             }
 
             // 2. Serve queued commands.
+            let mut kitty_mutated = false;
             let mut shutdown = false;
             while let Ok(command) = command_rx.try_recv() {
                 match command {
@@ -766,7 +1290,10 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             let _ = writer.flush();
                         }
                     }
-                    TerminalCommand::Feed(bytes) => terminal.vt_write(&bytes),
+                    TerminalCommand::Feed(bytes) => {
+                        terminal.vt_write(&bytes);
+                        kitty_mutated = true;
+                    }
                     TerminalCommand::Resize(columns, lines, cell_width, cell_height) => {
                         let _ = master.resize(PtySize {
                             rows: lines,
@@ -780,6 +1307,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             u32::from(cell_width),
                             u32::from(cell_height),
                         );
+                        kitty_mutated = true;
                     }
                     TerminalCommand::Scroll(scroll) => {
                         let page = terminal.rows().unwrap_or(rows) as isize;
@@ -791,6 +1319,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             SirioScroll::Lines(delta) => ScrollViewport::Delta(delta),
                         };
                         terminal.scroll_viewport(viewport);
+                        kitty_mutated = true;
                     }
                     TerminalCommand::Snapshot(reply) => {
                         let frame = build_snapshot(
@@ -800,6 +1329,9 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             &mut cell_iterator,
                         );
                         let _ = reply.send(frame);
+                    }
+                    TerminalCommand::KittyPlaces(reply) => {
+                        let _ = reply.send(collect_kitty_placements(&mut terminal));
                     }
                     TerminalCommand::Text(reply) => {
                         let _ = reply.send(capture_scrollback_text(&mut terminal));
@@ -818,6 +1350,20 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     TerminalCommand::Shutdown => shutdown = true,
                 }
             }
+            // #308 R4.4: any mutation that can move placements or change
+            // their visibility bumps the stamp the view gates its re-scan
+            // on. Content changes (transmits/replaces/placements/deletes)
+            // arrive through `vt_write`, so the output batch and `Feed`
+            // cover them; Scroll/Resize move placement pins without
+            // changing content. A still pane leaves the stamp untouched and
+            // the view pays one integer comparison per frame instead of a
+            // placement walk.
+            if had_output {
+                kitty_mutated = true;
+            }
+            if kitty_mutated {
+                kitty_stamp.fetch_add(1, Ordering::Relaxed);
+            }
             if shutdown {
                 let _ = child.kill();
                 // Dropping the master closes the pty, which unblocks the
@@ -834,8 +1380,8 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                 last_title = title.to_string();
                 let _ = event_tx.unbounded_send(TerminalEvent::Title(title.to_string()));
             }
-            if !child_exit_reported {
-                if let Ok(Some(status)) = child.try_wait() {
+            if !child_exit_reported
+                && let Ok(Some(status)) = child.try_wait() {
                     child_exit_reported = true;
                     // portable-pty reports a signalled exit as a signal
                     // *name* string, not a number, so a signalled child
@@ -847,7 +1393,6 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     };
                     let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
                 }
-            }
 
             // #43: refresh the shared tracking gate once per poll-loop
             // iteration so the view can decide Sirio-gesture vs encode from a
@@ -1131,6 +1676,19 @@ impl TerminalHandle {
         }
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
+        // #301 R1.4 (omp half): omp's pi-tui decides its image protocol from
+        // PI_FORCE_IMAGE_PROTOCOL before it sends anything — the Kitty support
+        // query is answered (R1.1, pinned by test #264) but omp never emits a
+        // graphics byte unless this is set (its `detectCapabilities` reads
+        // only the environment; measured in #264). The spec calls this one
+        // line the milestone (R1.4). It is deliberately NOT a terminal-identity
+        // claim: #86 settled Sirio's identity as ai.sirio.Sirio, and this
+        // variable only pins the image protocol choice. omp is its only reader
+        // in practice — pi's own shipped tree never references it and plain
+        // shells ignore it — so exporting it on every pane is the smallest
+        // honest surface; scoping it to omp panes would require TerminalShell
+        // to carry env, which the next ticket can add if that ever matters.
+        command.env("PI_FORCE_IMAGE_PROTOCOL", "kitty");
         if let Some(pane_id) = pane_id {
             command.env("SIRIO_PANE_ID", pane_id);
             // Scripts and agent skills written before the rebrand read the
@@ -1180,6 +1738,8 @@ impl TerminalHandle {
         // Shared before the thread spawns and handed to both the owner loop
         // (writer) and the handle (reader) below.
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
+        let kitty_stamp = Arc::new(AtomicU64::new(0));
+        let kitty_decode_failed = Arc::new(AtomicBool::new(false));
         spawn_terminal_thread(TerminalThreadInputs {
             cols: COLS,
             rows: ROWS,
@@ -1190,6 +1750,8 @@ impl TerminalHandle {
             master: pair.master,
             child,
             mouse_tracking: mouse_tracking_flag.clone(),
+            kitty_stamp: kitty_stamp.clone(),
+            kitty_decode_failed: kitty_decode_failed.clone(),
         });
 
         Ok((
@@ -1201,6 +1763,9 @@ impl TerminalHandle {
                 resize_generation: Arc::new(AtomicU64::new(0)),
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
+                kitty_images: Arc::new(Mutex::new(KittyImageCache::default())),
+                kitty_stamp,
+                kitty_decode_failed,
                 mouse_tracking: mouse_tracking_flag,
                 selection: Arc::new(Mutex::new(None)),
                 selection_anchor: Arc::new(Mutex::new(None)),
@@ -1330,6 +1895,22 @@ impl TerminalHandle {
             return (Vec::new(), (usize::MAX, 0));
         }
         reply_rx.recv().unwrap_or((Vec::new(), (usize::MAX, 0)))
+    }
+
+    /// #301 + #302 R3.1: every visible Kitty placement for this frame,
+    /// already bucketed into the three z-bands by the owner thread's
+    /// `set_layer` walks, copied as plain data (R2.3). Empty buckets when
+    /// the emulator holds no Kitty graphics or the terminal is gone.
+    fn kitty_places(&self) -> KittyPlacementBuckets {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if self
+            .commands
+            .send(TerminalCommand::KittyPlaces(reply_tx))
+            .is_err()
+        {
+            return KittyPlacementBuckets::default();
+        }
+        reply_rx.recv().unwrap_or_default()
     }
 
     /// Resolves the link under a viewport cell: the cell's OSC 8 hyperlink
@@ -1748,6 +2329,46 @@ struct LinkHover {
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 /// Cap on events drained into one redraw, bounding notify rate under a flood.
 const EVENT_COALESCE_CAP: usize = 100;
+
+/// #301 R1.3 + #308 R4.6: the Kitty ingest ceilings and the atlas cache cap
+/// are ALL decided together and stated as one coordinated pair of numbers —
+/// an emulator limit generous enough to retain hundreds of images, paired
+/// with a cache that uploads every one of them, would be an atlas policy
+/// nobody chose. 32 MiB holds any base64 PNG omp emits in a single APC; the
+/// emulator's image store keeps 64 MiB of image bytes (≈200 images at the
+/// 320 KiB average the store implies); the pane's atlas cache mirrors that
+/// same ≈200-image working set, evicting least-recently-painted first
+/// (R4.7) so GPU memory tracks the emulator's own retention instead of
+/// growing without limit.
+const KITTY_APC_MAX_BYTES: usize = 32 * 1024 * 1024;
+const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
+/// #303 R2.4: cap image decoder allocations, including the decompressed
+/// RGBA output, before a compressed PNG can expand into an unbounded buffer.
+const KITTY_DECOMPRESSED_MAX_BYTES: u64 = KITTY_IMAGE_STORAGE_LIMIT;
+
+/// #308 R4.6: the atlas ceiling, coordinated with `KITTY_IMAGE_STORAGE_LIMIT`
+/// above (64 MiB ÷ 200 ≈ 320 KiB per image). No agent session renders more
+/// than this many Kitty images at once, and the LRU-painted eviction (R4.7)
+/// bounds everything else, so GPU memory cannot grow past the configured
+/// ceiling however many images a session replaces or scrolls past.
+const KITTY_ATLAS_IMAGE_CAP: usize = 200;
+
+/// #301 R2.6: the wash for a placement whose image the pane refused to
+/// decode — a silent drop is indistinguishable from the renderer being
+/// absent, so a refused image paints this instead of nothing.
+const KITTY_REFUSED_COLOR: Hsla = Hsla {
+    h: 0.0,
+    s: 0.8,
+    l: 0.5,
+    a: 0.7,
+};
+
+/// #303 R2.6: PNG decoding can fail before libghostty stores a placement, so
+/// there is no image geometry to use for the normal refusal wash. Keep the
+/// indicator small and anchored inside the pane; the content mask clips it.
+fn kitty_refused_indicator_bounds(pane: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(pane.origin, size(px(16.0), px(16.0)))
+}
 
 /// Bounds the snapshot sent to the activity matcher. Persistence still keeps
 /// the complete scrollback, but matching an agent prompt only needs the last
@@ -2849,7 +3470,7 @@ impl TerminalView {
         }
         if let TerminalState::Running(terminal) = &self.terminal {
             let scroll = (!event.keystroke.modifiers.modified())
-                .then(|| match key.as_str() {
+                .then_some(match key.as_str() {
                     "pageup" | "page_up" => Some(SirioScroll::PageUp),
                     "pagedown" | "page_down" => Some(SirioScroll::PageDown),
                     _ => None,
@@ -2888,6 +3509,25 @@ struct TerminalPaintState {
     backgrounds: Vec<PaintQuad>,
     lines: Vec<(ShapedLine, gpui::Point<Pixels>)>,
     cursor: Option<PaintQuad>,
+    /// #302 R3.1/R3.2: Kitty placements for this frame, bucketed into the
+    /// three z-bands Kitty defines (`All` means "no filter", so never a
+    /// fourth list — `set_layer` did the bucketing on the owner thread) and
+    /// drained at the three insertion points of the existing paint order:
+    /// `BelowBg` before `backgrounds`, `BelowText` between `backgrounds` and
+    /// `lines`, `AboveText` after `lines`.
+    kitty_below_bg: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    kitty_below_text: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    kitty_above_text: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    /// #301 R2.6: placements whose image the pane refused to decode, painted
+    /// as a visible placeholder so a dropped image is never
+    /// indistinguishable from a missing renderer.
+    kitty_refused: Vec<Bounds<Pixels>>,
+    /// #308 R4.5: images whose cache entry died this frame (replaced,
+    /// deleted, evicted by the atlas cap, or a closed pane's leftovers
+    /// parked by [`KittyImageCache`]'s `Drop`). `paint` hands each to
+    /// `Window::drop_image` AFTER this frame's own images were painted, so
+    /// nothing still on screen is released under its own feet (R4.7).
+    kitty_dropped: Vec<Arc<RenderImage>>,
 }
 
 #[derive(Clone, Copy)]
@@ -3081,10 +3721,81 @@ impl Element for TerminalElement {
             )
         });
 
+        // #301 + #302 R3.1/#308 R4.4: Kitty placements arrive pre-bucketed
+        // by the emulator's own `set_layer` walks (the three z-bands; `All`
+        // is not a bucket), copied as plain pixels + geometry
+        // (`kitty_places`, R2.3), plus the LIVE placement set (`live`,
+        // #308). Decode and cache happen HERE on the UI thread, never on
+        // the PTY owner thread. The cache lives beside the pane's other
+        // state (R4.3). The re-scan is GATED on the owner thread's mutation
+        // stamp (R4.4): a still pane reuses the last walk — one integer
+        // comparison per frame, not a channel round trip plus three walks.
+        let kitty_stamp = self.terminal.kitty_stamp.load(Ordering::Relaxed);
+        let mut kitty_cache = self.terminal.kitty_images.lock();
+        if kitty_cache.last_stamp != kitty_stamp {
+            // Never hold the cache lock across the blocking round trip.
+            drop(kitty_cache);
+            kitty_cache = self.terminal.kitty_images.lock();
+            kitty_cache.last_stamp = kitty_stamp;
+            kitty_cache.last_buckets = self.terminal.kitty_places();
+        }
+        let kitty_buckets = std::mem::take(&mut kitty_cache.last_buckets);
+        let tick = kitty_cache.begin_frame();
+        let mut kitty_below_bg = Vec::new();
+        let mut kitty_below_text = Vec::new();
+        let mut kitty_above_text = Vec::new();
+        let mut kitty_refused = Vec::new();
+        if self.terminal.kitty_decode_failed.load(Ordering::Acquire) {
+            kitty_refused.push(kitty_refused_indicator_bounds(bounds));
+        }
+        for (layer_bucket, bucket) in [
+            (&mut kitty_below_bg, &kitty_buckets.below_bg),
+            (&mut kitty_below_text, &kitty_buckets.below_text),
+            (&mut kitty_above_text, &kitty_buckets.above_text),
+        ] {
+            for place in bucket {
+                // R3.3: keep the untruncated placement geometry — the row
+                // can be negative (scrolled partly off the top) — and let
+                // `Window::paint_image` derive the clipped region from the
+                // pane bounds at paint time. Clamping here would squash.
+                let image_bounds = kitty_image_bounds(bounds, cell_width, place);
+                match kitty_cache.get_or_decode(place, tick) {
+                    Some(image) => layer_bucket.push((image_bounds, image)),
+                    None => kitty_refused.push(image_bounds),
+                }
+            }
+        }
+        // #308 R4.5: reconcile the cache against the emulator AFTER this
+        // frame's decodes: a replaced image's old generation and every image
+        // that left the grid (guest delete, store eviction) are dead, and
+        // over the atlas cap (R4.6) the overflow is evicted
+        // least-recently-painted first (R4.7 — never a key painted this
+        // frame, so nothing on screen disappears silently, #303 R2.6).
+        // Scroll-away and scrollback trim do NOT kill placements (measured
+        // against libghostty-vt 0.2.1), so those keep their entries until
+        // the cap forces them out.
+        let mut kitty_dropped = Vec::new();
+        for key in kitty_cache
+            .dead_keys(&kitty_buckets.live)
+            .into_iter()
+            .chain(kitty_cache.lru_dead_keys(KITTY_ATLAS_IMAGE_CAP, tick))
+        {
+            if let Some(image) = kitty_cache.remove(&key) {
+                kitty_dropped.push(image);
+            }
+        }
+        kitty_cache.last_buckets = kitty_buckets;
+        drop(kitty_cache);
+
         TerminalPaintState {
             backgrounds,
             lines,
             cursor,
+            kitty_below_bg,
+            kitty_below_text,
+            kitty_above_text,
+            kitty_refused,
+            kitty_dropped,
         }
     }
 
@@ -3099,11 +3810,70 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            // #302 R3.2: the three insertion points in the existing paint
+            // order — BelowBg before `backgrounds`, BelowText between
+            // `backgrounds` and `lines`, AboveText after `lines`. No
+            // interleave-by-z pass: the emulator's `set_layer` bucketing
+            // already fixed each placement's relative order.
+            // `paint_image` intersects the full placement bounds with the
+            // pane and derives the clipped atlas sub-rect itself (R3.3); the
+            // content mask above already clips to the pane. Background quads
+            // under a placement still paint (R3.4), since Kitty images carry
+            // alpha — suppressing the cells would show the window behind
+            // wherever the image is transparent.
+            for (image_bounds, image) in state.kitty_below_bg.drain(..) {
+                let _ = window.paint_image(
+                    bounds,
+                    image_bounds,
+                    Corners::default(),
+                    image,
+                    0,
+                    false,
+                );
+            }
             for background in state.backgrounds.drain(..) {
                 window.paint_quad(background);
             }
+            for (image_bounds, image) in state.kitty_below_text.drain(..) {
+                let _ = window.paint_image(
+                    bounds,
+                    image_bounds,
+                    Corners::default(),
+                    image,
+                    0,
+                    false,
+                );
+            }
             for (line, origin) in state.lines.drain(..) {
                 let _ = line.paint(origin, LINE_HEIGHT, gpui::TextAlign::Left, None, window, cx);
+            }
+            for (image_bounds, image) in state.kitty_above_text.drain(..) {
+                let _ = window.paint_image(
+                    bounds,
+                    image_bounds,
+                    Corners::default(),
+                    image,
+                    0,
+                    false,
+                );
+            }
+            // R2.6: a refused format must be visible in the pane, not a
+            // silent drop.
+            for image_bounds in state.kitty_refused.drain(..) {
+                window.paint_quad(fill(image_bounds, KITTY_REFUSED_COLOR));
+            }
+            // #308 R4.5: release the images that died this frame — and the
+            // leftovers of a pane that closed (its cache's `Drop` parked
+            // them in the graveyard) — only now, after this frame's
+            // placements were already painted, so an on-screen image is
+            // never released under its own feet (R4.7). `drop_image` is the
+            // only atlas eviction; without it each dropped `Arc` leaks GPU
+            // memory for the process lifetime.
+            for image in state.kitty_dropped.drain(..) {
+                let _ = window.drop_image(image);
+            }
+            for image in KITTY_DROPPED_IMAGES.lock().drain(..) {
+                let _ = window.drop_image(image);
             }
             if let Some(cursor) = state.cursor.take() {
                 window.paint_quad(cursor);
@@ -4078,6 +4848,723 @@ mod tests {
         );
     }
 
+    /// #301 (R2.3's test half): the copy-out the owner thread performs for
+    /// every placement — plain owned pixels and geometry, no `!Send` borrows
+    /// escape. A raw 1x1 RGB transmit placed at the cursor must come back as
+    /// exactly those bytes, and a retransmit of the same id must carry a new
+    /// generation (R4.1 keys on both).
+    #[test]
+    fn kitty_placement_walk_copies_plain_pixels_and_geometry() {
+        let mut term = headless_term(80, 24);
+        // The real owner thread is resized with cell pixel dimensions before
+        // any input; placements are invisible without them (their grid size
+        // computes to zero), so the headless harness follows the same shape
+        // `resize_headless` already uses.
+        resize_headless(&mut term, 80, 24);
+        // Base64 of [0xFF, 0x00, 0x00] (a red pixel).
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;/wAA\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=1,C=1\x1b\\");
+
+        let buckets = collect_kitty_placements(&mut term);
+        // Default z is 0, the AboveText band (R3.1).
+        assert_eq!(buckets.above_text.len(), 1, "one placement for one image");
+        let first = &buckets.above_text[0];
+        assert_eq!(first.image_id, 1);
+        assert_eq!(first.format, libghostty_vt::kitty::graphics::ImageFormat::Rgb);
+        assert_eq!(&first.data, &[0xFF, 0x00, 0x00], "RGB pixels, verbatim");
+        assert_eq!((first.width, first.height), (1, 1));
+        assert_eq!((first.viewport_col, first.viewport_row), (0, 0));
+        assert_eq!((first.pixel_width, first.pixel_height), (1, 1));
+        assert!(first.generation > 0, "a stored image never has generation zero");
+        let generation_1 = first.generation;
+
+        // Retransmit the same image id with different pixels: same id, new
+        // generation, new bytes — the cache must treat this as a new image.
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;AAD/\x1b\\");
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.above_text.len(), 1);
+        let second = &buckets.above_text[0];
+        assert_eq!(second.image_id, 1);
+        assert_ne!(second.generation, generation_1, "retransmit bumps the generation");
+        assert_eq!(&second.data, &[0x00, 0x00, 0xFF], "blue now");
+    }
+
+    /// #302 R3.1: the iterator's own `set_layer` filter does the bucketing —
+    /// one walk per Kitty z-band, never a re-classification by the pane.
+    /// `All` is "no filter", so the prepaint state carries exactly three
+    /// lists (below background / below text / above text).
+    #[test]
+    fn kitty_layers_bucket_placements_by_z_index() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // Three images, three distinct z-bands (kitty spec: default 0 lands
+        // above text; z < i32::MIN/2 sits below the cell background).
+        for (id, z) in [(1, -2_000_000_000i32), (2, -1), (3, 5)] {
+            advance_headless(
+                &mut term,
+                format!("\x1b_Ga=t,f=24,s=1,v=1,i={id},q=2;/wAA\x1b\\").as_bytes(),
+            );
+            advance_headless(
+                &mut term,
+                format!("\x1b_Ga=p,q=2,i={id},C=1,z={z}\x1b\\").as_bytes(),
+            );
+        }
+
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.below_bg.len(), 1, "z < i32::MIN/2 lands BelowBg");
+        assert_eq!(buckets.below_text.len(), 1, "i32::MIN/2 <= z < 0 lands BelowText");
+        assert_eq!(buckets.above_text.len(), 1, "z >= 0 lands AboveText");
+        assert_eq!(buckets.below_bg[0].image_id, 1);
+        assert_eq!(buckets.below_text[0].image_id, 2);
+        assert_eq!(buckets.above_text[0].image_id, 3);
+    }
+
+    /// #302: the copy-once-per-(image_id, generation) contract (#301 R2.3)
+    /// survives the bucket split — the three `set_layer` walks share one
+    /// `seen` set, so an image placed on two layers still copies its bytes
+    /// exactly once, on the first walk that sees it. The later placement
+    /// reuses the render cache key instead of re-copying pixels.
+    #[test]
+    fn kitty_image_bytes_copied_once_across_layers() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // One 2x1 RGB image, placed twice: once below text, once above.
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=2,v=1,i=4,q=2;/wAAAAD/\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=4,C=1,z=-1\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=4,C=1,z=5\x1b\\");
+
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.below_text.len(), 1, "one placement below text");
+        assert_eq!(buckets.above_text.len(), 1, "one placement above text");
+        // Walk order (BelowBg, BelowText, AboveText) is also prepaint's
+        // decode order, so the first-walked placement carries the bytes.
+        assert!(
+            !buckets.below_text[0].data.is_empty(),
+            "the first walk copies the pixels"
+        );
+        assert!(
+            buckets.above_text[0].data.is_empty(),
+            "the same image on another layer reuses the cache key, no second copy"
+        );
+    }
+
+    /// #302 R3.3 (acceptance, geometry half): an image scrolled so part of
+    /// it sticks above the pane's top edge keeps its FULL, untruncated
+    /// geometry — negative `viewport_row`, still visible, pixel size intact.
+    /// The clip stays with `Window::paint_image` (visible-bounds intersection
+    /// plus atlas sub-rect), never a hand-clamped source rect.
+    #[test]
+    fn kitty_scrolled_half_offscreen_keeps_untruncated_geometry() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // An 8x36-px image (one 8px column, two 18px rows — 2x the height
+        // of a line) placed at the top row, auto-sized from its aspect.
+        let mut pixels = Vec::new();
+        for _ in 0..(8 * 36) {
+            pixels.extend_from_slice(&[0xFF, 0x00, 0x00]);
+        }
+        advance_headless(&mut term, b"\x1b[H");
+        advance_headless(
+            &mut term,
+            format!("\x1b_Ga=t,f=24,s=8,v=36,i=9,q=2;{}", base64_encode(&pixels)).as_bytes(),
+        );
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=9,C=1,z=0\x1b\\");
+        // Push one screenful plus one line: the top row of the image enters
+        // the scrollback and the placement stands half above the pane's top
+        // edge (measured: visible, viewport_row=-1, full 8x36 size).
+        for _ in 0..24 {
+            advance_headless(&mut term, b"Z\r\n");
+        }
+        let before = collect_kitty_placements(&mut term);
+        // Change the scroll position while the image is still visible.
+        term.scroll_viewport(ScrollViewport::Delta(-1));
+        let after = collect_kitty_placements(&mut term);
+
+        // The placement surviving the walk proves `viewport_visible` was true
+        // (fully-off-screen placements are filtered inside the copy-out), so
+        // BEFORE the scroll change it is half off the top with negative row.
+        assert_eq!(
+            before.above_text.len(),
+            1,
+            "one placement, half above the pane's top edge"
+        );
+        let half_out = &before.above_text[0];
+        assert!(half_out.viewport_row < 0, "top rows sit above the viewport");
+        assert_eq!(
+            (half_out.pixel_width, half_out.pixel_height),
+            (8, 36),
+            "geometry is NOT truncated to the visible part"
+        );
+        // After the scroll-position change the placement is still collected
+        // with the same untruncated geometry.
+        assert_eq!(after.above_text.len(), 1, "still one placement after scrolling");
+        assert_eq!(
+            (after.above_text[0].pixel_width, after.above_text[0].pixel_height),
+            (8, 36),
+            "scroll change keeps the untruncated geometry"
+        );
+        // The painter feeds this untruncated placement to `paint_image` with
+        // the pane rect as the clip: negative origin, full size.
+        let pane = Bounds::new(point(px(10.0), px(20.0)), size(px(640.0), px(432.0)));
+        let image_bounds = kitty_image_bounds(pane, px(8.0), half_out);
+        assert!(image_bounds.origin.y < pane.origin.y, "origin stays negative");
+        assert_eq!(image_bounds.size.height, px(36.0), "height stays full");
+        assert_eq!(image_bounds.size.width, px(8.0), "width stays full");
+    }
+
+    /// #301 acceptance: the decode produces BGRA pixels with R/B swapped for
+    /// byte-faithful RGB (R2.5) and RGBA inputs, passes gray through
+    /// unchanged with alpha, and refuses payloads whose length cannot match
+    /// the announced dimensions (the R2.4 hard bound — a stored image is
+    /// never compressed, so the length check is the ceiling).
+    #[test]
+    fn kitty_decode_swaps_rgb_and_rgba_into_bgra() {
+        let rgb = decode_kitty_image(
+            libghostty_vt::kitty::graphics::ImageFormat::Rgb,
+            2,
+            1,
+            &[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF], // red, blue
+        )
+        .expect("RGB decodes");
+        let pixels = rgb.as_bytes(0).expect("one frame");
+        assert_eq!(&pixels[0..4], &[0x00, 0x00, 0xFF, 0xFF], "red -> BGRA");
+        assert_eq!(&pixels[4..8], &[0xFF, 0x00, 0x00, 0xFF], "blue -> BGRA");
+        assert_eq!(rgb.size(0), gpui::size(2.into(), 1.into()));
+
+        let rgba = decode_kitty_image(
+            libghostty_vt::kitty::graphics::ImageFormat::Rgba,
+            1,
+            1,
+            &[0xFF, 0x00, 0x00, 0x80], // red, half alpha
+        )
+        .expect("RGBA decodes");
+        assert_eq!(
+            rgba.as_bytes(0).unwrap(),
+            &[0x00, 0x00, 0xFF, 0x80],
+            "alpha survives the swap"
+        );
+
+        let gray = decode_kitty_image(
+            libghostty_vt::kitty::graphics::ImageFormat::Gray,
+            2,
+            1,
+            &[0x80, 0x40],
+        )
+        .expect("gray decodes");
+        assert_eq!(
+            gray.as_bytes(0).unwrap(),
+            &[0x80, 0x80, 0x80, 0xFF, 0x40, 0x40, 0x40, 0xFF],
+            "gray replicates into opaque BGRA"
+        );
+
+        // R2.4: a payload that cannot match the announced dimensions is
+        // refused (and the caller paints a visible placeholder, R2.6) rather
+        // than trusting a lying length.
+        assert!(
+            decode_kitty_image(
+                libghostty_vt::kitty::graphics::ImageFormat::Rgb,
+                2,
+                1,
+                &[0xFF],
+            )
+            .is_none(),
+            "length mismatch is refused"
+        );
+    }
+
+    /// #301 (R4.1): the render cache keys on `(image_id, generation)`, so a
+    /// repeated render of the same image reuses the same `RenderImage` —
+    /// `Arc::ptr_eq` proves no re-decode and no rebuild — while a replaced
+    /// image (new generation, same id) decodes anew.
+    #[test]
+    fn kitty_render_cache_keys_on_image_id_and_generation() {
+        let mut cache = KittyImageCache::default();
+        let tick = cache.begin_frame();
+        let red = KittyPlacement {
+            image_id: 1,
+            generation: 3,
+            format: libghostty_vt::kitty::graphics::ImageFormat::Rgb,
+            width: 1,
+            height: 1,
+            data: vec![0xFF, 0x00, 0x00],
+            viewport_col: 0,
+            viewport_row: 0,
+            pixel_width: 1,
+            pixel_height: 1,
+        };
+        let first = cache.get_or_decode(&red, tick).expect("decodes");
+        let second = cache.get_or_decode(&red, tick).expect("decodes");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same (image_id, generation) must reuse the cached RenderImage"
+        );
+
+        // Same id retransmitted: the generation differs, so the cache misses
+        // and the new pixels decode.
+        let blue = KittyPlacement {
+            generation: 4,
+            data: vec![0x00, 0x00, 0xFF],
+            ..red
+        };
+        let third = cache.get_or_decode(&blue, tick).expect("decodes");
+        assert!(!Arc::ptr_eq(&first, &third), "new generation must decode anew");
+        assert_eq!(&third.as_bytes(0).unwrap()[0..3], &[0xFF, 0x00, 0x00]);
+    }
+
+    /// #303 R2.4: a small-on-the-wire PNG must be refused before its full
+    /// decompressed pixel buffer can be allocated.
+    #[test]
+    fn kitty_png_decoder_rejects_compressed_images_over_decompression_limit() {
+        let png =
+            image::RgbaImage::from_pixel(4097, 4096, image::Rgba([0x12, 0x34, 0x56, 0xFF]));
+        let mut encoded = Vec::new();
+        png.write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+            .expect("encode the compressed test image");
+        assert!(
+            encoded.len() < 1024 * 1024,
+            "solid image should be much smaller compressed than decompressed"
+        );
+
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut decoder = KittyPngDecoder::with_failure_flag(failed.clone());
+        assert!(
+            decoder
+                .decode_png(&libghostty_vt::alloc::Allocator::GLOBAL, &encoded)
+                .is_none(),
+            "the decompressed image exceeds the Kitty decoder ceiling"
+        );
+        assert!(
+            failed.load(Ordering::Acquire),
+            "a refused decode must be available to the pane for visible reporting"
+        );
+    }
+
+    /// #303 R2.6: a malformed PNG is refused and leaves the visible refusal
+    /// indicator that the paint path overlays in the pane.
+    #[test]
+    fn kitty_png_decode_failure_is_visible_to_the_paint_path() {
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut decoder = KittyPngDecoder::with_failure_flag(failed.clone());
+        assert!(
+            decoder
+                .decode_png(&libghostty_vt::alloc::Allocator::GLOBAL, b"not a PNG")
+                .is_none(),
+            "malformed PNG must be refused"
+        );
+        assert!(failed.load(Ordering::Acquire));
+
+        let pane = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(50.0)));
+        let indicator = kitty_refused_indicator_bounds(pane);
+        assert_eq!(indicator.origin, pane.origin);
+        assert!(indicator.size.width > px(0.0));
+        assert!(indicator.size.height > px(0.0));
+    }
+
+    /// #301: omp transmits PNG (f=100) — measured in the shipped pi-tui
+    /// (`encodeKittyTransmit` emits `a=t,f=100`), and ghostty refuses to
+    /// store a PNG unless a decoder is registered (`graphics_image.zig`
+    /// `complete`/`decodePng`). The pane's own `DecodePng` uses the
+    /// workspace `image` crate (R2.1: no second PNG stack).
+    #[test]
+    fn kitty_png_ingest_decoder_decodes_to_rgba() {
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(
+            2,
+            1,
+            vec![0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80],
+        )
+        .expect("2x1 buffer")
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode PNG");
+
+        let mut decoder = KittyPngDecoder::new();
+        let decoded = decoder
+            .decode_png(&libghostty_vt::alloc::Allocator::GLOBAL, &png)
+            .expect("PNG decodes via the image crate");
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert_eq!(
+            &decoded.data[..],
+            &[0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80],
+            "rgba pixels, verbatim"
+        );
+    }
+
+    /// #301 R1.3: the ingest ceilings are stated explicitly instead of
+    /// inherited from the emulator's defaults — the same function the owner
+    /// thread applies (`spawn_terminal_thread`) and the headless harness
+    /// (`headless_term`) shares, so what the test reads is what the pane
+    /// ships with.
+    #[test]
+    fn kitty_ingest_limits_are_explicit() {
+        let mut term = headless_term(80, 24);
+        // `set_apc_max_bytes_kitty` has no getter, so the constants are the
+        // readable half of the assertion; the storage getter is live.
+        assert!(KITTY_APC_MAX_BYTES > 0, "APC ceiling explicit");
+        assert!(KITTY_IMAGE_STORAGE_LIMIT > 0, "storage ceiling explicit");
+        term.set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES))
+            .expect("re-apply APC override");
+        term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
+            .expect("re-apply storage limit");
+        assert_eq!(
+            term.kitty_image_storage_limit().expect("read storage limit"),
+            KITTY_IMAGE_STORAGE_LIMIT
+        );
+    }
+
+    /// #301 end-to-end: a PNG transmit from omp's own emission shape
+    /// (`a=t,f=100,q=2,i=<id>` then `a=p`) is stored as raw RGBA and the
+    /// placement walk hands the renderer plain pixels. Base64-encodes a real
+    /// PNG to prove the decoder registered on this thread (the same call the
+    /// owner thread makes) is what the emulator actually calls.
+    #[test]
+    fn kitty_png_transmit_reaches_the_placement_walk_as_rgba() {
+        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(
+            KittyPngDecoder::new(),
+        )))
+        .expect("register decoder on this thread");
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(1, 1, vec![0x12, 0x34, 0x56, 0xFF])
+            .expect("1x1 buffer")
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode PNG");
+        let b64 = base64_encode(&png);
+
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        advance_headless(&mut term, format!("\x1b_Ga=t,f=100,s=1,v=1,i=7,q=2;{b64}\x1b\\").as_bytes());
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=7,C=1\x1b\\");
+
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.above_text.len(), 1, "the PNG image stored and placed");
+        let place = &buckets.above_text[0];
+        assert_eq!(place.image_id, 7);
+        assert_eq!(
+            place.format,
+            libghostty_vt::kitty::graphics::ImageFormat::Rgba,
+            "ghostty stores decoded PNG pixels as RGBA"
+        );
+        assert_eq!(
+            &place.data,
+            &[0x12, 0x34, 0x56, 0xFF],
+            "the PNG's own pixels, verbatim"
+        );
+        assert_eq!((place.width, place.height), (1, 1));
+    }
+
+/// #308 test half: a placeable 1x1 RGB image with deterministic pixels.
+    fn kitty_pixel_place(image_id: u32, generation: u64) -> KittyPlacement {
+        KittyPlacement {
+            image_id,
+            generation,
+            format: libghostty_vt::kitty::graphics::ImageFormat::Rgb,
+            width: 1,
+            height: 1,
+            data: vec![0xFF, 0x00, 0x00],
+            viewport_col: 0,
+            viewport_row: 0,
+            pixel_width: 1,
+            pixel_height: 1,
+        }
+    }
+
+    /// #308 R4.4: the owner-thread mutation stamp that gates the placement
+    /// re-scan must stay flat while the pane is idle — a still pane costs
+    /// one integer comparison per frame, not a channel round trip plus three
+    /// placement walks — and bump the moment anything is written. Driven
+    /// through a real PTY so the owner-thread poll loop is the one under
+    /// test, the same shape `pty_output_wakes_the_event_pump` uses.
+    #[test]
+    fn kitty_mutation_stamp_stays_flat_while_idle_and_bumps_on_output() {
+        let working_directory =
+            std::env::temp_dir().join(format!("sirio-terminal-test-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).unwrap();
+        let (handle, mut wakeup_rx) =
+            TerminalHandle::new(&working_directory, &TerminalShell::System).unwrap();
+
+        // Wait for TRUE quiescence: Windows ConPTY shells deliver startup
+        // traffic in several chunks with gaps between them, so a single
+        // `Empty` drain can return before the banner has fully arrived. Settle
+        // only when the stamp is unchanged across a quiet gap — more output
+        // would have bumped it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let before = loop {
+            while wakeup_rx.try_recv().is_ok() {}
+            let sample = handle.kitty_stamp.load(Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(100));
+            if handle.kitty_stamp.load(Ordering::Relaxed) == sample {
+                break sample;
+            }
+            assert!(std::time::Instant::now() < deadline, "startup never settled");
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            handle.kitty_stamp.load(Ordering::Relaxed),
+            before,
+            "R4.4: a still pane must not bump the stamp — the re-scan gate is one integer comparison per frame"
+        );
+
+        // Any output bumps it; kitty transmits arrive through the same path.
+        handle.write(b"printf STAMP_PROBE\n".to_vec());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut bumped = false;
+        while std::time::Instant::now() < deadline {
+            if handle.kitty_stamp.load(Ordering::Relaxed) != before {
+                bumped = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(bumped, "R4.4: output must bump the stamp so prepaint re-scans");
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// #308 E1 (R4.5): a retransmitted image id carries a new generation; the
+    /// cache reconcile drops the superseded generation the moment the walk
+    /// reports the id live at the newer one — the old `RenderImage` is dead
+    /// weight that would otherwise stay in the atlas for the process lifetime.
+    #[test]
+    fn kitty_replaced_image_drops_the_superseded_generation() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // Red pixel, id 1, placed at the cursor.
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;/wAA\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=1,C=1\x1b\\");
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.live.len(), 1, "one live placement");
+        let old_generation = buckets.live[0].1;
+
+        let mut cache = KittyImageCache::default();
+        let tick = cache.begin_frame();
+        let first = cache
+            .get_or_decode(&buckets.above_text[0], tick)
+            .expect("decodes");
+        assert_eq!(cache.images.len(), 1);
+
+        // Retransmit the same id with different pixels: same id, new
+        // generation (measured: ghostty bumps it on retransmit).
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;AAD/\x1b\\");
+        let buckets = collect_kitty_placements(&mut term);
+        let new_generation = buckets.live[0].1;
+        assert_ne!(old_generation, new_generation, "retransmit bumps the generation");
+
+        // The reconcile sees the id live at the NEW generation and names the
+        // old key dead; the new pixels decode on the next lookup.
+        let dead = cache.dead_keys(&buckets.live);
+        assert_eq!(dead, vec![(1, old_generation)], "only the superseded key is dead");
+        assert!(cache.remove(&dead[0]).is_some());
+        assert!(!cache.images.contains_key(&(1, old_generation)));
+        let tick = cache.begin_frame();
+        let second = cache
+            .get_or_decode(&buckets.above_text[0], tick)
+            .expect("redecodes from the new generation");
+        assert!(!Arc::ptr_eq(&first, &second), "the replacement is a fresh texture");
+    }
+
+    /// #308 E2 (R4.5): a guest delete removes placements from the grid. The
+    /// LIVE placement set (visible or not) is what the cache reconciles
+    /// against: an image whose id leaves it — `a=d` deletes placements even
+    /// when the image stays in the emulator's store (measured) — is dead
+    /// weight and must be released. `a=D` (delete images too) lands here the
+    /// same way.
+    #[test]
+    fn kitty_deleted_placement_releases_the_image() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;/wAA\x1b\\");
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=1,C=1\x1b\\");
+        let buckets = collect_kitty_placements(&mut term);
+        assert_eq!(buckets.live.len(), 1);
+        let generation = buckets.live[0].1;
+
+        let mut cache = KittyImageCache::default();
+        let tick = cache.begin_frame();
+        assert!(cache.get_or_decode(&buckets.above_text[0], tick).is_some());
+
+        // `a=d` (delete placements; the image itself stays in ghostty's
+        // store) empties the live set.
+        advance_headless(&mut term, b"\x1b_Ga=d,q=2\x1b\\");
+        let buckets = collect_kitty_placements(&mut term);
+        assert!(buckets.live.is_empty(), "delete empties the live set");
+
+        let dead = cache.dead_keys(&buckets.live);
+        assert_eq!(dead, vec![(1, generation)], "the vanished id is the dead key");
+        assert!(cache.remove(&dead[0]).is_some(), "its texture is released");
+        assert!(cache.images.is_empty());
+    }
+
+    /// #308 E2, scroll half (R4.7): scrolling an image OUT of view does NOT
+    /// kill its placement — the pin survives in the scrollback (measured
+    /// against libghostty-vt 0.2.1) — so the reconcile keeps it cached and a
+    /// scroll back is a cache hit instead of a re-decode. Deleting it is
+    /// what releases it, not scrolling it away.
+    #[test]
+    fn kitty_scrolled_away_image_stays_cached_until_deleted() {
+        let mut term = headless_term(80, 24);
+        resize_headless(&mut term, 80, 24);
+        // An 8x144-px image (8 columns x 8 rows) placed at the top.
+        let mut pixels = Vec::new();
+        for _ in 0..(8 * 144) {
+            pixels.extend_from_slice(&[0xFF, 0x00, 0x00]);
+        }
+        advance_headless(&mut term, b"\x1b[H");
+        advance_headless(
+            &mut term,
+            format!("\x1b_Ga=t,f=24,s=8,v=144,i=4,q=2;{}", base64_encode(&pixels)).as_bytes(),
+        );
+        advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=4,C=1,z=0\x1b\\");
+        let before = collect_kitty_placements(&mut term);
+        assert_eq!(before.live.len(), 1);
+        let generation = before.live[0].1;
+
+        let mut cache = KittyImageCache::default();
+        let tick = cache.begin_frame();
+        assert!(cache.get_or_decode(&before.above_text[0], tick).is_some());
+
+        // Scroll the image fully out of the viewport (into scrollback): 24
+        // line-feeds only reach the bottom of the screen — the placement sits
+        // one row up, still partially visible (the mirrored half-offscreen
+        // test pins that) — so keep pushing until the 8-row image is beyond
+        // the top edge entirely.
+        for _ in 0..48 {
+            advance_headless(&mut term, b"Z\r\n");
+        }
+        let scrolled = collect_kitty_placements(&mut term);
+        assert!(
+            scrolled.above_text.is_empty(),
+            "fully scrolled-out placements leave the visible walk"
+        );
+        assert_eq!(
+            scrolled.live,
+            vec![(4, generation)],
+            "but the placement is still pinned in the scrollback — LIVE"
+        );
+        assert!(
+            cache.dead_keys(&scrolled.live).is_empty(),
+            "a live, same-generation id must not be released on scroll-away"
+        );
+
+        // And it IS still showable: scroll back and it returns.
+        term.scroll_viewport(ScrollViewport::Top);
+        let back = collect_kitty_placements(&mut term);
+        assert_eq!(back.above_text.len(), 1, "scroll-back restores the placement");
+        let tick = cache.begin_frame();
+        let restored = cache.get_or_decode(&back.above_text[0], tick).expect("cache hit");
+        assert!(
+            Arc::ptr_eq(&restored, &cache.images[&(4, generation)]),
+            "scroll-back is a cache HIT — the texture survives the scroll away"
+        );
+    }
+
+    /// #308 E3 (R4.5/R4.6): scrollback trims do NOT remove placements in
+    /// libghostty-vt 0.2.1 (measured: pushing 16k lines through a 10k
+    /// scrollback leaves the placement live and showable), so there is no
+    /// per-trim signal to drop on. The release mechanism is the atlas cap:
+    /// when a session replaces/scrolls more images than the cap, the cache
+    /// must not grow beyond it, however long the pane lives.
+    #[test]
+    fn kitty_cache_stays_bounded_by_the_atlas_cap_through_churn() {
+        let mut cache = KittyImageCache::default();
+        let cap = KITTY_ATLAS_IMAGE_CAP;
+        // A session that streams three caps' worth of distinct images past
+        // the pane: every image stays live (trimmed placements survive, so
+        // the reconcile never fires) and each frame paints only the newest.
+        for id in 0..(3 * cap) as u32 {
+            let tick = cache.begin_frame();
+            cache.get_or_decode(&kitty_pixel_place(id, 1), tick);
+            for key in cache.lru_dead_keys(cap, tick) {
+                cache.remove(&key);
+            }
+            assert!(
+                cache.images.len() <= cap + 1,
+                "the cache overran the atlas cap at image {id}: {} entries",
+                cache.images.len()
+            );
+        }
+        assert_eq!(cache.images.len(), cap, "settles exactly at the ceiling");
+    }
+
+    /// #308 R4.7: the eviction ORDER is least-recently-*painted*, never
+    /// least-recently-added. Image 1 is added first and painted again long
+    /// after image 2's only paint — when the cap forces one out, image 2
+    /// goes, because 1 is what the user is looking at.
+    #[test]
+    fn kitty_lru_eviction_tracks_last_painted_not_last_added() {
+        let mut cache = KittyImageCache::default();
+        let one = kitty_pixel_place(1, 1);
+        let two = KittyPlacement {
+            image_id: 2,
+            data: vec![0x00, 0x00, 0xFF],
+            ..one
+        };
+        // Frame 1: both added and painted.
+        let tick = cache.begin_frame();
+        cache.get_or_decode(&one, tick);
+        cache.get_or_decode(&two, tick);
+        // Frames 2..8: a still pane — nothing is painted.
+        for _ in 2..9 {
+            cache.begin_frame();
+        }
+        // Frame 9: image 1 is scrolled back into view and painted again.
+        let t9 = cache.begin_frame();
+        cache.get_or_decode(&one, t9);
+        // Frame 10, cap 1: only one may stay.
+        let tick = cache.begin_frame();
+        let dead = cache.lru_dead_keys(1, tick);
+        assert_eq!(
+            dead,
+            vec![(2, 1)],
+            "the least-recently-PAINTED victim is image 2, not the least-recently-added image 1 — 1 was repainted at frame 9"
+        );
+    }
+
+    /// #308 E4 (R4.5): closing a pane drops the per-pane cache; its `Drop`
+    /// must park every remaining image in the graveyard that the next paint
+    /// drains into `Window::drop_image`. Dropping the last `Arc` without
+    /// `drop_image` would leave the GPU texture alive for the process
+    /// lifetime, which is the leak this ticket exists to close.
+    #[test]
+    fn kitty_pane_close_parks_every_image_for_the_next_paint_to_drop() {
+        let mut cache = KittyImageCache::default();
+        let tick = cache.begin_frame();
+        let first = cache.get_or_decode(&kitty_pixel_place(1, 1), tick).expect("decodes");
+        let second = cache.get_or_decode(&kitty_pixel_place(2, 4), tick).expect("decodes");
+
+        drop(cache); // the pane closed
+
+        // The graveyard is process-global and the harness runs tests in
+        // parallel, so sibling tests park their own images concurrently;
+        // assert membership of THIS pane's images, not an absolute count.
+        let parked = KITTY_DROPPED_IMAGES.lock();
+        assert!(
+            parked.iter().any(|image| Arc::ptr_eq(image, &first))
+                && parked.iter().any(|image| Arc::ptr_eq(image, &second)),
+            "both decoded textures of the closed pane reach the next paint's drop list"
+        );
+    }
+
+    /// Test-only RFC 4648 encoder for the Kitty APC payloads above; the
+    /// crate itself never base64-encodes anything.
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let n = (u32::from(chunk[0]) << 16)
+                | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*chunk.get(2).unwrap_or(&0));
+            out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+            out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        }
+        out
+    }
+
     /// #259: a selection spanning lines is linewise, not rectangular.
     #[test]
     fn a_multi_line_selection_takes_whole_lines_between_its_ends() {
@@ -4182,6 +5669,10 @@ mod tests {
         // grapheme clustering (DEC 2027) is off upstream.
         term.set_mode(Mode::GRAPHEME_CLUSTER, true)
             .expect("enable DEC 2027 grapheme clustering");
+        // #301 R1.3: the headless harness applies the same explicit Kitty
+        // ingest ceilings the owner thread does, so the limit test reads the
+        // shipped constants through the real setter path.
+        apply_kitty_ingest_limits(&mut term);
         term
     }
 

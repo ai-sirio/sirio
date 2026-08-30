@@ -22,16 +22,31 @@
 //! installation, and Inno already rolls back a failed install on its own
 //! ([spec §6.1]).
 //!
-//! # macOS / Linux (#313 / #314)
+//! # macOS (#313)
 //!
-//! Not implemented here: each platform ticket owns its own applying module.
-//! Until they land, calling [`apply`] on a non-Windows target is an error
-//! rather than a silent no-op.
+//! A verified download is a `.dmg` around a `Sirio.app`; it is applied by
+//! **swapping the installed bundle** (see [`macos`]). The running instance
+//! carries on until the user relaunches — macOS never restarts the app, so a
+//! successful return means "the new version is on disk".
+//!
+//! # Linux (#314)
+//!
+//! A verified download is an AppImage; it is applied by **renaming over the
+//! running image** (see [`linux`]). Self-location reads `$APPIMAGE` — inside
+//! an AppImage `current_exe()` points into the ephemeral squashfs mount, not
+//! the file to replace — and its absence is the "this is not an install"
+//! signal. The running instance carries on until the user relaunches, like
+//! macOS.
+//!
+//! Both platform modules are compiled on every target so their logic and
+//! tests run everywhere; the only `#[cfg(target_os)]` in this crate is the
+//! dispatch inside [`apply`] (plus the raw process-spawning primitives no
+//! other platform can execute).
 //!
 //! [spec §5.1]: https://github.com/ai-sirio/sirio/blob/main/docs/superpowers/specs/2026-08-29-auto-update-design.md
 //! [spec §6.1]: https://github.com/ai-sirio/sirio/blob/main/docs/superpowers/specs/2026-08-29-auto-update-design.md
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sirio_update::VerifiedUpdate;
 
@@ -57,6 +72,17 @@ pub enum ApplyError {
     /// The installer (or swap mechanism) could not be started.
     #[error("the update could not be applied because it failed to start: {0}")]
     Launch(String),
+    /// The swap failed; the previous version is back in place (macOS) or
+    /// untouched (Linux, where the rename is atomic).
+    #[error("the update could not be swapped into place: {0}")]
+    Swap(String),
+    /// The macOS swap failed *and* the previous version could not be put
+    /// back: the user's working copy is the moved-aside one.
+    #[error(
+        "the swap failed ({attempted}); rolling back also failed, so the previous \
+         version is still at {aside:?} — restore it by hand"
+    )]
+    Rollback { attempted: String, aside: PathBuf },
     /// This platform's applying module has not landed yet (see crate docs).
     #[error("applying an update is not implemented on this platform yet")]
     UnsupportedPlatform,
@@ -92,12 +118,24 @@ pub fn self_locate_at(
 ///
 /// On Windows this is fire-and-forget by design: the installer closes the
 /// running app and restarts it, so a successful return means "the installer
-/// was handed the update", not "the update is installed".
+/// was handed the update", not "the update is installed". On macOS the swap
+/// is synchronous and a successful return means "the new version is on
+/// disk"; the running instance keeps going until the user relaunches.
 pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
-    // Self-location first; the refusal *is* the outcome when this is not an
-    // install (a dev build or copied binary) — nothing is launched then.
-    windows::self_locate()?;
-    launch(update, &real_launch)
+    // The dispatch is the only platform decision in the crate: each module
+    // owns its whole applying sequence (self-location + how the artifact is
+    // applied), so nothing platform-specific leaks into shared code.
+    #[cfg(target_os = "windows")]
+    return windows::apply(update, &real_launch);
+    #[cfg(target_os = "macos")]
+    return macos::apply(update);
+    #[cfg(target_os = "linux")]
+    return linux::apply(update);
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = update;
+        Err(ApplyError::UnsupportedPlatform)
+    }
 }
 
 /// The injectable launcher seam: takes the staged artifact and its
@@ -106,47 +144,20 @@ pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
 /// region (a bare `dyn` in an alias would default to `'static`).
 type Launcher<'a> = dyn Fn(&Path, &[&str]) -> Result<(), String> + 'a;
 
-/// The launch half of [`apply`], once self-location has already refused.
-///
-/// Testable with a fake launcher so the assembly of the installer command
-/// (path + `/VERYSILENT /NORESTART`) is asserted without spawning anything.
-fn launch(update: &VerifiedUpdate, run: &Launcher<'_>) -> Result<(), ApplyError> {
-    run(&update.path, &["/VERYSILENT", "/NORESTART"]).map_err(ApplyError::Launch)
-}
-
 /// The real launcher: spawn the staged installer, detached, and let it run.
+#[cfg(target_os = "windows")]
 fn real_launch(path: &Path, args: &[&str]) -> Result<(), String> {
     windows::spawn_silent(path, args).map(|_child| ())
 }
 
-#[cfg(target_os = "windows")]
+pub mod linux;
+pub mod macos;
 mod windows;
-#[cfg(not(target_os = "windows"))]
-mod windows {
-    use super::*;
-
-    pub fn self_locate() -> Result<std::path::PathBuf, ApplyError> {
-        Err(ApplyError::UnsupportedPlatform)
-    }
-
-    pub fn spawn_silent(_path: &Path, _args: &[&str]) -> Result<std::process::Child, String> {
-        Err("no launcher on this platform".into())
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    fn update(path: &str) -> VerifiedUpdate {
-        VerifiedUpdate {
-            version: "0.7.0".into(),
-            notes: "notes".into(),
-            path: path.into(),
-            platform: "windows-x86_64".into(),
-        }
-    }
 
     #[test]
     fn expected_install_dir_is_localappdata_programs_sirio() {
@@ -177,36 +188,5 @@ mod tests {
             self_locate_at(&dev_build_exe, &expected),
             Err(ApplyError::InstallNotFound)
         );
-    }
-
-    #[test]
-    fn apply_runs_the_installer_with_verysilent_and_norestart() {
-        let captured_path = std::cell::RefCell::new(None);
-        let captured_args = std::cell::RefCell::new(Vec::new());
-        // Reborrow so the `move` closure copies references instead of
-        // moving the RefCells themselves; the asserts below still own them.
-        let path_cell = &captured_path;
-        let args_cell = &captured_args;
-        let staged = r"C:\staging\sirio-update-0.7.0-windows-x86_64";
-        let result = launch(&update(staged), &move |path, args| {
-            *path_cell.borrow_mut() = Some(path.to_path_buf());
-            *args_cell.borrow_mut() = args.iter().map(|s| s.to_string()).collect();
-            Ok(())
-        });
-        assert_eq!(result, Ok(()));
-        assert_eq!(captured_path.borrow().as_deref(), Some(Path::new(staged)));
-        assert_eq!(
-            *captured_args.borrow(),
-            vec!["/VERYSILENT".to_string(), "/NORESTART".to_string()]
-        );
-    }
-
-    #[test]
-    fn apply_propagates_a_launch_failure() {
-        let result = launch(
-            &update(r"C:\staging\sirio-update-0.7.0-windows-x86_64"),
-            &|_, _| Err("access denied".into()),
-        );
-        assert_eq!(result, Err(ApplyError::Launch("access denied".into())));
     }
 }

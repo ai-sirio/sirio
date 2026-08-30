@@ -1111,6 +1111,7 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
     {
         let db = AppDatabase::open(&path).expect("open writer database");
         db.save_settings(&AppSettings {
+            updates_enabled: false,
             resume_agent_sessions: false,
             auto_naming: true,
             limit_chat_history: false,
@@ -1132,6 +1133,7 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
 
     let db = AppDatabase::open(&path).expect("reopen database after relaunch");
     let settings = db.settings().expect("load Linux settings");
+    assert!(!settings.updates_enabled);
     assert!(!settings.resume_agent_sessions);
     assert!(settings.auto_naming);
     assert!(!settings.limit_chat_history);
