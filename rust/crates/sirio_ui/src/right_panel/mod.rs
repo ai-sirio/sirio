@@ -20,6 +20,7 @@ use sirio_theme::Theme;
 use std::path::PathBuf;
 
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use history::{GitHistory, GitHistoryEvent};
 
@@ -413,6 +414,7 @@ impl RightPanel {
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = PanelView::get(cx);
@@ -455,6 +457,10 @@ impl RightPanel {
                             theme.subtitle
                         },
                     ))
+                    .when(
+                        view == PanelView::Files && self.walk_task.is_some(),
+                        |this| this.child(loading::compact("files-refresh-spinner", window, cx)),
+                    )
                     .when_some(badge_color, |this, color| {
                         this.child(
                             div()
@@ -583,7 +589,7 @@ impl EventEmitter<RightPanelEvent> for RightPanel {}
 impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 
 impl Render for RightPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         // #189: incremented here and nowhere else -- being *in* a drawn
         // frame is the whole signal.
@@ -611,16 +617,16 @@ impl Render for RightPanel {
             .h_full()
             .overflow_hidden()
             .bg(theme.background)
-            .child(self.render_header(entity.clone(), theme, cx))
+            .child(self.render_header(entity.clone(), theme, window, cx))
             .child(if !self.worktree_selected {
                 self.render_no_worktree(theme).into_any_element()
             } else {
                 match PanelView::get(cx) {
                     PanelView::Files => self
-                        .render_files(entity.clone(), theme, cx)
+                        .render_files(entity.clone(), theme, window, cx)
                         .into_any_element(),
                     PanelView::Activity => self
-                        .render_activity(entity.clone(), theme)
+                        .render_activity(entity.clone(), theme, window, cx)
                         .into_any_element(),
                     PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
                     PanelView::History => self.render_history(theme, cx).into_any_element(),

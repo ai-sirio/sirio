@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::editor::fs_actions;
+use crate::loading;
 
 /// File-tree rows: 12.5px text at 26px, the app's single-line row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 26.0;
@@ -644,6 +645,7 @@ impl RightPanel {
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let rows = self.file_rows();
@@ -677,11 +679,27 @@ impl RightPanel {
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
                 .text_color(theme.subtitle)
+                .child(loading::indeterminate(
+                    "files-loading-orb",
+                    loading::GENERIC_ORB,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .child("Loading files…")
+                .child(loading::skeleton_rows(
+                    "files-skeleton",
+                    loading::SKELETON_ROWS,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .into_any_element()
         } else if let Some(error) = &self.refresh_error {
             let retry_entity = entity.clone();

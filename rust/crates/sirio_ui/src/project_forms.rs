@@ -11,6 +11,7 @@ use gpui::{
 use sirio_git::{GitRemote, clone_repository};
 
 use crate::caret;
+use crate::loading;
 use sirio_project::create_project;
 use sirio_theme::Theme;
 
@@ -432,18 +433,11 @@ impl Render for CloneForm {
                 this.child(
                     div()
                         .id("clone-progress")
+                        .debug_selector(|| "clone-progress".to_owned())
                         .w_full()
-                        .h(px(5.0))
-                        .rounded(px(3.0))
-                        .bg(theme.primary_pill_bg)
-                        .child(
-                            div()
-                                .h(px(5.0))
-                                .rounded(px(3.0))
-                                // A bar filling up is a quantity, not a status.
-                                .bg(theme.gauge)
-                                .w(px(240.0 * progress as f32)),
-                        ),
+                        .flex()
+                        .justify_center()
+                        .child(loading::progress(progress as f32, &theme)),
                 )
             })
             .child(
@@ -660,6 +654,7 @@ impl Render for CreateForm {
         let destination = self.destination().display().to_string();
         let (status_line, status_color) = create_status_line(&self.state, &theme);
         let can_submit = self.state.can_submit();
+        let creating = matches!(self.state.status(), CreateStatus::Running);
         let button_label = if self.state.error().is_some() {
             "Retry creation"
         } else {
@@ -773,6 +768,23 @@ impl Render for CreateForm {
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
             )
+            .when(creating, |this| {
+                this.child(
+                    div()
+                        .id("create-loading")
+                        .debug_selector(|| "create-loading".to_owned())
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(loading::indeterminate(
+                            "create-loading-orb",
+                            loading::GENERIC_ORB,
+                            &theme,
+                            window,
+                            cx,
+                        )),
+                )
+            })
             .child(
                 div()
                     .id("create-status")
@@ -1031,6 +1043,38 @@ mod tests {
             matches!(status, CreateStatus::Complete(_)),
             "two real clicks must produce exactly one successful creation, not a \
              destination-exists failure from a second racing create: {status:?}"
+        );
+    }
+
+    #[test]
+    fn a_clone_bar_reports_the_truthful_fraction() {
+        assert_eq!(crate::loading::clamp_fraction(0.0), 0.0);
+        assert_eq!(crate::loading::clamp_fraction(0.42), 0.42);
+        assert_eq!(crate::loading::clamp_fraction(1.0), 1.0);
+    }
+
+    #[gpui::test]
+    async fn a_cancelled_clone_shows_no_progress_bar(cx: &mut TestAppContext) {
+        let parent = TempDir::new("clone-cancelled");
+        let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| window.root::<CloneForm>().flatten().expect("form root"));
+
+        form.update(&mut cx.cx, |form, cx| {
+            form.state.set_url("file:///tmp/source");
+            assert!(form.state.begin());
+            form.state.fail("cancelled");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("clone-progress").is_none(),
+            "a terminal clone state wins over the determinate progress bar"
         );
     }
 
