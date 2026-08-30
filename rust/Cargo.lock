@@ -10492,3 +10492,7 @@ dependencies = [
  "syn 3.0.3",
  "winnow 1.0.4",
 ]
+
+[[patch.unused]]
+name = "bezel-gpui-linux"
+version = "0.3.6"

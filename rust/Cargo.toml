@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-# vendor/gpui_linux and vendor/gpui_platform are local `[patch]` overrides for the pinned gpui
-# git dependency (F-CORE-FILE-03A), not workspace members -- each carries its own `[workspace]`
-# table so `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml` (etc.) can run their
-# tests standalone; excluded here so `cargo build/test --workspace` does not also try to treat
-# them as members (which conflicts with their own `[workspace]` tables).
-exclude = ["vendor/gpui_linux", "vendor/gpui_platform"]
+# vendor/gpui_linux is a local `[patch.crates-io]` override for the published bezel-gpui-linux
+# (F-CORE-FILE-03A), not a workspace member -- it carries its own `[workspace]` table so
+# `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml` can run its tests standalone;
+# excluded here so `cargo build/test --workspace` does not also try to treat it as a member
+# (which conflicts with its own `[workspace]` table).
+exclude = ["vendor/gpui_linux"]
 members = [
     "crates/sirio",
     "crates/sirio_theme",
@@ -90,16 +90,16 @@ sirio_apply = { path = "crates/sirio_apply" }
 # the async `Enter` pipe-read that resolves the dragged paths has not yet completed -- which a
 # provider slower than ~150ms reliably triggers, discarding a real XDND drop with no trace. See
 # rust/vendor/README.md and docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md.
-# `gpui_platform` is patched alongside it only because its own `gpui_linux` dependency is a path
-# dependency inside the zed checkout (a different source than this `[patch]` targets), not
-# because gpui_platform's own code changed -- see rust/vendor/gpui_platform/Cargo.toml.
 #
-# The patch itself is gone for now: its git source (the zed rev above) no longer exists in the
-# dependency graph now that gpui/gpui_platform resolve from crates.io, and `vendor/gpui_linux`
-# still holds the zed-era package (named `gpui_linux`, not `bezel-gpui-linux`) so pointing a
-# `[patch.crates-io]` at it today would fail cargo's name check. This comes back as
-# `[patch.crates-io] bezel-gpui-linux = { path = "vendor/gpui_linux" }` once that vendored tree
-# is rebased onto the released `bezel-gpui-linux`.
+# `[patch.crates-io]` (not the git-URL form the comment here once described) because
+# gpui/gpui_platform now resolve `bezel-gpui-linux` from crates.io, not from a zed git rev.
+# `gpui_platform` is not patched alongside it: the published `bezel-gpui-platform` takes its own
+# `gpui_linux` dependency as a plain crates.io registry dependency (`package = "bezel-gpui-linux"`,
+# not a path dependency), so this one entry is enough for `[patch.crates-io]` to substitute the
+# vendored tree for every consumer, `bezel-gpui-platform` included -- verified against
+# `bezel-gpui-platform`'s published manifest. See rust/vendor/README.md for the full arrangement.
+[patch.crates-io]
+bezel-gpui-linux = { path = "vendor/gpui_linux" }
 
 [profile.dev]
 # Keep dev links and debug-info I/O light; remove this line when full debug info is needed.
