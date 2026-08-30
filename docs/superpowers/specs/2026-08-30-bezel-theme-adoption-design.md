@@ -195,7 +195,7 @@ deliberate improvement and is why `hairline` maps to `hairline(a)` rather than t
 | `text_tertiary` | `#686B71` / `#68757B` | `text_faint` | |
 | `text_ghost` | `#575757` / `#A4A4A4` | `text_dim` | |
 | `frame_fallback` | `#222427` / `#DCE5E9` | `bg` | |
-| `frame_surface` | `softened(frame_fallback, 0.88/0.82)` | `band` | **review** — translucent frame material vs bezel's band |
+| `frame_surface` | `softened(frame_fallback, 0.88/0.82)` | **retained in `SirioColors`** | bezel's `band` is a recessed palette/picker header or footer strip, with black at alpha 0.16 in dark mode and 0.045 in light mode, not Sirio's translucent window-frame material. |
 | `panel_surface` | `#18191A` / `#F4F7F8` | `surface` | |
 | `panel_border` | `#27292D` / `#CCD8DD` | `border` | opaque today, translucent in bezel — a real value change |
 | `raised` | `#1D1E21` / `#FBFCFC` | `surface_raised` | |
@@ -280,12 +280,13 @@ veil) are different kinds of value.
 `primary_action_bg` was listed as risk R3's confirmed suspect. It is resolved:
 it is an alias of `selected_fill`, and needs no judgement.
 
-### Group C — no bezel counterpart (2)
+### Group C — no bezel counterpart (3)
 
-After resolving against the code, only two bindings have no bezel home:
+After resolving against the code, only three bindings have no bezel home:
 
 | Sirio | Resolution |
 |---|---|
+| `frame_surface` | retain in `SirioColors` |
 | `terminal_surface` | retain in `SirioColors` |
 | `accent` → `brand_coral` | retain, **renamed**. Doc: "no role paints it any more"; only the Coral entry of the agent-colour picker reads it. Carries two invariants (clears AA on its own surface; is not any agent's brand). Renamed because `theme.accent` now resolves through `Deref` to bezel's `accent`, which is a different thing. |
 
@@ -484,6 +485,6 @@ mean.
 
 ## Open questions
 
-None blocking. Table 1's single **review** row (`frame_surface` to `band`) is
-settled during Phase 1 against the current value, which is where the table stops
-being a proposal and becomes a fact.
+None blocking. Table 1's `frame_surface` row is settled during Phase 1: bezel's
+`band` is a recessed palette/picker header or footer strip, not Sirio's
+translucent window-frame material.
