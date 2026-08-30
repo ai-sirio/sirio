@@ -161,7 +161,7 @@ Each of these documents itself as an alias of another field.
 | `sidebar` | `panel_surface` |
 | `sidebar_border` | `panel_border` |
 
-### Group B — direct bezel correspondence (45)
+### Group B — direct bezel correspondence (48)
 
 | Sirio | bezel | Note |
 |---|---|---|
@@ -178,6 +178,9 @@ Each of these documents itself as an alias of another field.
 | `subtitle` | `text_muted` | 77 sites |
 | `meta` | `text_faint` | 117 sites |
 | `text_ghost` | `text_dim` | |
+| `gauge` | `accent` | bezel's `accent` is `neutral(0.673)` — "indigo-400's lightness, no chroma" |
+| `file_link` | `accent` | same neutral; clickability loses its colour signal (see "The blue") |
+| `git_untracked` | `text_faint` | quieter than staged/modified/conflict, which stay chromatic |
 | `raised` | `surface_raised` | "a step above the surface" |
 | `card_fill` | `surface_card` | |
 | `composer` | `input_bg` | |
@@ -221,7 +224,7 @@ Group A — or bezel lacks a distinction Sirio relies on, in which case one of e
 pair moves to Group C. Resolved by comparing the current values, not by
 argument.
 
-### Group C — no bezel counterpart (11)
+### Group C — no bezel counterpart (8)
 
 | Sirio | Resolution |
 |---|---|
@@ -232,10 +235,7 @@ argument.
 | `diff_addition_background` | derive — `diff_add` at low alpha, as bezel does for `diff_hunk_bg` |
 | `diff_deletion_background` | derive — `diff_del` at low alpha |
 | `primary_action_bg` | **review** — doc says "must stay distinguishable from `raised`", so explicitly *not* `surface_raised` |
-| `accent` | retain — brand coral. Doc: "no role paints it any more"; only the Coral entry of the agent-colour picker reads it. Carries two invariants (clears AA on its own surface; is not any agent's brand). |
-| `gauge` | retain — quantity blue. Doc: "Blue means how much, which is why a progress bar is never painted in a status hue" |
-| `file_link` | retain — the gauge blue, "the one place blue means you can click this" |
-| `git_untracked` | retain — the gauge blue |
+| `accent` → `brand_coral` | retain, **renamed**. Doc: "no role paints it any more"; only the Coral entry of the agent-colour picker reads it. Carries two invariants (clears AA on its own surface; is not any agent's brand). Renamed because `theme.accent` now resolves through `Deref` to bezel's `accent`, which is a different thing. |
 
 #### The blue
 
@@ -248,14 +248,37 @@ Sirio uses blue for three documented meanings: quantity (`gauge`), clickability
 design choice — bezel reserves colour for data and attention and uses contrast
 for identity.
 
-**Decision (C2):** keep a Sirio blue in `SirioColors`, declared as a deliberate
-deviation from the bezel palette, with a comment stating why. Rejected: mapping
-`git_untracked` to a neutral (loses a distinction channel in the git file list)
-and mapping it to `busy` (pink reads as error in a git list).
+**Decision (C1):** drop the blue. All three tokens take a neutral from the bezel
+palette:
 
-T2 already establishes bezel as source rather than constraint. A token declared
-as a deviation is honest; a git state reinterpreted to fit a palette is hidden
-debt.
+- `gauge` → `accent`. bezel's `accent` is the neutral that sits where an accent
+  colour would, which is exactly what a progress bar needs.
+- `file_link` → `accent`, the same emphasis neutral.
+- `git_untracked` → `text_faint`, quieter than the chromatic staged / modified /
+  conflict states.
+
+Rejected: keeping a declared Sirio blue (adds a permanent deviation from the
+palette), and mapping `git_untracked` to `busy` (pink reads as error in a git
+list).
+
+This satisfies `gauge`'s documented intent rather than contradicting it. The doc
+says "a progress bar is never painted in a status hue — a bar filling up is not
+an alert"; the requirement was *not a status hue*, not *blue specifically*, and a
+neutral meets it.
+
+The real loss is `file_link`: clickability no longer has a colour signal, and
+must be carried by underline or hover instead. This is bezel's own convention —
+contrast for identity, colour for data — so it is consistent, but it is a
+behaviour change to verify in Phase 2's visual review, not just a token swap.
+
+Consequence: Sirio's `accent` (brand coral) is renamed `brand_coral`. With
+`Deref` pointing at bezel, `theme.accent` resolves to bezel's neutral accent, so
+the two cannot share a name. The rename also removes a standing ambiguity — the
+field has not been an accent in the design sense since it stopped being painted.
+
+If the coral is ever wanted back as the app accent, the supported route is
+`set_brand` with `Brand { accent: Tint::new(<coral hue>, <chroma>), .. }`, which
+rotates the whole palette coherently, rather than a bespoke token.
 
 ## Phases
 
@@ -339,6 +362,12 @@ The invariants are a value-independent oracle: if
 `shell_body_text_meets_wcag_aa_on_its_panel` is still green after the swap, the
 bezel colours are legible on the bezel surfaces without anyone having to look at
 them.
+
+Note on the two `accent_*` invariants: they follow the `accent` → `brand_coral`
+rename in Phase 1 and continue to test Sirio's coral, not bezel's neutral
+`accent`. They are the reason the coral is kept as a token at all — inlining it
+as a literal in the agent-colour picker would leave both invariants with nothing
+to hold.
 
 ### Oracles per phase
 
