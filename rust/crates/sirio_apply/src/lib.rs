@@ -88,6 +88,32 @@ pub enum ApplyError {
     UnsupportedPlatform,
 }
 
+/// The directory a Windows install of Sirio lives in: the Inno
+/// `DefaultDirName={localappdata}\Programs\Sirio` from `Scripts/build-inno.sh`
+/// (#310). Anything else — a dev build, a copied binary — is not an install
+/// the updater can update in place.
+///
+/// Pure path arithmetic, so it lives here rather than in the `windows`
+/// module: its tests are about Windows *paths*, not the Windows API, and a
+/// cfg-gated definition made `cargo test` fail to compile everywhere else.
+pub fn expected_install_dir(local_app_data: &Path) -> std::path::PathBuf {
+    local_app_data.join("Programs").join("Sirio")
+}
+
+/// Pure self-location check: `sirio.exe` must be running directly out of the
+/// expected install directory. Compiled on every platform for the same reason
+/// as [`expected_install_dir`].
+pub fn self_locate_at(
+    exe_path: &Path,
+    expected_dir: &Path,
+) -> Result<std::path::PathBuf, ApplyError> {
+    let exe_dir = exe_path.parent().ok_or(ApplyError::InstallNotFound)?;
+    if exe_dir != expected_dir {
+        return Err(ApplyError::InstallNotFound);
+    }
+    Ok(expected_dir.to_path_buf())
+}
+
 /// Apply a verified update on the current platform.
 ///
 /// On Windows this is fire-and-forget by design: the installer closes the
@@ -136,17 +162,20 @@ mod tests {
     #[test]
     fn expected_install_dir_is_localappdata_programs_sirio() {
         let base = Path::new(r"C:\Users\someone\AppData\Local");
-        assert_eq!(
-            windows::expected_install_dir(base),
-            PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\Sirio")
-        );
+        let dir = expected_install_dir(base);
+        // Compared by components rather than by a literal `\`-joined string:
+        // `Path::join` writes the *host's* separator, so the literal form only
+        // holds when the test itself runs on Windows. What the function owes
+        // is the same two components under the given base on every platform.
+        assert!(dir.starts_with(base));
+        assert_eq!(dir.strip_prefix(base).unwrap(), Path::new("Programs/Sirio"));
     }
 
     #[test]
     fn self_locate_accepts_an_exe_in_the_expected_dir() {
         let expected = PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\Sirio");
         assert_eq!(
-            windows::self_locate_at(expected.join("sirio.exe").as_path(), &expected),
+            self_locate_at(expected.join("sirio.exe").as_path(), &expected),
             Ok(expected)
         );
     }
@@ -156,7 +185,7 @@ mod tests {
         let expected = PathBuf::from(r"C:\Users\someone\AppData\Local\Programs\Sirio");
         let dev_build_exe = PathBuf::from(r"D:\projects\sirio\rust\target\debug\sirio.exe");
         assert_eq!(
-            windows::self_locate_at(&dev_build_exe, &expected),
+            self_locate_at(&dev_build_exe, &expected),
             Err(ApplyError::InstallNotFound)
         );
     }

@@ -31,6 +31,8 @@ use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "linux")]
 use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
 use sirio_theme::Theme;
+
+use sirio_ui::loading;
 use wry::{
     NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
@@ -1913,7 +1915,13 @@ impl BrowserSurface {
         cx.notify();
     }
 
-    fn render_toolbar(&self, theme: Theme, entity: gpui::Entity<Self>) -> impl IntoElement {
+    fn render_toolbar(
+        &self,
+        theme: Theme,
+        entity: gpui::Entity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let address_focus = self.address_focus.clone();
         let address_entity = entity.clone();
         let back = entity.clone();
@@ -1933,6 +1941,11 @@ impl BrowserSurface {
             "Browser".to_owned()
         } else {
             self.state.page_title().to_owned()
+        };
+        let reload_content = if self.state.is_loading() {
+            loading::compact("browser-reload-spinner", window, cx)
+        } else {
+            div().child("↻").into_any_element()
         };
         div()
             .id("browser-toolbar")
@@ -1960,9 +1973,9 @@ impl BrowserSurface {
                 self.state.can_go_forward(),
                 move |cx| forward.update(cx, |surface, cx| surface.on_forward(cx)),
             ))
-            .child(browser_button(
+            .child(browser_button_element(
                 "browser-reload",
-                if self.state.is_loading() { "×" } else { "↻" },
+                reload_content,
                 theme,
                 true,
                 move |cx| {
@@ -2041,6 +2054,22 @@ fn browser_button(
     enabled: bool,
     callback: impl Fn(&mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    browser_button_element(
+        id,
+        div().child(label).into_any_element(),
+        theme,
+        enabled,
+        callback,
+    )
+}
+
+fn browser_button_element(
+    id: &'static str,
+    content: impl IntoElement,
+    theme: Theme,
+    enabled: bool,
+    callback: impl Fn(&mut gpui::App) + 'static,
+) -> impl IntoElement {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -2057,7 +2086,7 @@ fn browser_button(
             this.hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| callback(cx))
         })
-        .child(label)
+        .child(content)
 }
 
 /// F-WIN-06: hands out the address bar's own focus handle -- the same
@@ -2103,7 +2132,7 @@ impl Render for BrowserSurface {
             .flex_col()
             .bg(theme.chat_surface)
             .text_color(theme.title)
-            .child(self.render_toolbar(theme, entity.clone()))
+            .child(self.render_toolbar(theme, entity.clone(), window, cx))
             .when_some(
                 self.startup_failure
                     .as_ref()
