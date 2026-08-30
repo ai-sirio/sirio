@@ -11,9 +11,7 @@ use bezel::motion::Painter;
 use bezel::ui::loaders;
 use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
-use gpui::{
-    div, px, AnyElement, App, Div, IntoElement, ParentElement, Styled, Window,
-};
+use gpui::{div, px, AnyElement, App, Div, IntoElement, ParentElement, Styled, Window};
 use sirio_theme::Theme;
 
 /// The glyph slot in an Activity-derived reasoning header.
