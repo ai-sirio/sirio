@@ -228,6 +228,37 @@ for crate in "${WORKSPACE_CRATES[@]}"; do
     run_cargo_stage "cargo test -p $crate" cargo test -p "$crate"
 done
 
+# rust/vendor/gpui_linux is `exclude`d from the root workspace (see rust/Cargo.toml) because
+# it carries its own `[workspace]` table -- so none of the `cargo test -p <crate>` calls above,
+# nor a hypothetical `cargo test --workspace`, ever reach it. That crate is where the Wayland
+# XDND slow-provider fix lives (F-CORE-FILE-03A, see rust/vendor/README.md), and until now
+# nothing in either CI gate ran its regression tests. Run the whole crate, not just the
+# `pending_drop` tests the fix itself added, so a future change to anything else vendored in
+# there is covered too.
+#
+# The crate is `#![cfg(any(target_os = "linux", target_os = "freebsd"))]`-gated
+# (src/gpui_linux.rs), so on any other host its whole body -- tests included -- compiles out to
+# nothing. `cargo test` still exits 0 with "0 tests" there, and reporting that as PASS would
+# claim coverage this gate never actually exercised. So a genuine zero-tests run is SKIP, not
+# PASS, loud and named the same way the rust-std-not-installed precondition above is: a green
+# gate here only means pending_drop and friends actually ran on a host that is Linux/FreeBSD.
+run_gpui_linux_vendor_test_stage() {
+    local stage="cargo test --manifest-path vendor/gpui_linux/Cargo.toml"
+    local log="$LOG_DIR/gpui_linux_vendor_test.log"
+    if ! (cd "$ROOT/rust" && cargo test --manifest-path vendor/gpui_linux/Cargo.toml) >"$log" 2>&1; then
+        fail_stage "$stage" "$log" "(cd rust && cargo test --manifest-path vendor/gpui_linux/Cargo.toml)"
+    fi
+    local total_passed
+    total_passed=$(grep -oE '[0-9]+ passed' "$log" | awk '{s+=$1} END{print s+0}')
+    if [[ "$total_passed" -eq 0 ]]; then
+        echo "SKIP: $stage — crate is cfg-gated to linux/freebsd; compiled to zero tests on this host"
+        return 0
+    fi
+    echo "PASS: $stage"
+    tail -5 "$log" || true
+}
+run_gpui_linux_vendor_test_stage
+
 # The project's acceptance test is "connect a real workspace agent over ACP, send
 # messages, verify streaming and replies". The tree has exactly one test that does
 # this — real_claude_streams_tool_permission_and_writes_nonce, which connects real
