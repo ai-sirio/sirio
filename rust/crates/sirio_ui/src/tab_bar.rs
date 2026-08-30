@@ -44,14 +44,11 @@ pub enum TabContextAction {
     CloseTabsToRight,
     MoveEarlier,
     MoveLater,
-    // F-TAB-12: there used to be a `MoveToCurrentPane` variant here, backing
-    // a tab-context-menu "Move to This Pane" item that was built
-    // unconditionally `disabled(...)` in `sirio`'s `tab_context_items()`.
-    // It could never be enabled: that menu only ever opens on a tab that
-    // already belongs to the workspace's active pane group, so "move it to
-    // this (its own) pane" had no reachable non-trivial destination. See
-    // the removal comment at that call site for the fuller rationale.
-    MoveToPane(usize),
+    // F-TAB-12 removed `MoveToCurrentPane` here, and #319 removed the
+    // `MoveToPane(usize)` that outlived it. Both named a gesture the center
+    // split no longer has: a tab's half is derived from its `TabKind`
+    // (`TabKind::pane_role`), so there is no destination to offer. Moving a
+    // tab between halves would mean changing what the tab *is*.
     AttachToCurrentTerminal,
 }
 
@@ -96,6 +93,12 @@ impl TabContextItem {
             disabled_reason: Some(reason.into()),
             separator_before: false,
         }
+    }
+
+    /// The row's drawn text. Read by the shell's tests to assert on what a
+    /// menu offers rather than on how many rows it happens to have.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     pub fn separator() -> Self {

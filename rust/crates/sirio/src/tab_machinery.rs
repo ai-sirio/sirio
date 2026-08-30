@@ -2,6 +2,30 @@ use sirio_project::PaneRole;
 
 use crate::OpenTab;
 
+/// What [`CenterSplit`] needs to know about a tab: its identity, and which
+/// half of the split its kind puts it in.
+///
+/// A trait rather than `&[OpenTab]` so the split's own tests can exercise it
+/// without minting a `gpui` entity. `CenterSplit` is pure state — a test that
+/// had to build a real `TerminalView` to check which tab is active would be
+/// testing the window instead of the model, and the shortcut that avoids
+/// that (`mem::zeroed()` for the entity) is undefined behaviour, not a
+/// shortcut.
+pub(crate) trait SplitTab {
+    fn split_id(&self) -> usize;
+    fn split_role(&self) -> PaneRole;
+}
+
+impl SplitTab for OpenTab {
+    fn split_id(&self) -> usize {
+        self.id
+    }
+
+    fn split_role(&self) -> PaneRole {
+        self.kind.pane_role()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MoveDirection {
     Earlier,
@@ -47,7 +71,7 @@ pub(crate) struct CenterSplit {
 }
 
 impl CenterSplit {
-    pub(crate) fn new(tabs: &[OpenTab]) -> Self {
+    pub(crate) fn new<T: SplitTab>(tabs: &[T]) -> Self {
         let mut this = Self {
             primary_active: None,
             secondary_active: None,
@@ -83,16 +107,16 @@ impl CenterSplit {
         }
     }
 
-    pub(crate) fn rebuild(&mut self, tabs: &[OpenTab]) {
+    pub(crate) fn rebuild<T: SplitTab>(&mut self, tabs: &[T]) {
         let primary_ids: Vec<usize> = tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Primary)
-            .map(|tab| tab.id)
+            .filter(|tab| tab.split_role() == PaneRole::Primary)
+            .map(|tab| tab.split_id())
             .collect();
         let secondary_ids: Vec<usize> = tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
-            .map(|tab| tab.id)
+            .filter(|tab| tab.split_role() == PaneRole::Secondary)
+            .map(|tab| tab.split_id())
             .collect();
 
         self.primary_active = match self.primary_active {
@@ -109,36 +133,35 @@ impl CenterSplit {
         }
     }
 
-    pub(crate) fn select_tab(&mut self, tab_id: usize, tabs: &[OpenTab]) -> bool {
-        let Some(tab) = tabs.iter().find(|tab| tab.id == tab_id) else {
+    pub(crate) fn select_tab<T: SplitTab>(&mut self, tab_id: usize, tabs: &[T]) -> bool {
+        let Some(tab) = tabs.iter().find(|tab| tab.split_id() == tab_id) else {
             return false;
         };
-        let role = tab.kind.pane_role();
+        let role = tab.split_role();
         self.focused = role;
         self.set_active(role, Some(tab_id));
         true
     }
 
-    pub(crate) fn tabs_for(&self, role: PaneRole, tabs: &[OpenTab]) -> Vec<usize> {
+    pub(crate) fn tabs_for<T: SplitTab>(&self, role: PaneRole, tabs: &[T]) -> Vec<usize> {
         tabs.iter()
-            .filter(|tab| tab.kind.pane_role() == role)
-            .map(|tab| tab.id)
+            .filter(|tab| tab.split_role() == role)
+            .map(|tab| tab.split_id())
             .collect()
     }
 
-    pub(crate) fn tabs_for_focused(&self, tabs: &[OpenTab]) -> Vec<usize> {
-        self.tabs_for(self.focused, tabs)
-    }
-
-    pub(crate) fn close_others(&self, tabs: &[OpenTab]) -> Option<Vec<usize>> {
+    pub(crate) fn close_others<T: SplitTab>(&self, tabs: &[T]) -> Option<Vec<usize>> {
         let active = self.active_for_focused()?;
         let role = self.focused;
         let ids = self.tabs_for(role, tabs);
-        let removed = ids.into_iter().filter(|id| *id != active).collect::<Vec<_>>();
+        let removed = ids
+            .into_iter()
+            .filter(|id| *id != active)
+            .collect::<Vec<_>>();
         Some(removed)
     }
 
-    pub(crate) fn close_tabs_to_right(&self, tabs: &[OpenTab]) -> Option<Vec<usize>> {
+    pub(crate) fn close_tabs_to_right<T: SplitTab>(&self, tabs: &[T]) -> Option<Vec<usize>> {
         let active = self.active_for_focused()?;
         let role = self.focused;
         let ids = self.tabs_for(role, tabs);
@@ -147,10 +170,10 @@ impl CenterSplit {
         Some(removed)
     }
 
-    pub(crate) fn move_active_tab(
+    pub(crate) fn move_active_tab<T: SplitTab>(
         &mut self,
         direction: MoveDirection,
-        tabs: &mut Vec<OpenTab>,
+        tabs: &mut [T],
     ) -> bool {
         let active = match self.active_for_focused() {
             Some(id) => id,
@@ -159,8 +182,8 @@ impl CenterSplit {
         let role = self.focused;
         let filtered_ids: Vec<usize> = tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == role)
-            .map(|tab| tab.id)
+            .filter(|tab| tab.split_role() == role)
+            .map(|tab| tab.split_id())
             .collect();
         let pos = match filtered_ids.iter().position(|id| *id == active) {
             Some(p) => p,
@@ -172,8 +195,14 @@ impl CenterSplit {
             _ => return false,
         };
         let target_id = filtered_ids[target_pos];
-        let from_idx = tabs.iter().position(|tab| tab.id == active).expect("active exists");
-        let to_idx = tabs.iter().position(|tab| tab.id == target_id).expect("target exists");
+        let from_idx = tabs
+            .iter()
+            .position(|tab| tab.split_id() == active)
+            .expect("active exists");
+        let to_idx = tabs
+            .iter()
+            .position(|tab| tab.split_id() == target_id)
+            .expect("target exists");
         tabs.swap(from_idx, to_idx);
         true
     }
@@ -181,28 +210,33 @@ impl CenterSplit {
 
 #[cfg(test)]
 mod tests {
-    use super::{CenterSplit, MoveDirection};
+    use super::{CenterSplit, MoveDirection, SplitTab};
     use sirio_project::{PaneRole, TabKind};
 
-    use crate::session::SessionTabState;
-    use crate::{OpenTab, PaneNode, TabContent};
+    /// The split reads exactly two things off a tab. Building those two
+    /// directly keeps these tests on the model: an `OpenTab` would drag in a
+    /// live `TerminalView` entity, which cannot be faked without undefined
+    /// behaviour and cannot be built without a window.
+    struct TestTab {
+        id: usize,
+        kind: TabKind,
+    }
 
-    fn make_tab(id: usize, kind: TabKind) -> OpenTab {
-        OpenTab {
-            id,
-            persistence_id: format!("test-{id}"),
-            title: format!("Tab {id}"),
-            kind,
-            agent_icon: None,
-            agent_id: None,
-            session_state: SessionTabState::default(),
-            panes: PaneNode::leaf(id, TabContent::Terminal { view: unsafe { std::mem::zeroed() } }),
-            focused_pane: id,
-            title_is_auto_named: true,
+    impl SplitTab for TestTab {
+        fn split_id(&self) -> usize {
+            self.id
+        }
+
+        fn split_role(&self) -> PaneRole {
+            self.kind.pane_role()
         }
     }
 
-    fn tabs_primary_secondary() -> Vec<OpenTab> {
+    fn make_tab(id: usize, kind: TabKind) -> TestTab {
+        TestTab { id, kind }
+    }
+
+    fn tabs_primary_secondary() -> Vec<TestTab> {
         vec![
             make_tab(1, TabKind::Terminal),
             make_tab(2, TabKind::AgentChat),
@@ -238,7 +272,7 @@ mod tests {
         let tabs = tabs_primary_secondary();
         let mut split = CenterSplit::new(&tabs);
         split.select_tab(2, &tabs);
-        let remaining: Vec<OpenTab> = tabs.into_iter().filter(|t| t.id != 2).collect();
+        let remaining: Vec<TestTab> = tabs.into_iter().filter(|t| t.id != 2).collect();
         split.rebuild(&remaining);
         assert_eq!(split.active(PaneRole::Primary), Some(1));
         assert_eq!(split.active(PaneRole::Secondary), Some(3));
