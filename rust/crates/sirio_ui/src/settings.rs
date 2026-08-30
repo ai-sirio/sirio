@@ -4,6 +4,7 @@ use crate::caret;
 use crate::controls;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+use crate::status_bar::{UpdateState, UpdateStatus};
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
     KeyDownEvent, MouseButton, Render, Rgba, Window, actions, div, prelude::*, px, text,
@@ -966,6 +967,13 @@ pub struct Settings {
     /// The host-supplied release channel shown next to the version (F-305):
     /// same independence rule as `version`.
     channel: String,
+    /// Host-owned update facts rendered in General settings.
+    update_state: UpdateState,
+    /// Host action used by the confirming update control. The updater itself
+    /// remains outside this crate.
+    on_apply_update: Option<Rc<dyn Fn()>>,
+    /// Host persistence hook for the per-install update opt-out.
+    on_update_enabled_change: Option<Rc<dyn Fn(bool)>>,
     /// Whether the summarizer picker's agent menu is open (F-SET-05).
     summarizer_popover_open: bool,
     /// Focus handle for the picker menu, so Escape closes the menu alone:
@@ -1210,6 +1218,9 @@ impl Settings {
             socket_path: initial.socket_path,
             version: String::new(),
             channel: String::new(),
+            update_state: UpdateState::default(),
+            on_apply_update: None,
+            on_update_enabled_change: None,
             summarizer_popover_open: false,
             summarizer_focus: cx.focus_handle(),
             surface_focus: cx.focus_handle(),
@@ -1274,6 +1285,35 @@ impl Settings {
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
         self.channel = channel.into();
         self
+    }
+
+    /// Supplies the host-owned update facts for General settings.
+    pub fn with_update_state(mut self, state: UpdateState) -> Self {
+        self.update_state = state;
+        self
+    }
+
+    /// Installs the host callback for the platform-specific update action.
+    pub fn on_apply_update(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_apply_update = Some(Rc::new(callback));
+        self
+    }
+
+    /// Installs the host callback that persists the per-install opt-out.
+    pub fn on_update_enabled_change(mut self, callback: impl Fn(bool) + 'static) -> Self {
+        self.on_update_enabled_change = Some(Rc::new(callback));
+        self
+    }
+
+    /// Replaces the host-owned update facts without starting updater work.
+    pub fn apply_update_state(&mut self, state: UpdateState, cx: &mut Context<Self>) {
+        self.update_state = state;
+        cx.notify();
+    }
+
+    /// The current host-owned update facts, for the host and tests.
+    pub fn update_state(&self) -> &UpdateState {
+        &self.update_state
     }
 
     /// Wires the durable account-identity cache (F-PERSIST-DB-06). Call
@@ -1733,6 +1773,14 @@ impl Settings {
     fn set_control_socket_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.control_socket_enabled = enabled;
         self.changed();
+        cx.notify();
+    }
+
+    fn set_updates_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.update_state.enabled = enabled;
+        if let Some(callback) = &self.on_update_enabled_change {
+            callback(enabled);
+        }
         cx.notify();
     }
 
@@ -3849,12 +3897,79 @@ impl Settings {
         menu
     }
 
+    fn update_channel(&self) -> &str {
+        let state_channel = self.update_state.channel.trim();
+        if state_channel.is_empty() {
+            self.channel.trim()
+        } else {
+            state_channel
+        }
+    }
+
+    fn update_status_text(&self) -> Option<String> {
+        if !self.update_state.enabled {
+            return Some("Updates are off".into());
+        }
+        match &self.update_state.status {
+            UpdateStatus::Disabled => Some("Updates are off".into()),
+            UpdateStatus::NotDue => self
+                .update_state
+                .last_checked
+                .as_ref()
+                .map(|stamp| format!("Checked {stamp}")),
+            UpdateStatus::Checking => Some("Checking for updates…".into()),
+            UpdateStatus::UpToDate => Some(
+                self.update_state
+                    .last_checked
+                    .as_ref()
+                    .map_or_else(|| "Up to date".into(), |stamp| format!("Checked {stamp}")),
+            ),
+            UpdateStatus::Available { version, .. } => Some(
+                self.update_state
+                    .last_checked
+                    .as_ref()
+                    .map_or_else(|| format!("Update available: {version}"), |stamp| {
+                        format!("Checked {stamp} · update available: {version}")
+                    }),
+            ),
+            UpdateStatus::Ready { version, .. } => Some(
+                self.update_state
+                    .last_checked
+                    .as_ref()
+                    .map_or_else(|| format!("Update ready: {version}"), |stamp| {
+                        format!("Checked {stamp} · update ready: {version}")
+                    }),
+            ),
+            UpdateStatus::Failed { message } => {
+                let mut text = "Could not check for updates".to_string();
+                if let Some(stamp) = &self.update_state.last_checked {
+                    text.push_str(" · ");
+                    text.push_str(stamp);
+                }
+                if !message.trim().is_empty() {
+                    text.push_str(": ");
+                    text.push_str(message);
+                }
+                Some(text)
+            }
+        }
+    }
+
+    fn update_action_label() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "Update and restart Sirio"
+        } else {
+            "Update and keep working"
+        }
+    }
+
     fn render_general(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
         let resume_entity = entity.clone();
         let auto_entity = entity.clone();
         let history_entity = entity.clone();
         let mounted_entity = entity.clone();
         let socket_entity = entity.clone();
+        let updates_entity = entity.clone();
         let resume = controls::toggle(
             "general-resume-sessions",
             self.resume_agent_sessions,
@@ -3903,13 +4018,19 @@ impl Settings {
                 });
             },
         );
-        // The About card states the version. "Check for Updates" is not
-        // offered: there is no updater on this platform (no Sparkle, no
-        // update channel), so a button that could never check would state
-        // something untrue about the program (P58, F-SET-03 — same
-        // platform-gating as the Permissions category and the file-icon
-        // sets).
-        let about = controls::card(theme)
+        let updates_enabled = controls::toggle(
+            "general-updates-enabled",
+            self.update_state.enabled,
+            theme,
+            move |_, _, cx| {
+                updates_entity.update(cx, |this, cx| {
+                    this.set_updates_enabled(!this.update_state.enabled, cx);
+                });
+            },
+        );
+        // The About card states the version and the last check result. The
+        // updater itself is host-owned; this surface only displays its facts.
+        let mut about = controls::card(theme)
             .child(controls::row(
                 "Version",
                 None,
@@ -3930,6 +4051,22 @@ impl Settings {
                     .child(text!(self.channel.clone())),
                 theme,
             ));
+        if let Some(status) = self.update_status_text() {
+            about = about.child(controls::row(
+                "Update status",
+                None,
+                div()
+                    .debug_selector(|| "settings-update-last-checked".into())
+                    .text_size(theme.typography.callout)
+                    .text_color(theme.subtitle)
+                    .child(
+                        div()
+                            .debug_selector(|| "settings-update-status".into())
+                            .child(text!(status)),
+                    ),
+                theme,
+            ));
+        }
 
         let agents = controls::card(theme).child(controls::row(
             "Resume agent sessions on launch",
@@ -4083,11 +4220,86 @@ impl Settings {
             );
         }
 
+        let apply_update_handler = self.on_apply_update.clone().map(|callback| {
+            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| callback()
+        });
+        let mut updates = controls::card(theme).child(controls::row(
+            "Automatic updates",
+            Some("Check for and download updates in the background.".into()),
+            updates_enabled,
+            theme,
+        ));
+        if self.update_state.enabled {
+            match &self.update_state.status {
+                UpdateStatus::Available { version, notes }
+                | UpdateStatus::Ready { version, notes } => {
+                    let update_label = if matches!(
+                        &self.update_state.status,
+                        UpdateStatus::Ready { .. }
+                    ) {
+                        "Ready to install"
+                    } else {
+                        "Available version"
+                    };
+                    updates = updates.child(controls::separator(theme)).child(
+                        controls::row(
+                            update_label,
+                            None,
+                            div()
+                                .debug_selector(|| "settings-update-version".into())
+                                .text_size(theme.typography.callout)
+                                .text_color(theme.subtitle)
+                                .child(text!(version.clone())),
+                            theme,
+                        ),
+                    );
+                    if self.update_channel().eq_ignore_ascii_case("nightly") {
+                        updates = updates.child(
+                            div()
+                                .id("settings-update-notes")
+                                .debug_selector(|| "settings-update-notes".into())
+                                .px(px(theme.cosmic.spacing.xs as f32))
+                                .py(px(theme.cosmic.spacing.xxs as f32))
+                                .text_size(theme.typography.footnote)
+                                .text_color(theme.subtitle)
+                                .child(text!("Nightly builds track main")),
+                        );
+                    } else if !notes.trim().is_empty() {
+                        updates = updates.child(
+                            div()
+                                .id("settings-update-notes")
+                                .debug_selector(|| "settings-update-notes".into())
+                                .px(px(theme.cosmic.spacing.xs as f32))
+                                .py(px(theme.cosmic.spacing.xxs as f32))
+                                .text_size(theme.typography.footnote)
+                                .text_color(theme.subtitle)
+                                .child(text!(notes.clone())),
+                        );
+                    }
+                    updates = updates.child(controls::action_row(
+                        controls::button_maybe(
+                            "general-apply-update",
+                            Self::update_action_label(),
+                            theme,
+                            apply_update_handler,
+                        ),
+                        theme,
+                    ));
+                }
+                UpdateStatus::Disabled
+                | UpdateStatus::NotDue
+                | UpdateStatus::Checking
+                | UpdateStatus::UpToDate
+                | UpdateStatus::Failed { .. } => {}
+            }
+        }
+
         div()
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
             .pb(px(DETAIL_BOTTOM_PADDING))
             .child(settings_section("About", about, theme))
+            .child(settings_section("Updates", updates, theme))
             .child(settings_section("Agents", agents, theme))
             .child(settings_section("Automation", automation, theme))
             .child(settings_section("Chat history", history_card, theme))
@@ -6993,13 +7205,10 @@ mod tests {
         );
     }
 
-    /// P58, F-SET-03/08: controls whose feature does not exist on this
-    /// platform must not draw as though they work. "Check for Updates" has
-    /// no updater here and "Copy install command" has no install mechanism
-    /// (F-CTRL-CLI-02 is its own absent row), so both are gone — a drawn
-    /// test asserts the absence with a validated probe: the same
-    /// `debug_bounds` mechanism first proves it finds the controls that DO
-    /// exist, then proves the removed ids do not.
+    /// P58, F-SET-08: controls whose feature is host-owned must still expose
+    /// their state without making the UI crate perform the work. The update
+    /// toggle is present even when no update is available; the action itself
+    /// is only rendered for an available host-supplied update.
     #[gpui::test]
     async fn general_settings_state_the_version_and_no_dead_controls(
         cx: &mut gpui::TestAppContext,
@@ -7053,14 +7262,132 @@ mod tests {
             "the sirioctl card renders"
         );
 
-        // The removed no-ops, absent.
         assert!(
-            cx.debug_bounds("general-check-updates").is_none(),
-            "Check for Updates is not drawn — there is no updater on this platform"
+            cx.debug_bounds("general-updates-enabled").is_some(),
+            "the host-owned update opt-out is rendered"
         );
         assert!(
-            cx.debug_bounds("general-install-path").is_none(),
-            "Copy install command is not drawn — no install mechanism exists"
+            cx.debug_bounds("settings-update-status").is_none(),
+            "no check result means no fake update status"
+        );
+    }
+
+    /// Ticket #316: an available update is rendered as a non-modal detail and
+    /// both user actions cross host callbacks; this UI never starts a check,
+    /// download, or install itself.
+    #[gpui::test]
+    async fn available_update_renders_details_and_emits_host_intents(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let apply_calls = Rc::new(RefCell::new(0));
+        let enabled_changes = Rc::new(RefCell::new(Vec::new()));
+        let apply_spy = apply_calls.clone();
+        let enabled_spy = enabled_changes.clone();
+        let update = UpdateState {
+            enabled: true,
+            channel: "stable".into(),
+            status: UpdateStatus::Available {
+                version: "0.7.0".into(),
+                notes: "Security and reliability fixes".into(),
+            },
+            last_checked: Some("14 minutes ago".into()),
+        };
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_version("0.6.0")
+                .with_update_state(update)
+                .on_apply_update(move || *apply_spy.borrow_mut() += 1)
+                .on_update_enabled_change(move |enabled| enabled_spy.borrow_mut().push(enabled))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The update detail follows the existing General sections, just as a
+        // user reaches it by scrolling. Grow this fixture so the click test
+        // exercises the real button rather than a point outside the viewport.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("settings-update-status").is_some());
+        assert!(cx.debug_bounds("settings-update-last-checked").is_some());
+        assert!(cx.debug_bounds("settings-update-version").is_some());
+        assert!(cx.debug_bounds("settings-update-notes").is_some());
+        let apply = cx
+            .debug_bounds("general-apply-update")
+            .expect("available update has a confirming control");
+        cx.simulate_click(apply.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(*apply_calls.borrow(), 1, "apply is host-owned");
+
+        let enabled = cx
+            .debug_bounds("general-updates-enabled")
+            .expect("the opt-out toggle renders")
+            .center();
+        cx.simulate_click(enabled, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(enabled_changes.borrow().as_slice(), &[false]);
+        assert!(
+            cx.debug_bounds("general-apply-update").is_none(),
+            "turning updates off hides the update action"
+        );
+    }
+
+    /// Ticket #316: Stable only renders non-empty manifest notes; Nightly
+    /// uses the one honest fixed explanation instead of daily release notes.
+    #[gpui::test]
+    async fn update_notes_follow_the_host_channel_and_manifest(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let stable_without_notes = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(UpdateState {
+                enabled: true,
+                channel: "stable".into(),
+                status: UpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: String::new(),
+                },
+                last_checked: None,
+            })
+        });
+        let mut stable_cx = VisualTestContext::from_window(stable_without_notes.into(), cx);
+        stable_cx.run_until_parked();
+        let general = stable_cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        stable_cx.simulate_click(general.center(), Modifiers::none());
+        stable_cx.run_until_parked();
+        assert!(
+            stable_cx.debug_bounds("settings-update-notes").is_none(),
+            "an absent notes field renders no placeholder"
+        );
+
+        let nightly = stable_cx.cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(UpdateState {
+                enabled: true,
+                channel: "nightly".into(),
+                status: UpdateStatus::Available {
+                    version: "0.7.0-nightly".into(),
+                    notes: "ignored for nightly".into(),
+                },
+                last_checked: None,
+            })
+        });
+        let mut nightly_cx = VisualTestContext::from_window(nightly.into(), &mut stable_cx.cx);
+        nightly_cx.run_until_parked();
+        let general = nightly_cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        nightly_cx.simulate_click(general.center(), Modifiers::none());
+        nightly_cx.run_until_parked();
+        assert!(
+            nightly_cx.debug_bounds("settings-update-notes").is_some(),
+            "nightly has the fixed main-tracking explanation"
         );
     }
 
@@ -7078,6 +7405,9 @@ mod tests {
                 .on_install_skill(move |command| recorder.borrow_mut().push(command))
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The new Updates section sits above Agent Skill; reach the lower
+        // existing control through the same scrollable surface a user uses.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
         cx.run_until_parked();
 
         let general = cx
