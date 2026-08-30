@@ -50,16 +50,32 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
     }
 }
 
-/// Build the Bezel palette expected by its published UI primitives while
-/// retaining Sirio's appearance and accent. Bezel's loading APIs use their own
-/// theme type, whereas the adapter's public contract intentionally exposes
-/// Sirio's theme type to its callers.
-fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
+/// Point Bezel's context-free paint helpers at Sirio's appearance, and return
+/// the Bezel appearance so a caller that also needs a palette can reuse it.
+///
+/// `ink`, `wash` and `hairline` are free functions called from inside Bezel's
+/// element builders, which have no `cx`; they read a process-wide mirror that
+/// defaults to Dark rather than the theme handed to them. Every entry point
+/// that paints through a Bezel primitive must call this first, including the
+/// ones that never build a palette — hence a named function rather than a
+/// discarded `bezel_theme()` binding, which reads as dead code and invites
+/// deletion. Repeat calls are free: Bezel only bumps its theme generation when
+/// the appearance actually changes.
+fn sync_bezel_appearance(theme: &Theme) -> bezel::theme::Appearance {
     let appearance = match theme.appearance {
         sirio_theme::Appearance::Light => bezel::theme::Appearance::Light,
         sirio_theme::Appearance::Dark => bezel::theme::Appearance::Dark,
     };
     bezel::theme::set_current_appearance(appearance);
+    appearance
+}
+
+/// Build the Bezel palette expected by its published UI primitives while
+/// retaining Sirio's appearance and accent. Bezel's loading APIs use their own
+/// theme type, whereas the adapter's public contract intentionally exposes
+/// Sirio's theme type to its callers.
+fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
+    let appearance = sync_bezel_appearance(theme);
     let mut bezel_theme = match appearance {
         bezel::theme::Appearance::Light => bezel::theme::Theme::light(),
         bezel::theme::Appearance::Dark => bezel::theme::Theme::dark(),
@@ -114,8 +130,7 @@ pub fn indeterminate(
 
 /// The compact Bezel mini gradient spinner for refresh/status slots.
 pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
-    let theme = *Theme::get(cx);
-    let _bezel_theme = bezel_theme(&theme);
+    sync_bezel_appearance(Theme::get(cx));
     loaders::mini_gradient_spinner(id, COMPACT_MINI_CELL, painter(window), cx).into_any_element()
 }
 
