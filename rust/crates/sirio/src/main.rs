@@ -346,6 +346,9 @@ const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
 /// #320: the rule between the two center panes.
 const CENTER_DIVIDER_WIDTH: f32 = 1.;
+/// #321: the centre split, in thousandths, so it stores like every other
+/// numeric setting. Even until someone drags it.
+const DEFAULT_CENTER_SPLIT_RATIO: i64 = 500;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
 const TERMINAL_TAB_MIN_WIDTH: f32 = 132.;
 const TAB_MAX_WIDTH: f32 = 220.;
@@ -3558,6 +3561,12 @@ struct DraggedPanelEdge {
     side: panel_layout::PanelSide,
 }
 
+/// #321: the centre divider's own payload. It is not a `PanelSide`, because
+/// the centre drag writes a *ratio* and `PanelSide::range()` answers in
+/// pixels — a third variant there would owe a range it does not have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DraggedCenterDivider;
+
 const SPLIT_DIVIDER_SIZE: f32 = 6.0;
 
 /// How long the panel width sits still before it is written to SQLite.
@@ -3669,6 +3678,13 @@ struct SirioWorkspace {
     /// the two compete for space, so the panel the user is *not* touching
     /// stays still.
     dragging_panel: Option<panel_layout::PanelSide>,
+    /// #321: how the centre is shared between the two panes, in thousandths
+    /// of the space left after the divider. A *preference*, like a panel's
+    /// width: `panel_layout::resolve_center_split` clamps it at render time
+    /// and never writes the clamp back.
+    center_split_ratio: i64,
+    /// Where the centre divider was grabbed, and the ratio it held then.
+    center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
     ///
     /// The width is derived as `grab_width ± (pointer − grab_x)` rather than
@@ -4454,6 +4470,8 @@ impl SirioWorkspace {
             sidebar_width,
             right_panel_width,
             dragging_panel: None,
+            center_split_ratio: DEFAULT_CENTER_SPLIT_RATIO,
+            center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
             panel_width_save_task: None,
@@ -11372,14 +11390,22 @@ impl SirioWorkspace {
     /// placeholder constant here would be a second definition of a number
     /// that will shortly have exactly one.
     fn center_pane_width(&self, role: PaneRole, window: &Window, theme: Theme) -> f32 {
-        let center = self.tab_strip_available_width(window, theme);
-        if !self.secondary_pane_visible() {
-            return match role {
-                PaneRole::Primary => center,
-                PaneRole::Secondary => 0.0,
-            };
+        let (primary, secondary) = self.center_pane_widths(window, theme);
+        match role {
+            PaneRole::Primary => primary,
+            PaneRole::Secondary => secondary.unwrap_or(0.0),
         }
-        ((center - CENTER_DIVIDER_WIDTH) / 2.0).max(0.0)
+    }
+
+    /// Both panes at once, which is what the layout needs and what keeps the
+    /// two widths from being resolved twice against different inputs.
+    fn center_pane_widths(&self, window: &Window, theme: Theme) -> (f32, Option<f32>) {
+        panel_layout::resolve_center_split(
+            self.tab_strip_available_width(window, theme),
+            self.center_split_ratio,
+            self.secondary_pane_visible(),
+            CENTER_DIVIDER_WIDTH,
+        )
     }
 
     /// Whether the Secondary half is drawn at all. Derived, never stored:
@@ -11398,6 +11424,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
+            panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
         );
         tab_strip_available_width_for_shell(
             f32::from(window.bounds().size.width),
@@ -11738,12 +11765,14 @@ impl SirioWorkspace {
         // and the two sit side by side. The strip is *inside* the pane, so
         // the seam between the strips is the divider itself and cannot drift
         // out of alignment with it.
+        let (primary_width, secondary_width) = self.center_pane_widths(window, *theme);
         let primary_pane = div()
             .id("pane-primary")
             .debug_selector(|| "pane-primary".into())
             .flex()
             .flex_col()
-            .flex_1()
+            .w(px(primary_width))
+            .flex_none()
             .min_w_0()
             .min_h_0()
             .child(
@@ -11781,10 +11810,44 @@ impl SirioWorkspace {
                     div()
                         .id("center-divider")
                         .debug_selector(|| "center-divider".into())
+                        .relative()
                         .w(px(CENTER_DIVIDER_WIDTH))
                         .h_full()
                         .flex_none()
-                        .bg(theme.border_strong),
+                        .bg(theme.border_strong)
+                        // The rule is one pixel; the grab area is the same
+                        // `SPLIT_DIVIDER_SIZE` the side panels use, centred on
+                        // it, because a one-pixel target is not a handle.
+                        .child(
+                            div()
+                                .id("center-divider-handle")
+                                .debug_selector(|| "center-divider-handle".into())
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(-(SPLIT_DIVIDER_SIZE - CENTER_DIVIDER_WIDTH) / 2.0))
+                                .w(px(SPLIT_DIVIDER_SIZE))
+                                .cursor_col_resize()
+                                .on_mouse_down(gpui::MouseButton::Left, {
+                                    let entity = entity.clone();
+                                    move |event, _, cx| {
+                                        entity.update(cx, |workspace, _| {
+                                            // Anchored here, not in the
+                                            // payload: the payload is built at
+                                            // render time and cannot know
+                                            // where inside the handle the
+                                            // pointer landed.
+                                            workspace.center_drag_anchor = Some((
+                                                f32::from(event.position.x),
+                                                workspace.center_split_ratio,
+                                            ));
+                                        });
+                                    }
+                                })
+                                .on_drag(DraggedCenterDivider, |_, _, _, cx| {
+                                    cx.new(|_| gpui::Empty)
+                                }),
+                        ),
                 )
                 .child(
                     div()
@@ -11792,7 +11855,8 @@ impl SirioWorkspace {
                         .debug_selector(|| "pane-secondary".into())
                         .flex()
                         .flex_col()
-                        .flex_1()
+                        .w(px(secondary_width.unwrap_or(0.0)))
+                        .flex_none()
                         .min_w_0()
                         .min_h_0()
                         .child(
@@ -11847,6 +11911,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
+            panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
         );
         // The History toolbar shapes itself from the panel's width, and the
         // view cannot measure its own container — push the resolved width
@@ -11880,6 +11945,26 @@ impl SirioWorkspace {
                     let drag = *event.drag(cx);
                     entity.update(cx, |workspace, cx| {
                         workspace.update_panel_width(drag.side, event, cx)
+                    });
+                }
+            })
+            .on_drag_move::<DraggedCenterDivider>({
+                let entity = entity.clone();
+                let theme = *theme;
+                move |event, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.update_center_split_ratio(event, window, theme, cx)
+                    });
+                }
+            })
+            .on_drop::<DraggedCenterDivider>({
+                let entity = entity.clone();
+                move |_, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        let active_tab = workspace.active_tab;
+                        workspace.refocus_focused_pane(active_tab, window, cx);
+                        workspace.center_drag_anchor = None;
+                        cx.notify();
                     });
                 }
             })
@@ -12049,6 +12134,47 @@ impl SirioWorkspace {
         }
         self.dragging_panel = Some(side);
         self.schedule_panel_width_save(cx);
+        cx.notify();
+    }
+
+    /// Moves the centre divider: how far the pointer has travelled, as a
+    /// fraction of the space the two panes share.
+    ///
+    /// The drag stops at a pane's floor. `resolve_center_split` would clamp
+    /// the *drawn* widths anyway, but not the stored ratio — so without this
+    /// the divider would appear to stop while the preference kept sliding,
+    /// and the pane would jump the moment the window grew.
+    fn update_center_split_ratio(
+        &mut self,
+        event: &gpui::DragMoveEvent<DraggedCenterDivider>,
+        window: &Window,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((grab_x, grab_ratio)) = self.center_drag_anchor else {
+            return;
+        };
+        let usable = self.tab_strip_available_width(window, theme) - CENTER_DIVIDER_WIDTH;
+        if usable <= 0.0 {
+            return;
+        }
+        let travelled = f32::from(event.event.position.x) - grab_x;
+        let ratio = (grab_ratio as f32 / 1000.0) + (travelled / usable);
+        if !ratio.is_finite() {
+            return;
+        }
+        let floor = panel_layout::MIN_CENTER_PANE_WIDTH / usable;
+        // A centre too narrow for two floors has no room to drag in; leaving
+        // the ratio alone is better than snapping it to a bound that is
+        // wider than the window.
+        if floor > 0.5 {
+            return;
+        }
+        let millis = (ratio.clamp(floor, 1.0 - floor) * 1000.0).round() as i64;
+        if millis == self.center_split_ratio {
+            return;
+        }
+        self.center_split_ratio = millis;
         cx.notify();
     }
 
