@@ -982,15 +982,24 @@ impl Default for Typography {
 // "SF Symbols" file-icon entry in Settings: a macOS assumption that is
 // invisible until you look for it.
 //
-// Platform split: on macOS the Apple/Xcode faces (SF Mono, SF Pro) lead;
-// elsewhere the JetBrains faces (JetBrains Mono — SIL OFL 1.1; JetBrains
-// Sans — Apache 2.0 — both open source) lead. Each list was verified
-// against `fc-list : family` on the Linux build machine rather than
-// assumed.
+// Platform split: on macOS the Apple/Xcode faces (SF Mono, SF Pro) lead —
+// macOS is the reference release platform and keeps them unchanged.
+// Elsewhere, Geist and Geist Mono (SIL OFL 1.1) lead: bundled in
+// `assets/fonts` and registered with the text system before the first
+// window opens, so they are always present. The JetBrains faces (JetBrains
+// Mono — SIL OFL 1.1; JetBrains Sans — Apache 2.0 — both open source) follow
+// as the fontconfig-detected fallback. Each list was verified against
+// `fc-list : family` on the Linux build machine rather than assumed.
 
 /// The sans-serif families to prefer, in order, when resolving the UI font.
+///
+/// "Geist" leads: it is bundled in `assets/fonts` and registered with the
+/// text system before the first window opens (see `sirio`'s `main.rs`), so
+/// it is always present here — the JetBrains chain behind it only matters
+/// if that registration is ever skipped.
 #[cfg(not(target_os = "macos"))]
 pub const UI_FAMILY_CANDIDATES: &[&str] = &[
+    "Geist",
     "JetBrains Sans",
     "Inter",
     "Ubuntu",
@@ -1013,12 +1022,16 @@ pub const UI_FAMILY_CANDIDATES: &[&str] = &[
 
 /// Monospace families to prefer, in order, when resolving the code font.
 ///
-/// First the family the visual bar is set in (waku's JetBrains Mono), then
-/// common good monospaced faces, then whatever the system's generic
-/// "monospace" resolves to (fontconfig's alias on Linux, always present).
-/// A candidate that is not installed is skipped — never guessed at.
+/// "Geist Mono" leads for the same reason "Geist" leads
+/// [`UI_FAMILY_CANDIDATES`]: bundled and registered before the first window
+/// opens. Behind it, the family the visual bar is set in (waku's JetBrains
+/// Mono), then common good monospaced faces, then whatever the system's
+/// generic "monospace" resolves to (fontconfig's alias on Linux, always
+/// present). A candidate that is not installed is skipped — never guessed
+/// at.
 #[cfg(not(target_os = "macos"))]
 pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
+    "Geist Mono",
     "JetBrains Mono",
     "Fira Mono",
     "Hack",
@@ -2697,6 +2710,25 @@ mod tests {
             appearance_from_color_scheme(ColorScheme::NoPreference),
             Appearance::Light
         );
+    }
+
+    /// Geist and Geist Mono are bundled and registered before the first
+    /// frame on Windows and Linux, so they lead the non-macOS candidate
+    /// lists ahead of the fontconfig-detected JetBrains faces.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn geist_leads_the_non_macos_families() {
+        assert_eq!(UI_FAMILY_CANDIDATES[0], "Geist");
+        assert_eq!(CODE_FAMILY_CANDIDATES[0], "Geist Mono");
+    }
+
+    /// macOS is the reference release platform and keeps its own Apple
+    /// faces — bundling Geist there would be a regression, not bundling it.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_keeps_the_apple_faces() {
+        assert_eq!(UI_FAMILY_CANDIDATES[0], "SF Pro");
+        assert_eq!(CODE_FAMILY_CANDIDATES[0], "SF Mono");
     }
 
     /// The code family picks the first installed candidate in preference
