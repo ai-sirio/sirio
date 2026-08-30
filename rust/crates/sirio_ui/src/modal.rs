@@ -30,7 +30,8 @@ use crate::controls::card;
 /// Visual weight of a [`ModalButton`] — which theme fill, and therefore
 /// which semantic role, it draws with. Three states rather than a bare
 /// `bool` because the two known uses need genuinely different colours for
-/// their default action: Set Title's "OK" is affirmative (`theme.accent`),
+/// their default action: Set Title's "OK" is affirmative (the inverted
+/// chip, `theme.inverse`),
 /// the close confirm's "Close Anyway" is destructive (`theme.tab_error`) —
 /// collapsing both into one "primary" flag would have painted one of them
 /// the wrong colour.
@@ -210,7 +211,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 // so the bar never shifts the value while blinking.
                 .child(crate::caret::bar(
                     px(14.0),
-                    theme.accent,
+                    theme.caret,
                     field.caret_visible,
                 )),
         );
@@ -226,7 +227,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
         let white: gpui::Rgba = gpui::white().into();
         let (bg, text_color) = match button.tone {
             ModalButtonTone::Plain => (theme.primary_pill_bg, theme.title),
-            ModalButtonTone::Accent => (theme.accent, white),
+            ModalButtonTone::Accent => (theme.inverse, theme.on_inverse),
             ModalButtonTone::Destructive => (theme.tab_error, white),
         };
         button_row = button_row.child(

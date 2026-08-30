@@ -3728,7 +3728,7 @@ impl Chat {
                     .bg(colors.raised)
                     .border_1()
                     .border_color(if question_answer.for_request == Some(request_id) {
-                        colors.accent
+                        colors.selection_ring
                     } else {
                         colors.hairline
                     })
@@ -3768,7 +3768,7 @@ impl Chat {
                             .debug_selector(|| "question-answer-caret".into())
                             .child(caret::bar(
                                 typography.body_line_height,
-                                colors.accent,
+                                colors.caret,
                                 caret_visible,
                             )),
                     ),
@@ -4112,7 +4112,7 @@ impl Chat {
             let trimmed = line.strip_suffix('\n').unwrap_or(line);
             for span in code_spans(language, trimmed) {
                 let color = match span.kind {
-                    CodeSpanKind::Keyword => theme.colors.accent,
+                    CodeSpanKind::Keyword => theme.colors.gauge,
                     CodeSpanKind::Literal => theme.colors.diff_addition,
                     CodeSpanKind::Comment => theme.colors.meta,
                 };
@@ -4565,7 +4565,7 @@ impl Chat {
                     .gap(px(5.0))
                     .text_size(typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.accent)
+                    .text_color(colors.file_link)
                     .cursor(CursorStyle::PointingHand)
                     .hover(|style| style.text_color(colors.title))
                     .px(px(10.0))
@@ -4575,7 +4575,9 @@ impl Chat {
                             cx.emit(ChatEvent::OpenFile(open_path.clone()));
                         });
                     })
-                    .child(IconElement::new(Icon::File, IconSize::Small).text_color(colors.accent))
+                    .child(
+                        IconElement::new(Icon::File, IconSize::Small).text_color(colors.file_link),
+                    )
                     .child(diff.path.display().to_string()),
             );
         for (index, line) in shown.iter().enumerate() {
@@ -4718,7 +4720,7 @@ impl Chat {
                     .debug_selector(move || format!("edit-summary-open-{entry}-{index}"))
                     .flex_1()
                     .text_size(typography.footnote)
-                    .text_color(colors.accent)
+                    .text_color(colors.file_link)
                     .cursor(CursorStyle::PointingHand)
                     .hover(|style| style.text_color(colors.title))
                     .on_click(move |_, _, cx| {
@@ -5643,7 +5645,7 @@ impl Chat {
                             .id(SharedString::from(element_id))
                             .debug_selector(move || selector.clone())
                             .text_size(typography.footnote)
-                            .text_color(colors.accent)
+                            .text_color(colors.file_link)
                             .cursor(CursorStyle::PointingHand)
                             .hover(|style| style.text_color(colors.title))
                             .on_click(move |_, _, cx| {
@@ -5801,7 +5803,7 @@ impl Chat {
                             .id(SharedString::from(element_id))
                             .debug_selector(move || selector.clone())
                             .text_size(typography.footnote)
-                            .text_color(colors.accent)
+                            .text_color(colors.file_link)
                             .cursor(CursorStyle::PointingHand)
                             .hover(|style| style.text_color(colors.title))
                             .on_click(move |_, _, cx| {
@@ -6106,7 +6108,7 @@ impl Chat {
                 .debug_selector(|| "composer-caret".into())
                 .child(caret::bar(
                     typography.body_line_height,
-                    colors.accent,
+                    colors.caret,
                     caret_visible,
                 ))
                 .into_any_element()
@@ -6416,7 +6418,7 @@ impl Chat {
                                         .debug_selector(|| "model-search-caret".into())
                                         .child(caret::bar(
                                             typography.body_line_height,
-                                            colors.accent,
+                                            colors.caret,
                                             model_search_caret_visible,
                                         )),
                                 ),
@@ -6477,8 +6479,8 @@ impl Chat {
                                         .px(px(5.0))
                                         .rounded(px(4.0))
                                         .text_size(typography.caption2)
-                                        .text_color(colors.accent)
-                                        .bg(colors.accent.opacity(0.15))
+                                        .text_color(colors.title)
+                                        .bg(colors.overlay_strong)
                                         .child("Recommended"),
                                 )
                             })
@@ -7484,7 +7486,7 @@ impl Chat {
             .border_color(if self.streaming {
                 colors.hairline.opacity(0.0)
             } else if focused {
-                colors.accent
+                colors.selection_ring
             } else {
                 colors.hairline
             })
@@ -8179,7 +8181,7 @@ impl Render for Chat {
                 // `ExternalPaths` drag sits over the pane. Not drawn at all
                 // while the composer can't accept input, matching the
                 // top-level `on_drop` binding just above.
-                let accent = theme.colors.accent;
+                let marker = theme.colors.title;
                 let overlay = div()
                     .id("chat-drop-overlay")
                     .debug_selector(|| "chat-drop-overlay".into())
@@ -8191,8 +8193,8 @@ impl Render for Chat {
                     .justify_center()
                     .rounded(theme.radii.composer)
                     .border_1()
-                    .border_color(accent)
-                    .bg(accent.opacity(0.08))
+                    .border_color(marker)
+                    .bg(theme.colors.overlay)
                     .child(
                         div()
                             .id("chat-drop-overlay-label")
@@ -8392,10 +8394,10 @@ impl InlineBuilder {
                         .push((start..end, theme.typography.code_family.into()));
                 }
                 if let Some(target) = link_target {
-                    highlight.color = Some(theme.colors.accent.into());
+                    highlight.color = Some(theme.colors.file_link.into());
                     highlight.underline = Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(theme.colors.accent.into()),
+                        color: Some(theme.colors.file_link.into()),
                         wavy: false,
                     });
                     self.links.push((start..end, target.to_string()));
@@ -8427,7 +8429,7 @@ impl InlineBuilder {
                     highlight.font_weight = strong.then_some(FontWeight::BOLD);
                     highlight.font_style = emphasis.then_some(FontStyle::Italic);
                     if let Some(target) = link_target {
-                        highlight.color = Some(theme.colors.accent.into());
+                        highlight.color = Some(theme.colors.file_link.into());
                         self.links.push((start..end, target.to_string()));
                     }
                     self.highlights.push((start..end, highlight));

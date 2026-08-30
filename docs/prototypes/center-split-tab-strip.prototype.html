@@ -1,0 +1,272 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers ai-sirio/sirio#320: where do the two tab strips go?
+  Not production code, not gpui. Double-click to open; no build step.
+  Palette is the real dark theme (sirio_theme/src/lib.rs:307-364), TAB_BAR_HEIGHT=34 (main.rs:347).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>#320 — center split tab strips</title>
+<style>
+  :root {
+    --panel:    #18191A;
+    --frame:    #222427;
+    --border:   #27292D;
+    --selected: #2D2F34;
+    --raised:   #1D1E21;
+    --text:     #CBCDD4;
+    --text-2:   #85888F;
+    --text-3:   #686B71;
+    --accent:   #E08B52;
+    --strip-h:  34px;
+    --gap:      6px;
+    --inset:    8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 0 96px;
+    background: #0E0F10; color: var(--text);
+    font: 13px/1.4 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  header { padding: 22px 28px 6px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--text-2); font-size: 12px; max-width: 76ch; }
+  code { color: var(--accent); font-family: ui-monospace, monospace; font-size: 11px; }
+
+  .variant-meta { padding: 18px 28px 10px; }
+  .variant-meta h2 { font-size: 13px; font-weight: 600; margin: 0 0 6px; }
+  .variant-meta p  { margin: 0 0 5px; color: var(--text-2); font-size: 12px; max-width: 80ch; }
+  .verdict { font-size: 12px; margin-top: 9px; }
+  .verdict b { color: var(--accent); font-weight: 600; }
+
+  .win {
+    margin: 6px 28px 0; height: 344px;
+    background: var(--frame); border: 1px solid var(--border); border-radius: 9px;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .titlebar {
+    height: 30px; flex: none; display: flex; align-items: center; gap: 7px;
+    padding: 0 11px; border-bottom: 1px solid var(--border);
+    color: var(--text-3); font-size: 11px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #3A3D42; }
+  .work { flex: 1; min-height: 0; display: flex; flex-direction: row; gap: var(--gap); padding: var(--inset); }
+  .sidebar {
+    flex: none; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 7px; padding: 8px; overflow: hidden;
+  }
+  .sidebar.left  { width: 152px; }
+  .sidebar.right { width: 168px; }
+  .sb-title { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); margin-bottom: 7px; }
+  .sb-row { font-size: 11px; color: var(--text-2); padding: 3px 5px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sb-row.on { background: var(--selected); color: var(--text); }
+
+  .center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .panes { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+  .pane { min-width: 0; display: flex; flex-direction: column; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .pane.primary   { flex: 1; }
+  .pane.secondary { flex: 1; }
+  .pane.focused { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+  .divider { flex: none; width: 6px; cursor: col-resize; position: relative; }
+  .divider::after { content: ""; position: absolute; inset: 0 2px; background: var(--border); border-radius: 1px; }
+
+  .strip { height: var(--strip-h); flex: none; display: flex; align-items: center; gap: 4px;
+           padding: 0 6px; border-bottom: 1px solid var(--border); overflow: hidden; }
+  .tab { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px;
+         border-radius: 5px; font-size: 11px; color: var(--text-2);
+         white-space: nowrap; max-width: 150px; overflow: hidden; }
+  .tab .ico { width: 12px; text-align: center; opacity: .75; font-size: 10px; }
+  .tab.active { background: var(--selected); color: var(--text); }
+  .tab.active.focused { box-shadow: inset 0 -2px 0 var(--accent); }
+  .plus { margin-left: auto; width: 20px; height: 20px; flex: none; display: grid;
+          place-items: center; border-radius: 4px; color: var(--text-3); font-size: 14px; line-height: 1; }
+  .closebtn { width: 20px; height: 20px; flex: none; display: grid; place-items: center;
+              border-radius: 4px; color: var(--text-3); font-size: 13px; margin-left: auto; }
+
+  .body { flex: 1; min-height: 0; padding: 12px; overflow: hidden; }
+  .term { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--text-3); line-height: 1.65; }
+  .term .p { color: var(--accent); }
+
+  .seam .strip { outline: 1px dashed rgba(224,139,82,.55); outline-offset: -1px; }
+
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+         background: rgba(24,25,26,.96); border-top: 1px solid var(--border);
+         backdrop-filter: blur(12px);
+         display: flex; align-items: center; gap: 8px; padding: 10px 28px; flex-wrap: wrap; }
+  .bar .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); margin-right: 2px; }
+  .bar button { font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 6px;
+                background: var(--raised); color: var(--text-2); border: 1px solid var(--border); cursor: pointer; }
+  .bar button:hover { color: var(--text); }
+  .bar button.on { background: var(--accent); border-color: var(--accent); color: #1B1206; font-weight: 600; }
+  .bar .sep { width: 1px; height: 22px; background: var(--border); margin: 0 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>#320 — where do the two tab strips go?</h1>
+  <p>Three arrangements, same content. Primary pane holds chat + terminals; Secondary holds browser, editor, diff.
+     Use the bar at the bottom to switch variant, open/close the Secondary pane, and move focus.
+     Palette and <code>TAB_BAR_HEIGHT = 34</code> are the real ones.</p>
+</header>
+
+<div class="variant-meta" id="meta"></div>
+<div class="win" id="win"></div>
+
+<div class="bar">
+  <span class="lbl">variant</span>
+  <button data-v="A">A · one strip on top</button>
+  <button data-v="B">B · strip inside each pane</button>
+  <button data-v="C">C · asymmetric</button>
+  <span class="sep"></span>
+  <span class="lbl">secondary</span><button id="btnSec">closed</button>
+  <span class="lbl">focus</span><button id="btnFocus">primary</button>
+  <span class="sep"></span>
+  <span class="lbl">debug</span><button id="btnSeam">mark strips</button>
+</div>
+
+<script>
+const state = { variant: "A", secondaryOpen: false, focus: "primary", seam: false };
+
+const COPY = {
+  A: {
+    title: "A — one strip on top, split into two segments",
+    lines: [
+      "Closest to today: the strip row stays where it is (<code>center_column</code>, main.rs:11426), full width above both panes, and splits at the divider.",
+      "The Secondary segment appears and disappears with the pane. Segment widths are tied to the split ratio, so the seam has to line up with the divider below it."
+    ],
+    verdict: "Cheapest diff — the layout tree barely moves. But the strip is a sibling of the panes, not part of them, so the seam must be kept in sync with the divider by hand on every resize and every ratio change."
+  },
+  B: {
+    title: "B — each pane owns its strip, inside itself",
+    lines: [
+      "<code>center_column</code> stops being one column: each pane becomes its own vertical stack (strip on top, surface below), and the two stacks sit side by side.",
+      "The strip is a child of the pane, so it inherits the pane's width for free — nothing to keep in sync. Each pane can carry its own <code>+</code> and its own close button."
+    ],
+    verdict: "The strip can never disagree with its pane, because it is inside it. Costs a real restructure of the render tree, and the Primary strip no longer spans the window."
+  },
+  C: {
+    title: "C — Primary strip full width, Secondary gets its own",
+    lines: [
+      "The Primary strip keeps the whole width as today, and the Secondary pane opens <em>under</em> it with a strip of its own.",
+      "Reads as \"the app has a tab bar, plus a panel that opened\" rather than as two equal halves."
+    ],
+    verdict: "Least disruptive to muscle memory, but it contradicts the model: the two panes are peers, and this draws one as chrome and the other as a guest."
+  }
+};
+
+function tab(icon, label, opts) {
+  opts = opts || {};
+  const cls = ["tab", opts.active ? "active" : "", (opts.active && opts.focused) ? "focused" : ""].filter(Boolean).join(" ");
+  return '<div class="' + cls + '"><span class="ico">' + icon + '</span><span>' + label + '</span></div>';
+}
+
+const PRIMARY_TABS = () => tab("&#9670;", "Claude", { active: true, focused: state.focus === "primary" })
+                          + tab("&#9656;", "zsh") + tab("&#9656;", "cargo watch");
+const SECONDARY_TABS = () => tab("&#9671;", "main.rs", { active: true, focused: state.focus === "secondary" })
+                           + tab("&#8997;", "Changes") + tab("&#9672;", "localhost:3000");
+
+const PRIMARY_BODY = '<div class="body"><div class="term">'
+  + '<span class="p">&#10035;</span> Ready for your next message.<br>'
+  + '<span class="p">&gt;</span> cargo test -p sirio_ui<br>'
+  + '&nbsp;&nbsp;&nbsp;running 214 tests ......................<br>'
+  + '&nbsp;&nbsp;&nbsp;test result: ok. 214 passed</div></div>';
+const SECONDARY_BODY = '<div class="body"><div class="term">'
+  + '&nbsp;&nbsp;42 &nbsp;<span class="p">pub enum</span> PaneRole {<br>'
+  + '&nbsp;&nbsp;43 &nbsp;&nbsp;&nbsp;&nbsp;Primary,<br>'
+  + '&nbsp;&nbsp;44 &nbsp;&nbsp;&nbsp;&nbsp;Secondary,<br>'
+  + '&nbsp;&nbsp;45 &nbsp;}</div></div>';
+
+const SIDEBAR_LEFT = '<div class="sidebar left">'
+  + '<div class="sb-title">Worktree</div>'
+  + '<div class="sb-row on">&#9670; Claude</div><div class="sb-row">&#9656; zsh</div>'
+  + '<div class="sb-row">&#9656; cargo watch</div>'
+  + '<div class="sb-title" style="margin-top:14px">only pane 1</div></div>';
+const SIDEBAR_RIGHT = '<div class="sidebar right">'
+  + '<div class="sb-title">Changes</div>'
+  + '<div class="sb-row">M&nbsp; main.rs</div><div class="sb-row on">M&nbsp; tab_bar.rs</div>'
+  + '<div class="sb-title" style="margin-top:12px">Files</div>'
+  + '<div class="sb-row">panes.rs</div><div class="sb-row">theme.rs</div></div>';
+
+const fc = w => state.focus === w ? " focused" : "";
+
+function renderCenter() {
+  const open = state.secondaryOpen, v = state.variant;
+
+  if (v === "A") {
+    return '<div class="center">'
+      + '<div style="display:flex;flex-direction:row">'
+      +   '<div class="strip" style="flex:1;min-width:0">' + PRIMARY_TABS() + '<div class="plus">+</div></div>'
+      +   (open ? '<div class="divider" style="border-bottom:1px solid var(--border)"></div>'
+               + '<div class="strip" style="flex:1;min-width:0">' + SECONDARY_TABS() + '<div class="closebtn">&times;</div></div>' : '')
+      + '</div>'
+      + '<div class="panes" style="margin-top:6px">'
+      +   '<div class="pane primary' + fc("primary") + '">' + PRIMARY_BODY + '</div>'
+      +   (open ? '<div class="divider"></div><div class="pane secondary' + fc("secondary") + '">' + SECONDARY_BODY + '</div>' : '')
+      + '</div></div>';
+  }
+
+  if (v === "B") {
+    return '<div class="center"><div class="panes">'
+      + '<div class="pane primary' + fc("primary") + '">'
+      +   '<div class="strip">' + PRIMARY_TABS() + '<div class="plus">+</div></div>' + PRIMARY_BODY
+      + '</div>'
+      + (open ? '<div class="divider"></div>'
+             + '<div class="pane secondary' + fc("secondary") + '">'
+             +   '<div class="strip">' + SECONDARY_TABS() + '<div class="closebtn">&times;</div></div>' + SECONDARY_BODY
+             + '</div>' : '')
+      + '</div></div>';
+  }
+
+  return '<div class="center">'
+    + '<div class="strip">' + PRIMARY_TABS() + '<div class="plus">+</div></div>'
+    + '<div class="panes" style="margin-top:6px">'
+    +   '<div class="pane primary' + fc("primary") + '">' + PRIMARY_BODY + '</div>'
+    +   (open ? '<div class="divider"></div>'
+            + '<div class="pane secondary' + fc("secondary") + '">'
+            +   '<div class="strip">' + SECONDARY_TABS() + '<div class="closebtn">&times;</div></div>' + SECONDARY_BODY
+            + '</div>' : '')
+    + '</div></div>';
+}
+
+function render() {
+  const c = COPY[state.variant];
+  document.getElementById("meta").innerHTML =
+    '<h2>' + c.title + '</h2>' + c.lines.map(l => '<p>' + l + '</p>').join('')
+    + '<p class="verdict"><b>Trade-off:</b> ' + c.verdict + '</p>';
+
+  const win = document.getElementById("win");
+  win.className = "win" + (state.seam ? " seam" : "");
+  win.innerHTML = '<div class="titlebar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>'
+    + '&nbsp;sirio &mdash; worktree-green-meadow</div>'
+    + '<div class="work">' + SIDEBAR_LEFT + renderCenter() + SIDEBAR_RIGHT + '</div>';
+
+  document.querySelectorAll('.bar button[data-v]').forEach(b => b.classList.toggle("on", b.dataset.v === state.variant));
+  const s = document.getElementById("btnSec");
+  s.textContent = state.secondaryOpen ? "open" : "closed";
+  s.classList.toggle("on", state.secondaryOpen);
+  const f = document.getElementById("btnFocus");
+  f.textContent = state.focus;
+  f.classList.toggle("on", state.focus === "secondary");
+  document.getElementById("btnSeam").classList.toggle("on", state.seam);
+}
+
+document.querySelectorAll('.bar button[data-v]').forEach(b => b.onclick = () => { state.variant = b.dataset.v; render(); });
+document.getElementById("btnSec").onclick = () => {
+  state.secondaryOpen = !state.secondaryOpen;
+  if (!state.secondaryOpen) state.focus = "primary";
+  render();
+};
+document.getElementById("btnFocus").onclick = () => {
+  if (!state.secondaryOpen) return;
+  state.focus = state.focus === "primary" ? "secondary" : "primary";
+  render();
+};
+document.getElementById("btnSeam").onclick = () => { state.seam = !state.seam; render(); };
+
+render();
+</script>
+</body>
+</html>

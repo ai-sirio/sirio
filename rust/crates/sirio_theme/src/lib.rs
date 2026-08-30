@@ -3,8 +3,11 @@
 //! Sirio keeps its chrome quiet through a compact cool-tinted shell hierarchy:
 //! a translucent frame surrounds opaque panel surfaces, selected rows, and
 //! shell borders. Within that hierarchy, generic hover, pressed, and divider
-//! washes remain neutral veils; the coral accent marks focus, and semantic hues
-//! retain their existing state meanings.
+//! washes remain neutral veils; focus and active chrome are spelled with
+//! contrast rather than hue, and semantic hues retain their existing state
+//! meanings. Colour is spent on two things only: data (a diff, a git status, an
+//! agent's brand) and attention (needs-input, error). The brand coral no longer
+//! has a role — see [`ThemeColors::accent`].
 //!
 //! Where each value comes from is recorded in
 //! `docs/linux-rewrite/THEME-PROVENANCE.md`. The re-runnable
@@ -124,7 +127,9 @@ pub struct ThemeColors {
     pub panel_surface: Rgba,
     /// Opaque separator between shell panels.
     pub panel_border: Rgba,
-    /// Focus ring for shell panels; deliberately the existing accent.
+    /// Focus ring for shell panels — a neutral one step brighter than
+    /// [`ThemeColors::panel_border`], not the accent. It is deliberately below
+    /// [`ThemeColors::title`]: a focused pane has to be findable, not loud.
     pub panel_focus_ring: Rgba,
     /// Compatibility alias for [`ThemeColors::panel_surface`], used by the tab
     /// bar, workspace column, right panel, and settings.
@@ -135,8 +140,10 @@ pub struct ThemeColors {
     /// Terminal surface — paper-white in light and the pre-shell dark well in
     /// dark mode, retained independently of the shell panel hierarchy.
     pub terminal_surface: Rgba,
-    /// Brand accent, a coral spent only on meaning: focus rings, caret, live
-    /// activity, selected states. Never structure.
+    /// Active-chrome tint: the tab strip's underline and dirty dot, a menu's
+    /// checkmark, a running worktree's badge. With colour reserved for data and
+    /// attention, contrast is the only channel left to say "this one is
+    /// active", so this is the full text neutral rather than a step below it.
     pub tab_focus_accent: Rgba,
     /// Waiting-for-input status.
     pub tab_needs_input: Rgba,
@@ -163,7 +170,8 @@ pub struct ThemeColors {
     /// Selected-row fill, aliased to [`ThemeColors::selected_fill`]. Text
     /// selection is a different concept: see [`ThemeColors::selection`].
     pub selection_fill: Rgba,
-    /// Focused-field border. The focus ring is the accent, not a second blue.
+    /// Focused-field border — the same neutral the rest of the active chrome
+    /// uses, and never a second blue.
     pub selection_ring: Rgba,
     /// Row title text.
     pub title: Rgba,
@@ -211,13 +219,15 @@ pub struct ThemeColors {
     /// Clickable file-link color — the gauge blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
-    /// Task-card accent rail.
+    /// Task-card rail — neutral. A card's kind is already spelled by its icon
+    /// and title; the rail only has to separate the card from the transcript.
     pub rail_task: Rgba,
-    /// Question-card accent rail — the warning hue.
+    /// Question-card rail — the warning hue. The one card kind that is waiting
+    /// on the reader, and so the one that keeps its colour.
     pub rail_question: Rgba,
-    /// Edit-card accent rail — the success hue.
+    /// Edit-card rail — neutral, like [`ThemeColors::rail_task`].
     pub rail_edit: Rgba,
-    /// Tool-card accent rail.
+    /// Tool-card rail — neutral, like [`ThemeColors::rail_task`].
     pub rail_tool: Rgba,
 
     // ── Role tokens: what a value does, rather than who consumes it ───────
@@ -241,21 +251,36 @@ pub struct ThemeColors {
     /// Faintest text step — placeholder copy and disabled labels, below
     /// [`ThemeColors::meta`].
     pub text_ghost: Rgba,
-    /// Brand coral (same value as `tab_focus_accent`).
+    /// Brand coral. No role paints it any more: the shell's focus rings,
+    /// caret, selection and active chrome are neutral, and every colour left in
+    /// the UI is a status, a diff, a quantity or an agent's own brand.
+    ///
+    /// What still reads it is the `Coral` entry of the agent-colour picker,
+    /// which needs a real coral to offer. Kept as a token rather than inlined
+    /// as a literal there, so the picker keeps drawing from `Theme` — and so
+    /// the two invariants this value carries (it clears AA on its own surface,
+    /// and it is not any agent's brand) still have something to hold.
     pub accent: Rgba,
-    /// Quota-meter blue. Blue is reserved for quantity, so a gauge never
-    /// competes with the accent for attention.
+    /// Quantity blue: quota meters, and the clone and update progress bars.
+    /// Blue means "how much", which is why a progress bar is never painted in
+    /// a status hue — a bar filling up is not an alert.
     pub gauge: Rgba,
     /// Approved selected-row fill, aliased by [`ThemeColors::selection_fill`].
     /// [`ThemeColors::selection`] remains reserved for text-selection under
     /// glyphs.
     pub selected_fill: Rgba,
-    /// Text-selection wash — the familiar browser blue, painted under
-    /// glyphs: `hsla(211,100%,50%,0.55)` / `0.35`. Never used for row
-    /// chrome.
+    /// Text-selection wash, painted *under* glyphs: the top rung of the veil
+    /// ladder, neutral in both appearances. Never used for row chrome — that
+    /// is [`ThemeColors::selection_fill`].
     pub selection: Rgba,
-    /// Inline `code` foreground — a warm tone that separates code from prose
-    /// without spending the accent on it.
+    /// The text-insertion caret, everywhere one blinks: composer, address bar,
+    /// command palette, every inline rename field. Its own role rather than a
+    /// reuse of [`ThemeColors::title`], so that fifteen call sites say what
+    /// they mean and the caret can be re-tinted in one place.
+    pub caret: Rgba,
+    /// Inline `code` foreground. The rounded [`ThemeColors::code_wash`] behind
+    /// it already separates code from prose, so the glyphs stay the ordinary
+    /// text neutral instead of spending a second signal on the same job.
     pub code_text: Rgba,
     /// Inline `code` rounded wash.
     pub code_wash: Rgba,
@@ -398,18 +423,12 @@ impl ThemeColors {
         // large-area hover sits one rung lower.
         let overlay = veil(VEIL_FAINT, appearance);
         let overlay_strong = veil(VEIL_MID, appearance);
-        // Text selection is focus, and focus is what the accent is for. The
-        // light variant is turned down further because its accent is the dark
-        // one of the pair and would otherwise swallow the glyphs it sits
-        // under; `selection_stays_under_its_text` holds that.
-        let selection = softened(
-            accent,
-            match appearance {
-                Appearance::Dark => 0.45,
-                Appearance::Light => 0.30,
-            },
-        );
-        let code_text = Self::adaptive(rgb_hex(0xE0A882), rgb_hex(0x9A5528), appearance);
+        // A selection wash sits under its own text, so it has two jobs at
+        // once: be visible, and not swallow the glyphs. The top rung of the
+        // veil ladder is the strongest wash that still does both in either
+        // appearance; `selection_stays_under_its_text` holds the second half.
+        let selection = veil(VEIL_HIGH, appearance);
+        let code_text = text;
         let code_wash = veil(VEIL_LOW, appearance);
         // An inverted chip — a tooltip, a keycap — is literally the other
         // appearance's page, so it is the same measured pair, swapped. No new
@@ -424,11 +443,11 @@ impl ThemeColors {
             frame_fallback,
             panel_surface,
             panel_border,
-            panel_focus_ring: accent,
+            panel_focus_ring: text_secondary,
             background: panel_surface,
             canvas: frame_fallback,
             terminal_surface,
-            tab_focus_accent: accent,
+            tab_focus_accent: text,
             tab_needs_input: warning,
             tab_done: success,
             tab_error: danger,
@@ -439,7 +458,7 @@ impl ThemeColors {
             row_hover,
             chat_row_hover: overlay,
             selection_fill: selected_fill,
-            selection_ring: accent,
+            selection_ring: text,
             title: text,
             title_selected: text,
             subtitle: text_secondary,
@@ -463,18 +482,10 @@ impl ThemeColors {
             code_inset_fill: inset,
             primary_text_color: text,
             file_link: gauge,
-            rail_task: Self::adaptive(
-                color(0.49, 0.42, 0.84, 1.0),
-                color(0.36, 0.30, 0.68, 1.0),
-                appearance,
-            ),
+            rail_task: border_strong,
             rail_question: warning,
-            rail_edit: success,
-            rail_tool: Self::adaptive(
-                color(0.40, 0.42, 0.50, 1.0),
-                color(0.55, 0.57, 0.65, 1.0),
-                appearance,
-            ),
+            rail_edit: border_strong,
+            rail_tool: border_strong,
             sidebar: panel_surface,
             raised,
             composer,
@@ -487,6 +498,7 @@ impl ThemeColors {
             accent,
             gauge,
             selection,
+            caret: text,
             selected_fill,
             code_text,
             code_wash,
@@ -1783,9 +1795,19 @@ mod tests {
             assert_ne!(theme.primary_action_bg, theme.raised);
             assert_eq!(theme.filter_field_bg, theme.inset);
             assert_eq!(theme.code_inset_fill, theme.inset);
-            assert_eq!(theme.panel_focus_ring, theme.accent);
-            assert_eq!(theme.selection_ring, theme.panel_focus_ring);
-            assert_eq!(theme.tab_focus_accent, theme.accent);
+            // Active chrome, the caret and inline code all resolve to the
+            // text neutral; the pane's focus ring sits one step below it, so a
+            // focused pane is findable without shouting.
+            assert_eq!(theme.tab_focus_accent, theme.title);
+            assert_eq!(theme.selection_ring, theme.tab_focus_accent);
+            assert_eq!(theme.caret, theme.tab_focus_accent);
+            assert_eq!(theme.code_text, theme.title);
+            assert_eq!(theme.panel_focus_ring, theme.subtitle);
+            assert_ne!(theme.panel_focus_ring, theme.panel_border);
+            // The coral is still a value the theme hands out — the agent-colour
+            // picker offers it — but no role paints it any more. This is the
+            // assertion that catches an accent creeping back into the chrome.
+            assert_ne!(theme.tab_focus_accent, theme.accent);
             assert_eq!(theme.primary_text_color, theme.title);
         }
     }
@@ -2167,12 +2189,13 @@ mod tests {
                 0x52 as f32 / 255.0,
             ),
         );
+        // Active chrome is the text neutral, not the coral.
         expect_color(
             theme.tab_focus_accent,
             f(
-                0xE0 as f32 / 255.0,
-                0x8B as f32 / 255.0,
-                0x52 as f32 / 255.0,
+                0xCB as f32 / 255.0,
+                0xCD as f32 / 255.0,
+                0xD4 as f32 / 255.0,
             ),
         );
         // Swift `AppTheme.tabFocusAccent`, dark.
@@ -2219,9 +2242,9 @@ mod tests {
         expect_color(
             theme.code_text,
             f(
-                0xE0 as f32 / 255.0,
-                0xA8 as f32 / 255.0,
-                0x82 as f32 / 255.0,
+                0xCB as f32 / 255.0,
+                0xCD as f32 / 255.0,
+                0xD4 as f32 / 255.0,
             ),
         );
         // An inverted chip in dark is the *light* page and the light page's
@@ -2256,16 +2279,9 @@ mod tests {
                 0x2D as f32 / 255.0,
             ),
         );
-        // Selection is the accent turned down, not a borrowed browser blue.
-        expect_color(
-            theme.selection,
-            (
-                0xE0 as f32 / 255.0,
-                0x8B as f32 / 255.0,
-                0x52 as f32 / 255.0,
-                0.45,
-            ),
-        );
+        // Selection is the top rung of the veil ladder, neither a turned-down
+        // accent nor a borrowed browser blue.
+        expect_color(theme.selection, (1.0, 1.0, 1.0, VEIL_HIGH));
     }
 
     /// The light palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
@@ -2351,15 +2367,7 @@ mod tests {
                 0xDD as f32 / 255.0,
             ),
         );
-        expect_color(
-            theme.selection,
-            (
-                0xAD as f32 / 255.0,
-                0x58 as f32 / 255.0,
-                0x1F as f32 / 255.0,
-                0.30,
-            ),
-        );
+        expect_color(theme.selection, (0.0, 0.0, 0.0, VEIL_HIGH));
         // The well, mirrored: the light page has far less room below it, so
         // the step is 0.93 rather than dark's 0.72.
         expect_color(
@@ -2373,9 +2381,9 @@ mod tests {
         expect_color(
             theme.code_text,
             f(
-                0x9A as f32 / 255.0,
-                0x55 as f32 / 255.0,
-                0x28 as f32 / 255.0,
+                0x31 as f32 / 255.0,
+                0x3A as f32 / 255.0,
+                0x40 as f32 / 255.0,
             ),
         );
         // And in light, an inverted chip is the *dark* page and its text.
@@ -2513,6 +2521,7 @@ mod tests {
             ("accent", light.accent, dark.accent),
             ("gauge", light.gauge, dark.gauge),
             ("selection", light.selection, dark.selection),
+            ("caret", light.caret, dark.caret),
             ("code_text", light.code_text, dark.code_text),
             ("code_wash", light.code_wash, dark.code_wash),
             ("inverse", light.inverse, dark.inverse),

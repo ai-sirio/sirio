@@ -3011,7 +3011,7 @@ impl Settings {
             // single-line fields always append. Invisible (but still laid
             // out) while unfocused so the bar never shifts the text.
             .when(is_focused, |this| {
-                this.child(caret::bar(px(16.0), theme.accent, caret_visible))
+                this.child(caret::bar(px(16.0), theme.caret, caret_visible))
             })
     }
 
@@ -3683,7 +3683,7 @@ impl Settings {
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
                                     px(16.0),
-                                    theme.accent,
+                                    theme.caret,
                                     self.field_caret_visible,
                                 ))
                             }),
