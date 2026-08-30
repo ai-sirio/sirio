@@ -5699,19 +5699,30 @@ impl Chat {
             )
             .child(
                 div()
+                    .flex_none()
                     .text_size(typography.footnote)
                     .text_color(colors.meta)
                     .child(kind),
             )
             .child(
+                // Bezel step-row grammar: verb (above), then this detail
+                // slot, then duration-or-status pinned right. `min_w_0` +
+                // `text_ellipsis` keep the row single-line — a long title
+                // truncates instead of pushing the status off the row.
                 div()
                     .flex_1()
+                    .min_w_0()
+                    .text_ellipsis()
                     .text_size(typography.callout)
                     .text_color(colors.title)
                     .child(title),
             )
             .child(
+                // Sirio has no per-call duration today, so this is always the
+                // status; failed and cancelled keep their own words and never
+                // read as finished.
                 div()
+                    .flex_none()
                     .text_size(typography.footnote)
                     .text_color(colors.meta)
                     .child(status),
@@ -5921,7 +5932,7 @@ impl Chat {
                     .text_size(typography.callout)
                     .text_color(colors.subtitle)
                     .italic()
-                    .child(format!("{count} steps")),
+                    .child(tool_group_label(count)),
             )
             .on_click(move |_, _, cx| {
                 toggle_entity.update(cx, |chat, cx| {
@@ -8390,6 +8401,17 @@ fn tool_call_run_bounds(entries: &[Entry], index: usize) -> Option<(usize, usize
         end += 1;
     }
     (end > start).then_some((start, end))
+}
+
+/// The header for a run of consecutive tool calls, in the Bezel Transcript
+/// pattern's words. Pure, so the singular/plural split is testable without a
+/// window.
+fn tool_group_label(count: usize) -> String {
+    if count == 1 {
+        "Worked · 1 step".to_string()
+    } else {
+        format!("Worked · {count} steps")
+    }
 }
 
 /// F-CHAT-22, turn half: how many of the most recent turns stay open. Swift's
@@ -11797,6 +11819,12 @@ mod tests {
     #[test]
     fn default_agent_cwd_follows_the_process_workspace() {
         assert_eq!(default_agent_cwd(), std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn a_tool_run_is_labelled_as_a_work_zone() {
+        assert_eq!(tool_group_label(1), "Worked · 1 step");
+        assert_eq!(tool_group_label(4), "Worked · 4 steps");
     }
 
     #[test]
