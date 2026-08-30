@@ -9400,7 +9400,7 @@ mod tests {
     /// composer's border is the same footprint and color idle or streaming —
     /// nothing wraps the card, and nothing shifts the draft text inside it.
     #[gpui::test]
-    async fn the_rotating_border_wraps_the_composer_only_while_streaming(cx: &mut TestAppContext) {
+    async fn the_composer_has_no_rotating_border_while_streaming(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &[]);
         refresh_frame(cx);
 
@@ -9598,7 +9598,7 @@ mod tests {
     /// narrow pane open. With the border gone, the composer itself must
     /// still track the narrow pane the same way idle or streaming.
     #[gpui::test]
-    async fn the_rotating_border_shrinks_with_a_narrow_pane(cx: &mut TestAppContext) {
+    async fn a_narrow_pane_draws_no_rotating_border(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &[]);
         cx.simulate_resize(size(px(595.0), px(600.0)));
         refresh_frame(cx);

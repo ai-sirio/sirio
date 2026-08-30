@@ -3722,7 +3722,7 @@ impl Settings {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(8.0))
+                    .gap(theme.spacing.card_gap)
                     .text_size(theme.typography.headline)
                     .text_color(theme.subtitle)
                     .child(loading::indeterminate(

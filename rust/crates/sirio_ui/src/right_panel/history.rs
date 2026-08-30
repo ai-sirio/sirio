@@ -640,7 +640,8 @@ impl Render for GitHistory {
                 .items_center()
                 .justify_center()
                 .gap(theme.spacing.card_gap)
-                .text_color(theme.meta)
+                .text_size(theme.typography.headline)
+                .text_color(theme.subtitle)
                 .child(loading::indeterminate(
                     "history-loading-orb",
                     loading::GENERIC_ORB,

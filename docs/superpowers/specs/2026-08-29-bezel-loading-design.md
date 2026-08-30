@@ -1,7 +1,7 @@
 # Bezel thinking orbs and loading system
 
 Date: 2026-08-29
-Status: approved, not yet implemented
+Status: implemented on `worktree/green-valley-a9fb`
 
 ## Decision summary
 
@@ -400,7 +400,10 @@ Acceptance requires one GPUI universe, the Wayland fix, evidence-supported
 dimensions and labels, truthful terminal states, preserved existing content,
 no custom Chat animations or per-entry timers, correct reduced-motion and
 unmount behavior, Geist assets on Windows/Linux, and `Scripts/ci.sh` printing
-`CI OK`. Status remains **approved, not yet implemented**.
+`CI OK`. Status: **implemented** on `worktree/green-valley-a9fb`, per
+`docs/superpowers/plans/2026-08-30-bezel-loading.md`. The one requirement left
+unbuilt is the date separator: no truthful per-turn timestamp exists in the
+transcript model, and fabricating one at render time is forbidden above.
 
 ## Rationale and changelog
 

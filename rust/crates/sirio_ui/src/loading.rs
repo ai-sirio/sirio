@@ -4,6 +4,13 @@
 //! keeps its own task/status state machine and asks here only for a picture of
 //! it. Bezel imports live here and nowhere else, so a Bezel API change is a
 //! one-file change.
+//!
+//! A note on the `id` every entry point takes: Bezel 0.1.3 currently discards
+//! it (`loaders.rs` binds `let _key`, `popover.rs` takes `_id`), so today it
+//! keys nothing and a collision would be symptomless. Pass a unique one anyway
+//! — it is the identity these primitives are documented to take, and the day
+//! Bezel starts honouring it, duplicates would become state bleeding between
+//! elements with no compile error to warn you.
 
 use std::time::Duration;
 
