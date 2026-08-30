@@ -239,10 +239,16 @@ Expected: `CI OK`. Zig 0.15.2 must be on PATH (`sirio_terminal` needs it).
 - [ ] **Step 2: Re-check the one-family invariant**
 
 ```bash
-cd rust && cargo tree -d | grep -i gpui; echo "exit=$?"
+cd rust && grep -A1 '^name = "bezel-gpui"$' Cargo.lock | grep -c '^version'
 ```
 
-Expected: no output (grep exit 1). Two GPUI packages here is a failed migration.
+Expected: `1`. Two GPUI packages here is a failed migration.
+
+Do NOT use `cargo tree -d | grep -i gpui` for this. `cargo tree -d` prints the *inverse*
+tree of every duplicated package, and `bezel-gpui` appears inside those trees because most
+of the graph depends on it — so the grep matches on every run regardless of whether
+`bezel-gpui` itself is duplicated. It is a structural false positive, and a check that can
+never pass is how a real duplicate gets waved through. Count versions in the lockfile.
 
 - [ ] **Step 3: Confirm no pixels moved**
 
