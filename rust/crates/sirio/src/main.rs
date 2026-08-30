@@ -344,6 +344,8 @@ fn close_tab_fallback_fires(
 /// `docs/MEASURED.md`.
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
+/// #320: the rule between the two center panes.
+const CENTER_DIVIDER_WIDTH: f32 = 1.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
 const TERMINAL_TAB_MIN_WIDTH: f32 = 132.;
 const TAB_MAX_WIDTH: f32 = 220.;
@@ -10239,13 +10241,14 @@ impl SirioWorkspace {
     /// left is a worktree with no Primary tab.
     fn render_group_surfaces(
         &self,
+        role: PaneRole,
         theme: Theme,
         entity: Entity<Self>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let surface = self
             .center_split
-            .active_for_focused()
+            .active(role)
             .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
             .map(|tab_index| {
                 div()
@@ -10264,7 +10267,10 @@ impl SirioWorkspace {
                     .into_any_element()
             })
             .unwrap_or_else(|| {
-                if self.has_current_worktree() {
+                // #320: the empty prompt is Primary-only. The Secondary pane
+                // auto-closes with its last tab, so it is never drawn empty;
+                // the Primary pane does not, and can be.
+                if role == PaneRole::Primary && self.has_current_worktree() {
                     let new_terminal_entity = entity.clone();
                     div()
                         .id("empty-worktree")
@@ -10310,7 +10316,9 @@ impl SirioWorkspace {
                                 .child("New Terminal"),
                         )
                         .into_any_element()
-                } else if let Some(prompt) = self.empty_pane_prompts.get(&0) {
+                } else if role == PaneRole::Primary
+                    && let Some(prompt) = self.empty_pane_prompts.get(&0)
+                {
                     // F-TERM-02: no Primary tab and no worktree behind it --
                     // mount the real `TerminalView` empty prompt rather than a
                     // static label, so "New Terminal" is live.
@@ -10362,6 +10370,11 @@ impl SirioWorkspace {
         // function deliberately does not take.
         agent: Option<AgentMark>,
         active: bool,
+        // #320: whether the *pane* this tab is drawn in holds focus. A tab is
+        // `active` within its own half regardless — both halves always show
+        // which of their tabs is current — but only one half at a time wears
+        // the accent, because only one receives what you type next.
+        pane_focused: bool,
         status: Option<ActivityStatus>,
         exit_label: Option<String>,
         dirty: bool,
@@ -10608,8 +10621,9 @@ impl SirioWorkspace {
                         .bg(theme.tab_focus_accent),
                 )
             })
-            .when(active, |this| {
-                this.bg(theme.selected_fill).child(
+            .when(active, |this| this.bg(theme.selected_fill))
+            .when(active && pane_focused, |this| {
+                this.child(
                     div()
                         .absolute()
                         .top(px(0.0))
@@ -10619,6 +10633,49 @@ impl SirioWorkspace {
                         .bg(theme.tab_focus_accent),
                 )
             })
+    }
+
+    /// #320: the `×` at the end of the Secondary strip. It **closes the
+    /// pane's tabs**, and the pane disappears because it has none left — it
+    /// does not hide the pane. That distinction is the whole reason this
+    /// control is allowed to exist beside `ctrl-shift-b`, which hides and
+    /// keeps: a `×` that merely hid would be a second spelling of the toggle.
+    fn render_secondary_pane_close(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
+        div()
+            .id("secondary-pane-close")
+            .debug_selector(|| "secondary-pane-close".to_owned())
+            .absolute()
+            .right_0()
+            .top(theme.spacing.titlebar_control_spacing)
+            .w(theme.spacing.titlebar_control_frame.width)
+            .h(theme.spacing.titlebar_control_frame.height)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme.radii.control)
+            .text_color(theme.meta)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, window, cx| {
+                entity.update(cx, |workspace, cx| {
+                    workspace.close_secondary_pane_tabs(window, cx);
+                });
+            })
+            .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.meta))
+    }
+
+    /// Closes every Secondary tab, one real close each — the same path a tab's
+    /// own `×` takes, so a dirty editor's guard and a browser's native
+    /// teardown are not skipped by closing the pane instead of its tabs.
+    fn close_secondary_pane_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<usize> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .map(|tab| tab.id)
+            .collect();
+        for id in ids {
+            self.close_tab_by_id(id, Some(window), cx);
+        }
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -11238,12 +11295,15 @@ impl SirioWorkspace {
     /// This shell overlay owns the visible tabs. The UI crate's TabBar remains
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
-    fn tab_strip_fit(&self, window: &Window, theme: Theme) -> (usize, bool, usize) {
-        let focused = self.center_split.focused();
+    /// #320: each strip lives *inside* its pane, so it fits against that
+    /// pane's width, not the center's. This is the property the layout was
+    /// chosen for: the Primary strip widens when the Secondary pane closes,
+    /// with no seam to keep aligned by hand.
+    fn tab_strip_fit(&self, role: PaneRole, window: &Window, theme: Theme) -> (usize, bool, usize) {
         let group_len = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.kind.pane_role() == role)
             .count();
         if group_len == 0 {
             return (0, false, 0);
@@ -11251,11 +11311,11 @@ impl SirioWorkspace {
         let tab_widths = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.kind.pane_role() == role)
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
-        let available_width = self.tab_strip_available_width(window, theme);
+        let available_width = self.center_pane_width(role, window, theme);
         // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
         // overflow_width` unconditionally reserves room for the chevron even
         // when no chevron will ever be shown, so the strip flipped into
@@ -11275,12 +11335,12 @@ impl SirioWorkspace {
     }
 
     fn keep_active_tab_visible(&mut self, window: &Window, theme: Theme) {
-        let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(window, theme);
+        let focused = self.center_split.focused();
+        let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(focused, window, theme);
         if visible_count == 0 || group_len == 0 {
             self.tab_strip_first_visible = 0;
             return;
         }
-        let focused = self.center_split.focused();
         let Some(active_tab) = self.tabs.get(self.active_tab) else {
             return;
         };
@@ -11301,6 +11361,33 @@ impl SirioWorkspace {
             visible_count,
             group_len,
         );
+    }
+
+    /// How wide one half of the center is.
+    ///
+    /// #320: the Secondary pane exists only while it holds tabs — it opens
+    /// with the first and auto-closes with the last — so a Primary-only
+    /// workspace gives the whole center to the Primary strip. The halves are
+    /// even for now; the draggable ratio is its own step, and putting a
+    /// placeholder constant here would be a second definition of a number
+    /// that will shortly have exactly one.
+    fn center_pane_width(&self, role: PaneRole, window: &Window, theme: Theme) -> f32 {
+        let center = self.tab_strip_available_width(window, theme);
+        if !self.secondary_pane_visible() {
+            return match role {
+                PaneRole::Primary => center,
+                PaneRole::Secondary => 0.0,
+            };
+        }
+        ((center - CENTER_DIVIDER_WIDTH) / 2.0).max(0.0)
+    }
+
+    /// Whether the Secondary half is drawn at all. Derived, never stored:
+    /// the pane is exactly as present as its tabs are.
+    fn secondary_pane_visible(&self) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.kind.pane_role() == PaneRole::Secondary)
     }
 
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
@@ -11418,21 +11505,32 @@ impl SirioWorkspace {
         deferred(menu)
     }
 
+    /// One pane's tab strip. #320: called once per half rather than once for
+    /// whichever half has focus, so both halves show their own tabs.
     fn render_open_tabs(
         &self,
+        role: PaneRole,
         theme: Theme,
         entity: Entity<Self>,
         window: &Window,
         cx: &App,
     ) -> impl IntoElement {
-        let focused = self.center_split.focused();
+        let pane_focused = self.center_split.focused() == role;
         let group_tabs = self
             .tabs
             .iter()
-            .filter(|tab| tab.kind.pane_role() == focused)
+            .filter(|tab| tab.kind.pane_role() == role)
             .collect::<Vec<_>>();
-        let (visible_count, has_overflow, _) = self.tab_strip_fit(window, theme);
-        let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let (visible_count, has_overflow, _) = self.tab_strip_fit(role, window, theme);
+        let active_tab_id = self.center_split.active(role);
+        // Only the focused strip scrolls. `keep_active_tab_visible` maintains
+        // this one offset against the focused half, and an unfocused strip
+        // showing its first tabs is honest — nothing has scrolled it.
+        let first_visible = if pane_focused {
+            self.tab_strip_first_visible
+        } else {
+            0
+        };
         let mut tabs = div()
             .absolute()
             .left_0()
@@ -11462,12 +11560,7 @@ impl SirioWorkspace {
         if has_overflow {
             tabs = tabs.pr(theme.spacing.titlebar_control_frame.width);
         }
-        for (index, tab) in group_tabs
-            .iter()
-            .enumerate()
-            .skip(self.tab_strip_first_visible)
-            .take(visible_count)
-        {
+        for tab in group_tabs.iter().skip(first_visible).take(visible_count) {
             let renaming = self
                 .tab_rename
                 .as_ref()
@@ -11485,7 +11578,12 @@ impl SirioWorkspace {
             tabs = tabs.child(Self::render_open_tab(
                 tab,
                 self.tab_agent_mark(tab),
-                index == self.active_tab,
+                // Active *within this half*. The old test was `index ==
+                // self.active_tab`, which compared a position in the filtered
+                // strip against an index into the whole tab list — right only
+                // while there was one strip starting at tab zero.
+                active_tab_id == Some(tab.id),
+                pane_focused,
                 self.tab_status(tab, cx),
                 Self::terminal_exit_label(tab, cx),
                 self.tab_is_dirty(tab, cx),
@@ -11552,7 +11650,7 @@ impl SirioWorkspace {
         let right_focus_visible =
             shell_chrome::focus_is_keyboard_visible(&self.right_panel_focus, window, cx);
 
-        let centre_surface = if self.has_current_worktree() {
+        let primary_surface = if self.has_current_worktree() {
             div()
                 .id("group-surfaces-wrapper")
                 .debug_selector(|| "group-surfaces-wrapper".into())
@@ -11566,7 +11664,7 @@ impl SirioWorkspace {
                 .flex_1()
                 .w_full()
                 .overflow_hidden()
-                .child(self.render_group_surfaces(*theme, entity.clone(), cx))
+                .child(self.render_group_surfaces(PaneRole::Primary, *theme, entity.clone(), cx))
                 .when_some(self.tabs.get(self.active_tab), |this, tab| {
                     this.when(tab_has_terminal(tab), |this| {
                         this.child(
@@ -11613,7 +11711,7 @@ impl SirioWorkspace {
                 .into_any_element()
         };
 
-        let centre_surface = div()
+        let primary_surface = div()
             .id("centre-surface")
             .debug_selector(|| "centre-surface".into())
             .relative()
@@ -11621,17 +11719,31 @@ impl SirioWorkspace {
             .min_h_0()
             .w_full()
             .overflow_hidden()
-            .child(centre_surface);
+            .child(primary_surface);
         #[cfg(test)]
-        let centre_surface = centre_surface
+        let primary_surface = primary_surface
             .when_some(shell_paint_probe("centre-surface", cx), |this, probe| {
                 this.child(probe)
             });
 
-        let center_column = div()
+        // #320: the context menu is drawn by the strip that owns the tab it
+        // was opened on, so it lands over the right half rather than always
+        // over the Primary one.
+        let menu_role = self
+            .tab_menu_tab
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .map(|tab| tab.kind.pane_role());
+
+        // #320: each pane is its own stack — strip on top, surface below —
+        // and the two sit side by side. The strip is *inside* the pane, so
+        // the seam between the strips is the divider itself and cannot drift
+        // out of alignment with it.
+        let primary_pane = div()
+            .id("pane-primary")
+            .debug_selector(|| "pane-primary".into())
             .flex()
             .flex_col()
-            .size_full()
+            .flex_1()
             .min_w_0()
             .min_h_0()
             .child(
@@ -11639,13 +11751,92 @@ impl SirioWorkspace {
                     .relative()
                     .h(px(TAB_BAR_HEIGHT))
                     .w_full()
+                    // The one `+`: it routes a new surface to its own half by
+                    // what the surface is, so a second copy in the Secondary
+                    // strip would be a button that sends you elsewhere.
                     .child(self.tab_bar.clone())
-                    .child(self.render_open_tabs(*theme, entity.clone(), window, cx))
-                    .when(self.tab_menu_open, |this| {
-                        this.child(self.render_tab_context_menu(*theme, entity.clone(), cx))
-                    }),
+                    .child(self.render_open_tabs(
+                        PaneRole::Primary,
+                        *theme,
+                        entity.clone(),
+                        window,
+                        cx,
+                    ))
+                    .when(
+                        self.tab_menu_open && menu_role == Some(PaneRole::Primary),
+                        |this| this.child(self.render_tab_context_menu(*theme, entity.clone(), cx)),
+                    ),
             )
-            .child(centre_surface);
+            .child(primary_surface);
+
+        let center_column = div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(primary_pane)
+            .when(self.secondary_pane_visible(), |this| {
+                this.child(
+                    div()
+                        .id("center-divider")
+                        .debug_selector(|| "center-divider".into())
+                        .w(px(CENTER_DIVIDER_WIDTH))
+                        .h_full()
+                        .flex_none()
+                        .bg(theme.border_strong),
+                )
+                .child(
+                    div()
+                        .id("pane-secondary")
+                        .debug_selector(|| "pane-secondary".into())
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(
+                            div()
+                                .relative()
+                                .h(px(TAB_BAR_HEIGHT))
+                                .w_full()
+                                .child(self.render_open_tabs(
+                                    PaneRole::Secondary,
+                                    *theme,
+                                    entity.clone(),
+                                    window,
+                                    cx,
+                                ))
+                                .child(self.render_secondary_pane_close(*theme, entity.clone()))
+                                .when(
+                                    self.tab_menu_open && menu_role == Some(PaneRole::Secondary),
+                                    |this| {
+                                        this.child(self.render_tab_context_menu(
+                                            *theme,
+                                            entity.clone(),
+                                            cx,
+                                        ))
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("secondary-surface")
+                                .debug_selector(|| "secondary-surface".into())
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .overflow_hidden()
+                                .child(self.render_group_surfaces(
+                                    PaneRole::Secondary,
+                                    *theme,
+                                    entity.clone(),
+                                    cx,
+                                )),
+                        ),
+                )
+            });
 
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             // Same expression `tab_strip_available_width` already uses at
