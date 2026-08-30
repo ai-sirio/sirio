@@ -840,11 +840,19 @@ impl Render for Titlebar {
                 .items_center()
                 .gap(px(6.0))
                 .child(
+                    // The dot beside the title used to be the COSMIC desktop
+                    // accent. On Linux that is the user's own choice, but the
+                    // other two platforms have no COSMIC to ask and fell back
+                    // to the transcribed cyan — a colour nobody picked,
+                    // marking nothing. It takes the titlebar's own foreground,
+                    // the same neutral the title text beside it already uses,
+                    // which also keeps this surface inside one palette instead
+                    // of mixing the COSMIC roles with the shell's.
                     div()
                         .w(px(6.0))
                         .h(px(6.0))
                         .rounded(px(3.0))
-                        .bg(cosmic.semantic.accent.base),
+                        .bg(bar.on),
                 )
                 .child(div().text_color(bar.on).text_size(px(13.5)).child(title))
                 .children(subtitle.map(|subtitle| {

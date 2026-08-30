@@ -142,26 +142,32 @@ fn expect_hex(actual: Rgba, hex: u32, label: &str) {
     assert_eq!(actual.a, 1.0, "{label}.a must be opaque");
 }
 
-/// The accent resolves to Sirio's coral in both appearances — `#E08B52` dark
-/// / `#AD581F` light — under both the modern and legacy token names the
-/// surfaces consume.
+/// The accent is still Sirio's coral — `#E08B52` dark / `#AD581F` light — and
+/// the active chrome is deliberately *not* it.
 ///
-/// The pair a surface reads through `accent` and the pair it reads through
-/// `tab_focus_accent` must not drift apart, which is the only thing this test
-/// is for; where the values themselves come from is
-/// `docs/linux-rewrite/THEME-PROVENANCE.md`, and the rules they satisfy are
-/// tested next to them in `sirio_theme`.
+/// `tab_focus_accent` used to be an alias of `accent`, and this test existed to
+/// stop the two drifting apart. They are now different on purpose: colour is
+/// spent on data and on attention, so focus and active chrome are spelled with
+/// contrast and resolve to the text neutral instead. The coral's own value
+/// stays pinned because the agent-colour picker still offers it. What this test
+/// guards is therefore the separation rather than the alias — it is what
+/// catches a coral creeping back into the shell.
+///
+/// Where the values come from is `docs/linux-rewrite/THEME-PROVENANCE.md`, and
+/// the rules they satisfy are tested next to them in `sirio_theme`.
 #[test]
-fn accent_resolves_to_the_same_coral_under_either_token_name() {
+fn the_accent_is_the_pickers_coral_and_no_longer_the_chrome() {
     let dark = Theme::dark();
     assert_eq!(dark.appearance, Appearance::Dark);
     expect_hex(dark.accent, 0xE0_8B_52, "dark accent");
-    expect_hex(dark.tab_focus_accent, 0xE0_8B_52, "dark tab_focus_accent");
+    expect_hex(dark.tab_focus_accent, 0xCB_CD_D4, "dark tab_focus_accent");
+    assert_ne!(dark.tab_focus_accent, dark.accent);
 
     let light = Theme::light();
     assert_eq!(light.appearance, Appearance::Light);
     expect_hex(light.accent, 0xAD_58_1F, "light accent");
-    expect_hex(light.tab_focus_accent, 0xAD_58_1F, "light tab_focus_accent");
+    expect_hex(light.tab_focus_accent, 0x31_3A_40, "light tab_focus_accent");
+    assert_ne!(light.tab_focus_accent, light.accent);
 }
 
 /// The type scale: waku's measured steps with a uniform +1px. Body
