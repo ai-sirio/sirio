@@ -2,12 +2,15 @@
 //! their status glyphs.
 
 use super::*;
+use crate::loading;
 
 impl RightPanel {
     pub(super) fn render_activity(
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if self.activity.is_empty() {
             // F-CHG-20: the empty activity view states the absence instead
@@ -32,6 +35,8 @@ impl RightPanel {
                     index,
                     entity.clone(),
                     theme,
+                    window,
+                    cx,
                 ));
             }
             list.into_any_element()
@@ -43,6 +48,8 @@ impl RightPanel {
         index: usize,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let status = super::status_color(surface.status, theme);
         let status_name = match surface.status {
@@ -102,7 +109,7 @@ impl RightPanel {
                     .debug_selector(move || status_id.clone())
                     .text_size(px(12.0))
                     .text_color(status)
-                    .child(activity_status_glyph(surface.status)),
+                    .child(activity_status_glyph(surface.status, window, cx)),
             )
             .child(
                 div()
@@ -120,13 +127,17 @@ impl RightPanel {
     }
 }
 
-fn activity_status_glyph(status: ActivityStatus) -> &'static str {
+fn activity_status_glyph(
+    status: ActivityStatus,
+    window: &mut Window,
+    cx: &mut Context<RightPanel>,
+) -> gpui::AnyElement {
     match status {
-        ActivityStatus::Idle => "○",
-        ActivityStatus::Running => "●",
-        ActivityStatus::NeedsInput => "?",
-        ActivityStatus::Done => "✓",
-        ActivityStatus::Error => "!",
+        ActivityStatus::Running => loading::compact("activity-running-spinner", window, cx),
+        ActivityStatus::Idle => div().child("○").into_any_element(),
+        ActivityStatus::NeedsInput => div().child("?").into_any_element(),
+        ActivityStatus::Done => div().child("✓").into_any_element(),
+        ActivityStatus::Error => div().child("!").into_any_element(),
     }
 }
 
@@ -221,10 +232,9 @@ mod tests {
             cx.debug_bounds("activity-status-needs-input-0").is_some(),
             "NeedsInput reaches a dedicated status marker in the drawn panel"
         );
-        assert_ne!(
-            activity_status_glyph(ActivityStatus::NeedsInput),
-            activity_status_glyph(ActivityStatus::Idle),
-            "NeedsInput is not rendered with Idle's glyph"
+        assert!(
+            cx.debug_bounds("activity-status-idle-1").is_some(),
+            "Idle reaches its own status marker instead of sharing NeedsInput's slot"
         );
     }
 }

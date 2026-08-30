@@ -17,6 +17,7 @@ use sirio_usage::{
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 pub(crate) const HEIGHT: f32 = 40.0;
@@ -349,11 +350,15 @@ impl StatusBar {
 }
 
 impl Render for StatusBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();
         let refresh_entity = cx.entity();
+        let refreshing = matches!(&self.claude, ProviderUsageState::Loading)
+            || matches!(&self.codex, ProviderUsageState::Loading)
+            || matches!(&self.opencode_go, ProviderUsageState::Loading)
+            || matches!(&self.ollama_cloud, ProviderUsageState::Loading);
 
         let icon_button = |id: &'static str, icon: Icon| {
             div()
@@ -434,6 +439,28 @@ impl Render for StatusBar {
 
         // The segments follow the settings surface's "Show in usage bar"
         // toggles (F-SET-10): a provider hidden there does not render here.
+        let refresh_button = div()
+            .id("status-refresh")
+            .w(px(22.0))
+            .h(px(22.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.footnote)
+            .text_color(theme.title)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, _, cx| {
+                refresh_entity.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
+            })
+            .child(if refreshing {
+                loading::compact("status-refresh-spinner", window, cx)
+            } else {
+                IconElement::new(Icon::RefreshCw, IconSize::Medium)
+                    .text_color(theme.title)
+                    .into_any_element()
+            });
+
         let mut left = div()
             .flex()
             .items_center()
@@ -445,13 +472,7 @@ impl Render for StatusBar {
                     }
                 }),
             )
-            .child(
-                // F-USE-01: `on_refresh` had a real field and builder but
-                // no control in the render tree ever invoked it.
-                icon_button("status-refresh", Icon::RefreshCw).on_click(move |_, _, cx| {
-                    refresh_entity.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
-                }),
-            );
+            .child(refresh_button);
         if self.prefs.claude_visible {
             left = left.child(provider_segment(
                 "Claude",

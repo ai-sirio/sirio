@@ -26,6 +26,7 @@ use sirio_project::{TabKind, display_absolute_path, display_path};
 use sirio_theme::{AgentBrandColor, Theme};
 
 use crate::caret;
+use crate::loading;
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconPicker, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
@@ -3461,6 +3462,8 @@ impl Sidebar {
         entity: gpui::Entity<Self>,
         theme: Theme,
         panel_width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let row_id = row.id;
         let selected = row.selected;
@@ -3678,18 +3681,14 @@ impl Sidebar {
                         // running worktree can never be mistaken for a
                         // finished one at a glance, and a different tint per
                         // agent, so the one glyph carries both facts.
-                        RowStatusGlyph::Running(color) => {
-                            div()
-                                .id(("sidebar-status-running", row_id))
-                                .debug_selector(move || format!("sidebar-status-running-{row_id}"))
-                                .flex()
-                                .items_center()
-                                .gap(px(1.5))
-                                .children((0..3).map(|_| {
-                                    div().w(px(3.0)).h(px(3.0)).rounded(px(1.5)).bg(color)
-                                }))
-                                .into_any_element()
-                        }
+                        RowStatusGlyph::Running(_color) => div()
+                            .id(("sidebar-status-running", row_id))
+                            .debug_selector(move || format!("sidebar-status-running-{row_id}"))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(loading::compact("sidebar-running-spinner", window, cx))
+                            .into_any_element(),
                         RowStatusGlyph::Dot(color) => div()
                             .id(("sidebar-status-dot", row_id))
                             .debug_selector(move || format!("sidebar-status-dot-{row_id}"))
@@ -4011,6 +4010,28 @@ impl Render for Sidebar {
         let project_form = self.project_form.clone();
         let reorder_drop_entity = entity.clone();
         let panel_width = self.panel_width;
+        let rendered_rows = rows
+            .into_iter()
+            .map(|row| {
+                let project_id = project_ids.get(&row.id).cloned();
+                let project_icon = project_id
+                    .as_ref()
+                    .and_then(|id| project_identities.get(id).cloned());
+                let drag = row_drags.get(&row.id).copied();
+                Self::render_row(
+                    row,
+                    project_id,
+                    project_icon,
+                    drag,
+                    entity.clone(),
+                    theme,
+                    panel_width,
+                    window,
+                    cx,
+                )
+                .into_any_element()
+            })
+            .collect::<Vec<_>>();
         div()
             .relative()
             .flex()
@@ -4120,25 +4141,7 @@ impl Render for Sidebar {
                     .on_drop::<RowDrag>(move |_, _, cx| {
                         reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
                     })
-                    .children(rows.into_iter().map({
-                        let entity = entity.clone();
-                        move |row| {
-                            let project_id = project_ids.get(&row.id).cloned();
-                            let project_icon = project_id
-                                .as_ref()
-                                .and_then(|id| project_identities.get(id).cloned());
-                            let drag = row_drags.get(&row.id).copied();
-                            Self::render_row(
-                                row,
-                                project_id,
-                                project_icon,
-                                drag,
-                                entity.clone(),
-                                theme,
-                                panel_width,
-                            )
-                        }
-                    })),
+                    .children(rendered_rows),
             )
             .when(notice.is_some(), |this| {
                 this.child(
