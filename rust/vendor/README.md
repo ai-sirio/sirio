@@ -65,6 +65,30 @@ field-for-field.
   without a leading `/` match at any depth) — never commit it; it runs to several GB.
 - `LICENSE-APACHE` is copied alongside the crate, matching upstream's own per-crate licensing.
 
+## Keeping the standalone lock honest
+
+`vendor/gpui_linux/Cargo.lock` only proves something if it describes the same dependency graph
+`rust/Cargo.lock` actually ships. For every package the two locks share, their versions must
+agree — otherwise `Scripts/ci-linux.sh`'s vendored-crate stage is testing a graph that exists
+nowhere else. `bezel-gpui`, `bezel-gpui-wgpu`, and `bezel-gpui-linux` are the exception: those
+three are pinned exactly to `0.3.6` on purpose, everything else the family pulls in (its
+`bezel-zed-*` build-dep chain) resolves to whatever later patch release satisfies the caret range,
+`0.3.7` as of this writing — that's ordinary semver composition of a published family, not drift.
+
+To re-sync after `rust/Cargo.lock` moves: `cargo update --manifest-path
+vendor/gpui_linux/Cargo.toml -p <package> --precise <version>` per drifted package, matching
+whatever `rust/Cargo.lock` resolved it to. Never hand-edit either lockfile.
+
+**Trap:** don't "fix" this by pinning those `bezel-zed-*` dependencies to an exact `=0.3.6` in
+`vendor/gpui_linux/Cargo.toml`. Cargo unifies each package to one version graph-wide, and the
+build-dep chain above already forces those packages to `0.3.7+`; an exact `=0.3.6` requirement
+inside the `[patch.crates-io]` candidate then makes that candidate infeasible, and cargo falls
+back to the unpatched registry crate — *silently*, with only a warning, not a build failure. The
+symptom is `patch ... was not used in the crate graph` and a registry-sourced `bezel-gpui-linux` in
+`rust/Cargo.lock` instead of the path-sourced one. After touching those dependency lines, always
+run `cargo tree --target x86_64-unknown-linux-gnu -i bezel-gpui-linux` and confirm it resolves to
+the path source with no such warning.
+
 ## Maintenance cost — read before bumping the pinned `bezel-gpui-linux` version
 
 This is a real, standing fork of one crate, not a one-line patch. Bumping
