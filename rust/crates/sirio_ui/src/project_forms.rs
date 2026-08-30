@@ -11,6 +11,7 @@ use gpui::{
 use sirio_git::{GitRemote, clone_repository};
 
 use crate::caret;
+use crate::loading;
 use sirio_project::create_project;
 use sirio_theme::Theme;
 
@@ -660,6 +661,7 @@ impl Render for CreateForm {
         let destination = self.destination().display().to_string();
         let (status_line, status_color) = create_status_line(&self.state, &theme);
         let can_submit = self.state.can_submit();
+        let creating = matches!(self.state.status(), CreateStatus::Running);
         let button_label = if self.state.error().is_some() {
             "Retry creation"
         } else {
@@ -773,6 +775,23 @@ impl Render for CreateForm {
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
             )
+            .when(creating, |this| {
+                this.child(
+                    div()
+                        .id("create-loading")
+                        .debug_selector(|| "create-loading".to_owned())
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(loading::indeterminate(
+                            "create-loading-orb",
+                            loading::GENERIC_ORB,
+                            &theme,
+                            window,
+                            cx,
+                        )),
+                )
+            })
             .child(
                 div()
                     .id("create-status")

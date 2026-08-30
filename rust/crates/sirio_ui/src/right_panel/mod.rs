@@ -583,7 +583,7 @@ impl EventEmitter<RightPanelEvent> for RightPanel {}
 impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 
 impl Render for RightPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         // #189: incremented here and nowhere else -- being *in* a drawn
         // frame is the whole signal.
@@ -617,7 +617,7 @@ impl Render for RightPanel {
             } else {
                 match PanelView::get(cx) {
                     PanelView::Files => self
-                        .render_files(entity.clone(), theme, cx)
+                        .render_files(entity.clone(), theme, window, cx)
                         .into_any_element(),
                     PanelView::Activity => self
                         .render_activity(entity.clone(), theme)

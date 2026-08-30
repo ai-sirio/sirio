@@ -54,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::controls;
+use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// Context lines fetched for each change. Generous enough that the
@@ -1898,6 +1899,8 @@ impl ChangesTab {
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
@@ -1905,14 +1908,31 @@ impl ChangesTab {
         if self.git_task.is_some() && self.entries.is_empty() {
             return div()
                 .id("changes-loading")
+                .debug_selector(|| "changes-loading".into())
                 .flex_1()
                 .min_h(px(0.0))
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
                 .text_color(theme.subtitle)
+                .child(loading::indeterminate(
+                    "changes-loading-orb",
+                    loading::GENERIC_ORB,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .child("Loading changes…")
+                .child(loading::skeleton_rows(
+                    "changes-skeleton",
+                    loading::SKELETON_ROWS,
+                    &theme,
+                    window,
+                    cx,
+                ))
                 .into_any_element();
         }
         let sections = self.section_rows(mode);
@@ -2040,7 +2060,7 @@ impl Render for ChangesTab {
             .flex_col()
             .bg(theme.background)
             .child(self.render_toolbar(entity.clone(), theme, mode))
-            .child(self.render_body(entity, theme, mode))
+            .child(self.render_body(entity, theme, mode, _window, cx))
     }
 }
 
@@ -2814,6 +2834,67 @@ mod tests {
                 .iter()
                 .all(|section| section.section != ChangeSection::Untracked),
             "an empty Untracked bucket must not render a section"
+        );
+    }
+
+    /// The first snapshot has no stale entries to preserve, so it gets the
+    /// full-surface loading treatment while the background git task is in
+    /// flight.
+    #[gpui::test]
+    async fn a_first_load_shows_the_generic_loader_over_an_empty_list(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| {
+                tab.git_task.is_some() && tab.entries.is_empty()
+            }),
+            "the assertion must cover the empty first-load state, before git has published a snapshot"
+        );
+        tab.update(&mut cx.cx, |tab, cx| {
+            // Hold the task open so the test cannot race a fast git snapshot.
+            tab.git_task = Some(cx.spawn(async move |_this, _cx| {
+                std::future::pending::<()>().await;
+            }));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("changes-loading").is_some(),
+            "an empty first load draws the loading surface"
+        );
+    }
+
+    /// A refresh after a snapshot has landed keeps the last known rows on
+    /// screen. The compact refresh indicator belongs inside that stale list;
+    /// the full-surface first-load state must not flash over it.
+    #[gpui::test]
+    async fn a_refresh_keeps_the_settled_list_visible(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| {
+            tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
+        });
+        cx.cx.run_until_parked();
+
+        tab.update(&mut cx.cx, |tab, cx| tab.refresh(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-list").is_some(),
+            "a refresh preserves the stale changes list"
+        );
+        assert!(
+            cx.debug_bounds("changes-loading").is_none(),
+            "a refresh with stale entries does not replace the list with a full-surface loader"
         );
     }
 
