@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sirio_persistence::{
-    AgentRef, AppDatabase, AppSettings, AppearanceMode, CURRENT_SCHEMA_VERSION, ChatEntry,
+    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CURRENT_SCHEMA_VERSION, ChatEntry,
     ChatPermissionOption, ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn,
     FileIconTheme, MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord, migrate_up_to,
@@ -504,6 +504,30 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
 
     assert_eq!(db.settings().expect("load settings"), settings);
     assert_eq!(db.sidebar_state().expect("load sidebar state"), state);
+}
+
+#[test]
+fn base_colour_survives_a_relaunch() {
+    let dir = TempDir::new();
+    let path = dir.db_path("base-colour");
+
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        let mut settings = db.settings().expect("load defaults");
+        assert_eq!(
+            settings.base_color,
+            BaseColor::Neutral,
+            "an install that never wrote the key reads as neutral"
+        );
+        settings.base_color = BaseColor::Slate;
+        db.save_settings(&settings).expect("save settings");
+    }
+    // Drop closes the connection; reopen simulates a relaunch.
+    let db = AppDatabase::open(&path).expect("reopen");
+    assert_eq!(
+        db.settings().expect("load settings").base_color,
+        BaseColor::Slate
+    );
 }
 
 #[test]
