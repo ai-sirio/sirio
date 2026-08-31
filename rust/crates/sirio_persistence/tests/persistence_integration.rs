@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, CURRENT_SCHEMA_VERSION, ChatEntry,
     ChatPermissionOption, ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn,
-    FileIconTheme, MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord,
+    MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord, migrate_up_to,
 };
 
@@ -437,7 +437,6 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
         appearance: AppearanceMode::Dark,
         ui_font_size: 16,
         terminal_font_size: 14,
-        file_icon_theme: FileIconTheme::Material,
         control_socket_enabled: false,
         ..AppSettings::default()
     };
@@ -1202,7 +1201,6 @@ fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
             appearance: AppearanceMode::Light,
             ui_font_size: 99,      // above the 10...20 Swift range
             terminal_font_size: 1, // below the 9...24 Swift range
-            file_icon_theme: FileIconTheme::SfSymbols,
             control_socket_enabled: true,
             ..AppSettings::default()
         })
@@ -1213,7 +1211,7 @@ fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw");
         conn.execute(
-            "UPDATE setting SET value = 'banana' WHERE key = 'appearance.fileIconTheme'",
+            "UPDATE setting SET value = 'banana' WHERE key = 'appearance.baseColor'",
             [],
         )
         .expect("corrupt a key");
@@ -1230,8 +1228,8 @@ fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
         "clamped to the Swift lower bound"
     );
     assert_eq!(
-        settings.file_icon_theme,
-        FileIconTheme::SfSymbols,
+        settings.base_color,
+        BaseColor::Neutral,
         "unparseable value falls back to the default"
     );
     assert_eq!(

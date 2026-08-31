@@ -56,13 +56,6 @@ fn base_color_segment(base: sirio_theme::BaseColor) -> usize {
         .position(|candidate| *candidate == base)
         .unwrap_or(0)
 }
-/// The file-icon sets this platform can actually render, in display order
-/// (see [`file_icon_choices`]). On macOS both SF Symbols and the embedded
-/// Material set exist; everywhere else only the embedded set does.
-#[cfg(target_os = "macos")]
-const SEGMENTED_FILE_ICONS: &[&str] = &["SF Symbols", "Material"];
-#[cfg(not(target_os = "macos"))]
-const SEGMENTED_FILE_ICONS: &[&str] = &["Material"];
 
 fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl IntoElement {
     div()
@@ -150,69 +143,6 @@ impl SettingsCategory {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileIconChoice {
-    SfSymbols,
-    Material,
-}
-
-impl FileIconChoice {
-    /// The user-visible name, matching the Swift settings surface.
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::SfSymbols => "SF Symbols",
-            Self::Material => "Material",
-        }
-    }
-
-    /// Whether this icon set actually exists on the running platform. SF
-    /// Symbols is Apple's system icon API — there is no such font and no
-    /// such API on Linux — so it must never be offered where it cannot
-    /// render (P19: a settings screen that lists a set the program cannot
-    /// use states something untrue about the running program).
-    pub fn available_on_this_platform(self) -> bool {
-        match self {
-            Self::SfSymbols => cfg!(target_os = "macos"),
-            Self::Material => true,
-        }
-    }
-}
-
-/// The file-icon sets this platform can actually render, in display order.
-/// The settings surface derives its segmented control from this list — the
-/// platform answers, exactly as the font token resolves through its own
-/// candidate list.
-pub fn file_icon_choices() -> &'static [FileIconChoice] {
-    #[cfg(target_os = "macos")]
-    {
-        &[FileIconChoice::SfSymbols, FileIconChoice::Material]
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        &[FileIconChoice::Material]
-    }
-}
-
-/// Clamps a choice to what this platform can actually render. A persisted
-/// value written on another platform (the Swift-parity database defaults to
-/// sfSymbols) must not be displayed as if it were a real option here.
-pub fn clamp_file_icons(choice: FileIconChoice) -> FileIconChoice {
-    if choice.available_on_this_platform() {
-        choice
-    } else {
-        file_icon_choices()[0]
-    }
-}
-
-/// The segment index of a choice inside the platform's list. A choice that
-/// does not exist here (a clamped value should prevent that) lands on the
-/// first segment rather than producing an out-of-range index.
-fn file_icons_segment(choice: FileIconChoice) -> usize {
-    file_icon_choices()
-        .iter()
-        .position(|candidate| *candidate == choice)
-        .unwrap_or(0)
-}
 
 /// The agent used to summarize sessions into short tab titles
 /// (F-SET-05's summarizer picker). The choice is one of the five supported
@@ -352,7 +282,6 @@ pub struct SettingsSnapshot {
     pub terminal_font_size: i32,
     /// The bezel base colour the greys are tinted with (Appearance → Theme).
     pub base_color: sirio_theme::BaseColor,
-    pub file_icons: FileIconChoice,
     pub control_socket_enabled: bool,
     /// The control socket's resolved path, routed from the host. This is
     /// runtime state (the path the live socket listens on), not a persisted
@@ -401,7 +330,6 @@ impl Default for SettingsSnapshot {
             interface_font_size: 13,
             terminal_font_size: 13,
             base_color: sirio_theme::BaseColor::Neutral,
-            file_icons: FileIconChoice::SfSymbols,
             control_socket_enabled: true,
             socket_path: String::new(),
             resume_agent_sessions: true,
@@ -943,7 +871,6 @@ pub struct Settings {
     interface_font_size: i32,
     terminal_font_size: i32,
     base_color: sirio_theme::BaseColor,
-    file_icons: FileIconChoice,
     claude_show_in_bar: bool,
     codex_show_in_bar: bool,
     opencode_show_in_bar: bool,
@@ -1202,7 +1129,6 @@ impl Settings {
             // is the Swift-parity sfSymbols) is clamped to the first set
             // that exists here, so the surface never shows a choice it
             // cannot render.
-            file_icons: clamp_file_icons(initial.file_icons),
             control_socket_enabled: initial.control_socket_enabled,
             // The Agents screen reports what discovery finds on this
             // machine — never a fixed list of "Available" claims.
@@ -1649,7 +1575,6 @@ impl Settings {
             interface_font_size: self.interface_font_size,
             terminal_font_size: self.terminal_font_size,
             base_color: self.base_color,
-            file_icons: self.file_icons,
             control_socket_enabled: self.control_socket_enabled,
             socket_path: self.socket_path.clone(),
             resume_agent_sessions: self.resume_agent_sessions,
@@ -1749,17 +1674,6 @@ impl Settings {
         self.terminal_font_size = value.clamp(9, 24);
         self.changed();
         cx.notify();
-    }
-
-    fn set_file_icons(&mut self, index: usize, cx: &mut Context<Self>) {
-        // The index is an index into the platform's actual list — never a
-        // hardcoded position in a constant that can mention sets this
-        // machine cannot render.
-        if let Some(choice) = file_icon_choices().get(index) {
-            self.file_icons = *choice;
-            self.changed();
-            cx.notify();
-        }
     }
 
     fn set_control_socket_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -2554,17 +2468,6 @@ impl Settings {
                 controls::row("Font size", None, terminal_stepper, theme),
             ));
 
-        let file_entity = entity.clone();
-        let file_icons = controls::segmented(
-            "file-icons",
-            SEGMENTED_FILE_ICONS,
-            file_icons_segment(self.file_icons),
-            theme,
-            move |index, cx| file_entity.update(cx, |this, cx| this.set_file_icons(index, cx)),
-        );
-        let files_card =
-            controls::card(theme).child(controls::row("File icons", None, file_icons, theme));
-
         div()
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
@@ -2572,7 +2475,6 @@ impl Settings {
             .child(settings_section("Theme", theme_card, theme))
             .child(settings_section("Interface", interface_card, theme))
             .child(settings_section("Terminal", terminal_card, theme))
-            .child(settings_section("Files", files_card, theme))
     }
 
     fn render_provider_card(
@@ -4738,7 +4640,6 @@ mod tests {
         assert_eq!(snapshot.theme, ThemeMode::System);
         assert_eq!(snapshot.interface_font_size, 13);
         assert_eq!(snapshot.terminal_font_size, 13);
-        assert_eq!(snapshot.file_icons, FileIconChoice::SfSymbols);
         assert!(snapshot.control_socket_enabled);
         assert!(
             snapshot.socket_path.is_empty(),
@@ -4780,64 +4681,6 @@ mod tests {
         );
         assert_eq!(SummarizerChoice::Claude.title(), "Claude Code");
         assert_eq!(SummarizerChoice::OhMyPi.id(), "omp");
-    }
-
-    #[test]
-    fn file_icon_choices_are_platform_derived() {
-        // The settings surface must only offer sets that actually exist on
-        // this machine. SF Symbols is Apple's system icon API — it cannot
-        // exist on Linux — so the list here must never mention it.
-        assert_eq!(
-            FileIconChoice::SfSymbols.available_on_this_platform(),
-            cfg!(target_os = "macos"),
-            "SF Symbols is selectable exactly where it exists"
-        );
-        assert!(FileIconChoice::Material.available_on_this_platform());
-        assert!(
-            file_icon_choices()
-                .iter()
-                .all(|choice| choice.available_on_this_platform()),
-            "every listed set must be renderable on this platform"
-        );
-
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            file_icon_choices(),
-            &[FileIconChoice::SfSymbols, FileIconChoice::Material]
-        );
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(file_icon_choices(), &[FileIconChoice::Material]);
-            assert_eq!(
-                SEGMENTED_FILE_ICONS,
-                &["Material"],
-                "the segmented control lists exactly the platform's sets"
-            );
-        }
-    }
-
-    #[test]
-    fn persisted_sf_symbols_choice_clamps_to_what_exists_here() {
-        // The persistence contract defaults to sfSymbols (Swift parity), but
-        // a choice for a platform that cannot render it must not surface as
-        // if it were real. The clamp is idempotent and selection always
-        // lands on the platform's list.
-        assert_eq!(
-            clamp_file_icons(FileIconChoice::SfSymbols),
-            file_icon_choices()[0]
-        );
-        assert_eq!(
-            clamp_file_icons(file_icon_choices()[0]),
-            file_icon_choices()[0],
-            "clamping a real choice is a no-op"
-        );
-        assert_eq!(file_icons_segment(file_icon_choices()[0]), 0);
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            file_icons_segment(FileIconChoice::SfSymbols),
-            0,
-            "a choice that cannot exist here still selects the first real segment"
-        );
     }
 
     #[test]
@@ -7109,40 +6952,6 @@ mod tests {
         assert!(
             cx.debug_bounds("settings-browser-grants-empty").is_some(),
             "revoking all origins leaves an explicit empty state"
-        );
-    }
-
-    #[gpui::test]
-    async fn selecting_the_listed_file_icon_set_changes_the_snapshot(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        // Whatever the settings screen lists must be selectable and must
-        // actually take effect: clicking the File icons segment updates the
-        // snapshot with the platform's set.
-        cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let segment = cx
-            .debug_bounds("file-icons-0")
-            .expect("the File icons segment is rendered");
-        cx.simulate_click(segment.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let snapshot = cx.update(|window, cx| {
-            window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx)
-                .snapshot()
-        });
-        assert_eq!(snapshot.file_icons, file_icon_choices()[0]);
-        assert!(
-            snapshot.file_icons.available_on_this_platform(),
-            "the snapshot must never carry a set the platform cannot render"
         );
     }
 
