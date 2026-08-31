@@ -253,12 +253,9 @@ impl SummarizerChoice {
     }
 }
 
-/// A per-agent accent colour choice (F-SET-22). A small fixed palette,
-/// not a full colour picker: every variant resolves to a [`Theme`] token
-/// that already carries meaning elsewhere in the app (a status colour, a
-/// rail accent, …), so offering it here stays honest to "colours from
-/// `Theme`, never a literal" instead of inventing eight new hex values
-/// nobody else uses.
+/// A project-icon tint palette (F-PRJ-15). This palette remains available to
+/// `project_identity`; it is unrelated to the removed per-agent settings
+/// override.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentAccentColor {
     Coral,
@@ -272,7 +269,7 @@ pub enum AgentAccentColor {
 }
 
 impl AgentAccentColor {
-    /// The choices offered by the picker, in display order.
+    /// The choices offered by the project-icon tint picker, in display order.
     pub const ALL: [Self; 8] = [
         Self::Coral,
         Self::Amber,
@@ -284,8 +281,8 @@ impl AgentAccentColor {
         Self::Slate,
     ];
 
-    /// The stable id, used as the persisted value and as the picker's
-    /// per-swatch element id.
+    /// The stable id, used as the persisted project-icon tint value and as
+    /// the picker's per-swatch element id.
     pub fn id(self) -> &'static str {
         match self {
             Self::Coral => "coral",
@@ -299,7 +296,7 @@ impl AgentAccentColor {
         }
     }
 
-    /// The `Theme` token this choice draws with.
+    /// The `Theme` token this project-icon tint draws with.
     pub fn resolve(self, theme: Theme) -> Rgba {
         match self {
             Self::Coral => theme.brand_coral,
@@ -313,9 +310,8 @@ impl AgentAccentColor {
         }
     }
 
-    /// Parses a persisted id; anything unknown falls back to `Coral`,
-    /// exactly like the other persisted settings fall back to their
-    /// defaults on an unparseable value.
+    /// Parses a persisted project-icon tint id; anything unknown falls back
+    /// to `Coral`.
     pub fn parse(value: &str) -> Self {
         Self::ALL
             .into_iter()
@@ -379,9 +375,6 @@ pub struct SettingsSnapshot {
     /// here — secrets live in [`CredentialStore`], never the settings
     /// database.
     pub opencode_workspace_id_override: String,
-    /// Per-agent accent colour choice, in `SummarizerChoice::ALL` order —
-    /// Claude Code, Codex, OpenCode, Pi, Oh-My-Pi (F-SET-22).
-    pub agent_colors: [AgentAccentColor; 5],
     /// The Appearance screen's Translucency toggle (F-SET-20).
     pub translucency: bool,
 }
@@ -408,18 +401,6 @@ impl Default for SettingsSnapshot {
             ollama_show_in_bar: false,
             refresh_interval: 5,
             opencode_workspace_id_override: String::new(),
-            // Preserves four of the five defaults the surface drew before
-            // the picker existed (Claude amber, Codex coral, Pi green,
-            // Oh-My-Pi purple); OpenCode moves off the amber it happened to
-            // share with Claude onto blue, since a picker existing implies
-            // each row should read as distinct by default.
-            agent_colors: [
-                AgentAccentColor::Amber,
-                AgentAccentColor::Coral,
-                AgentAccentColor::Blue,
-                AgentAccentColor::Green,
-                AgentAccentColor::Purple,
-            ],
             translucency: false,
         }
     }
@@ -1120,9 +1101,6 @@ pub struct Settings {
     /// visibility is stashed here each render for the field builders.
     field_blink: caret::Blink,
     field_caret_visible: bool,
-    /// Per-agent accent colour choice (F-SET-22), in `SummarizerChoice::ALL`
-    /// order. Part of the persistence contract — see [`SettingsSnapshot::agent_colors`].
-    agent_colors: [AgentAccentColor; 5],
     /// Where the account-identity cache lives (F-PERSIST-DB-06) — the same
     /// database file `chat.rs`'s transcript persistence opens on demand.
     /// `None` in every UI-only/test construction; the host wires this once
@@ -1264,7 +1242,6 @@ impl Settings {
             agent_search_focus: cx.focus_handle(),
             field_blink: caret::Blink::new(),
             field_caret_visible: false,
-            agent_colors: initial.agent_colors,
             database_path: None,
             claude_accounts: Vec::new(),
             codex_accounts: Vec::new(),
@@ -1669,7 +1646,6 @@ impl Settings {
             ollama_show_in_bar: self.ollama_show_in_bar,
             refresh_interval: self.refresh_interval,
             opencode_workspace_id_override: self.opencode_workspace_id_override.clone(),
-            agent_colors: self.agent_colors,
             translucency: self.translucency,
         }
     }
@@ -1749,23 +1725,6 @@ impl Settings {
         // machine cannot render.
         if let Some(choice) = file_icon_choices().get(index) {
             self.file_icons = *choice;
-            self.changed();
-            cx.notify();
-        }
-    }
-
-    /// Sets one agent's accent colour (F-SET-22). `agent_index` follows
-    /// `SummarizerChoice::ALL` order, the same order the Agent Colors rows
-    /// render in; out-of-range indices are ignored rather than panicking,
-    /// since the index comes from an enumerated render loop, not user input.
-    fn set_agent_color(
-        &mut self,
-        agent_index: usize,
-        color: AgentAccentColor,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(slot) = self.agent_colors.get_mut(agent_index) {
-            *slot = color;
             self.changed();
             cx.notify();
         }
@@ -2557,8 +2516,6 @@ impl Settings {
         let files_card =
             controls::card(theme).child(controls::row("File icons", None, file_icons, theme));
 
-        let agent_card = self.render_agent_colors(theme, entity.clone());
-
         div()
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
@@ -2567,80 +2524,6 @@ impl Settings {
             .child(settings_section("Interface", interface_card, theme))
             .child(settings_section("Terminal", terminal_card, theme))
             .child(settings_section("Files", files_card, theme))
-            .child(settings_section("Agent Colors", agent_card, theme))
-    }
-
-    fn render_agent_colors(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
-        let agents: [(&str, Icon); 5] = [
-            ("Claude Code", Icon::ClaudeCode),
-            ("Codex", Icon::Codex),
-            ("OpenCode", Icon::OpenCode),
-            ("Pi", Icon::Pi),
-            ("Oh-My-Pi", Icon::OhMyPi),
-        ];
-        // The mark wears its published brand colour, not the picked accent:
-        // Claude's orange, omp's own gradient, and the monochrome trio in
-        // the foreground exactly as those projects present them. Which
-        // accent is selected stays visible in the picker itself, whose
-        // swatch ring is the single source of that truth.
-        let palette: Vec<(&'static str, Rgba)> = AgentAccentColor::ALL
-            .iter()
-            .map(|choice| (choice.id(), choice.resolve(theme)))
-            .collect();
-        let mut card = controls::card(theme);
-        for (index, (name, mark)) in agents.into_iter().enumerate() {
-            if index > 0 {
-                card = card.child(controls::separator(theme));
-            }
-            let selected = self.agent_colors[index];
-            let mut mark_element = IconElement::new(mark, IconSize::XSmall);
-            if let Some(tint) = mark.agent_mark_color(theme.text) {
-                mark_element = mark_element.text_color(tint);
-            }
-            let label = div()
-                .flex()
-                .items_center()
-                .gap(px(9.0))
-                .text_size(theme.typography.headline)
-                .text_color(theme.text)
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(mark_element),
-                )
-                .child(text!(id = ("settings-agent-color-name", index), name));
-            let picker_id: &'static str = match index {
-                0 => "agent-color-claude",
-                1 => "agent-color-codex",
-                2 => "agent-color-opencode",
-                3 => "agent-color-pi",
-                _ => "agent-color-omp",
-            };
-            let picker_entity = entity.clone();
-            let picker =
-                controls::color_picker(picker_id, &palette, selected.id(), theme, move |id, cx| {
-                    picker_entity.update(cx, |this, cx| {
-                        this.set_agent_color(index, AgentAccentColor::parse(id), cx);
-                    });
-                });
-            card = card.child(
-                div()
-                    .id(("settings-agent-color-row", index))
-                    .min_h(px(44.0))
-                    .w_full()
-                    .px(px(10.0))
-                    .py(px(7.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(label)
-                    .child(picker),
-            );
-        }
-        card
     }
 
     fn render_provider_card(
@@ -7902,67 +7785,6 @@ mod tests {
                 .interface_font_size),
             14,
             "the + half of the stepper raises the interface font size"
-        );
-    }
-
-    /// F-SET-22: clicking a swatch on an Agent Colors row selects that
-    /// colour for that agent and flows into the persistence contract — the
-    /// control that used to draw a display-only pill with no `on_click`
-    /// now reaches `on_change` through a real click, and only the clicked
-    /// row's choice moves.
-    #[gpui::test]
-    async fn agent_color_click_selects_a_new_accent_and_persists(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let changes = Rc::new(RefCell::new(Vec::<SettingsSnapshot>::new()));
-        let recorder = changes.clone();
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default())
-                .on_change(move |snapshot| recorder.borrow_mut().push(snapshot))
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let settings =
-            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
-
-        let appearance = cx
-            .debug_bounds("settings-category-Appearance")
-            .expect("Appearance is offered as a category");
-        cx.simulate_click(appearance.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            settings.read_with(&cx.cx, |settings, _| settings.snapshot().agent_colors[1]),
-            AgentAccentColor::Coral,
-            "Codex starts on its default colour"
-        );
-
-        // Codex is row 1; pick Purple, a colour that is not its default.
-        let purple = cx
-            .debug_bounds("agent-color-codex-purple")
-            .expect("the Codex row's Purple swatch is drawn");
-        cx.simulate_click(purple.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let snapshot = settings.read_with(&cx.cx, |settings, _| settings.snapshot());
-        assert_eq!(
-            snapshot.agent_colors[1],
-            AgentAccentColor::Purple,
-            "clicking the Purple swatch selects Purple for Codex"
-        );
-        assert_eq!(
-            snapshot.agent_colors[0],
-            AgentAccentColor::Amber,
-            "Claude Code's colour is untouched by Codex's row"
-        );
-        assert_eq!(
-            changes
-                .borrow()
-                .last()
-                .expect("on_change fired")
-                .agent_colors[1],
-            AgentAccentColor::Purple,
-            "the click reaches the host's persistence callback"
         );
     }
 

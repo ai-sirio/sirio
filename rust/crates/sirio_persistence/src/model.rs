@@ -391,6 +391,43 @@ impl FileIconTheme {
     }
 }
 
+/// The bezel base colour the palette's greys are tinted with. The serde
+/// half of `sirio_theme::BaseColor`, kept here for the same reason
+/// `AppearanceMode` is: this crate carries the storage contract and must not
+/// depend on the theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BaseColor {
+    #[default]
+    Neutral,
+    Stone,
+    Zinc,
+    Gray,
+    Slate,
+}
+
+impl BaseColor {
+    pub fn raw(self) -> &'static str {
+        match self {
+            BaseColor::Neutral => "neutral",
+            BaseColor::Stone => "stone",
+            BaseColor::Zinc => "zinc",
+            BaseColor::Gray => "gray",
+            BaseColor::Slate => "slate",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "neutral" => Some(BaseColor::Neutral),
+            "stone" => Some(BaseColor::Stone),
+            "zinc" => Some(BaseColor::Zinc),
+            "gray" => Some(BaseColor::Gray),
+            "slate" => Some(BaseColor::Slate),
+            _ => None,
+        }
+    }
+}
+
 /// The application settings the Swift app keeps in UserDefaults, persisted
 /// here as key-value rows under the *exact* Swift key names. Loading applies
 /// the Swift defaults for keys that were never written, and clamps font
@@ -403,6 +440,8 @@ pub struct AppSettings {
     pub ui_font_size: i64,
     /// "appearance.terminalFontSize" — default 13, clamped to 9...24.
     pub terminal_font_size: i64,
+    /// "appearance.baseColor" — default: neutral.
+    pub base_color: BaseColor,
     /// "appearance.fileIconTheme" — default: sfSymbols.
     pub file_icon_theme: FileIconTheme,
     /// "controlSocket.enabled" — default: true.
@@ -466,6 +505,7 @@ impl Default for AppSettings {
             appearance: AppearanceMode::System,
             ui_font_size: 13,
             terminal_font_size: 13,
+            base_color: BaseColor::Neutral,
             file_icon_theme: FileIconTheme::SfSymbols,
             control_socket_enabled: true,
             updates_enabled: true,
@@ -497,6 +537,7 @@ pub mod settings_keys {
     pub const APPEARANCE_THEME: &str = "appearance.theme";
     pub const UI_FONT_SIZE: &str = "appearance.uiFontSize";
     pub const TERMINAL_FONT_SIZE: &str = "appearance.terminalFontSize";
+    pub const BASE_COLOR: &str = "appearance.baseColor";
     pub const FILE_ICON_THEME: &str = "appearance.fileIconTheme";
     pub const CONTROL_SOCKET_ENABLED: &str = "controlSocket.enabled";
     pub const UPDATES_ENABLED: &str = "updates.enabled";
@@ -623,5 +664,36 @@ mod tests {
             Some(FileIconTheme::Material)
         );
         assert_eq!(FileIconTheme::parse("banana"), None);
+    }
+
+    #[test]
+    fn base_colour_round_trips_through_its_raw_value() {
+        for base in [
+            BaseColor::Neutral,
+            BaseColor::Stone,
+            BaseColor::Zinc,
+            BaseColor::Gray,
+            BaseColor::Slate,
+        ] {
+            assert_eq!(BaseColor::parse(base.raw()), Some(base), "{base:?}");
+        }
+        assert_eq!(
+            BaseColor::raw(BaseColor::Neutral),
+            "neutral",
+            "the raw values are lower-case, like every other enum setting"
+        );
+    }
+
+    #[test]
+    fn an_unknown_base_colour_is_not_parsed() {
+        // The loader turns None into the default; parse itself does not
+        // guess, matching AppearanceMode::parse.
+        assert_eq!(BaseColor::parse("cerulean"), None);
+        assert_eq!(BaseColor::parse(""), None);
+    }
+
+    #[test]
+    fn settings_default_to_the_neutral_base_colour() {
+        assert_eq!(AppSettings::default().base_color, BaseColor::Neutral);
     }
 }
