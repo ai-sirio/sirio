@@ -742,7 +742,7 @@ impl ProviderKind {
 /// actually contrasts with both fills, and it is already what the granted
 /// permission badge uses two screens over.
 fn on_status_fill(theme: &Theme) -> Rgba {
-    theme.background
+    theme.surface
 }
 
 /// Every process id currently a descendant of `root` (not including `root`
@@ -2364,7 +2364,7 @@ impl Settings {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 // The arrow is the control: no word beside it, and sized
                 // off `large_title` so it still tracks the interface font
@@ -2410,7 +2410,7 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .bg(theme.background);
+            .bg(theme.surface);
 
         for (category_index, category) in SettingsCategory::ALL.into_iter().enumerate() {
             let selected = self.category == category;
@@ -2437,7 +2437,7 @@ impl Settings {
                     } else {
                         theme.text_muted
                     })
-                    .when(selected, |this| this.bg(theme.selected_fill))
+                    .when(selected, |this| this.bg(theme.element_active))
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| this.select_category(category, cx));
@@ -2976,7 +2976,7 @@ impl Settings {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
             .border_color(if is_focused {
                 theme.text
@@ -3341,7 +3341,7 @@ impl Settings {
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
                 .text_color(theme.text_muted)
-                .bg(theme.primary_pill_bg)
+                .bg(theme.surface_raised)
                 .child(text!(sirio_project::display_path(path))),
             None => div()
                 .id(status_id.clone())
@@ -3396,7 +3396,7 @@ impl Settings {
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
                 .text_color(theme.text_muted)
-                .bg(theme.primary_pill_bg)
+                .bg(theme.surface_raised)
                 .child(text!(label))
         } else {
             div()
@@ -3548,7 +3548,7 @@ impl Settings {
                         .text_size(theme.typography.caption2)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .bg(theme.primary_action_bg)
+                        .bg(theme.element_active)
                         .hover(|style| style.bg(theme.row_hover))
                         .on_click(move |_, _, cx| {
                             install_entity.update(cx, |_, cx| {
@@ -3666,7 +3666,7 @@ impl Settings {
                             .items_center()
                             .gap(px(6.0))
                             .rounded(theme.radii.control)
-                            .bg(theme.filter_field_bg)
+                            .bg(theme.input_bg)
                             .border_1()
                             .border_color(if search_is_focused {
                                 theme.text
@@ -3809,7 +3809,7 @@ impl Settings {
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
             .text_color(if enabled { theme.text } else { theme.text_faint })
-            .bg(theme.primary_pill_bg)
+            .bg(theme.surface_raised)
             .when(enabled, |this| {
                 this.hover(|style| style.bg(theme.row_hover))
             })
@@ -3855,7 +3855,7 @@ impl Settings {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg();
         for choice in SummarizerChoice::ALL {
             let is_selected = choice == selected;
@@ -3876,7 +3876,7 @@ impl Settings {
                     } else {
                         theme.text
                     })
-                    .when(is_selected, |this| this.bg(theme.selected_fill))
+                    .when(is_selected, |this| this.bg(theme.element_active))
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, cx| {
                         choice_entity.update(cx, |this, cx| {
@@ -4390,7 +4390,7 @@ impl Settings {
             } else {
                 theme.text
             })
-            .bg(theme.primary_pill_bg)
+            .bg(theme.surface_raised)
             .child(text!("Revoke all"));
         let revoke_all = revoke_all.when(!origins.is_empty(), move |this| {
             this.hover(|style| style.bg(theme.row_hover))
@@ -4437,7 +4437,7 @@ impl Settings {
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.callout)
                 .text_color(theme.text)
-                .bg(theme.primary_pill_bg)
+                .bg(theme.surface_raised)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| {
                     origin_entity.update(cx, |settings, cx| {
@@ -4478,7 +4478,7 @@ impl Settings {
         #[cfg(target_os = "macos")]
         let denied = theme.tab_error;
         #[cfg(target_os = "macos")]
-        let neutral = theme.primary_pill_bg;
+        let neutral = theme.surface_raised;
         #[cfg(target_os = "macos")]
         let rows = controls::card(theme)
             .child(self.render_permission_row(
@@ -4488,7 +4488,7 @@ impl Settings {
                 PermissionBadge {
                     label: "GRANTED",
                     background: granted,
-                    foreground: theme.background,
+                    foreground: theme.surface,
                 },
                 "Open Settings",
                 theme,
@@ -4501,7 +4501,7 @@ impl Settings {
                 PermissionBadge {
                     label: "GRANTED",
                     background: granted,
-                    foreground: theme.background,
+                    foreground: theme.surface,
                 },
                 "Open Settings",
                 theme,
@@ -4540,7 +4540,7 @@ impl Settings {
                 PermissionBadge {
                     label: "GRANTED",
                     background: granted,
-                    foreground: theme.background,
+                    foreground: theme.surface,
                 },
                 "Open Settings",
                 theme,
@@ -4630,7 +4630,7 @@ impl Render for Settings {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(self.render_header(theme))
             .child(div().h(px(1.0)).w_full().bg(theme.hairline))
             .child(

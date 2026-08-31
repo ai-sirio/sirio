@@ -616,7 +616,7 @@ impl Render for RightPanel {
             .w_full()
             .h_full()
             .overflow_hidden()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(self.render_header(entity.clone(), theme, window, cx))
             .child(if !self.worktree_selected {
                 self.render_no_worktree(theme).into_any_element()

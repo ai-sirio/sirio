@@ -3678,7 +3678,7 @@ impl Chat {
                     .py(px(5.0))
                     .flex_1()
                     .rounded(theme.radii.control)
-                    .bg(colors.raised)
+                    .bg(colors.surface_raised)
                     .border_1()
                     .border_color(if question_answer.for_request == Some(request_id) {
                         colors.text
@@ -3733,7 +3733,7 @@ impl Chat {
                     .px(px(10.0))
                     .py(px(5.0))
                     .rounded(theme.radii.control)
-                    .bg(colors.primary_pill_bg)
+                    .bg(colors.surface_raised)
                     .text_size(typography.footnote)
                     .text_color(colors.text)
                     .hover(|style| style.bg(colors.chat_row_hover))
@@ -3949,7 +3949,7 @@ impl Chat {
                 div()
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.code_inset_fill)
+                    .bg(colors.input_bg)
                     .px(px(12.0))
                     .py(px(9.0))
                     .flex()
@@ -4037,7 +4037,7 @@ impl Chat {
                 styled,
                 source_start..source_start + text.len(),
                 interaction.clone(),
-                theme.colors.selection_fill,
+                theme.colors.element_active,
                 Vec::new(),
             )
             .into_any_element()
@@ -4087,7 +4087,7 @@ impl Chat {
                 styled,
                 source_start..source_start + text.len(),
                 interaction.clone(),
-                theme.colors.selection_fill,
+                theme.colors.element_active,
                 Vec::new(),
             )
             .into_any_element()
@@ -4301,7 +4301,7 @@ impl Chat {
                 .flex()
                 .border_b_1()
                 .border_color(colors.hairline)
-                .when(header_row, |this| this.bg(colors.card_fill))
+                .when(header_row, |this| this.bg(colors.surface_raised))
                 .children(cells.into_iter().enumerate().scan(
                     row_start,
                     |cell_start, (index, cell)| {
@@ -4409,7 +4409,7 @@ impl Chat {
                 styled,
                 source_start..source_start + rendered_len,
                 interaction.clone(),
-                theme.colors.selection_fill,
+                theme.colors.element_active,
                 links,
             )
             .into_any_element()
@@ -4446,7 +4446,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.code_inset_fill)
+            .bg(colors.input_bg)
             .px(px(10.0))
             .py(px(6.0))
             .gap(px(4.0));
@@ -4570,7 +4570,7 @@ impl Chat {
                         .expect("selection present in this arm")
                         .interaction
                         .clone(),
-                    theme.colors.selection_fill,
+                    theme.colors.element_active,
                     Vec::new(),
                 )
                 .into_any_element(),
@@ -4650,7 +4650,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.code_inset_fill)
+            .bg(colors.input_bg)
             .py(px(6.0))
             .child(
                 div()
@@ -4716,7 +4716,7 @@ impl Chat {
             .flex_col()
             .gap(px(6.0))
             .rounded(theme.radii.code_block)
-            .bg(colors.raised)
+            .bg(colors.surface_raised)
             .px(px(CARD_H_PADDING))
             .py(px(CARD_V_PADDING))
             .child(
@@ -4880,7 +4880,7 @@ impl Chat {
                         .min_w_0()
                         .max_w(px(USER_PILL_MAX_WIDTH))
                         .rounded(theme.radii.user_pill)
-                        .bg(colors.raised)
+                        .bg(colors.surface_raised)
                         .px(px(12.0))
                         .py(px(8.0))
                         .text_size(typography.headline)
@@ -4911,7 +4911,7 @@ impl Chat {
                     .px(px(7.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .bg(colors.raised)
+                    .bg(colors.surface_raised)
                     .text_size(typography.footnote)
                     .text_color(colors.text_faint)
                     .cursor(CursorStyle::PointingHand)
@@ -5038,8 +5038,8 @@ impl Chat {
                                     .h(px(20.0))
                                     .bg(linear_gradient(
                                         180.0,
-                                        linear_color_stop(colors.chat_surface, 0.0),
-                                        linear_color_stop(colors.chat_surface.opacity(0.0), 1.0),
+                                        linear_color_stop(colors.surface, 0.0),
+                                        linear_color_stop(colors.surface.opacity(0.0), 1.0),
                                     )),
                             ),
                     );
@@ -5101,7 +5101,7 @@ impl Chat {
                 let mut card = div()
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_l_2()
                     .border_color(colors.rail_question)
                     .px(px(CARD_H_PADDING))
@@ -5176,7 +5176,7 @@ impl Chat {
                                 .px(px(10.0))
                                 .py(px(5.0))
                                 .rounded(theme.radii.control)
-                                .bg(colors.primary_pill_bg)
+                                .bg(colors.surface_raised)
                                 .text_size(typography.footnote)
                                 .text_color(if option.is_rejection {
                                     colors.git_conflict
@@ -5203,7 +5203,7 @@ impl Chat {
                             .px(px(10.0))
                             .py(px(5.0))
                             .rounded(theme.radii.control)
-                            .bg(colors.primary_pill_bg)
+                            .bg(colors.surface_raised)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
                             .hover(|style| style.bg(colors.chat_row_hover))
@@ -5225,7 +5225,7 @@ impl Chat {
                 let mut card = div()
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_l_2()
                     .border_color(colors.rail_task)
                     .px(px(CARD_H_PADDING))
@@ -5296,7 +5296,7 @@ impl Chat {
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded(theme.radii.control)
-                                    .bg(colors.primary_pill_bg)
+                                    .bg(colors.surface_raised)
                                     .text_size(typography.footnote)
                                     .text_color(if option.is_rejection {
                                         colors.git_conflict
@@ -5427,7 +5427,7 @@ impl Chat {
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
                                 .text_color(colors.text)
-                                .bg(colors.card_fill)
+                                .bg(colors.surface_raised)
                                 .hover(|style| style.bg(colors.chat_row_hover))
                                 .on_click(move |_, _, cx| {
                                     // Same underlying call as Retry
@@ -5463,7 +5463,7 @@ impl Chat {
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
                                 .text_color(colors.text)
-                                .bg(colors.card_fill)
+                                .bg(colors.surface_raised)
                                 .hover(|style| style.bg(colors.chat_row_hover))
                                 .on_click(move |_, _, cx| {
                                     settings_entity
@@ -5493,7 +5493,7 @@ impl Chat {
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
                                 .text_color(colors.text)
-                                .bg(colors.card_fill)
+                                .bg(colors.surface_raised)
                                 .hover(|style| style.bg(colors.chat_row_hover))
                                 .on_click(move |_, _, cx| {
                                     dismiss_entity.update(cx, |chat, cx| {
@@ -5569,7 +5569,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.card_fill)
+            .bg(colors.surface_raised)
             .border_l_2()
             .border_color(colors.rail_task)
             .child(header);
@@ -5812,7 +5812,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.card_fill)
+            .bg(colors.surface_raised)
             .border_l_2()
             .border_color(colors.rail_tool)
             .child(header);
@@ -5934,7 +5934,7 @@ impl Chat {
             .px(px(8.0))
             .py(px(6.0))
             .rounded(theme.radii.code_block)
-            .bg(colors.raised)
+            .bg(colors.surface_raised)
             .cursor(CursorStyle::PointingHand)
             .hover(|style| style.bg(colors.chat_row_hover))
             .on_click(move |_, _, cx| {
@@ -6199,7 +6199,7 @@ impl Chat {
             .h(px(24.0))
             .px(px(7.0))
             .rounded(theme.radii.control)
-            .bg(colors.raised)
+            .bg(colors.surface_raised)
             .text_size(typography.ui_size);
         let status_pill = if connecting {
             status_pill
@@ -6270,7 +6270,7 @@ impl Chat {
                 .h(px(24.0))
                 .px(px(7.0))
                 .rounded(theme.radii.control)
-                .bg(colors.raised)
+                .bg(colors.surface_raised)
                 .text_size(typography.ui_size)
                 // Sized to its content, not to the row. It used to carry
                 // `flex_1`, which stretched the pill the whole width of the
@@ -6330,7 +6330,7 @@ impl Chat {
                 .h(px(24.0))
                 .px(px(7.0))
                 .rounded(theme.radii.control)
-                .bg(colors.raised)
+                .bg(colors.surface_raised)
                 .text_size(typography.ui_size)
                 // Same rule as the chip above: hug the content.
                 .min_w_0()
@@ -6363,7 +6363,7 @@ impl Chat {
                     .h(px(24.0))
                     .px(px(7.0))
                     .rounded(theme.radii.control)
-                    .bg(colors.raised)
+                    .bg(colors.surface_raised)
                     .text_size(typography.ui_size)
                     .hover(|style| style.bg(colors.chat_row_hover))
                     .on_click(move |_, window, cx| {
@@ -6418,7 +6418,7 @@ impl Chat {
                     .overflow_hidden()
                     .p(px(8.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_1()
                     .border_color(colors.hairline)
                     .shadow_lg()
@@ -6436,7 +6436,7 @@ impl Chat {
                                 .px(px(8.0))
                                 .py(px(5.0))
                                 .rounded(theme.radii.control)
-                                .bg(colors.raised)
+                                .bg(colors.surface_raised)
                                 .border_1()
                                 .border_color(colors.hairline)
                                 .text_size(typography.footnote)
@@ -6564,7 +6564,7 @@ impl Chat {
                                     .items_center()
                                     .text_size(typography.caption2)
                                     .text_color(colors.text)
-                                    .when(is_selected, |this| this.bg(colors.selection_fill))
+                                    .when(is_selected, |this| this.bg(colors.element_active))
                                     .hover(|style| style.bg(colors.chat_row_hover))
                                     .on_click(move |_, _, cx| {
                                         row_entity.update(cx, |chat, cx| {
@@ -6630,7 +6630,7 @@ impl Chat {
                     .w(px(200.0))
                     .p(px(6.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_1()
                     .border_color(colors.hairline)
                     .shadow_lg()
@@ -6663,7 +6663,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
-                            .when(is_selected, |this| this.bg(colors.selection_fill))
+                            .when(is_selected, |this| this.bg(colors.element_active))
                             .hover(|style| style.bg(colors.chat_row_hover))
                             .on_click(move |_, _, cx| {
                                 row_entity
@@ -6790,7 +6790,7 @@ impl Chat {
                     .w(px(285.0))
                     .p(px(12.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_1()
                     .border_color(colors.hairline)
                     .shadow_lg()
@@ -6920,7 +6920,7 @@ impl Chat {
                         .w(px(360.0))
                         .p(px(6.0))
                         .rounded(theme.radii.toast)
-                        .bg(colors.card_fill)
+                        .bg(colors.surface_raised)
                         .border_1()
                         .border_color(colors.hairline)
                         .shadow_lg()
@@ -6941,7 +6941,7 @@ impl Chat {
                                     .rounded(theme.radii.control)
                                     .flex()
                                     .flex_col()
-                                    .when(is_selected, |this| this.bg(colors.selection_fill))
+                                    .when(is_selected, |this| this.bg(colors.element_active))
                                     .on_click(move |_, _, cx| {
                                         row_entity.update(cx, |chat, cx| {
                                             chat.accept_slash_command(&accept_name, cx);
@@ -6983,7 +6983,7 @@ impl Chat {
                         .w(px(360.0))
                         .p(px(6.0))
                         .rounded(theme.radii.toast)
-                        .bg(colors.card_fill)
+                        .bg(colors.surface_raised)
                         .border_1()
                         .border_color(colors.hairline)
                         .shadow_lg()
@@ -7047,7 +7047,7 @@ impl Chat {
                     .w(px(200.0))
                     .p(px(6.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_1()
                     .border_color(colors.hairline)
                     .shadow_lg()
@@ -7226,7 +7226,7 @@ impl Chat {
                     .overflow_y_scroll()
                     .p(px(6.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.card_fill)
+                    .bg(colors.surface_raised)
                     .border_1()
                     .border_color(colors.hairline)
                     .shadow_lg()
@@ -7391,7 +7391,7 @@ impl Chat {
                                         })
                                         .min_w_0()
                                         .rounded(px(2.0))
-                                        .bg(colors.selection_fill)
+                                        .bg(colors.element_active)
                                         .text_color(colors.text)
                                         .child(piece)
                                         .into_any_element(),
@@ -7449,9 +7449,9 @@ impl Chat {
                             // selection fill whole or not at all — the same
                             // rule `chip_is_selected` encodes in the model.
                             .bg(if self.composer.chip_is_selected(index) {
-                                colors.selection_fill
+                                colors.element_active
                             } else {
-                                colors.card_fill
+                                colors.surface_raised
                             })
                             .border_1()
                             .border_color(colors.hairline)
@@ -7527,7 +7527,7 @@ impl Chat {
                 colors.hairline
             })
             .rounded(theme.radii.composer)
-            .bg(colors.composer)
+            .bg(colors.surface_raised)
             .p(px(10.0))
             .flex()
             .flex_col()
@@ -7569,7 +7569,7 @@ impl Chat {
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded(theme.radii.control)
-                        .bg(colors.raised)
+                        .bg(colors.surface_raised)
                         .text_size(typography.footnote)
                         .child(div().text_color(colors.text_faint).child("Queued:"))
                         .child(
@@ -7631,7 +7631,7 @@ impl Chat {
                             .h(px(24.0))
                             .px(px(7.0))
                             .rounded(theme.radii.control)
-                            .bg(colors.raised)
+                            .bg(colors.surface_raised)
                             .text_size(typography.ui_size)
                             .child(context_ring)
                             // Named, like every other value in this row. A
@@ -7679,7 +7679,7 @@ impl Chat {
                             } else {
                                 colors.text_dim
                             })
-                            .hover(|style| style.bg(colors.raised))
+                            .hover(|style| style.bg(colors.surface_raised))
                             .when(self.streaming, |this| {
                                 // D-CHAT-02: while a turn runs the same
                                 // control becomes stop — a filled square in
@@ -7858,7 +7858,7 @@ impl Render for Chat {
             .flex()
             .flex_col()
             .items_center()
-            .bg(theme.colors.chat_surface)
+            .bg(theme.colors.surface)
             .key_context("ChatComposer")
             .track_focus(&self.composer_focus)
             .on_action(cx.listener(Self::send_action))
@@ -8129,7 +8129,7 @@ impl Render for Chat {
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .rounded(theme.radii.control)
-                                .bg(bar_colors.card_fill)
+                                .bg(bar_colors.surface_raised)
                                 .border_1()
                                 .border_color(bar_colors.rail_question)
                                 .text_size(bar_typography.footnote)

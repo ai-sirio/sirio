@@ -10359,7 +10359,7 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let groups = self.tab_machinery.groups();
-        let mut surfaces = div().flex().flex_row().size_full().bg(theme.background);
+        let mut surfaces = div().flex().flex_row().size_full().bg(theme.surface);
         for (index, group) in groups.iter().enumerate() {
             if index > 0 {
                 surfaces = surfaces.child(div().w(px(1.0)).h_full().bg(gpui::black()));
@@ -10418,9 +10418,9 @@ impl SirioWorkspace {
                                     .px(theme.spacing.card_gap)
                                     .py(theme.spacing.titlebar_control_spacing)
                                     .rounded(theme.radii.control)
-                                    .bg(theme.inverse)
+                                    .bg(theme.solid)
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.on_inverse)
+                                    .text_color(theme.on_solid)
                                     .hover(|style| style.opacity(0.9))
                                     .on_click(move |_, _, cx| {
                                         new_terminal_entity.update(cx, |workspace, cx| {
@@ -10633,7 +10633,7 @@ impl SirioWorkspace {
                         .min_w_0()
                         .px(theme.spacing.titlebar_control_spacing)
                         .rounded(theme.radii.control)
-                        .bg(theme.filter_field_bg)
+                        .bg(theme.input_bg)
                         .text_color(theme.text)
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             focus_for_click.focus(window, cx);
@@ -10729,7 +10729,7 @@ impl SirioWorkspace {
                 )
             })
             .when(active, |this| {
-                this.bg(theme.selected_fill).child(
+                this.bg(theme.element_active).child(
                     div()
                         .absolute()
                         .top(px(0.0))
@@ -11500,7 +11500,7 @@ impl SirioWorkspace {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |workspace, cx| {
@@ -11596,7 +11596,7 @@ impl SirioWorkspace {
             .flex()
             .items_start()
             .gap(px(1.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             // F-TAB-24: a real drop commits the reorder that
             // `preview_tab_reorder` already applied live during hover --
             // this just clears the pre-drag snapshot so a later, unrelated
@@ -11732,7 +11732,7 @@ impl SirioWorkspace {
                                 .px(px(8.0))
                                 .flex()
                                 .items_center()
-                                .bg(theme.background)
+                                .bg(theme.surface)
                                 .text_size(px(14.0))
                                 .text_color(theme.text)
                                 .child(self.terminal_breadcrumb.clone()),
@@ -12867,7 +12867,7 @@ impl SirioWorkspace {
                         theme.text_faint
                     })
                     .when(active && entry.is_enabled(), |this| {
-                        this.bg(theme.selected_fill)
+                        this.bg(theme.element_active)
                     })
                     .when(entry.is_enabled(), move |this| {
                         this.hover(|style| style.bg(theme.row_hover)).on_click(
@@ -12949,7 +12949,7 @@ impl SirioWorkspace {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .child(
                 div()
@@ -12961,7 +12961,7 @@ impl SirioWorkspace {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(theme.text)
                     .text_size(theme.typography.headline)
@@ -13021,7 +13021,7 @@ impl SirioWorkspace {
                 .rounded(theme.radii.control)
                 .border_1()
                 .border_color(theme.hairline)
-                .bg(theme.card_fill)
+                .bg(theme.surface_raised)
                 .shadow_lg()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text)
@@ -13091,7 +13091,7 @@ impl SirioWorkspace {
                 .rounded(theme.radii.control)
                 .border_1()
                 .border_color(theme.hairline)
-                .bg(theme.card_fill)
+                .bg(theme.surface_raised)
                 .shadow_lg()
                 .child(
                     div()
@@ -13131,7 +13131,7 @@ impl SirioWorkspace {
                             .w_full()
                             .h(px(5.0))
                             .rounded(px(3.0))
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .child(
                                 div()
                                     .h(px(5.0))
@@ -21296,7 +21296,7 @@ mod tests {
                  (the spec's opaque-fallback rule)"
             );
             assert_eq!(
-                theme.panel_surface.a, 1.0,
+                theme.surface.a, 1.0,
                 "an unfaded theme keeps its opaque panels"
             );
         });
@@ -21307,7 +21307,7 @@ mod tests {
                 !theme.translucency_enabled,
                 "a mode-switch reinstall must not invent translucency"
             );
-            assert_eq!(theme.panel_surface.a, 1.0);
+            assert_eq!(theme.surface.a, 1.0);
         });
     }
 
@@ -23933,7 +23933,7 @@ mod tests {
         };
         assert_eq!(
             border_now(&mut cx),
-            Theme::dark().panel_focus_ring,
+            Theme::dark().text_muted,
             "keyboard focus inside the sidebar must brighten the enclosing shell panel's border"
         );
 

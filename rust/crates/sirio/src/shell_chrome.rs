@@ -42,7 +42,7 @@ impl ShellMaterial {
 
     pub(crate) fn frame_fill(self, theme: &Theme) -> gpui::Rgba {
         match self {
-            Self::Opaque => theme.frame_fallback,
+            Self::Opaque => theme.bg,
             Self::Blurred => theme.frame_surface,
         }
     }
@@ -90,7 +90,7 @@ pub(crate) fn panel(
         .debug_selector(move || id.into())
         .relative()
         .size_full()
-        .bg(theme.panel_surface)
+        .bg(theme.surface)
         .border_1()
         .border_color(panel_border(theme, focus_visible))
         .rounded(theme.radii.shell_panel)
@@ -129,7 +129,7 @@ mod tests {
         );
         assert_eq!(
             ShellMaterial::Opaque.frame_fill(&theme),
-            theme.frame_fallback
+            theme.bg
         );
         assert_eq!(
             ShellMaterial::Blurred.frame_fill(&theme),

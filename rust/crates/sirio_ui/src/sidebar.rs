@@ -2704,7 +2704,7 @@ impl Sidebar {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
             .border_color(if focused {
                 theme.text
@@ -2776,7 +2776,7 @@ impl Sidebar {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg();
 
         for item in Self::context_menu_items(&target) {
@@ -2849,7 +2849,7 @@ impl Sidebar {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .child(Self::render_add_project_item(
                 entity.clone(),
@@ -2933,7 +2933,7 @@ impl Sidebar {
                     .rounded(theme.radii.toast)
                     .border_1()
                     .border_color(theme.hairline)
-                    .bg(theme.background)
+                    .bg(theme.surface)
                     .child(form_view)
                     .child(
                         div()
@@ -3003,7 +3003,7 @@ impl Sidebar {
             // finally the only thing a click on it can reach.
             .occlude()
             .p(px(16.0))
-            .bg(theme.sidebar)
+            .bg(theme.surface)
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -3041,7 +3041,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(theme.hairline)
                     .text_size(theme.typography.footnote)
@@ -3093,7 +3093,7 @@ impl Sidebar {
                         .items_center()
                         .justify_center()
                         .rounded(theme.radii.control)
-                        .bg(theme.primary_pill_bg)
+                        .bg(theme.surface_raised)
                         .text_size(theme.typography.footnote)
                         .text_color(theme.text)
                         .on_click(move |_, _, cx| {
@@ -3114,7 +3114,7 @@ impl Sidebar {
                     .w_full()
                     .p(px(8.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.background)
+                    .bg(theme.surface)
                     .child(card.icon_picker.clone()),
             )
             .when(card.is_git, |this| {
@@ -3277,7 +3277,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(theme.hairline)
                     .text_size(theme.typography.footnote)
@@ -3377,7 +3377,7 @@ impl Sidebar {
                             .flex()
                             .items_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.filter_field_bg)
+                            .bg(theme.input_bg)
                             .border_1()
                             .border_color(theme.hairline)
                             .text_size(theme.typography.footnote)
@@ -3424,7 +3424,7 @@ impl Sidebar {
                             .items_center()
                             .justify_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .text_size(theme.typography.footnote)
                             .text_color(theme.text)
                             .on_click(move |_, window, cx| {
@@ -3656,7 +3656,7 @@ impl Sidebar {
         }
 
         if selected {
-            row_view = row_view.bg(theme.selected_fill);
+            row_view = row_view.bg(theme.element_active);
         }
 
         // The card's main line. The disclosure chevron and every per-row
@@ -3898,7 +3898,7 @@ impl Sidebar {
                                 .debug_selector(move || format!("sidebar-primary-pill-{row_id}"))
                                 .px(px(5.0))
                                 .rounded(theme.radii.chip)
-                                .bg(theme.primary_pill_bg)
+                                .bg(theme.surface_raised)
                                 .text_color(theme.text)
                                 .text_size(px(11.0))
                                 .child("Primary"),
@@ -4039,7 +4039,7 @@ impl Render for Sidebar {
             .w(px(panel_width))
             .h_full()
             .overflow_hidden()
-            .bg(theme.sidebar)
+            .bg(theme.surface)
             .border_r_1()
             .border_color(theme.sidebar_border)
             .pt(px(8.0))
@@ -4088,7 +4088,7 @@ impl Render for Sidebar {
                     .items_center()
                     .gap(px(7.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(if filter_is_focused {
                         theme.text
@@ -4185,7 +4185,7 @@ impl Render for Sidebar {
                                 .track_focus(&prompt.focus)
                                 .w(px(260.0))
                                 .rounded(theme.radii.toast)
-                                .bg(theme.chat_surface)
+                                .bg(theme.surface)
                                 .border_1()
                                 .border_color(theme.hairline)
                                 .px(px(14.0))

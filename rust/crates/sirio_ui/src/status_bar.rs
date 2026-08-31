@@ -641,7 +641,7 @@ impl Render for StatusBarTooltip {
             .px(px(8.0))
             .py(px(4.0))
             .rounded(self.theme.radii.control)
-            .bg(self.theme.raised)
+            .bg(self.theme.surface_raised)
             .border_1()
             .border_color(self.theme.hairline)
             .text_size(self.theme.typography.caption2)

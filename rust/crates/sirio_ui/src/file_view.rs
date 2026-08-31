@@ -698,7 +698,7 @@ impl FileView {
                         .px(px(6.0))
                         .py(px(1.0))
                         .rounded(theme.radii.chip)
-                        .bg(theme.raised)
+                        .bg(theme.surface_raised)
                         .text_color(theme.text_muted)
                         .child(language.unwrap_or_default()),
                 )
@@ -855,7 +855,7 @@ impl Render for FileView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.chat_surface)
+            .bg(theme.surface)
             .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
@@ -902,7 +902,7 @@ fn render_mode_switch(
         .gap(px(2.0))
         .p(px(2.0))
         .rounded(theme.radii.control)
-        .bg(theme.raised)
+        .bg(theme.surface_raised)
         .child(preview)
         .child(code)
 }
@@ -927,7 +927,7 @@ fn render_mode_option(
         } else {
             theme.text_faint
         })
-        .when(active, |this| this.bg(theme.selected_fill))
+        .when(active, |this| this.bg(theme.element_active))
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
@@ -1018,7 +1018,7 @@ fn render_markdown_toolbar(
         .gap(theme.spacing.titlebar_control_spacing)
         .border_b_1()
         .border_color(theme.hairline)
-        .bg(theme.raised)
+        .bg(theme.surface_raised)
         .child(render_format_button(
             "B",
             "file-format-bold",
@@ -1199,7 +1199,7 @@ fn render_content(
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(theme.radii.control)
-                            .bg(theme.raised)
+                            .bg(theme.surface_raised)
                             .text_size(theme.typography.footnote)
                             .text_color(theme.text_muted)
                             .flex()
@@ -1499,7 +1499,7 @@ impl EditableLine {
             line_len,
             view,
             selection,
-            selection_fill: theme.selected_fill,
+            selection_fill: theme.element_active,
             caret_offset,
             caret_color: theme.text,
             links,

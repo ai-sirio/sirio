@@ -3914,7 +3914,7 @@ impl gpui::Render for TerminalView {
                 .rounded(theme.radii.user_pill)
                 .border_1()
                 .border_color(theme.hairline)
-                .bg(theme.card_fill)
+                .bg(theme.surface_raised)
                 .shadow_lg();
 
             let items = match split_pane_size {
@@ -4021,7 +4021,7 @@ impl gpui::Render for TerminalView {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(theme.primary_pill_bg)
+                                    .bg(theme.surface_raised)
                                     .text_color(theme.text)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(TerminalPromptAction::NewTerminal, cx);
@@ -4035,7 +4035,7 @@ impl gpui::Render for TerminalView {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(theme.card_fill)
+                                    .bg(theme.surface_raised)
                                     .text_color(theme.text)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(
@@ -4100,7 +4100,7 @@ impl gpui::Render for TerminalView {
                             .px(theme.spacing.titlebar_control_spacing)
                             .py(theme.spacing.titlebar_control_spacing)
                             .rounded(theme.radii.control)
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .text_size(theme.typography.caption2)
                             .text_color(theme.text)
                             .child(format!("Dropped diff: {path}")),
@@ -4123,7 +4123,7 @@ impl gpui::Render for TerminalView {
                                 .bottom(px(8.0))
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .bg(theme.primary_pill_bg)
+                                .bg(theme.surface_raised)
                                 .text_size(px(12.0))
                                 .text_color(theme.tab_needs_input)
                                 .child("Running"),
@@ -4136,7 +4136,7 @@ impl gpui::Render for TerminalView {
                                 .bottom(px(8.0))
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .bg(theme.primary_pill_bg)
+                                .bg(theme.surface_raised)
                                 .text_size(px(12.0))
                                 .text_color(theme.text_muted)
                                 .child(label),
@@ -4156,7 +4156,7 @@ impl gpui::Render for TerminalView {
                                     .py(px(4.0))
                                     .max_w(px(560.0))
                                     .rounded(theme.radii.control)
-                                    .bg(theme.card_fill)
+                                    .bg(theme.surface_raised)
                                     .border_1()
                                     .border_color(theme.hairline)
                                     .font_family(sirio_theme::terminal_family())
@@ -4204,7 +4204,7 @@ impl gpui::Render for TerminalView {
                             .px(px(14.0))
                             .py(px(6.0))
                             .rounded(px(6.0))
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .text_size(px(13.0))
                             .text_color(theme.text)
                             .hover(|style| style.bg(theme.row_hover))

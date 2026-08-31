@@ -196,7 +196,7 @@ fn toggle(
         .bg(if on {
             theme.row_hover
         } else {
-            theme.background
+            theme.surface
         })
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| on_click(cx))
@@ -234,7 +234,7 @@ pub(super) fn render_filter_chip(
         .bg(if open {
             theme.row_hover
         } else {
-            theme.background
+            theme.surface
         })
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| {
@@ -269,7 +269,7 @@ pub(super) fn render_chip_popup(
         .rounded(theme.radii.user_pill)
         .border_1()
         .border_color(theme.hairline)
-        .bg(theme.card_fill)
+        .bg(theme.surface_raised)
         .shadow_lg();
 
     if chip == FilterChip::User {
@@ -378,7 +378,7 @@ pub(super) fn render_paths_popup(
         .rounded(theme.radii.user_pill)
         .border_1()
         .border_color(theme.hairline)
-        .bg(theme.card_fill)
+        .bg(theme.surface_raised)
         .shadow_lg()
         .child(
             div()
@@ -456,7 +456,7 @@ pub(super) fn render_collapsed_chips(
         .bg(if open {
             theme.row_hover
         } else {
-            theme.background
+            theme.surface
         })
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| {

@@ -178,7 +178,7 @@ impl Render for BrowserSpike {
 
         div()
             .size_full()
-            .bg(theme.chat_surface)
+            .bg(theme.surface)
             .text_color(theme.text)
             .child(
                 div()
@@ -187,7 +187,7 @@ impl Render for BrowserSpike {
                     .flex()
                     .items_center()
                     .px(px(20.0))
-                    .bg(theme.canvas)
+                    .bg(theme.bg)
                     .border_b_1()
                     .border_color(theme.hairline)
                     .text_size(theme.typography.headline)
@@ -206,7 +206,7 @@ impl Render for BrowserSpike {
                             .bottom(px(0.0))
                             .w(px(336.0))
                             .p(px(20.0))
-                            .bg(theme.canvas)
+                            .bg(theme.bg)
                             .border_r_1()
                             .border_color(theme.hairline)
                             .child(
@@ -247,7 +247,7 @@ impl Render for BrowserSpike {
                             .justify_start()
                             .px(px(16.0))
                             .bg(theme.accent)
-                            .text_color(theme.canvas)
+                            .text_color(theme.bg)
                             .text_size(theme.typography.title)
                             .child("GPUI → WebKit"),
                     ),
@@ -1956,7 +1956,7 @@ impl BrowserSurface {
             .items_center()
             .gap(px(6.0))
             .px(px(12.0))
-            .bg(theme.canvas)
+            .bg(theme.bg)
             .border_b_1()
             .border_color(theme.hairline)
             .child(browser_button(
@@ -2000,7 +2000,7 @@ impl BrowserSurface {
                     .items_center()
                     .px(px(10.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.chat_surface)
+                    .bg(theme.surface)
                     .border_1()
                     .border_color(theme.hairline)
                     .text_size(theme.typography.footnote)
@@ -2032,7 +2032,7 @@ impl BrowserSurface {
                         .py(px(4.0))
                         .rounded(theme.radii.control)
                         .bg(theme.text)
-                        .text_color(theme.canvas)
+                        .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
                         .child("Agent driving"),
                 )
@@ -2130,7 +2130,7 @@ impl Render for BrowserSurface {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.chat_surface)
+            .bg(theme.surface)
             .text_color(theme.text)
             .child(self.render_toolbar(theme, entity.clone(), window, cx))
             .when_some(
@@ -2147,7 +2147,7 @@ impl Render for BrowserSurface {
                             .px(px(12.0))
                             .py(px(8.0))
                             .bg(theme.tab_error)
-                            .text_color(theme.canvas)
+                            .text_color(theme.bg)
                             .text_size(theme.typography.footnote)
                             .child(error),
                     )
@@ -2162,7 +2162,7 @@ impl Render for BrowserSurface {
                         .px(px(12.0))
                         .py(px(8.0))
                         .bg(theme.tab_error)
-                        .text_color(theme.canvas)
+                        .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
                         .child(error),
                 )
@@ -2181,7 +2181,7 @@ impl Render for BrowserSurface {
                         .px(px(12.0))
                         .py(px(8.0))
                         .bg(theme.tab_needs_input)
-                        .text_color(theme.canvas)
+                        .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
                         .child(format!(
                             "Allow agent browser access to {}?",
@@ -2349,7 +2349,7 @@ impl Element for AddressTextElement {
                         line_origin.y + line_height,
                     ),
                 ),
-                self.theme.colors.selection_fill,
+                self.theme.colors.element_active,
             ))
         } else {
             None
