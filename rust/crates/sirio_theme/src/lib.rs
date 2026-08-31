@@ -1204,13 +1204,17 @@ impl Theme {
 
     pub fn install(mode: ThemeMode, cx: &mut App) {
         Self::resolve_font_families(cx);
+        // Both the base colour and the translucency flag are recovered from
+        // whatever is already installed: `install` is called from mode
+        // switches and from the portal follower, neither of which knows or
+        // should know about the other two axes.
+        let previous = cx.try_global::<Self>();
+        let base = previous.map_or_else(BaseColor::default, |theme| theme.base_color);
+        let translucency = previous.is_some_and(|theme| theme.translucency_enabled);
         #[cfg(target_os = "linux")]
-        let theme = Self::for_mode_linux(mode, cx.window_appearance(), BaseColor::Neutral);
+        let theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
         #[cfg(not(target_os = "linux"))]
-        let theme = Self::for_mode(mode, cx.window_appearance(), BaseColor::Neutral);
-        let translucency = cx
-            .try_global::<Self>()
-            .is_some_and(|theme| theme.translucency_enabled);
+        let theme = Self::for_mode(mode, cx.window_appearance(), base);
         let theme = theme.with_translucency(translucency);
         theme.sync_appearance();
         cx.set_global(theme);
@@ -1257,6 +1261,34 @@ impl Theme {
             // possibly-stale appearance cached at startup.
             Self::follow_portal(cx);
         }
+    }
+
+    /// The base colour the installed theme is painting with, or the default
+    /// when no theme is installed yet.
+    pub fn current_base_color(cx: &App) -> BaseColor {
+        cx.try_global::<Self>()
+            .map_or_else(BaseColor::default, |theme| theme.base_color)
+    }
+
+    /// Installs a replacement base colour, keeping the current mode.
+    ///
+    /// The mode is read back rather than passed in because the picker that
+    /// calls this changes one axis and must not restate the other — a caller
+    /// that guessed `System` here would undo an explicit Light or Dark.
+    pub fn set_base_color(base: BaseColor, cx: &mut App) {
+        let mode = cx
+            .try_global::<Self>()
+            .map_or(ThemeMode::System, |theme| theme.mode);
+        let translucency = cx
+            .try_global::<Self>()
+            .is_some_and(|theme| theme.translucency_enabled);
+        #[cfg(target_os = "linux")]
+        let theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
+        #[cfg(not(target_os = "linux"))]
+        let theme = Self::for_mode(mode, cx.window_appearance(), base);
+        let theme = theme.with_translucency(translucency);
+        theme.sync_appearance();
+        cx.set_global(theme);
     }
 
     /// Installs the system-following theme and starts the portal follower.
@@ -1857,6 +1889,33 @@ mod tests {
             translucent.colors.border,
             theme.colors.border,
             "a non-faded token keeps the tinted value"
+        );
+    }
+
+    #[test]
+    fn the_base_colour_defaults_to_neutral_when_nothing_is_installed() {
+        // A pure test of the recovery rule; no gpui context involved.
+        assert_eq!(BaseColor::default(), BaseColor::Neutral);
+        assert_eq!(Theme::dark().base_color, BaseColor::Neutral);
+    }
+
+    #[test]
+    fn a_reinstall_keeps_the_base_colour_the_way_it_keeps_translucency() {
+        // `install` recovers both from the previously installed theme. This
+        // is the pure half of that contract: rebuilding for a new mode from
+        // an existing theme's fields must carry the choice across.
+        let installed =
+            Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Zinc);
+        let next = Theme::for_appearance(
+            ThemeMode::Light,
+            Appearance::Light,
+            installed.base_color,
+        );
+        assert_eq!(next.base_color, BaseColor::Zinc);
+        assert_ne!(
+            next.colors.bg,
+            ThemeColors::for_appearance(Appearance::Light, BaseColor::Neutral).bg,
+            "the light rebuild is still tinted"
         );
     }
 
