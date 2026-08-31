@@ -39,6 +39,7 @@ use sirio_ui::{
     editor::fs_actions::open_command as platform_open_command,
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
+    orbit::{EMPTY_SURFACE_MARK, orbit},
     right_panel::{
         self, ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
@@ -10378,10 +10379,11 @@ impl SirioWorkspace {
                         .justify_center()
                         .gap(theme.spacing.card_gap)
                         .text_color(theme.text_faint)
-                        .child(
-                            IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                                .text_color(theme.text_faint),
-                        )
+                        .child(orbit(
+                            "empty-worktree-orbit",
+                            EMPTY_SURFACE_MARK,
+                            theme.text_faint,
+                        ))
                         .child(
                             div()
                                 .text_size(theme.typography.headline)
@@ -11799,6 +11801,11 @@ impl SirioWorkspace {
             div()
                 .id("no-worktree-selected")
                 .debug_selector(|| "no-worktree-selected".to_owned())
+                // The same P117 trap the sibling branch above documents: this
+                // parent is a *row*, so `flex_1` sizes width and height falls
+                // back to content -- which pinned this whole prompt to the top
+                // of the surface instead of its middle.
+                .h_full()
                 .flex_1()
                 .w_full()
                 .flex()
@@ -11807,10 +11814,11 @@ impl SirioWorkspace {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_color(theme.text_faint)
-                .child(
-                    IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                        .text_color(theme.text_faint),
-                )
+                .child(orbit(
+                    "no-worktree-selected-orbit",
+                    EMPTY_SURFACE_MARK,
+                    theme.text_faint,
+                ))
                 .child(
                     div()
                         .text_size(theme.typography.headline)
