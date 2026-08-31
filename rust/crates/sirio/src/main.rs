@@ -15215,6 +15215,7 @@ fn main() {
         Theme::init(cx);
         bezel::ui::input::init(cx);
         sirio_ui::chat::init(cx);
+        sirio_ui::file_view::init(cx);
 
         // Restore the stored layout; a missing, corrupt or newer-schema
         // database logs and falls back to the default layout — the app must
@@ -16589,6 +16590,7 @@ mod tests {
         translucency_enabled: bool,
     ) -> SirioWorkspace {
         bezel::ui::input::init(cx);
+        sirio_ui::file_view::init(cx);
         if let Some(theme) = cx.try_global::<Theme>().copied() {
             theme.install_into_bezel(cx);
         }
@@ -16867,6 +16869,7 @@ mod tests {
         working_directory: PathBuf,
         cx: &mut Context<SirioWorkspace>,
     ) -> SirioWorkspace {
+        sirio_ui::file_view::init(cx);
         let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
             id: "activity-project".into(),
             name: "Activity Project".into(),
