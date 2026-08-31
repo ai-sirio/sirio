@@ -196,11 +196,7 @@ where
                 .w(px(14.0))
                 .h(px(14.0))
                 .rounded(px(7.0))
-                .bg(if on {
-                    theme.on_solid
-                } else {
-                    theme.text
-                }),
+                .bg(if on { theme.on_solid } else { theme.text }),
         )
 }
 
@@ -245,11 +241,7 @@ pub fn segmented(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if active {
-                    theme.text
-                } else {
-                    theme.text_muted
-                })
+                .text_color(if active { theme.text } else { theme.text_muted })
                 .when(active, |this| this.bg(theme.element_active))
                 .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| callback(index, cx))
@@ -298,11 +290,7 @@ pub fn segmented_icons(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if active {
-                    theme.text
-                } else {
-                    theme.text_muted
-                })
+                .text_color(if active { theme.text } else { theme.text_muted })
                 .when(active, |this| this.bg(theme.element_active))
                 .hover(|style| style.bg(theme.element_hover))
                 .tooltip(text_tooltip(tooltip, theme))
@@ -585,7 +573,11 @@ where
         .py(px(spacing.xxxs as f32))
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
-        .text_color(if enabled { theme.text } else { theme.text_faint })
+        .text_color(if enabled {
+            theme.text
+        } else {
+            theme.text_faint
+        })
         .bg(theme.surface_raised)
         .child(text!(id = format!("settings-button-{id}"), label));
     if let Some(callback) = callback {
@@ -632,11 +624,7 @@ pub fn color_picker(
                 .rounded(px(10.0))
                 .bg(color)
                 .border_2()
-                .border_color(if active {
-                    theme.text
-                } else {
-                    theme.border
-                })
+                .border_color(if active { theme.text } else { theme.border })
                 .cursor(CursorStyle::PointingHand)
                 .on_click(move |_, _, cx| callback(key, cx)),
         );

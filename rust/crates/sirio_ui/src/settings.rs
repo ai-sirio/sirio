@@ -2978,11 +2978,7 @@ impl Settings {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(if is_focused {
-                theme.text
-            } else {
-                theme.border
-            })
+            .border_color(if is_focused { theme.text } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |this, cx| on_focus(this, window, cx));
@@ -2991,7 +2987,11 @@ impl Settings {
                 key_entity.update(cx, |this, cx| on_key(this, event, window, cx));
             })
             .text_size(theme.typography.callout)
-            .text_color(if is_empty { theme.text_faint } else { theme.text })
+            .text_color(if is_empty {
+                theme.text_faint
+            } else {
+                theme.text
+            })
             // #212: shrink and ellipsise inside the field rather than
             // drawing past its border. Must shrink without growing:
             // `flex_1` would push the end-of-text caret to the far right.
@@ -3808,7 +3808,11 @@ impl Settings {
             .gap(px(6.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
-            .text_color(if enabled { theme.text } else { theme.text_faint })
+            .text_color(if enabled {
+                theme.text
+            } else {
+                theme.text_faint
+            })
             .bg(theme.surface_raised)
             .when(enabled, |this| {
                 this.hover(|style| style.bg(theme.element_hover))
@@ -3871,11 +3875,7 @@ impl Settings {
                     .justify_between()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.callout)
-                    .text_color(if is_selected {
-                        theme.text
-                    } else {
-                        theme.text
-                    })
+                    .text_color(if is_selected { theme.text } else { theme.text })
                     .when(is_selected, |this| this.bg(theme.element_active))
                     .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
@@ -3924,22 +3924,18 @@ impl Settings {
                     .as_ref()
                     .map_or_else(|| "Up to date".into(), |stamp| format!("Checked {stamp}")),
             ),
-            UpdateStatus::Available { version, .. } => Some(
-                self.update_state
-                    .last_checked
-                    .as_ref()
-                    .map_or_else(|| format!("Update available: {version}"), |stamp| {
-                        format!("Checked {stamp} · update available: {version}")
-                    }),
-            ),
-            UpdateStatus::Ready { version, .. } => Some(
-                self.update_state
-                    .last_checked
-                    .as_ref()
-                    .map_or_else(|| format!("Update ready: {version}"), |stamp| {
-                        format!("Checked {stamp} · update ready: {version}")
-                    }),
-            ),
+            UpdateStatus::Available { version, .. } => {
+                Some(self.update_state.last_checked.as_ref().map_or_else(
+                    || format!("Update available: {version}"),
+                    |stamp| format!("Checked {stamp} · update available: {version}"),
+                ))
+            }
+            UpdateStatus::Ready { version, .. } => {
+                Some(self.update_state.last_checked.as_ref().map_or_else(
+                    || format!("Update ready: {version}"),
+                    |stamp| format!("Checked {stamp} · update ready: {version}"),
+                ))
+            }
             UpdateStatus::Failed { message } => {
                 let mut text = "Could not check for updates".to_string();
                 if let Some(stamp) = &self.update_state.last_checked {
@@ -4220,9 +4216,10 @@ impl Settings {
             );
         }
 
-        let apply_update_handler = self.on_apply_update.clone().map(|callback| {
-            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| callback()
-        });
+        let apply_update_handler = self
+            .on_apply_update
+            .clone()
+            .map(|callback| move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| callback());
         let mut updates = controls::card(theme).child(controls::row(
             "Automatic updates",
             Some("Check for and download updates in the background.".into()),
@@ -4233,16 +4230,15 @@ impl Settings {
             match &self.update_state.status {
                 UpdateStatus::Available { version, notes }
                 | UpdateStatus::Ready { version, notes } => {
-                    let update_label = if matches!(
-                        &self.update_state.status,
-                        UpdateStatus::Ready { .. }
-                    ) {
-                        "Ready to install"
-                    } else {
-                        "Available version"
-                    };
-                    updates = updates.child(controls::separator(theme)).child(
-                        controls::row(
+                    let update_label =
+                        if matches!(&self.update_state.status, UpdateStatus::Ready { .. }) {
+                            "Ready to install"
+                        } else {
+                            "Available version"
+                        };
+                    updates = updates
+                        .child(controls::separator(theme))
+                        .child(controls::row(
                             update_label,
                             None,
                             div()
@@ -4251,8 +4247,7 @@ impl Settings {
                                 .text_color(theme.text_muted)
                                 .child(text!(version.clone())),
                             theme,
-                        ),
-                    );
+                        ));
                     if self.update_channel().eq_ignore_ascii_case("nightly") {
                         updates = updates.child(
                             div()
@@ -7340,20 +7335,20 @@ mod tests {
     /// Ticket #316: Stable only renders non-empty manifest notes; Nightly
     /// uses the one honest fixed explanation instead of daily release notes.
     #[gpui::test]
-    async fn update_notes_follow_the_host_channel_and_manifest(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn update_notes_follow_the_host_channel_and_manifest(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let stable_without_notes = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(UpdateState {
-                enabled: true,
-                channel: "stable".into(),
-                status: UpdateStatus::Available {
-                    version: "0.7.0".into(),
-                    notes: String::new(),
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(
+                UpdateState {
+                    enabled: true,
+                    channel: "stable".into(),
+                    status: UpdateStatus::Available {
+                        version: "0.7.0".into(),
+                        notes: String::new(),
+                    },
+                    last_checked: None,
                 },
-                last_checked: None,
-            })
+            )
         });
         let mut stable_cx = VisualTestContext::from_window(stable_without_notes.into(), cx);
         stable_cx.run_until_parked();
@@ -7368,15 +7363,17 @@ mod tests {
         );
 
         let nightly = stable_cx.cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(UpdateState {
-                enabled: true,
-                channel: "nightly".into(),
-                status: UpdateStatus::Available {
-                    version: "0.7.0-nightly".into(),
-                    notes: "ignored for nightly".into(),
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(
+                UpdateState {
+                    enabled: true,
+                    channel: "nightly".into(),
+                    status: UpdateStatus::Available {
+                        version: "0.7.0-nightly".into(),
+                        notes: "ignored for nightly".into(),
+                    },
+                    last_checked: None,
                 },
-                last_checked: None,
-            })
+            )
         });
         let mut nightly_cx = VisualTestContext::from_window(nightly.into(), &mut stable_cx.cx);
         nightly_cx.run_until_parked();

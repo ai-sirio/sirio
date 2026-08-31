@@ -318,7 +318,10 @@ fn the_non_chat_content_columns_are_the_frozen_720() {
 
 #[test]
 fn the_live_transcript_follows_the_bezel_transcript_pattern() {
-    assert_eq!(TRANSCRIPT_WIDTH, 700.0, "transcript column (Bezel Transcript)");
+    assert_eq!(
+        TRANSCRIPT_WIDTH, 700.0,
+        "transcript column (Bezel Transcript)"
+    );
     assert_eq!(USER_PILL_MAX_WIDTH, 440.0, "user bubble (Bezel Activity)");
 }
 

@@ -1277,7 +1277,11 @@ impl ChangesTab {
                     .text_color(theme.text_muted)
                     .child(section.label()),
             )
-            .child(div().text_color(theme.text_faint).child(format!("({count})")))
+            .child(
+                div()
+                    .text_color(theme.text_faint)
+                    .child(format!("({count})")),
+            )
             .child(div().flex_1())
             // A commit view renders no stage/unstage batch action either:
             // the header keeps its collapse toggle but not the mutation.

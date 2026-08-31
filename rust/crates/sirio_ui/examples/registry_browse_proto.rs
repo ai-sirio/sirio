@@ -439,7 +439,11 @@ fn agent_label(
     enabled: bool,
     theme: Theme,
 ) -> Div {
-    let title_color = if enabled { theme.text } else { theme.text_faint };
+    let title_color = if enabled {
+        theme.text
+    } else {
+        theme.text_faint
+    };
     let description_color = if enabled {
         theme.text_muted
     } else {
@@ -973,11 +977,7 @@ impl RegistryBrowseProto {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(if focused {
-                theme.text
-            } else {
-                theme.border
-            })
+            .border_color(if focused { theme.text } else { theme.border })
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |_, cx| focus_for_click.focus(window, cx));

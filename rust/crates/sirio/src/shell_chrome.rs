@@ -127,10 +127,7 @@ mod tests {
             ShellMaterial::Blurred.window_background(),
             WindowBackgroundAppearance::Blurred
         );
-        assert_eq!(
-            ShellMaterial::Opaque.frame_fill(&theme),
-            theme.bg
-        );
+        assert_eq!(ShellMaterial::Opaque.frame_fill(&theme), theme.bg);
         assert_eq!(
             ShellMaterial::Blurred.frame_fill(&theme),
             theme.frame_surface

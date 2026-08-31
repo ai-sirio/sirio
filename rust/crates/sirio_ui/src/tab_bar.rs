@@ -156,7 +156,11 @@ pub fn render_tab_context_menu(
             .gap(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(if enabled { theme.text } else { theme.text_faint })
+            .text_color(if enabled {
+                theme.text
+            } else {
+                theme.text_faint
+            })
             .when(enabled, |this| {
                 this.hover(|style| style.bg(theme.element_hover))
             })
@@ -401,9 +405,12 @@ impl TabBar {
                     .child(text!(id = format!("new-tab-label-{label}"), label)),
             )
             .when(chevron, |this| {
-                this.child(div().text_color(theme.text_faint).child(
-                    IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.text_faint),
-                ))
+                this.child(
+                    div().text_color(theme.text_faint).child(
+                        IconElement::new(Icon::ChevronRight, IconSize::XSmall)
+                            .text_color(theme.text_faint),
+                    ),
+                )
             })
             // #205: annotate, never disable. The row stays clickable because
             // availability is probed against Sirio's own PATH while the agent

@@ -209,11 +209,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 )
                 // End-of-text insertion caret; laid out even when invisible
                 // so the bar never shifts the value while blinking.
-                .child(crate::caret::bar(
-                    px(14.0),
-                    theme.text,
-                    field.caret_visible,
-                )),
+                .child(crate::caret::bar(px(14.0), theme.text, field.caret_visible)),
         );
     }
 
