@@ -3265,12 +3265,34 @@ fn settings_category_id(category: SettingsCategory) -> String {
     category.title().to_ascii_lowercase().replace(' ', "-")
 }
 
-fn theme_mode_name(mode: ThemeMode) -> &'static str {
+/// The persisted appearance for a selected theme mode.
+///
+/// Both enums are `System`/`Light`/`Dark`, but they belong to different
+/// crates — `ThemeMode` is bezel's, re-exported by `sirio_theme`, and
+/// `AppearanceMode` is `sirio_persistence`'s, which carries the serde
+/// contract with existing databases. `sirio` is the only crate that depends
+/// on both, so this pair is the single conversion point; it used to be two
+/// `match` blocks written out separately inside the settings converters.
+fn persisted_appearance(mode: ThemeMode) -> AppearanceMode {
     match mode {
-        ThemeMode::System => "system",
-        ThemeMode::Light => "light",
-        ThemeMode::Dark => "dark",
+        ThemeMode::System => AppearanceMode::System,
+        ThemeMode::Light => AppearanceMode::Light,
+        ThemeMode::Dark => AppearanceMode::Dark,
     }
+}
+
+fn theme_mode(appearance: AppearanceMode) -> ThemeMode {
+    match appearance {
+        AppearanceMode::System => ThemeMode::System,
+        AppearanceMode::Light => ThemeMode::Light,
+        AppearanceMode::Dark => ThemeMode::Dark,
+    }
+}
+
+/// Reads the mode's name through the persisted enum, so the string this shows
+/// cannot drift from the string the database stores.
+fn theme_mode_name(mode: ThemeMode) -> &'static str {
+    persisted_appearance(mode).raw()
 }
 
 fn tab_has_file(tab: &OpenTab) -> bool {
@@ -14600,11 +14622,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         };
 
     SettingsSnapshot {
-        theme: match settings.appearance {
-            AppearanceMode::System => ThemeMode::System,
-            AppearanceMode::Light => ThemeMode::Light,
-            AppearanceMode::Dark => ThemeMode::Dark,
-        },
+        theme: theme_mode(settings.appearance),
         interface_font_size: settings.ui_font_size.clamp(10, 20) as i32,
         terminal_font_size: settings.terminal_font_size.clamp(9, 24) as i32,
         file_icons: match settings.file_icon_theme {
@@ -14637,11 +14655,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
 
 fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
     AppSettings {
-        appearance: match snapshot.theme {
-            ThemeMode::System => AppearanceMode::System,
-            ThemeMode::Light => AppearanceMode::Light,
-            ThemeMode::Dark => AppearanceMode::Dark,
-        },
+        appearance: persisted_appearance(snapshot.theme),
         ui_font_size: i64::from(snapshot.interface_font_size.clamp(10, 20)),
         terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(9, 24)),
         file_icon_theme: match snapshot.file_icons {
@@ -15477,6 +15491,24 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    /// The persisted appearance and the theme's own mode round-trip.
+    ///
+    /// There used to be four `System`/`Light`/`Dark` enums — the persisted
+    /// one, bezel's, `sirio_theme`'s and a dead one in `sirio_project`. Two
+    /// remain, and `sirio` is the only crate that sees both, so this pair of
+    /// functions is the whole conversion. A gap here is a setting that
+    /// silently reverts to System on restart, which no other test would show.
+    #[test]
+    fn the_persisted_appearance_and_the_theme_mode_round_trip() {
+        for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+            assert_eq!(theme_mode(persisted_appearance(mode)), mode);
+        }
+        // The stored strings are a serde contract with existing databases.
+        assert_eq!(theme_mode_name(ThemeMode::System), "system");
+        assert_eq!(theme_mode_name(ThemeMode::Light), "light");
+        assert_eq!(theme_mode_name(ThemeMode::Dark), "dark");
+    }
 
     /// The defect this pins: `on_window_should_close` minimized and then
     /// vetoed the close on *every* platform, so #290's new Windows `×`

@@ -123,6 +123,6 @@ pub use project::Project;
 pub use settings::SettingsPolicy;
 pub use skill::{SkillInstallCommand, agent_skill_install_command};
 pub use tab::{Tab, TabKind};
-pub use ui::{AppearanceMode, UpdateEvent, UpdateState};
+pub use ui::{UpdateEvent, UpdateState};
 pub use workspace::{FilteredProject, FilteredTab, FilteredTree, FilteredWorktree, Workspace};
 pub use worktree::Worktree;
