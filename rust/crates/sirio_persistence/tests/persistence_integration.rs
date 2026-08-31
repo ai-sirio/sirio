@@ -66,6 +66,7 @@ fn sample_worktree(id: &str, project_id: &str, branch: &str) -> WorktreeRecord {
         comment: None,
         created_at: None,
         updated_at: None,
+        secondary_pane_open: false,
     }
 }
 
@@ -1978,4 +1979,82 @@ fn panel_widths_round_trip_and_clamp_into_their_ranges() {
         "an in-range width survives verbatim"
     );
     assert_eq!(settings.right_panel_width, 500);
+}
+
+#[test]
+fn the_centre_split_ratio_survives_a_relaunch_and_clamps_a_corrupt_value() {
+    let dir = TempDir::new();
+    let path = dir.db_path("centre-split-ratio");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_settings(&AppSettings {
+            center_split_ratio: 640,
+            ..AppSettings::default()
+        })
+        .expect("save the dragged ratio");
+    }
+
+    assert_eq!(
+        AppDatabase::open(&path)
+            .expect("reopen")
+            .settings()
+            .expect("load")
+            .center_split_ratio,
+        640,
+        "a ratio inside the range comes back verbatim"
+    );
+
+    // Hand-edit the row past the safety net: the range exists to stop a value
+    // like this driving a pane to zero width.
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw");
+        conn.execute(
+            "UPDATE setting SET value = '10000' WHERE key = 'appearance.centerSplitRatio'",
+            [],
+        )
+        .expect("corrupt the ratio");
+    }
+
+    assert_eq!(
+        AppDatabase::open(&path)
+            .expect("reopen")
+            .settings()
+            .expect("load")
+            .center_split_ratio,
+        900,
+        "clamped to the upper bound, not honoured"
+    );
+}
+
+#[test]
+fn a_worktrees_secondary_pane_flag_survives_a_relaunch_and_defaults_closed() {
+    let dir = TempDir::new();
+    let path = dir.db_path("secondary-pane-flag");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("p1", "Sirio"))
+            .expect("save project");
+        db.save_worktree(&WorktreeRecord {
+            secondary_pane_open: true,
+            ..sample_worktree("w1", "p1", "main")
+        })
+        .expect("save the worktree with its pane open");
+        db.save_worktree(&sample_worktree("w2", "p1", "feature"))
+            .expect("save a worktree that never opened one");
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let worktrees = db.worktrees().expect("load worktrees");
+    let flag = |id: &str| {
+        worktrees
+            .iter()
+            .find(|worktree| worktree.id == id)
+            .expect("worktree present")
+            .secondary_pane_open
+    };
+    assert!(flag("w1"), "an open pane reopens open");
+    assert!(
+        !flag("w2"),
+        "a worktree that never opened one stays closed"
+    );
 }

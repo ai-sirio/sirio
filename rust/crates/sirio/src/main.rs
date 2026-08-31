@@ -346,9 +346,6 @@ const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
 /// #320: the rule between the two center panes.
 const CENTER_DIVIDER_WIDTH: f32 = 1.;
-/// #321: the centre split, in thousandths, so it stores like every other
-/// numeric setting. Even until someone drags it.
-const DEFAULT_CENTER_SPLIT_RATIO: i64 = 500;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
 const TERMINAL_TAB_MIN_WIDTH: f32 = 132.;
 const TAB_MAX_WIDTH: f32 = 220.;
@@ -3683,6 +3680,10 @@ struct SirioWorkspace {
     /// width: `panel_layout::resolve_center_split` clamps it at render time
     /// and never writes the clamp back.
     center_split_ratio: i64,
+    /// #323: whether this worktree's Secondary pane is open. The one piece of
+    /// the centre split that is stored rather than derived -- see
+    /// `WorktreeRecord::secondary_pane_open` for why it has to be.
+    secondary_pane_open: bool,
     /// Where the centre divider was grabbed, and the ratio it held then.
     center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
@@ -3987,6 +3988,7 @@ impl SirioWorkspace {
         translucency_enabled: bool,
         sidebar_width: f32,
         right_panel_width: f32,
+        center_split_ratio: i64,
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
@@ -4373,6 +4375,7 @@ impl SirioWorkspace {
 
         Self::subscribe_right_panel(&right_panel, cx);
         Self::bind_terminal_tabs(&tabs, cx);
+        Self::bind_file_tabs(&tabs, cx);
         for tab in &tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::Changes(changes) = content {
@@ -4470,7 +4473,8 @@ impl SirioWorkspace {
             sidebar_width,
             right_panel_width,
             dragging_panel: None,
-            center_split_ratio: DEFAULT_CENTER_SPLIT_RATIO,
+            center_split_ratio,
+            secondary_pane_open: session.secondary_pane_open_for(&working_directory),
             center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
@@ -4984,7 +4988,14 @@ impl SirioWorkspace {
                             TabContent::Browser(browser) => {
                                 state.browser_url = browser.read(cx).state().address().to_string();
                             }
-                            TabContent::File { .. } | TabContent::Changes(_) => {}
+                            // #323: same live read as the arms above, so a
+                            // restored Editor tab reopens the document the
+                            // user left open rather than nothing.
+                            TabContent::File { view } => {
+                                state.editor_path =
+                                    view.read(cx).path().to_string_lossy().into_owned();
+                            }
+                            TabContent::Changes(_) => {}
                         }
                     });
                     state
@@ -5288,6 +5299,20 @@ impl SirioWorkspace {
         Self::subscribe_terminal_link(terminal, pane_id, cx);
         Self::subscribe_terminal_activity(terminal, pane_id, cx);
         Self::subscribe_terminal_drop(terminal, cx);
+    }
+
+    /// #323: a restored Editor tab reaches the workspace through the free
+    /// `restore_tabs*` functions, which cannot subscribe. Without this its
+    /// "open this file" links would be dead on a restored tab but live on a
+    /// freshly opened one.
+    fn bind_file_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
+        for tab in tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content {
+                    Self::subscribe_file_view(view, cx);
+                }
+            });
+        }
     }
 
     fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
@@ -6615,6 +6640,7 @@ impl SirioWorkspace {
                     cx,
                 );
                 Self::bind_terminal_tabs(&new_tabs, cx);
+                Self::bind_file_tabs(&new_tabs, cx);
                 for tab in &new_tabs {
                     tab.panes.for_each(&mut |_, content| {
                         if let TabContent::Chat(chat) = content {
@@ -6632,6 +6658,9 @@ impl SirioWorkspace {
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
+        // #323: the pane flag is per worktree, so it follows the switch the
+        // same way the tabs above just did.
+        self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
         self.worktree_label = context.activity_label;
         self.terminal_breadcrumb = context.terminal_breadcrumb;
         self.rebind_changes_tabs(cx);
@@ -7000,6 +7029,7 @@ impl SirioWorkspace {
                 cx,
             );
             Self::bind_terminal_tabs(&tabs, cx);
+        Self::bind_file_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
             // tabs need the same binding or a restored session's Edit-tool file
@@ -8397,6 +8427,7 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
             self.rebuild_center_split();
         }
@@ -8462,6 +8493,7 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Diff, "Changes") {
             self.rebuild_center_split();
         }
@@ -8493,6 +8525,7 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Diff, "Changes") {
             self.rebuild_center_split();
         }
@@ -8530,6 +8563,7 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Browser, "Browser") {
             self.rebuild_center_split();
         }
@@ -11408,12 +11442,27 @@ impl SirioWorkspace {
         )
     }
 
-    /// Whether the Secondary half is drawn at all. Derived, never stored:
-    /// the pane is exactly as present as its tabs are.
+    /// Whether the Secondary half is drawn at all: it holds tabs *and* has
+    /// not been hidden. Membership stays derived -- which half a tab belongs
+    /// to comes from its kind -- but "open" cannot be, because hiding the
+    /// pane leaves its tabs in place (#323).
     fn secondary_pane_visible(&self) -> bool {
-        self.tabs
-            .iter()
-            .any(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+        self.secondary_pane_open
+            && self
+                .tabs
+                .iter()
+                .any(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+    }
+
+    /// #323: opening any Secondary surface opens the pane, even if it was
+    /// hidden -- the alternative is a tab that exists and is drawn nowhere.
+    fn open_secondary_pane(&mut self) {
+        if self.secondary_pane_open {
+            return;
+        }
+        self.secondary_pane_open = true;
+        self.session
+            .save_secondary_pane_open(&self.working_directory, true);
     }
 
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
@@ -12193,6 +12242,7 @@ impl SirioWorkspace {
         // key is an i64 and drag positions are fractional.
         let sidebar = self.sidebar_width.round() as i64;
         let right_panel = self.right_panel_width.round() as i64;
+        let center_split = self.center_split_ratio;
         self.panel_width_save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(PANEL_WIDTH_SAVE_DEBOUNCE)
@@ -12204,6 +12254,7 @@ impl SirioWorkspace {
                 let mut settings = app_settings_from_snapshot(this.settings.read(cx).snapshot());
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
+                settings.center_split_ratio = center_split;
                 this.session.save_settings(&settings);
             });
         }));
@@ -14096,10 +14147,14 @@ fn restore_tabs(
                 TabContent::Browser(browser)
             }
             "file" => {
-                // File tabs are not restored yet: their source may disappear
-                // between launches. Session restoration skips them rather
-                // than opening a stale or missing document.
-                continue;
+                // #323: an Editor tab comes back only when its file still
+                // does; see `restored_editor_path`.
+                let Some(path) = restored_editor_path(&tab_state) else {
+                    continue;
+                };
+                TabContent::File {
+                    view: cx.new(|cx| FileView::new(path, cx)),
+                }
             }
             // restore() only returns chat and terminal tabs.
             _ => unreachable!("unexpected restored tab kind {}", tab.kind),
@@ -14145,6 +14200,7 @@ fn restore_tabs(
                 "chat" => TabKind::AgentChat,
                 "diff" => TabKind::Diff,
                 "browser" => TabKind::Browser,
+                "file" => TabKind::Editor,
                 _ => TabKind::Terminal,
             },
             agent_icon,
@@ -14202,6 +14258,19 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
 /// What was captured at save time, or the fallback page when the session
 /// predates the capture or the tab never carried an address. Both restore
 /// paths go through here so the fallback is spelled once.
+/// #323: the file a restored Editor tab reopens, or `None` when this session
+/// carries no path or that path no longer resolves.
+///
+/// The check lives here, at materialisation, and not in `SessionLayout`:
+/// answering it needs the filesystem, and `SessionLayout` is a pure data
+/// container. A file can be deleted, renamed, or sit on a volume that is not
+/// mounted this launch; a tab whose target is gone is dropped silently rather
+/// than restored onto an error the user never asked to see.
+fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(&state.editor_path);
+    path.is_file().then_some(path)
+}
+
 fn restored_browser_url(state: &SessionTabState) -> &str {
     if state.browser_url.is_empty() {
         "https://example.com"
@@ -14352,6 +14421,15 @@ fn restore_tabs_in_workspace(
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
             }
+            "file" => {
+                // #323: see the matching arm in `restore_tabs`.
+                let Some(path) = restored_editor_path(&tab_state) else {
+                    continue;
+                };
+                TabContent::File {
+                    view: cx.new(|cx| FileView::new(path, cx)),
+                }
+            }
             _ => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
@@ -14375,6 +14453,8 @@ fn restore_tabs_in_workspace(
                 TabKind::Diff
             } else if tab.kind == "browser" {
                 TabKind::Browser
+            } else if tab.kind == "file" {
+                TabKind::Editor
             } else {
                 TabKind::Terminal
             },
@@ -14838,12 +14918,14 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
         translucency: snapshot.translucency,
-        // Not in the Settings UI snapshot: the widths belong to the drag.
-        // Callers must re-apply the live values — see the `on_change`
-        // handler below. Filling these from `Default` here would reset a
-        // dragged panel every time any unrelated setting changed.
+        // Not in the Settings UI snapshot: the widths and the centre split
+        // belong to the drag. Callers must re-apply the live values — see
+        // the `on_change` handler below. Filling these from `Default` here
+        // would reset a dragged panel every time any unrelated setting
+        // changed.
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
+        center_split_ratio: AppSettings::default().center_split_ratio,
     }
 }
 
@@ -15463,6 +15545,7 @@ fn main() {
                             settings.updates_enabled = stored.updates_enabled;
                             settings.sidebar_width = stored.sidebar_width;
                             settings.right_panel_width = stored.right_panel_width;
+                            settings.center_split_ratio = stored.center_split_ratio;
                             session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
@@ -15545,6 +15628,7 @@ fn main() {
                         initial_translucency,
                         saved_settings.sidebar_width as f32,
                         saved_settings.right_panel_width as f32,
+                        saved_settings.center_split_ratio,
                         cx,
                     );
                     // The update host is attached here, after construction,
@@ -16576,6 +16660,7 @@ mod tests {
             translucency_enabled,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -16652,6 +16737,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -16787,6 +16873,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -16889,6 +16976,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -19746,6 +19834,9 @@ mod tests {
                 .activity
                 .agent_spawned("pane-3", "codex", Instant::now());
 
+            // #323: a tab pushed by hand never went through `add_file_tab`,
+            // so nothing opened the pane it is drawn in.
+            workspace.open_secondary_pane();
             workspace.rebuild_center_split();
             cx.notify();
         });
@@ -20965,6 +21056,8 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs[0].title = "Note".into();
             workspace.tabs[0].kind = TabKind::Editor;
+            // #323: see the matching comment in the tab-status test.
+            workspace.open_secondary_pane();
             workspace.tabs[0].panes = PaneNode::leaf(
                 0,
                 TabContent::File {
@@ -21855,6 +21948,7 @@ mod tests {
             translucency: true,
             sidebar_width: 325,
             right_panel_width: 405,
+            center_split_ratio: 610,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -21964,6 +22058,7 @@ mod tests {
             translucency: true,
             sidebar_width: 325,
             right_panel_width: 405,
+            center_split_ratio: 610,
         };
         store.save_settings(&persisted);
 
@@ -26438,6 +26533,7 @@ mod tests {
                 scrollback: std::collections::BTreeMap::new(),
                 chat_draft: "an idea I never sent".into(),
                 browser_url: String::new(),
+                editor_path: String::new(),
             }],
             diagnostics: Vec::new(),
         };
@@ -26538,6 +26634,98 @@ browser  profile  "
         assert_eq!(restored_browser_url(&state), "https://example.org/probe");
     }
 
+    /// #323: an Editor tab survives a restart only when its file does.
+    #[test]
+    fn restored_editor_path_drops_a_file_that_is_no_longer_there() {
+        let root = std::env::temp_dir().join(format!(
+            "sirio-restored-editor-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create fixture");
+        let file = root.join("open.rs");
+        std::fs::write(&file, "fn main() {}").expect("write the open file");
+
+        let mut state = session::SessionTabState::with_root(0);
+        assert_eq!(
+            restored_editor_path(&state),
+            None,
+            "a session that captured no path restores no editor"
+        );
+
+        state.editor_path = file.to_string_lossy().into_owned();
+        assert_eq!(
+            restored_editor_path(&state),
+            Some(file.clone()),
+            "a file that is still there comes back"
+        );
+
+        std::fs::remove_file(&file).expect("delete the file behind the tab");
+        assert_eq!(
+            restored_editor_path(&state),
+            None,
+            "a deleted file is dropped silently, not restored onto an error"
+        );
+
+        state.editor_path = root.to_string_lossy().into_owned();
+        assert_eq!(
+            restored_editor_path(&state),
+            None,
+            "a path that resolves to a directory is not a document"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #323, the save half: an Editor tab's open file is read into the
+    /// session snapshot, the way the browser address below is.
+    #[gpui::test]
+    async fn layout_captures_the_open_editors_path(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let path = std::env::temp_dir().join(format!(
+            "sirio-editor-capture-{}-{}.rs",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::write(&path, "fn main() {}").expect("write the open file");
+        let captured_path = path.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let view = cx.new(|cx| FileView::new(captured_path, cx));
+            workspace.tabs[0] = OpenTab {
+                id: 0,
+                persistence_id: "test-editor".into(),
+                title: "open.rs".into(),
+                kind: TabKind::Editor,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(0),
+                panes: PaneNode::leaf(0, TabContent::File { view }),
+                focused_pane: 0,
+                title_is_auto_named: true,
+            };
+            workspace.rebuild_center_split();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let captured = workspace.update(&mut cx, |workspace, cx| {
+            workspace.layout(cx).tab_states[0].editor_path.clone()
+        });
+        assert_eq!(
+            captured,
+            path.to_string_lossy(),
+            "the open file must reach the session snapshot"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// #125 (spec R6.5), the save half: a browser tab's live address is read
     /// into the session snapshot, the way the draft and scrollback arms are.
     #[gpui::test]
@@ -26600,6 +26788,7 @@ browser  profile  "
                 scrollback: std::collections::BTreeMap::new(),
                 chat_draft: String::new(),
                 browser_url: "https://example.org/probe".into(),
+                editor_path: String::new(),
             }],
             diagnostics: Vec::new(),
         };
@@ -26653,6 +26842,7 @@ browser  profile  "
                 scrollback: std::collections::BTreeMap::from([(0, nonce.clone())]),
                 chat_draft: String::new(),
                 browser_url: String::new(),
+                editor_path: String::new(),
             }],
             diagnostics: Vec::new(),
         };

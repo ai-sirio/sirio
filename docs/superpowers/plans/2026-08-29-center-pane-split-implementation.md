@@ -39,6 +39,12 @@ where a tab is drawn. Membership is derived from `TabKind`, never stored.
    `worktree.secondary_pane_open`; restore filter at materialisation (editor
    tabs restore only if the file exists); pane starts closed when no Secondary
    tab survives (flag honoured, not overridden).
+   Done. Two notes for step 6: the in-memory `secondary_pane_open` field and
+   the `secondary_pane_visible()` gate landed here rather than with the
+   toggle, because restore is where "flag honoured" has to be true; step 6
+   only adds the chord that flips it to `false`. And `open_secondary_pane()`
+   is called from the four Secondary inserts, so a tab pushed by hand (two
+   drawing tests do this) has to call it too or its pane is not drawn.
 6. **`ctrl-shift-b`** through the five sibling points.
 7. **Enter promotes the selected Changes row** in the right sidebar (Files
    already has `return_opens_the_selected_file_row`).

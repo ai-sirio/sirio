@@ -229,7 +229,7 @@ impl AppDatabase {
     pub fn worktrees(&self) -> Result<Vec<WorktreeRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
             "SELECT id, project_id, branch, path, is_primary, order_idx,
-                    comment, created_at, updated_at
+                    comment, created_at, updated_at, secondary_pane_open
              FROM worktree
              ORDER BY project_id, order_idx, id",
         )?;
@@ -244,7 +244,7 @@ impl AppDatabase {
     ) -> Result<Vec<WorktreeRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
             "SELECT id, project_id, branch, path, is_primary, order_idx,
-                    comment, created_at, updated_at
+                    comment, created_at, updated_at, secondary_pane_open
              FROM worktree
              WHERE project_id = ?1
              ORDER BY order_idx, id",
@@ -260,8 +260,8 @@ impl AppDatabase {
         transaction.execute(
             "INSERT INTO worktree
                 (id, project_id, branch, path, is_primary, order_idx,
-                 comment, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 comment, created_at, updated_at, secondary_pane_open)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                  project_id = excluded.project_id,
                  branch = excluded.branch,
@@ -270,7 +270,8 @@ impl AppDatabase {
                  order_idx = excluded.order_idx,
                  comment = excluded.comment,
                  created_at = excluded.created_at,
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at,
+                 secondary_pane_open = excluded.secondary_pane_open",
             params![
                 worktree.id,
                 worktree.project_id,
@@ -281,6 +282,7 @@ impl AppDatabase {
                 worktree.comment,
                 worktree.created_at,
                 worktree.updated_at,
+                worktree.secondary_pane_open,
             ],
         )?;
         transaction.commit()?;
@@ -316,7 +318,7 @@ impl AppDatabase {
         self.conn
             .query_row(
                 "SELECT id, project_id, branch, path, is_primary, order_idx,
-                        comment, created_at, updated_at
+                        comment, created_at, updated_at, secondary_pane_open
                  FROM worktree
                  WHERE path = ?1
                  ORDER BY project_id, order_idx, id
@@ -998,6 +1000,13 @@ impl AppDatabase {
                 405,
             );
         }
+        if let Some(value) = self.setting_value(settings_keys::CENTER_SPLIT_RATIO)? {
+            defaults.center_split_ratio = clamp_setting(
+                &value,
+                crate::model::settings_ranges::CENTER_SPLIT_RATIO,
+                500,
+            );
+        }
 
         Ok(defaults)
     }
@@ -1158,6 +1167,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::RIGHT_PANEL_WIDTH,
             &settings.right_panel_width.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CENTER_SPLIT_RATIO,
+            &settings.center_split_ratio.to_string(),
         )?;
         transaction.commit()?;
         Ok(())
@@ -1454,6 +1468,7 @@ fn map_worktree(row: &rusqlite::Row) -> rusqlite::Result<WorktreeRecord> {
         comment: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        secondary_pane_open: row.get(9)?,
     })
 }
 
@@ -1602,8 +1617,8 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
     tx.execute(
         "INSERT INTO worktree
             (id, project_id, branch, path, is_primary, order_idx,
-             comment, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             comment, created_at, updated_at, secondary_pane_open)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             worktree.id,
             worktree.project_id,
@@ -1614,6 +1629,7 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
             worktree.comment,
             worktree.created_at,
             worktree.updated_at,
+            worktree.secondary_pane_open,
         ],
     )?;
     Ok(())

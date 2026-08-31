@@ -73,6 +73,15 @@ pub struct WorktreeRecord {
     pub is_primary: bool,
     /// User-authored sidebar note for this worktree.
     pub comment: Option<String>,
+    /// Whether this worktree's Secondary centre pane is open (#323).
+    ///
+    /// Stored, not derived — and that is a deliberate exception to how the
+    /// rest of the centre split works. A tab's half comes from its kind, and
+    /// the pane is normally exactly as present as its tabs are. The one state
+    /// that cannot be derived is "closed while still holding tabs", which is
+    /// what the keyboard toggle produces. Take the toggle away and this
+    /// column must go with it.
+    pub secondary_pane_open: bool,
     /// Creation time as Unix milliseconds, when known.
     pub created_at: Option<i64>,
     /// Last update time as Unix milliseconds, when known.
@@ -96,6 +105,7 @@ impl WorktreeRecord {
             comment: None,
             created_at: None,
             updated_at: None,
+            secondary_pane_open: false,
         }
     }
 }
@@ -438,6 +448,16 @@ pub struct AppSettings {
     /// "appearance.rightPanelWidth" — default 405, clamped to 220...640.
     /// Linux-rewrite-only for the same reason as `sidebar_width`.
     pub right_panel_width: i64,
+    /// "appearance.centerSplitRatio" — default 500, clamped to 100...900.
+    /// How the centre column is shared between its two panes, in
+    /// thousandths. Thousandths and not a float because `AppSettings` has no
+    /// float anywhere, and `PaneEvent::SetRatio { ratio_millis }` is the
+    /// in-repo precedent for this exact quantity.
+    ///
+    /// The range is a safety net, not the constraint: it stops a corrupt or
+    /// hand-edited value driving a pane to zero width. What actually governs
+    /// the split is the 320px per-pane floor applied at render.
+    pub center_split_ratio: i64,
 }
 
 impl Default for AppSettings {
@@ -465,6 +485,7 @@ impl Default for AppSettings {
             translucency: false,
             sidebar_width: 325,
             right_panel_width: 405,
+            center_split_ratio: 500,
         }
     }
 }
@@ -497,6 +518,7 @@ pub mod settings_keys {
     pub const SIDEBAR_WIDTH: &str = "appearance.sidebarWidth";
     /// Linux-rewrite-only: no Swift antecedent.
     pub const RIGHT_PANEL_WIDTH: &str = "appearance.rightPanelWidth";
+    pub const CENTER_SPLIT_RATIO: &str = "appearance.centerSplitRatio";
 }
 
 /// The Swift ranges settings values are clamped into.
@@ -515,6 +537,7 @@ pub mod settings_ranges {
     pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<i64> = 220..=480;
     /// Linux-rewrite-only; no Swift range to mirror.
     pub const RIGHT_PANEL_WIDTH: std::ops::RangeInclusive<i64> = 220..=640;
+    pub const CENTER_SPLIT_RATIO: std::ops::RangeInclusive<i64> = 100..=900;
 }
 
 /// One isolated agent-CLI account, as persisted (F-SET-15). Mirrors the
