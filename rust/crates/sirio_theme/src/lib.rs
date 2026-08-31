@@ -313,7 +313,18 @@ impl ThemeColors {
         };
         let panel_surface = Rgba::from(bezel.surface);
         let selected_fill = Rgba::from(bezel.element_active);
-        let text = Rgba::from(bezel.text);
+        // bezel paints body text at full contrast against its page: #E5E5E5
+        // on #0D0D0D is 15.4:1, #222222 on #F4F4F4 is 14.5:1. On a surface
+        // this dense — a sidebar, a tab strip and a file tree all in view —
+        // that reads as glare rather than as emphasis, so Sirio pulls the
+        // primary text one step back toward the surface it sits on. The
+        // result lands where Sirio's own text was before it adopted bezel
+        // (12.2:1 dark, 10.8:1 light), which is the target, not a taste:
+        // both are comfortably past WCAG AAA's 7:1, so nothing is spent.
+        //
+        // Only the primary rung moves. `text_muted` and below are already
+        // pulled back, and softening them too would collapse the ladder.
+        let text = toward(Rgba::from(bezel.text), panel_surface, TEXT_SOFTENING);
         let text_muted = Rgba::from(bezel.text_muted);
         let text_faint = Rgba::from(bezel.text_faint);
         let text_dim = Rgba::from(bezel.text_dim);
@@ -1544,6 +1555,11 @@ fn hairline(alpha: f32, appearance: Appearance) -> Rgba {
 /// and the "ladder" no longer describes anything: what is left is the faint
 /// wash and the mid wash, quoted in dark-mode terms the way bezel quotes its
 /// own.
+/// How far the primary text rung is pulled back toward its surface. Chosen so
+/// the result lands on the contrast Sirio shipped before adopting bezel; held
+/// by `body_text_is_softened_off_bezels_full_contrast`.
+const TEXT_SOFTENING: f32 = 0.10;
+
 const VEIL_FAINT: f32 = 0.05;
 const VEIL_MID: f32 = 0.12;
 
@@ -1559,6 +1575,20 @@ const SURFACE_DARK: u32 = 0x1A_1A_1A;
 /// turned down.
 fn softened(color: Rgba, alpha: f32) -> Rgba {
     Rgba { a: alpha, ..color }
+}
+
+/// Mixes `fraction` of `target` into `color`, opaquely.
+///
+/// Distinct from [`softened`], which lowers alpha and lets whatever is behind
+/// show through: this states one opaque colour as a step from another toward a
+/// named second one, so the result does not depend on what it is drawn over.
+fn toward(color: Rgba, target: Rgba, fraction: f32) -> Rgba {
+    Rgba {
+        r: color.r + (target.r - color.r) * fraction,
+        g: color.g + (target.g - color.g) * fraction,
+        b: color.b + (target.b - color.b) * fraction,
+        a: color.a,
+    }
 }
 
 /// HSL hue in degrees, and HSL lightness in 0..1, of an sRGB colour.
@@ -1681,7 +1711,9 @@ mod tests {
             ("input_bg", sirio.input_bg, bezel.input_bg),
             ("element_active", sirio.element_active, bezel.element_active),
             ("element_hover", sirio.element_hover, bezel.element_hover),
-            ("text", sirio.text, bezel.text),
+            // `text` is deliberately absent: it is bezel's, pulled one step
+            // back toward the surface. `body_text_is_softened_off_bezels_full_contrast`
+            // is its guard.
             ("text_muted", sirio.text_muted, bezel.text_muted),
             ("text_faint", sirio.text_faint, bezel.text_faint),
             ("text_dim", sirio.text_dim, bezel.text_dim),
@@ -1703,6 +1735,52 @@ mod tests {
                 ours,
                 Rgba::from(theirs),
                 "{appearance:?} {name} is not bezel's any more"
+            );
+        }
+    }
+
+    /// The primary text rung is bezel's, softened — not bezel's as-is, and not
+    /// a hand-picked hex either.
+    ///
+    /// bezel paints body text at full contrast against its page. Sirio's
+    /// surfaces carry more text per screen (a sidebar, a tab strip and a file
+    /// tree at once), where that reads as glare. The target is the contrast
+    /// Sirio shipped before adopting bezel, so this pins the *relationship* —
+    /// softened toward the surface, still past AAA, still clearly ahead of
+    /// `text_muted`.
+    #[test]
+    fn body_text_is_softened_off_bezels_full_contrast() {
+        for (appearance, bezel) in [
+            (Appearance::Dark, bezel::theme::Theme::dark()),
+            (Appearance::Light, bezel::theme::Theme::light()),
+        ] {
+            let sirio = ThemeColors::for_appearance(appearance);
+            let full = Rgba::from(bezel.text);
+
+            assert_ne!(
+                sirio.text, full,
+                "{appearance:?} text must not be bezel's full-contrast rung"
+            );
+            assert_eq!(
+                sirio.text,
+                toward(full, sirio.surface, TEXT_SOFTENING),
+                "{appearance:?} text must be bezel's, softened toward the surface"
+            );
+
+            // Softer than bezel, but not into the muted rung's territory: the
+            // ladder still has a visible first step.
+            let step = contrast_ratio(sirio.text, sirio.surface);
+            assert!(
+                step > contrast_ratio(sirio.text_muted, sirio.surface),
+                "{appearance:?} text ({step:.1}:1) must stay ahead of text_muted"
+            );
+            assert!(
+                step > 7.0,
+                "{appearance:?} text is {step:.1}:1 — softening must not spend WCAG AAA"
+            );
+            assert!(
+                step < contrast_ratio(full, sirio.surface),
+                "{appearance:?} text must be softer than bezel's"
             );
         }
     }
@@ -1748,14 +1826,16 @@ mod tests {
     fn theme_colours_come_from_bezel() {
         // The swap's defining property: Sirio's neutrals are bezel's, not a
         // copy that happens to agree today. Read through `Deref`, which is what
-        // every call site uses.
+        // every call site uses. `text_muted` stands in for the text ladder
+        // here because the primary rung is softened —
+        // `body_text_is_softened_off_bezels_full_contrast` covers that one.
         for (appearance, bezel) in [
             (Appearance::Dark, bezel::theme::Theme::dark()),
             (Appearance::Light, bezel::theme::Theme::light()),
         ] {
             let sirio = ThemeColors::for_appearance(appearance);
             assert_eq!(sirio.surface, Rgba::from(bezel.surface));
-            assert_eq!(sirio.text, Rgba::from(bezel.text));
+            assert_eq!(sirio.text_muted, Rgba::from(bezel.text_muted));
             assert_eq!(sirio.border, Rgba::from(bezel.border));
         }
     }
@@ -2663,3 +2743,4 @@ mod agent_brand_tests {
         }
     }
 }
+

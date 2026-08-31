@@ -24,8 +24,28 @@ pin protects appearance, not just API**: bumping bezel restyles the app. Treat
 any bump as a visual change to review, not a dependency chore.
 
 `dark_palette_comes_from_bezel` and `light_palette_comes_from_bezel` compare
-all 23 taken tokens against bezel itself, so a bump that moves a value fails the
+the taken tokens against bezel itself, so a bump that moves a value fails the
 suite rather than shipping quietly.
+
+**One exception: `text`.** bezel paints body text at full contrast against its
+page — `#E5E5E5` on `#0D0D0D` is 15.4:1, `#222222` on `#F4F4F4` is 14.5:1.
+Sirio pulls it back by `TEXT_SOFTENING` (10%) toward the surface it sits on,
+giving `#CFCFCF` (12.5:1) and `#373737` (10.9:1).
+
+The reason is glare, and the reference is the platform: read off this machine,
+macOS's own `labelColor` is white at 85% alpha over `rgb(30,30,30)` in dark —
+12.2:1 — and black at 85% over white in light, 14.9:1. bezel's dark rung is the
+outlier, mostly because its page (`#0D0D0D`) is far darker than Apple's. The
+softened values also land on the contrast Sirio itself shipped before adopting
+bezel (12.2 and 10.8), which is the target rather than a taste.
+
+Note the asymmetry that is *not* applied here: because light-on-dark haloes,
+platform convention runs dark **lower** than light, and Sirio's symmetric 10%
+runs it the other way in light (10.9 against macOS's 14.9). That was reviewed
+on screen in both appearances and accepted. `text_muted` and below are
+untouched — they are already pulled back, and softening them too would collapse
+the ladder; `body_text_is_softened_off_bezels_full_contrast` pins the
+relationship, not the numbers, so a bezel bump carries it along.
 
 ### 2. Radii and spacing — bezel's constants, Sirio's measurements
 
@@ -52,6 +72,7 @@ path, which is why the values are restated in the trailing comments in
 |---|---|
 | `brand_coral` | Sirio's brand coral: hue 24.3° measured off the reference frames' inline-code tone, saturation and lightness chosen against two constraints — it clears WCAG AA on its own surface, and it is not any agent's brand (Claude's `#D97757` is the near one, 22 units away). The Coral entry of the agent-colour picker reads it, and `sirio_ui`'s `loading::bezel_theme` puts it on bezel's `accent` so the loaders keep painting Sirio's colour rather than bezel's grey. Held by `brand_coral_clears_contrast_on_its_own_surface` and `brand_coral_is_not_any_agent_brand`. |
 | `frame_surface` | The translucent window-frame material, `frame_fallback` softened to 0.88 (dark) / 0.82 (light). bezel's `band` is a recessed palette header or footer strip, not a window frame. |
+| `text` | bezel's, softened 10% toward the surface — see the exception above. Not a hand-picked hex: the rule is one line and follows a bezel bump. |
 | `terminal_surface` | Paper-white in light, the pre-shell dark well in dark. bezel has no terminal-surface concept, and the terminal is deliberately independent of the shell's panel hierarchy. |
 
 Two more values are Sirio's choice but derived rather than measured:
