@@ -159,15 +159,15 @@ fn expect_hex(actual: Rgba, hex: u32, label: &str) {
 fn the_accent_is_the_pickers_coral_and_no_longer_the_chrome() {
     let dark = Theme::dark();
     assert_eq!(dark.appearance, Appearance::Dark);
-    expect_hex(dark.accent, 0xE0_8B_52, "dark accent");
+    expect_hex(dark.brand_coral, 0xE0_8B_52, "dark accent");
     expect_hex(dark.text, 0xCB_CD_D4, "dark tab_focus_accent");
-    assert_ne!(dark.text, dark.accent);
+    assert_ne!(dark.text, dark.brand_coral);
 
     let light = Theme::light();
     assert_eq!(light.appearance, Appearance::Light);
-    expect_hex(light.accent, 0xAD_58_1F, "light accent");
+    expect_hex(light.brand_coral, 0xAD_58_1F, "light accent");
     expect_hex(light.text, 0x31_3A_40, "light tab_focus_accent");
-    assert_ne!(light.text, light.accent);
+    assert_ne!(light.text, light.brand_coral);
 }
 
 /// The type scale: waku's measured steps with a uniform +1px. Body

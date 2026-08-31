@@ -4065,7 +4065,7 @@ impl Chat {
             let trimmed = line.strip_suffix('\n').unwrap_or(line);
             for span in code_spans(language, trimmed) {
                 let color = match span.kind {
-                    CodeSpanKind::Keyword => theme.colors.gauge,
+                    CodeSpanKind::Keyword => theme.colors.accent,
                     CodeSpanKind::Literal => theme.colors.diff_add,
                     CodeSpanKind::Comment => theme.colors.text_faint,
                 };
@@ -6764,7 +6764,7 @@ impl Chat {
                                         if context_warning {
                                             colors.danger
                                         } else {
-                                            colors.gauge
+                                            colors.accent
                                         },
                                     );
                                 }

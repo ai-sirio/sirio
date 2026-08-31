@@ -301,11 +301,11 @@ impl AgentAccentColor {
     /// The `Theme` token this choice draws with.
     pub fn resolve(self, theme: Theme) -> Rgba {
         match self {
-            Self::Coral => theme.accent,
+            Self::Coral => theme.brand_coral,
             Self::Amber => theme.warning,
             Self::Green => theme.success,
             Self::Red => theme.danger,
-            Self::Blue => theme.gauge,
+            Self::Blue => theme.accent,
             Self::Purple => theme.border_strong,
             Self::Gold => theme.favorite,
             Self::Slate => theme.border_strong,

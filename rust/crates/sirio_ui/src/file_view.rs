@@ -1459,7 +1459,7 @@ impl EditableLine {
                     // Blue keywords, green literals, grey comments: the three
                     // most conventional syntax colours there are, and none of
                     // them a brand tint.
-                    CodeSpanKind::Keyword => theme.gauge,
+                    CodeSpanKind::Keyword => theme.accent,
                     CodeSpanKind::Literal => theme.diff_add,
                     CodeSpanKind::Comment => theme.text_faint,
                 };

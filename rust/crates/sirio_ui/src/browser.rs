@@ -246,7 +246,7 @@ impl Render for BrowserSpike {
                             .items_center()
                             .justify_start()
                             .px(px(16.0))
-                            .bg(theme.accent)
+                            .bg(theme.brand_coral)
                             .text_color(theme.bg)
                             .text_size(theme.typography.title)
                             .child("GPUI → WebKit"),

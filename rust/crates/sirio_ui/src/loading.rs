@@ -87,7 +87,7 @@ fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
         bezel::theme::Appearance::Light => bezel::theme::Theme::light(),
         bezel::theme::Appearance::Dark => bezel::theme::Theme::dark(),
     };
-    bezel_theme.accent = theme.colors.accent.into();
+    bezel_theme.accent = theme.colors.brand_coral.into();
     bezel_theme
 }
 
