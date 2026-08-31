@@ -3653,7 +3653,6 @@ impl Chat {
         question_answer: &QuestionAnswerState,
         caret_visible: bool,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let field_entity = entity.clone();
         let send_entity = entity.clone();
@@ -3678,12 +3677,12 @@ impl Chat {
                     .py(px(5.0))
                     .flex_1()
                     .rounded(theme.radii.control)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_1()
                     .border_color(if question_answer.for_request == Some(request_id) {
-                        colors.text
+                        theme.text
                     } else {
-                        colors.border
+                        theme.border
                     })
                     .text_size(typography.headline)
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
@@ -3705,12 +3704,12 @@ impl Chat {
                     .items_center()
                     .child(if question_answer.draft.is_empty() {
                         div()
-                            .text_color(colors.text_faint)
+                            .text_color(theme.text_faint)
                             .child(placeholder)
                             .into_any_element()
                     } else {
                         div()
-                            .text_color(colors.text)
+                            .text_color(theme.text)
                             .child(question_answer.draft.clone())
                             .into_any_element()
                     })
@@ -3721,7 +3720,7 @@ impl Chat {
                             .debug_selector(|| "question-answer-caret".into())
                             .child(caret::bar(
                                 typography.body_line_height,
-                                colors.text,
+                                theme.text,
                                 caret_visible,
                             )),
                     ),
@@ -3733,10 +3732,10 @@ impl Chat {
                     .px(px(10.0))
                     .py(px(5.0))
                     .rounded(theme.radii.control)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .text_size(typography.footnote)
-                    .text_color(colors.text)
-                    .hover(|style| style.bg(colors.overlay))
+                    .text_color(theme.text)
+                    .hover(|style| style.bg(theme.overlay))
                     .on_click(move |_, _, cx| {
                         send_entity.update(cx, |chat, cx| {
                             let draft = chat.question_answer.draft.clone();
@@ -3753,8 +3752,8 @@ impl Chat {
                     .py(px(5.0))
                     .rounded(theme.radii.control)
                     .text_size(typography.footnote)
-                    .text_color(colors.danger)
-                    .hover(|style| style.bg(colors.overlay))
+                    .text_color(theme.danger)
+                    .hover(|style| style.bg(theme.overlay))
                     .on_click(move |_, _, cx| {
                         cancel_entity.update(cx, |chat, cx| {
                             chat.cancel_question(request_id, cx);
@@ -3823,7 +3822,6 @@ impl Chat {
         source_start: usize,
         link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         match block {
             Block::Heading { level, inline } => div()
@@ -3833,7 +3831,7 @@ impl Chat {
                     f32::from(markdown_heading_size(level, typography)) * 1.42
                 ))
                 .font_weight(FontWeight::BOLD)
-                .text_color(colors.text)
+                .text_color(theme.text)
                 .child(Self::render_inline(
                     inline,
                     theme,
@@ -3847,7 +3845,7 @@ impl Chat {
                 .w_full()
                 .text_size(typography.headline)
                 .line_height(typography.body_line_height)
-                .text_color(colors.text)
+                .text_color(theme.text)
                 .child(Self::render_inline(
                     inline,
                     theme,
@@ -3871,7 +3869,7 @@ impl Chat {
                 .w_full()
                 .flex()
                 .border_l_2()
-                .border_color(colors.text_muted)
+                .border_color(theme.text_muted)
                 .pl(px(12.0))
                 .child(div().w_full().flex().flex_col().gap(px(7.0)).children(
                     blocks.into_iter().enumerate().scan(
@@ -3925,9 +3923,9 @@ impl Chat {
                         .py(px(4.0))
                         .rounded(theme.radii.control)
                         .text_size(typography.footnote)
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(colors.overlay))
+                        .hover(|style| style.bg(theme.overlay))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             copy_entity.update(cx, |chat, cx| {
@@ -3949,7 +3947,7 @@ impl Chat {
                 div()
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.input_bg)
+                    .bg(theme.input_bg)
                     .px(px(12.0))
                     .py(px(9.0))
                     .flex()
@@ -3961,7 +3959,7 @@ impl Chat {
                             .items_center()
                             .text_size(typography.footnote)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.text_faint)
+                            .text_color(theme.text_faint)
                             .child(div().flex_1().child(Self::render_plain_text(
                                 language_label.clone(),
                                 theme,
@@ -3976,7 +3974,7 @@ impl Chat {
                             .font_family(typography.code_family)
                             .text_size(typography.code_size)
                             .line_height(typography.code_line_height)
-                            .text_color(colors.text)
+                            .text_color(theme.text)
                             .child(Self::render_highlighted_code(
                                 text,
                                 fence_language,
@@ -4006,12 +4004,12 @@ impl Chat {
                 .w_full()
                 .h(px(1.0))
                 .my(px(4.0))
-                .bg(colors.border)
+                .bg(theme.border)
                 .into_any_element(),
             Block::Html { text } => div()
                 .w_full()
                 .text_size(typography.headline)
-                .text_color(colors.text)
+                .text_color(theme.text)
                 .child(Self::render_plain_text(
                     text,
                     theme,
@@ -4037,7 +4035,7 @@ impl Chat {
                 styled,
                 source_start..source_start + text.len(),
                 interaction.clone(),
-                theme.colors.element_active,
+                theme.element_active,
                 Vec::new(),
             )
             .into_any_element()
@@ -4065,9 +4063,9 @@ impl Chat {
             let trimmed = line.strip_suffix('\n').unwrap_or(line);
             for span in code_spans(language, trimmed) {
                 let color = match span.kind {
-                    CodeSpanKind::Keyword => theme.colors.accent,
-                    CodeSpanKind::Literal => theme.colors.diff_add,
-                    CodeSpanKind::Comment => theme.colors.text_faint,
+                    CodeSpanKind::Keyword => theme.accent,
+                    CodeSpanKind::Literal => theme.diff_add,
+                    CodeSpanKind::Comment => theme.text_faint,
                 };
                 highlights.push((
                     offset + span.range.start..offset + span.range.end,
@@ -4087,7 +4085,7 @@ impl Chat {
                 styled,
                 source_start..source_start + text.len(),
                 interaction.clone(),
-                theme.colors.element_active,
+                theme.element_active,
                 Vec::new(),
             )
             .into_any_element()
@@ -4148,7 +4146,6 @@ impl Chat {
         interaction: Option<&TranscriptInteraction>,
         link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let marker_chars = match kind {
             ListKind::Bullet => 1,
@@ -4224,7 +4221,7 @@ impl Chat {
                                 .flex_none()
                                 .whitespace_nowrap()
                                 .text_size(typography.headline)
-                                .text_color(colors.file_link)
+                                .text_color(theme.file_link)
                                 .child(Self::render_plain_text(
                                     marker,
                                     theme,
@@ -4258,7 +4255,6 @@ impl Chat {
         source_start: usize,
         link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
 
         // Column widths, as flex weights.
@@ -4300,8 +4296,8 @@ impl Chat {
                 .w_full()
                 .flex()
                 .border_b_1()
-                .border_color(colors.border)
-                .when(header_row, |this| this.bg(colors.surface_raised))
+                .border_color(theme.border)
+                .when(header_row, |this| this.bg(theme.surface_raised))
                 .children(cells.into_iter().enumerate().scan(
                     row_start,
                     |cell_start, (index, cell)| {
@@ -4317,11 +4313,11 @@ impl Chat {
                             .py(px(5.0))
                             .flex()
                             .text_size(typography.callout)
-                            .text_color(colors.text)
+                            .text_color(theme.text)
                             // The rule the grid was missing. Not on the first
                             // column, where it would double the table border.
                             .when(index > 0, |this| {
-                                this.border_l_1().border_color(colors.border)
+                                this.border_l_1().border_color(theme.border)
                             });
                         cell_view = match alignment {
                             Alignment::Center => cell_view.justify_center(),
@@ -4352,7 +4348,7 @@ impl Chat {
             .flex()
             .flex_col()
             .border_1()
-            .border_color(colors.border)
+            .border_color(theme.border)
             .rounded(theme.radii.control)
             .overflow_hidden()
             .child(render_row(
@@ -4409,7 +4405,7 @@ impl Chat {
                 styled,
                 source_start..source_start + rendered_len,
                 interaction.clone(),
-                theme.colors.element_active,
+                theme.element_active,
                 links,
             )
             .into_any_element()
@@ -4438,7 +4434,6 @@ impl Chat {
     /// results in particular can run long, and the tail is where the
     /// result usually lands) rather than shown in full.
     fn render_tool_output_text(text: &str, theme: &Theme) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let (shown, truncated) = truncate_tool_output(text);
         let mut column = div()
@@ -4446,7 +4441,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.input_bg)
+            .bg(theme.input_bg)
             .px(px(10.0))
             .py(px(6.0))
             .gap(px(4.0));
@@ -4454,7 +4449,7 @@ impl Chat {
             column = column.child(
                 div()
                     .text_size(typography.caption2)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(format!("Showing last {TOOL_OUTPUT_MAX_CHARS} characters")),
             );
         }
@@ -4464,7 +4459,7 @@ impl Chat {
                     .font_family(typography.code_family)
                     .text_size(typography.code_size)
                     .line_height(typography.code_line_height)
-                    .text_color(colors.text)
+                    .text_color(theme.text)
                     .child(shown),
             )
             .into_any_element()
@@ -4485,7 +4480,6 @@ impl Chat {
         theme: &Theme,
         context: DiffPreviewContext,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let lines = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text);
         let total = lines.len();
@@ -4525,21 +4519,21 @@ impl Chat {
             // stay theme-wide and out of this task's `chat.rs`-only scope),
             // so the wash is built locally from the same solid colour.
             let (prefix, text_color, background) = match line {
-                DiffLine::Context { .. } => (" ", colors.text, None),
+                DiffLine::Context { .. } => (" ", theme.text, None),
                 DiffLine::Removed { .. } => (
                     "-",
-                    colors.diff_del,
+                    theme.diff_del,
                     Some(Rgba {
                         a: 0.10,
-                        ..colors.diff_del
+                        ..theme.diff_del
                     }),
                 ),
                 DiffLine::Added { .. } => (
                     "+",
-                    colors.diff_add,
+                    theme.diff_add,
                     Some(Rgba {
                         a: 0.10,
-                        ..colors.diff_add
+                        ..theme.diff_add
                     }),
                 ),
             };
@@ -4570,7 +4564,7 @@ impl Chat {
                         .expect("selection present in this arm")
                         .interaction
                         .clone(),
-                    theme.colors.element_active,
+                    theme.element_active,
                     Vec::new(),
                 )
                 .into_any_element(),
@@ -4606,7 +4600,7 @@ impl Chat {
                                 .pr(px(4.0))
                                 .flex()
                                 .justify_end()
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child(old_number),
                         )
                         .child(
@@ -4615,7 +4609,7 @@ impl Chat {
                                 .pr(px(8.0))
                                 .flex()
                                 .justify_end()
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child(new_number),
                         ),
                 )
@@ -4637,7 +4631,7 @@ impl Chat {
                 div()
                     .min_w_full()
                     .text_size(typography.caption2)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .px(px(10.0))
                     .child(format!("… {} more lines", total - DIFF_PREVIEW_MAX_LINES)),
             );
@@ -4650,7 +4644,7 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.input_bg)
+            .bg(theme.input_bg)
             .py(px(6.0))
             .child(
                 div()
@@ -4661,9 +4655,9 @@ impl Chat {
                     .gap(px(5.0))
                     .text_size(typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.file_link)
+                    .text_color(theme.file_link)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.text_color(colors.text))
+                    .hover(|style| style.text_color(theme.text))
                     .px(px(10.0))
                     .pb(px(4.0))
                     .on_click(move |_, _, cx| {
@@ -4672,7 +4666,7 @@ impl Chat {
                         });
                     })
                     .child(
-                        IconElement::new(Icon::File, IconSize::Small).text_color(colors.file_link),
+                        IconElement::new(Icon::File, IconSize::Small).text_color(theme.file_link),
                     )
                     .child(diff.path.display().to_string())
                     .child(div().flex_1())
@@ -4680,14 +4674,10 @@ impl Chat {
                         div()
                             .flex()
                             .gap(px(6.0))
+                            .child(div().text_color(theme.diff_add).child(format!("+{added}")))
                             .child(
                                 div()
-                                    .text_color(colors.diff_add)
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .text_color(colors.diff_del)
+                                    .text_color(theme.diff_del)
                                     .child(format!("-{removed}")),
                             ),
                     ),
@@ -4706,7 +4696,6 @@ impl Chat {
         theme: &Theme,
         entity: Entity<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let mut card = div()
             .id(("edit-summary", entry))
@@ -4716,14 +4705,14 @@ impl Chat {
             .flex_col()
             .gap(px(6.0))
             .rounded(theme.radii.code_block)
-            .bg(colors.surface_raised)
+            .bg(theme.surface_raised)
             .px(px(CARD_H_PADDING))
             .py(px(CARD_V_PADDING))
             .child(
                 div()
                     .text_size(typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.text_muted)
+                    .text_color(theme.text_muted)
                     .child(if diffs.len() == 1 {
                         "1 file changed".to_string()
                     } else {
@@ -4748,9 +4737,9 @@ impl Chat {
                     .debug_selector(move || format!("edit-summary-open-{entry}-{index}"))
                     .flex_1()
                     .text_size(typography.footnote)
-                    .text_color(colors.file_link)
+                    .text_color(theme.file_link)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.text_color(colors.text))
+                    .hover(|style| style.text_color(theme.text))
                     .on_click(move |_, _, cx| {
                         open_entity.update(cx, |_, cx| {
                             cx.emit(ChatEvent::OpenFile(open_path.clone()));
@@ -4764,7 +4753,7 @@ impl Chat {
                         .id(format!("edit-summary-reverted-{entry}-{index}"))
                         .debug_selector(move || format!("edit-summary-reverted-{entry}-{index}"))
                         .text_size(typography.caption2)
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child("reverted"),
                 );
             } else if confirming {
@@ -4777,8 +4766,8 @@ impl Chat {
                             .py(px(4.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.danger)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.danger)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(move |_, _, cx| {
                                 confirm_entity.update(cx, |chat, cx| {
                                     chat.confirm_edit_revert(entry, confirm_path.clone(), cx);
@@ -4794,8 +4783,8 @@ impl Chat {
                             .py(px(4.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.text_faint)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text_faint)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(move |_, _, cx| {
                                 cancel_entity.update(cx, |chat, cx| {
                                     chat.cancel_edit_revert(entry, cx);
@@ -4813,11 +4802,11 @@ impl Chat {
                         .rounded(theme.radii.control)
                         .text_size(typography.footnote)
                         .text_color(if reverting {
-                            colors.text_faint
+                            theme.text_faint
                         } else {
-                            colors.danger
+                            theme.danger
                         })
-                        .hover(|style| style.bg(colors.overlay))
+                        .hover(|style| style.bg(theme.overlay))
                         .on_click(move |_, _, cx| {
                             if !reverting {
                                 request_entity.update(cx, |chat, cx| {
@@ -4836,7 +4825,7 @@ impl Chat {
                     .id(("edit-summary-error", entry))
                     .debug_selector(move || format!("edit-summary-error-{entry}"))
                     .text_size(typography.caption2)
-                    .text_color(colors.danger)
+                    .text_color(theme.danger)
                     .child(error),
             );
         }
@@ -4855,7 +4844,6 @@ impl Chat {
         copied_target: Option<CopyTarget>,
         edit_summary: Option<EditSummaryState>,
     ) -> impl IntoElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
@@ -4880,12 +4868,12 @@ impl Chat {
                         .min_w_0()
                         .max_w(px(USER_PILL_MAX_WIDTH))
                         .rounded(theme.radii.user_pill)
-                        .bg(colors.surface_raised)
+                        .bg(theme.surface_raised)
                         .px(px(12.0))
                         .py(px(8.0))
                         .text_size(typography.headline)
                         .line_height(typography.body_line_height)
-                        .text_color(colors.text)
+                        .text_color(theme.text)
                         .child(Self::render_plain_text(
                             text,
                             theme,
@@ -4911,11 +4899,11 @@ impl Chat {
                     .px(px(7.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .text_size(typography.footnote)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(colors.overlay))
+                    .hover(|style| style.bg(theme.overlay))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         copy_entity.update(cx, |chat, cx| {
@@ -4966,7 +4954,7 @@ impl Chat {
                         .px(px(4.0))
                         .py(px(5.0))
                         .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.text_color(colors.text))
+                        .hover(|style| style.text_color(theme.text))
                         .child(
                             div()
                                 .flex()
@@ -4981,14 +4969,14 @@ impl Chat {
                                         },
                                         IconSize::XSmall,
                                     )
-                                    .text_color(colors.text_faint),
+                                    .text_color(theme.text_faint),
                                 ),
                         )
                         .child(
                             div()
                                 .text_size(typography.callout)
                                 .line_height(px(19.0))
-                                .text_color(colors.text_muted)
+                                .text_color(theme.text_muted)
                                 .italic()
                                 .child(if expanded {
                                     "Thinking".to_string()
@@ -5008,7 +4996,7 @@ impl Chat {
                             .id(("thought-body", entry_index))
                             .relative()
                             .border_l_1()
-                            .border_color(colors.border)
+                            .border_color(theme.border)
                             .pl(px(12.0))
                             .pr(px(14.0))
                             .max_h(px(160.0))
@@ -5016,7 +5004,7 @@ impl Chat {
                             .overflow_y_scroll()
                             .text_size(typography.callout)
                             .line_height(px(19.0))
-                            .text_color(colors.text_muted)
+                            .text_color(theme.text_muted)
                             .italic()
                             .child(Self::render_plain_text(
                                 text,
@@ -5030,17 +5018,13 @@ impl Chat {
                                 // scrollable body rather than masked, so
                                 // selection and the scrollbar hit-test still
                                 // see the full text underneath it.
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .right_0()
-                                    .h(px(20.0))
-                                    .bg(linear_gradient(
+                                div().absolute().top_0().left_0().right_0().h(px(20.0)).bg(
+                                    linear_gradient(
                                         180.0,
-                                        linear_color_stop(colors.surface, 0.0),
-                                        linear_color_stop(colors.surface.opacity(0.0), 1.0),
-                                    )),
+                                        linear_color_stop(theme.surface, 0.0),
+                                        linear_color_stop(theme.surface.opacity(0.0), 1.0),
+                                    ),
+                                ),
                             ),
                     );
                 }
@@ -5101,9 +5085,9 @@ impl Chat {
                 let mut card = div()
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_l_2()
-                    .border_color(colors.warning)
+                    .border_color(theme.warning)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
@@ -5112,14 +5096,14 @@ impl Chat {
                     .child(
                         div()
                             .text_size(typography.callout)
-                            .text_color(colors.text)
+                            .text_color(theme.text)
                             .child(header),
                     );
                 if !prompt.is_empty() {
                     card = card.child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(colors.text_muted)
+                            .text_color(theme.text_muted)
                             .child(prompt),
                     );
                 }
@@ -5132,14 +5116,14 @@ impl Chat {
                     card = card.child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(colors.text_faint)
+                            .text_color(theme.text_faint)
                             .child(format!("Answered: {choice}")),
                     );
                 } else if dismissed {
                     card = card.child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(colors.text_faint)
+                            .text_color(theme.text_faint)
                             .child("Dismissed — request cancelled"),
                     );
                 } else if expired {
@@ -5148,7 +5132,7 @@ impl Chat {
                     card = card.child(
                         div()
                             .text_size(typography.footnote)
-                            .text_color(colors.text_faint)
+                            .text_color(theme.text_faint)
                             .child("No answer — the turn ended"),
                     );
                 } else if let Some(input) = text_input {
@@ -5176,14 +5160,14 @@ impl Chat {
                                 .px(px(10.0))
                                 .py(px(5.0))
                                 .rounded(theme.radii.control)
-                                .bg(colors.surface_raised)
+                                .bg(theme.surface_raised)
                                 .text_size(typography.footnote)
                                 .text_color(if option.is_rejection {
-                                    colors.danger
+                                    theme.danger
                                 } else {
-                                    colors.text
+                                    theme.text
                                 })
-                                .hover(|style| style.bg(colors.overlay))
+                                .hover(|style| style.bg(theme.overlay))
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |chat, cx| {
                                         chat.respond_permission(request_id, &option_for_click, cx);
@@ -5203,10 +5187,10 @@ impl Chat {
                             .px(px(10.0))
                             .py(px(5.0))
                             .rounded(theme.radii.control)
-                            .bg(colors.surface_raised)
+                            .bg(theme.surface_raised)
                             .text_size(typography.footnote)
-                            .text_color(colors.text)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(move |_, _, cx| {
                                 dismiss_entity.update(cx, |chat, cx| {
                                     chat.dismiss_permission(request_id, cx);
@@ -5225,9 +5209,9 @@ impl Chat {
                 let mut card = div()
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_l_2()
-                    .border_color(colors.border_strong)
+                    .border_color(theme.border_strong)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
@@ -5239,18 +5223,18 @@ impl Chat {
                             .items_center()
                             .gap(px(6.0))
                             .text_size(typography.caption2)
-                            .child(div().text_color(colors.text).child("Plan"))
+                            .child(div().text_color(theme.text).child("Plan"))
                             .child(
                                 div()
-                                    .text_color(colors.text_faint)
+                                    .text_color(theme.text_faint)
                                     .child(format!("{completed}/{}", entries.len())),
                             ),
                     );
                 for row in entries {
                     let (glyph, tint) = match row.status.as_str() {
-                        "completed" => ("✓", colors.border_strong),
-                        "in_progress" => ("◌", colors.text),
-                        _ => ("○", colors.text_faint),
+                        "completed" => ("✓", theme.border_strong),
+                        "in_progress" => ("◌", theme.text),
+                        _ => ("○", theme.text_faint),
                     };
                     card = card.child(
                         div()
@@ -5259,7 +5243,7 @@ impl Chat {
                             .gap(px(6.0))
                             .text_size(typography.callout)
                             .child(div().w(px(14.0)).text_color(tint).child(glyph))
-                            .child(div().flex_1().text_color(colors.text).child(row.content)),
+                            .child(div().flex_1().text_color(theme.text).child(row.content)),
                     );
                 }
                 if let Some(approval) = approval {
@@ -5267,14 +5251,14 @@ impl Chat {
                         card = card.child(
                             div()
                                 .text_size(typography.footnote)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child(format!("Approved: {choice}")),
                         );
                     } else if approval.expired {
                         card = card.child(
                             div()
                                 .text_size(typography.footnote)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child("No answer — the turn ended"),
                         );
                     } else {
@@ -5296,14 +5280,14 @@ impl Chat {
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded(theme.radii.control)
-                                    .bg(colors.surface_raised)
+                                    .bg(theme.surface_raised)
                                     .text_size(typography.footnote)
                                     .text_color(if option.is_rejection {
-                                        colors.danger
+                                        theme.danger
                                     } else {
-                                        colors.text
+                                        theme.text
                                     })
-                                    .hover(|style| style.bg(colors.overlay))
+                                    .hover(|style| style.bg(theme.overlay))
                                     .on_click(move |_, _, cx| {
                                         entity.update(cx, |chat, cx| {
                                             chat.respond_permission(
@@ -5327,14 +5311,14 @@ impl Chat {
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(div().h(px(1.0)).flex_1().bg(colors.border))
+                .child(div().h(px(1.0)).flex_1().bg(theme.border))
                 .child(
                     div()
                         .text_size(typography.footnote)
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child(at.clone()),
                 )
-                .child(div().h(px(1.0)).flex_1().bg(colors.border))
+                .child(div().h(px(1.0)).flex_1().bg(theme.border))
                 .into_any_element(),
             Entry::Error {
                 message,
@@ -5365,13 +5349,9 @@ impl Chat {
                 let settings_entity = entity.clone();
                 let (banner_bg, banner_border, banner_text) = if is_auth_required || is_unavailable
                 {
-                    (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), colors.text)
+                    (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), theme.text)
                 } else {
-                    (
-                        colors.diff_del_bg,
-                        colors.diff_del,
-                        colors.diff_del,
-                    )
+                    (theme.diff_del_bg, theme.diff_del, theme.diff_del)
                 };
                 div()
                     .id(("chat-error-banner", entry_index))
@@ -5426,9 +5406,9 @@ impl Chat {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
-                                .text_color(colors.text)
-                                .bg(colors.surface_raised)
-                                .hover(|style| style.bg(colors.overlay))
+                                .text_color(theme.text)
+                                .bg(theme.surface_raised)
+                                .hover(|style| style.bg(theme.overlay))
                                 .on_click(move |_, _, cx| {
                                     // Same underlying call as Retry
                                     // (`Chat::retry` -> `start_connection`)
@@ -5462,9 +5442,9 @@ impl Chat {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
-                                .text_color(colors.text)
-                                .bg(colors.surface_raised)
-                                .hover(|style| style.bg(colors.overlay))
+                                .text_color(theme.text)
+                                .bg(theme.surface_raised)
+                                .hover(|style| style.bg(theme.overlay))
                                 .on_click(move |_, _, cx| {
                                     settings_entity
                                         .update(cx, |_, cx| cx.emit(ChatEvent::OpenSettings));
@@ -5492,9 +5472,9 @@ impl Chat {
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
-                                .text_color(colors.text)
-                                .bg(colors.surface_raised)
-                                .hover(|style| style.bg(colors.overlay))
+                                .text_color(theme.text)
+                                .bg(theme.surface_raised)
+                                .hover(|style| style.bg(theme.overlay))
                                 .on_click(move |_, _, cx| {
                                     dismiss_entity.update(cx, |chat, cx| {
                                         chat.dismiss_error(entry_index, cx);
@@ -5517,7 +5497,6 @@ impl Chat {
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let toggle_entity = entity.clone();
         let header = div()
@@ -5538,25 +5517,25 @@ impl Chat {
                     },
                     IconSize::XSmall,
                 )
-                .text_color(colors.text_faint),
+                .text_color(theme.text_faint),
             )
             .child(
                 div()
                     .text_size(typography.footnote)
-                    .text_color(colors.border_strong)
+                    .text_color(theme.border_strong)
                     .child("Subagent"),
             )
             .child(
                 div()
                     .flex_1()
                     .text_size(typography.callout)
-                    .text_color(colors.text)
+                    .text_color(theme.text)
                     .child(title),
             )
             .child(
                 div()
                     .text_size(typography.footnote)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(status),
             )
             .on_click(move |_, _, cx| {
@@ -5569,9 +5548,9 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.surface_raised)
+            .bg(theme.surface_raised)
             .border_l_2()
-            .border_color(colors.border_strong)
+            .border_color(theme.border_strong)
             .child(header);
         if expanded {
             for (child_index, call) in tool_calls.into_iter().enumerate() {
@@ -5594,7 +5573,6 @@ impl Chat {
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let SubagentToolCall {
             title,
@@ -5627,25 +5605,25 @@ impl Chat {
                     },
                     IconSize::XSmall,
                 )
-                .text_color(colors.text_faint),
+                .text_color(theme.text_faint),
             )
             .child(
                 div()
                     .text_size(typography.footnote)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(kind),
             )
             .child(
                 div()
                     .flex_1()
                     .text_size(typography.callout)
-                    .text_color(colors.text)
+                    .text_color(theme.text)
                     .child(title),
             )
             .child(
                 div()
                     .text_size(typography.footnote)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(status),
             )
             .on_click(move |_, _, cx| {
@@ -5707,9 +5685,9 @@ impl Chat {
                             .id(SharedString::from(element_id))
                             .debug_selector(move || selector.clone())
                             .text_size(typography.footnote)
-                            .text_color(colors.file_link)
+                            .text_color(theme.file_link)
                             .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.text_color(colors.text))
+                            .hover(|style| style.text_color(theme.text))
                             .on_click(move |_, _, cx| {
                                 open_entity.update(cx, |_, cx| {
                                     cx.emit(ChatEvent::OpenFile(open_path.clone()));
@@ -5744,7 +5722,6 @@ impl Chat {
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let toggle_entity = entity.clone();
         // F-CHAT-31: the same projection `Entry::plain_text` contributes to
@@ -5770,13 +5747,13 @@ impl Chat {
                     },
                     IconSize::XSmall,
                 )
-                .text_color(colors.text_faint),
+                .text_color(theme.text_faint),
             )
             .child(
                 div()
                     .flex_none()
                     .text_size(typography.footnote)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(kind),
             )
             .child(
@@ -5789,7 +5766,7 @@ impl Chat {
                     .min_w_0()
                     .text_ellipsis()
                     .text_size(typography.callout)
-                    .text_color(colors.text)
+                    .text_color(theme.text)
                     .child(title),
             )
             .child(
@@ -5799,7 +5776,7 @@ impl Chat {
                 div()
                     .flex_none()
                     .text_size(typography.footnote)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(status),
             )
             .on_click(move |_, _, cx| {
@@ -5812,9 +5789,9 @@ impl Chat {
             .flex()
             .flex_col()
             .rounded(theme.radii.code_block)
-            .bg(colors.surface_raised)
+            .bg(theme.surface_raised)
             .border_l_2()
-            .border_color(colors.border_strong)
+            .border_color(theme.border_strong)
             .child(header);
         if expanded {
             let mut body = div()
@@ -5876,9 +5853,9 @@ impl Chat {
                             .id(SharedString::from(element_id))
                             .debug_selector(move || selector.clone())
                             .text_size(typography.footnote)
-                            .text_color(colors.file_link)
+                            .text_color(theme.file_link)
                             .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.text_color(colors.text))
+                            .hover(|style| style.text_color(theme.text))
                             .on_click(move |_, _, cx| {
                                 open_entity.update(cx, |_, cx| {
                                     cx.emit(ChatEvent::OpenFile(open_path.clone()));
@@ -5922,7 +5899,6 @@ impl Chat {
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         div()
             .id(("turn-fold", turn_id))
@@ -5934,26 +5910,28 @@ impl Chat {
             .px(px(8.0))
             .py(px(6.0))
             .rounded(theme.radii.code_block)
-            .bg(colors.surface_raised)
+            .bg(theme.surface_raised)
             .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.bg(colors.overlay))
+            .hover(|style| style.bg(theme.overlay))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |chat, cx| {
                     chat.toggle_turn_unfolded(turn_id, cx);
                 });
             })
-            .child(IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(colors.text_faint))
+            .child(
+                IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.text_faint),
+            )
             .child(
                 div()
                     .flex_1()
                     .text_size(typography.footnote)
-                    .text_color(colors.text_muted)
+                    .text_color(theme.text_muted)
                     .child(format!("Turn: {label}")),
             )
             .child(
                 div()
                     .text_size(typography.caption2)
-                    .text_color(colors.text_faint)
+                    .text_color(theme.text_faint)
                     .child(at),
             )
             .into_any_element()
@@ -5977,7 +5955,6 @@ impl Chat {
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let count = members.len();
         let toggle_entity = entity.clone();
@@ -5990,7 +5967,7 @@ impl Chat {
             .items_center()
             .gap(px(TOOL_CALL_GROUP_GAP))
             .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.text_color(colors.text))
+            .hover(|style| style.text_color(theme.text))
             .child(
                 IconElement::new(
                     if group_expanded {
@@ -6000,12 +5977,12 @@ impl Chat {
                     },
                     IconSize::XSmall,
                 )
-                .text_color(colors.text_faint),
+                .text_color(theme.text_faint),
             )
             .child(
                 div()
                     .text_size(typography.callout)
-                    .text_color(colors.text_muted)
+                    .text_color(theme.text_muted)
                     .italic()
                     .child(tool_group_label(count)),
             )
@@ -6065,7 +6042,7 @@ impl Chat {
                             })
                             .pl(px(TOOL_CALL_GROUP_MEMBER_INDENT))
                             .text_size(typography.footnote)
-                            .text_color(colors.text_faint)
+                            .text_color(theme.text_faint)
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis_start()
@@ -6102,7 +6079,6 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let colors = theme.colors;
         let typography = theme.typography;
         let focused = self.composer_focus.is_focused(window);
         let can_send = self.can_send();
@@ -6140,15 +6116,14 @@ impl Chat {
             Self::flip_model_search_blink,
             cx,
         );
-        self.model_search_caret_visible =
-            model_search_focused && self.model_search_blink.visible();
+        self.model_search_caret_visible = model_search_focused && self.model_search_blink.visible();
         let model_search_caret_visible = self.model_search_caret_visible;
         let caret_bar = || {
             div()
                 .debug_selector(|| "composer-caret".into())
                 .child(caret::bar(
                     typography.body_line_height,
-                    colors.text,
+                    theme.text,
                     caret_visible,
                 ))
                 .into_any_element()
@@ -6199,7 +6174,7 @@ impl Chat {
             .h(px(24.0))
             .px(px(7.0))
             .rounded(theme.radii.control)
-            .bg(colors.surface_raised)
+            .bg(theme.surface_raised)
             .text_size(typography.ui_size);
         let status_pill = if connecting {
             status_pill
@@ -6212,15 +6187,15 @@ impl Chat {
         };
         let status_pill = status_pill
             .when(mode_selectable, |this| {
-                this.hover(|style| style.bg(colors.overlay))
+                this.hover(|style| style.bg(theme.overlay))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_mode_picker(window, cx);
                     }))
             })
             .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(div().text_color(colors.text).child(label))
+            .child(div().text_color(theme.text).child(label))
             .when(mode_selectable, |this| {
-                this.child(div().text_color(colors.text_faint).child("⌄"))
+                this.child(div().text_color(theme.text_faint).child("⌄"))
             });
 
         let selected_model_name = self
@@ -6270,7 +6245,7 @@ impl Chat {
                 .h(px(24.0))
                 .px(px(7.0))
                 .rounded(theme.radii.control)
-                .bg(colors.surface_raised)
+                .bg(theme.surface_raised)
                 .text_size(typography.ui_size)
                 // Sized to its content, not to the row. It used to carry
                 // `flex_1`, which stretched the pill the whole width of the
@@ -6280,11 +6255,11 @@ impl Chat {
                 // caption rather than a picker. `min_w_0` still lets it
                 // shrink, which is what keeps the name's ellipsis working.
                 .min_w_0()
-                .hover(|style| style.bg(colors.overlay))
+                .hover(|style| style.bg(theme.overlay))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
                 }))
-                .child(div().text_color(colors.text_faint).child("Model"))
+                .child(div().text_color(theme.text_faint).child("Model"))
                 .child(
                     div()
                         .id(model_selection_id.clone())
@@ -6300,7 +6275,7 @@ impl Chat {
                         // truncating a long name when the row is tight.
                         .min_w_0()
                         .text_ellipsis()
-                        .text_color(colors.text)
+                        .text_color(theme.text)
                         .child(selected_model_name.clone()),
                 )
                 .child(
@@ -6308,7 +6283,7 @@ impl Chat {
                         .id("model-chip-chevron")
                         .debug_selector(|| "model-chip-chevron".into())
                         .flex_none()
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child("⌄"),
                 )
         } else {
@@ -6330,7 +6305,7 @@ impl Chat {
                 .h(px(24.0))
                 .px(px(7.0))
                 .rounded(theme.radii.control)
-                .bg(colors.surface_raised)
+                .bg(theme.surface_raised)
                 .text_size(typography.ui_size)
                 // Same rule as the chip above: hug the content.
                 .min_w_0()
@@ -6338,7 +6313,7 @@ impl Chat {
                     div()
                         .min_w_0()
                         .text_ellipsis()
-                        .text_color(colors.text)
+                        .text_color(theme.text)
                         .child(agent_badge_name),
                 )
         };
@@ -6363,22 +6338,21 @@ impl Chat {
                     .h(px(24.0))
                     .px(px(7.0))
                     .rounded(theme.radii.control)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .text_size(typography.ui_size)
-                    .hover(|style| style.bg(colors.overlay))
+                    .hover(|style| style.bg(theme.overlay))
                     .on_click(move |_, window, cx| {
-                        effort_entity
-                            .update(cx, |chat, cx| chat.toggle_model_picker(window, cx));
+                        effort_entity.update(cx, |chat, cx| chat.toggle_model_picker(window, cx));
                     })
-                    .child(div().text_color(colors.text_faint).child("Effort"))
+                    .child(div().text_color(theme.text_faint).child("Effort"))
                     .child(
                         div()
                             .id("model-effort-label")
                             .debug_selector(|| "model-effort-label".into())
-                            .text_color(colors.text)
+                            .text_color(theme.text)
                             .child(label),
                     )
-                    .child(div().flex_none().text_color(colors.text_faint).child("⌄"))
+                    .child(div().flex_none().text_color(theme.text_faint).child("⌄"))
             });
 
         let model_picker = if self.model_picker_open {
@@ -6418,9 +6392,9 @@ impl Chat {
                     .overflow_hidden()
                     .p(px(8.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.model_picker_open = false;
@@ -6436,32 +6410,30 @@ impl Chat {
                                 .px(px(8.0))
                                 .py(px(5.0))
                                 .rounded(theme.radii.control)
-                                .bg(colors.surface_raised)
+                                .bg(theme.surface_raised)
                                 .border_1()
-                                .border_color(colors.border)
+                                .border_color(theme.border)
                                 .text_size(typography.footnote)
                                 .flex()
                                 .items_center()
                                 .child(if search_placeholder {
                                     div()
-                                        .text_color(colors.text_faint)
+                                        .text_color(theme.text_faint)
                                         .child("Search models…")
                                         .into_any_element()
                                 } else {
                                     div()
-                                        .text_color(colors.text)
+                                        .text_color(theme.text)
                                         .child(search_text)
                                         .into_any_element()
                                 })
-                                .child(
-                                    div()
-                                        .debug_selector(|| "model-search-caret".into())
-                                        .child(caret::bar(
-                                            typography.body_line_height,
-                                            colors.text,
-                                            model_search_caret_visible,
-                                        )),
-                                ),
+                                .child(div().debug_selector(|| "model-search-caret".into()).child(
+                                    caret::bar(
+                                        typography.body_line_height,
+                                        theme.text,
+                                        model_search_caret_visible,
+                                    ),
+                                )),
                         )
                     })
                     .when(self.available_models.is_empty(), |this| {
@@ -6469,7 +6441,7 @@ impl Chat {
                             div()
                                 .p(px(8.0))
                                 .text_size(typography.footnote)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child("The connected agent did not report any models."),
                         )
                     })
@@ -6482,7 +6454,7 @@ impl Chat {
                                     .debug_selector(|| "model-picker-no-match".into())
                                     .p(px(8.0))
                                     .text_size(typography.footnote)
-                                    .text_color(colors.text_faint)
+                                    .text_color(theme.text_faint)
                                     .child("No models match"),
                             )
                         },
@@ -6503,8 +6475,8 @@ impl Chat {
                             .py(px(7.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.text)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(move |_, _, cx| {
                                 option_entity
                                     .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
@@ -6519,8 +6491,8 @@ impl Chat {
                                         .px(px(5.0))
                                         .rounded(px(4.0))
                                         .text_size(typography.caption2)
-                                        .text_color(colors.text)
-                                        .bg(colors.overlay_strong)
+                                        .text_color(theme.text)
+                                        .bg(theme.overlay_strong)
                                         .child("Recommended"),
                                 )
                             })
@@ -6539,7 +6511,7 @@ impl Chat {
                                 .px(px(8.0))
                                 .pt(px(4.0))
                                 .text_size(typography.caption2)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child(effort_name)
                                 .into_any_element(),
                         ];
@@ -6563,9 +6535,9 @@ impl Chat {
                                     .flex()
                                     .items_center()
                                     .text_size(typography.caption2)
-                                    .text_color(colors.text)
-                                    .when(is_selected, |this| this.bg(colors.element_active))
-                                    .hover(|style| style.bg(colors.overlay))
+                                    .text_color(theme.text)
+                                    .when(is_selected, |this| this.bg(theme.element_active))
+                                    .hover(|style| style.bg(theme.overlay))
                                     .on_click(move |_, _, cx| {
                                         row_entity.update(cx, |chat, cx| {
                                             chat.select_effort(choice_value.clone(), cx);
@@ -6575,7 +6547,7 @@ impl Chat {
                                     .into_any_element()
                             })
                             .collect::<Vec<_>>();
-                        this.child(div().h(px(1.0)).w_full().bg(colors.border))
+                        this.child(div().h(px(1.0)).w_full().bg(theme.border))
                             .child(
                                 div()
                                     .flex()
@@ -6630,9 +6602,9 @@ impl Chat {
                     .w(px(200.0))
                     .p(px(6.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.mode_picker_open = false;
@@ -6643,7 +6615,7 @@ impl Chat {
                             div()
                                 .p(px(8.0))
                                 .text_size(typography.footnote)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child("No modes offered"),
                         )
                     })
@@ -6662,9 +6634,9 @@ impl Chat {
                             .py(px(6.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.text)
-                            .when(is_selected, |this| this.bg(colors.element_active))
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text)
+                            .when(is_selected, |this| this.bg(theme.element_active))
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(move |_, _, cx| {
                                 row_entity
                                     .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
@@ -6700,8 +6672,8 @@ impl Chat {
             .h(px(16.0))
             .rounded(px(8.0))
             .border_1()
-            .border_color(colors.border)
-            .hover(|style| style.bg(colors.overlay))
+            .border_color(theme.border)
+            .hover(|style| style.bg(theme.overlay))
             .on_click(move |_, window, cx| {
                 context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
             })
@@ -6712,7 +6684,11 @@ impl Chat {
                     .debug_selector(|| "context-ring-progress".into())
                     .absolute()
                     .inset_0()
-                    .child(
+                    .child({
+                        // The paint closure is `'static`, so it cannot borrow
+                        // `theme`; copy out the two colours it draws with.
+                        let ring_danger = theme.danger;
+                        let ring_accent = theme.accent;
                         canvas(
                             move |_, _, _| {},
                             move |bounds, _, window, _| {
@@ -6762,17 +6738,17 @@ impl Chat {
                                     window.paint_path(
                                         path,
                                         if context_warning {
-                                            colors.danger
+                                            ring_danger
                                         } else {
-                                            colors.accent
+                                            ring_accent
                                         },
                                     );
                                 }
                             },
                         )
                         .absolute()
-                        .size_full(),
-                    ),
+                        .size_full()
+                    }),
             );
 
         let context_popover = if self.context_popover_open {
@@ -6790,9 +6766,9 @@ impl Chat {
                     .w(px(285.0))
                     .p(px(12.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.context_popover_open = false;
@@ -6814,14 +6790,14 @@ impl Chat {
                                     format!("context-usage-{}-of-{}", usage.used, usage.size)
                                 })
                                 .text_size(typography.footnote)
-                                .text_color(colors.text)
+                                .text_color(theme.text)
                                 .child(format!("{percent}% of context used")),
                         )
                         .child(
                             div()
                                 .mt(px(4.0))
                                 .text_size(typography.caption2)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child(format!("{} / {} tokens", usage.used, usage.size)),
                         )
                         .when_some(cost, |this, cost| {
@@ -6829,7 +6805,7 @@ impl Chat {
                                 div()
                                     .mt(px(4.0))
                                     .text_size(typography.caption2)
-                                    .text_color(colors.text_faint)
+                                    .text_color(theme.text_faint)
                                     .child(cost),
                             )
                         })
@@ -6850,7 +6826,7 @@ impl Chat {
                                         .mt(px(6.0))
                                         .pt(px(6.0))
                                         .border_t_1()
-                                        .border_color(colors.border)
+                                        .border_color(theme.border)
                                         .flex()
                                         .flex_col()
                                         .gap(px(2.0))
@@ -6858,7 +6834,7 @@ impl Chat {
                                             this.child(
                                                 div()
                                                     .text_size(typography.caption2)
-                                                    .text_color(colors.text_faint)
+                                                    .text_color(theme.text_faint)
                                                     .child(format!("Input: {tokens} tokens")),
                                             )
                                         })
@@ -6866,7 +6842,7 @@ impl Chat {
                                             this.child(
                                                 div()
                                                     .text_size(typography.caption2)
-                                                    .text_color(colors.text_faint)
+                                                    .text_color(theme.text_faint)
                                                     .child(format!("Output: {tokens} tokens")),
                                             )
                                         })
@@ -6874,7 +6850,7 @@ impl Chat {
                                             this.child(
                                                 div()
                                                     .text_size(typography.caption2)
-                                                    .text_color(colors.text_faint)
+                                                    .text_color(theme.text_faint)
                                                     .child(format!("Cache read: {tokens} tokens")),
                                             )
                                         }),
@@ -6886,7 +6862,7 @@ impl Chat {
                         this.child(
                             div()
                                 .text_size(typography.footnote)
-                                .text_color(colors.text_faint)
+                                .text_color(theme.text_faint)
                                 .child("The agent has not reported context usage yet."),
                         )
                     }),
@@ -6920,9 +6896,9 @@ impl Chat {
                         .w(px(360.0))
                         .p(px(6.0))
                         .rounded(theme.radii.toast)
-                        .bg(colors.surface_raised)
+                        .bg(theme.surface_raised)
                         .border_1()
-                        .border_color(colors.border)
+                        .border_color(theme.border)
                         .shadow_lg()
                         .children(candidates.into_iter().enumerate().map(
                             move |(index, command)| {
@@ -6941,7 +6917,7 @@ impl Chat {
                                     .rounded(theme.radii.control)
                                     .flex()
                                     .flex_col()
-                                    .when(is_selected, |this| this.bg(colors.element_active))
+                                    .when(is_selected, |this| this.bg(theme.element_active))
                                     .on_click(move |_, _, cx| {
                                         row_entity.update(cx, |chat, cx| {
                                             chat.accept_slash_command(&accept_name, cx);
@@ -6950,13 +6926,13 @@ impl Chat {
                                     .child(
                                         div()
                                             .text_size(typography.footnote)
-                                            .text_color(colors.text)
+                                            .text_color(theme.text)
                                             .child(format!("/{name}")),
                                     )
                                     .child(
                                         div()
                                             .text_size(typography.caption2)
-                                            .text_color(colors.text_faint)
+                                            .text_color(theme.text_faint)
                                             .child(description),
                                     )
                             },
@@ -6983,9 +6959,9 @@ impl Chat {
                         .w(px(360.0))
                         .p(px(6.0))
                         .rounded(theme.radii.toast)
-                        .bg(colors.surface_raised)
+                        .bg(theme.surface_raised)
                         .border_1()
-                        .border_color(colors.border)
+                        .border_color(theme.border)
                         .shadow_lg()
                         .children(candidates.into_iter().map(move |path| {
                             let row_entity = mention_entity.clone();
@@ -7001,7 +6977,7 @@ impl Chat {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
-                                .hover(|style| style.bg(colors.overlay))
+                                .hover(|style| style.bg(theme.overlay))
                                 .on_click(move |_, _, cx| {
                                     row_entity.update(cx, |chat, cx| {
                                         chat.accept_mention(&path_for_accept, cx);
@@ -7010,13 +6986,13 @@ impl Chat {
                                 .child(
                                     div()
                                         .text_size(typography.caption2)
-                                        .text_color(colors.text_faint)
+                                        .text_color(theme.text_faint)
                                         .child("▤"),
                                 )
                                 .child(
                                     div()
                                         .text_size(typography.footnote)
-                                        .text_color(colors.text)
+                                        .text_color(theme.text)
                                         .child(path),
                                 )
                         })),
@@ -7047,9 +7023,9 @@ impl Chat {
                     .w(px(200.0))
                     .p(px(6.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.overflow_open = false;
@@ -7064,8 +7040,8 @@ impl Chat {
                             .py(px(6.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.text)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.following_edited_files = !this.following_edited_files;
                                 cx.notify();
@@ -7081,8 +7057,8 @@ impl Chat {
                             .py(px(6.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.text)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.new_conversation(cx);
                             }))
@@ -7097,8 +7073,8 @@ impl Chat {
                             .py(px(6.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.text)
-                            .hover(|style| style.bg(colors.overlay))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.overlay))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_chat_history(window, cx);
                             }))
@@ -7120,7 +7096,7 @@ impl Chat {
                         .px(px(8.0))
                         .py(px(10.0))
                         .text_size(typography.footnote)
-                        .text_color(colors.text_muted)
+                        .text_color(theme.text_muted)
                         .child("No past chats")
                         .into_any_element(),
                 ]
@@ -7147,13 +7123,13 @@ impl Chat {
                             .px(px(8.0))
                             .py(px(6.0))
                             .rounded(theme.radii.control)
-                            .hover(|style| style.bg(colors.overlay))
+                            .hover(|style| style.bg(theme.overlay))
                             .child(
                                 div()
                                     .id(SharedString::from(format!("chat-history-open-{tab_id}")))
                                     .flex_1()
                                     .text_size(typography.footnote)
-                                    .text_color(colors.text)
+                                    .text_color(theme.text)
                                     .child(title)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.open_chat_history_session(open_tab_id.clone(), cx);
@@ -7173,7 +7149,7 @@ impl Chat {
                                                 "chat-history-confirm-delete-{tab_id}"
                                             )))
                                             .text_size(typography.footnote)
-                                            .text_color(colors.danger)
+                                            .text_color(theme.danger)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.confirm_delete_chat_session(
                                                     confirm_tab_id.clone(),
@@ -7188,7 +7164,7 @@ impl Chat {
                                                 "chat-history-cancel-delete-{tab_id}"
                                             )))
                                             .text_size(typography.footnote)
-                                            .text_color(colors.text_muted)
+                                            .text_color(theme.text_muted)
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.cancel_delete_chat_session(cx);
                                             }))
@@ -7200,7 +7176,7 @@ impl Chat {
                                 div()
                                     .id(SharedString::from(format!("chat-history-delete-{tab_id}")))
                                     .text_size(typography.footnote)
-                                    .text_color(colors.text_muted)
+                                    .text_color(theme.text_muted)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.request_delete_chat_session(delete_tab_id.clone(), cx);
                                     }))
@@ -7226,9 +7202,9 @@ impl Chat {
                     .overflow_y_scroll()
                     .p(px(6.0))
                     .rounded(theme.radii.toast)
-                    .bg(colors.surface_raised)
+                    .bg(theme.surface_raised)
                     .border_1()
-                    .border_color(colors.border)
+                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.history_open = false;
@@ -7250,11 +7226,11 @@ impl Chat {
             .flex()
             .items_center()
             .justify_center()
-            .hover(|style| style.bg(colors.overlay))
+            .hover(|style| style.bg(theme.overlay))
             .on_click(move |_, window, cx| {
                 attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
             })
-            .child(IconElement::new(Icon::Plus, IconSize::XSmall).text_color(colors.text));
+            .child(IconElement::new(Icon::Plus, IconSize::XSmall).text_color(theme.text));
 
         let overflow_button = div()
             .id("composer-overflow")
@@ -7266,11 +7242,16 @@ impl Chat {
             .flex()
             .items_center()
             .justify_center()
-            .hover(|style| style.bg(colors.overlay))
+            .hover(|style| style.bg(theme.overlay))
             .on_click(move |_, window, cx| {
                 overflow_entity.update(cx, |chat, cx| chat.toggle_overflow(window, cx));
             })
-            .child(div().text_size(px(15.0)).text_color(colors.text_faint).child("…"));
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .text_color(theme.text_faint)
+                    .child("…"),
+            );
 
         let context_percent = context_usage
             .as_ref()
@@ -7294,7 +7275,7 @@ impl Chat {
                     div()
                         .id("permission-wait-placeholder")
                         .debug_selector(|| "permission-wait-placeholder".into())
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child("Waiting for permission response…")
                         .into_any_element(),
                 ]
@@ -7303,7 +7284,7 @@ impl Chat {
                     div()
                         .id("queue-placeholder")
                         .debug_selector(|| "queue-placeholder".into())
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child("Type to queue for the next turn…")
                         .into_any_element(),
                 ]
@@ -7320,7 +7301,7 @@ impl Chat {
                     div()
                         .id("offline-placeholder")
                         .debug_selector(|| "offline-placeholder".into())
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child("Agent offline — reconnecting when you send…")
                         .into_any_element(),
                 ]
@@ -7332,7 +7313,7 @@ impl Chat {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_color(colors.text_faint)
+                        .text_color(theme.text_faint)
                         .child(self.default_placeholder())
                         .into_any_element(),
                 ]
@@ -7381,8 +7362,7 @@ impl Chat {
                                 continue;
                             }
                             let piece: String = chars[from..to].iter().collect();
-                            let selected =
-                                span.is_some_and(|(lo, hi)| from >= lo && to <= hi);
+                            let selected = span.is_some_and(|(lo, hi)| from >= lo && to <= hi);
                             if selected {
                                 run.push(
                                     div()
@@ -7391,8 +7371,8 @@ impl Chat {
                                         })
                                         .min_w_0()
                                         .rounded(px(2.0))
-                                        .bg(colors.element_active)
-                                        .text_color(colors.text)
+                                        .bg(theme.element_active)
+                                        .text_color(theme.text)
                                         .child(piece)
                                         .into_any_element(),
                                 );
@@ -7409,7 +7389,7 @@ impl Chat {
                                             }
                                         })
                                         .min_w_0()
-                                        .text_color(colors.text)
+                                        .text_color(theme.text)
                                         .child(piece)
                                         .into_any_element(),
                                 );
@@ -7449,15 +7429,15 @@ impl Chat {
                             // selection fill whole or not at all — the same
                             // rule `chip_is_selected` encodes in the model.
                             .bg(if self.composer.chip_is_selected(index) {
-                                colors.element_active
+                                theme.element_active
                             } else {
-                                colors.surface_raised
+                                theme.surface_raised
                             })
                             .border_1()
-                            .border_color(colors.border)
+                            .border_color(theme.border)
                             .text_size(typography.caption2)
-                            .child(div().text_color(colors.text_faint).child(glyph))
-                            .child(div().text_color(colors.text).child(label))
+                            .child(div().text_color(theme.text_faint).child(glyph))
+                            .child(div().text_color(theme.text).child(label))
                             .child(
                                 div()
                                     .id(format!("chip-remove-{index}"))
@@ -7465,8 +7445,8 @@ impl Chat {
                                     .px(px(2.0))
                                     .rounded(px(2.0))
                                     .text_size(typography.caption2)
-                                    .text_color(colors.text_faint)
-                                    .hover(|style| style.bg(colors.overlay))
+                                    .text_color(theme.text_faint)
+                                    .hover(|style| style.bg(theme.overlay))
                                     .on_click(move |_, window, cx| {
                                         // F-CHAT-12: the × removes the chip
                                         // from the model correctly on its
@@ -7521,13 +7501,9 @@ impl Chat {
             // retired (Task 7) — the shared Activity clock lives in the
             // reasoning header now (Task 6).
             .border_1()
-            .border_color(if focused {
-                colors.text
-            } else {
-                colors.border
-            })
+            .border_color(if focused { theme.text } else { theme.border })
             .rounded(theme.radii.composer)
-            .bg(colors.surface_raised)
+            .bg(theme.surface_raised)
             .p(px(10.0))
             .flex()
             .flex_col()
@@ -7569,14 +7545,14 @@ impl Chat {
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded(theme.radii.control)
-                        .bg(colors.surface_raised)
+                        .bg(theme.surface_raised)
                         .text_size(typography.footnote)
-                        .child(div().text_color(colors.text_faint).child("Queued:"))
+                        .child(div().text_color(theme.text_faint).child("Queued:"))
                         .child(
                             div()
                                 .id("queued-text")
                                 .debug_selector(move || format!("queued-text-{queued_for_id}"))
-                                .text_color(colors.text)
+                                .text_color(theme.text)
                                 .child(queued),
                         )
                         .child(
@@ -7585,8 +7561,8 @@ impl Chat {
                                 .debug_selector(|| "queued-remove".into())
                                 .px(px(4.0))
                                 .rounded(px(3.0))
-                                .text_color(colors.text_faint)
-                                .hover(|style| style.bg(colors.overlay))
+                                .text_color(theme.text_faint)
+                                .hover(|style| style.bg(theme.overlay))
                                 .on_click(move |_, _, cx| {
                                     remove_entity.update(cx, |chat, cx| {
                                         chat.remove_queued_item(cx);
@@ -7603,7 +7579,7 @@ impl Chat {
                         .debug_selector(|| "attach-error".into())
                         .px(px(4.0))
                         .text_size(typography.caption2)
-                        .text_color(colors.danger)
+                        .text_color(theme.danger)
                         .child(message),
                 )
             })
@@ -7631,7 +7607,7 @@ impl Chat {
                             .h(px(24.0))
                             .px(px(7.0))
                             .rounded(theme.radii.control)
-                            .bg(colors.surface_raised)
+                            .bg(theme.surface_raised)
                             .text_size(typography.ui_size)
                             .child(context_ring)
                             // Named, like every other value in this row. A
@@ -7646,14 +7622,14 @@ impl Chat {
                                 div()
                                     .id("context-label")
                                     .debug_selector(|| "context-label".into())
-                                    .text_color(colors.text_faint)
+                                    .text_color(theme.text_faint)
                                     .child("Context"),
                             )
                             .child(
                                 div()
                                     .id("context-percent")
                                     .debug_selector(|| "context-percent".into())
-                                    .text_color(colors.text)
+                                    .text_color(theme.text)
                                     .child(format!("{context_percent}%")),
                             ),
                     )
@@ -7670,16 +7646,16 @@ impl Chat {
                             .justify_center()
                             .text_size(px(15.0))
                             .bg(if self.streaming || can_send {
-                                colors.overlay_strong
+                                theme.overlay_strong
                             } else {
-                                colors.overlay
+                                theme.overlay
                             })
                             .text_color(if self.streaming || can_send {
-                                colors.text
+                                theme.text
                             } else {
-                                colors.text_dim
+                                theme.text_dim
                             })
-                            .hover(|style| style.bg(colors.surface_raised))
+                            .hover(|style| style.bg(theme.surface_raised))
                             .when(self.streaming, |this| {
                                 // D-CHAT-02: while a turn runs the same
                                 // control becomes stop — a filled square in
@@ -7697,7 +7673,7 @@ impl Chat {
                                         .w(px(9.0))
                                         .h(px(9.0))
                                         .rounded(px(2.0))
-                                        .bg(colors.text),
+                                        .bg(theme.text),
                                 )
                             })
                             .when(!self.streaming, |this| {
@@ -7858,7 +7834,7 @@ impl Render for Chat {
             .flex()
             .flex_col()
             .items_center()
-            .bg(theme.colors.surface)
+            .bg(theme.surface)
             .key_context("ChatComposer")
             .track_focus(&self.composer_focus)
             .on_action(cx.listener(Self::send_action))
@@ -8091,12 +8067,17 @@ impl Render for Chat {
                                 .flex()
                                 .w(px(loading::THINKING_GLYPH))
                                 .justify_center()
-                                .child(loading::thinking_indicator("chat-thinking", &theme, window, cx)),
+                                .child(loading::thinking_indicator(
+                                    "chat-thinking",
+                                    &theme,
+                                    window,
+                                    cx,
+                                )),
                         )
                         .child(
                             div()
                                 .text_size(px(12.5))
-                                .text_color(theme.colors.text_muted)
+                                .text_color(theme.text_muted)
                                 .child("Thinking"),
                         ),
                 )
@@ -8114,7 +8095,6 @@ impl Render for Chat {
                         // while a question is unanswered; Show scrolls the
                         // transcript to the question card.
                         let show_entity = entity_for_bar.clone();
-                        let bar_colors = theme.colors;
                         let bar_typography = theme.typography;
                         this.child(
                             div()
@@ -8129,15 +8109,15 @@ impl Render for Chat {
                                 .px(px(10.0))
                                 .py(px(6.0))
                                 .rounded(theme.radii.control)
-                                .bg(bar_colors.surface_raised)
+                                .bg(theme.surface_raised)
                                 .border_1()
-                                .border_color(bar_colors.warning)
+                                .border_color(theme.warning)
                                 .text_size(bar_typography.footnote)
-                                .child(div().text_color(bar_colors.warning).child("?"))
+                                .child(div().text_color(theme.warning).child("?"))
                                 .child(
                                     div()
                                         .flex_1()
-                                        .text_color(bar_colors.text)
+                                        .text_color(theme.text)
                                         .child(format!("Question waiting · {title}")),
                                 )
                                 .child(
@@ -8148,8 +8128,8 @@ impl Render for Chat {
                                         .py(px(3.0))
                                         .rounded(theme.radii.control)
                                         .text_size(bar_typography.caption2)
-                                        .text_color(bar_colors.text_faint)
-                                        .hover(|style| style.bg(bar_colors.overlay))
+                                        .text_color(theme.text_faint)
+                                        .hover(|style| style.bg(theme.overlay))
                                         .on_click(move |_, _, cx| {
                                             show_entity.update(cx, |chat, cx| {
                                                 chat.list_state.scroll_to_reveal_item(index);
@@ -8176,7 +8156,7 @@ impl Render for Chat {
                 // `ExternalPaths` drag sits over the pane. Not drawn at all
                 // while the composer can't accept input, matching the
                 // top-level `on_drop` binding just above.
-                let marker = theme.colors.text;
+                let marker = theme.text;
                 let overlay = div()
                     .id("chat-drop-overlay")
                     .debug_selector(|| "chat-drop-overlay".into())
@@ -8189,12 +8169,12 @@ impl Render for Chat {
                     .rounded(theme.radii.composer)
                     .border_1()
                     .border_color(marker)
-                    .bg(theme.colors.overlay)
+                    .bg(theme.overlay)
                     .child(
                         div()
                             .id("chat-drop-overlay-label")
                             .debug_selector(|| "chat-drop-overlay-label".into())
-                            .text_color(theme.colors.text)
+                            .text_color(theme.text)
                             .child("Drop files to attach"),
                     );
                 if can_accept_drop {
@@ -8383,16 +8363,16 @@ impl InlineBuilder {
                 if code {
                     // waku spends its one saturated colour on inline code:
                     // the warm `code_text` on a faint `code_wash` ground.
-                    highlight.color = Some(theme.colors.text.into());
-                    highlight.background_color = Some(theme.colors.code_wash.into());
+                    highlight.color = Some(theme.text.into());
+                    highlight.background_color = Some(theme.code_wash.into());
                     self.font_overrides
                         .push((start..end, theme.typography.code_family.into()));
                 }
                 if let Some(target) = link_target {
-                    highlight.color = Some(theme.colors.file_link.into());
+                    highlight.color = Some(theme.file_link.into());
                     highlight.underline = Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(theme.colors.file_link.into()),
+                        color: Some(theme.file_link.into()),
                         wavy: false,
                     });
                     self.links.push((start..end, target.to_string()));
@@ -8417,14 +8397,14 @@ impl InlineBuilder {
                 let end = self.text.len();
                 if start < end {
                     let mut highlight = HighlightStyle {
-                        color: Some(theme.colors.text.into()),
-                        background_color: Some(theme.colors.code_wash.into()),
+                        color: Some(theme.text.into()),
+                        background_color: Some(theme.code_wash.into()),
                         ..Default::default()
                     };
                     highlight.font_weight = strong.then_some(FontWeight::BOLD);
                     highlight.font_style = emphasis.then_some(FontStyle::Italic);
                     if let Some(target) = link_target {
-                        highlight.color = Some(theme.colors.file_link.into());
+                        highlight.color = Some(theme.file_link.into());
                         self.links.push((start..end, target.to_string()));
                     }
                     self.highlights.push((start..end, highlight));
@@ -9551,9 +9531,7 @@ mod tests {
     /// `on_composer_key`, so it is a text field by every measure except the
     /// one the user checks: it drew no insertion bar at all.
     #[gpui::test]
-    async fn the_question_answer_field_draws_a_caret_while_it_holds_focus(
-        cx: &mut TestAppContext,
-    ) {
+    async fn the_question_answer_field_draws_a_caret_while_it_holds_focus(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["question"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         refresh_frame(cx);
@@ -12028,7 +12006,6 @@ mod tests {
         );
     }
 
-
     /// F-CHAT-23: text output past the cap is truncated to its tail, not
     /// its head — a long run's result or error usually lands at the end.
     #[test]
@@ -14297,9 +14274,7 @@ mod tests {
 
         // And the pill must not span the control row. The composer is far
         // wider than a model name; a pill claiming most of it is the bug.
-        let composer = cx
-            .debug_bounds("composer")
-            .expect("the composer is drawn");
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
         assert!(
             f32::from(chip.size.width) < f32::from(composer.size.width) * 0.6,
             "the pill must hug its content, not the row: pill {}px of {}px",

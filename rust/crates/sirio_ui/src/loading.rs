@@ -18,7 +18,7 @@ use bezel::motion::Painter;
 use bezel::ui::loaders;
 use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
-use gpui::{div, px, AnyElement, App, Div, IntoElement, ParentElement, Styled, Window};
+use gpui::{AnyElement, App, Div, IntoElement, ParentElement, Styled, Window, div, px};
 use sirio_theme::Theme;
 
 /// The glyph slot in an Activity-derived reasoning header.
@@ -87,7 +87,7 @@ fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
         bezel::theme::Appearance::Light => bezel::theme::Theme::light(),
         bezel::theme::Appearance::Dark => bezel::theme::Theme::dark(),
     };
-    bezel_theme.accent = theme.colors.brand_coral.into();
+    bezel_theme.accent = theme.brand_coral.into();
     bezel_theme
 }
 
