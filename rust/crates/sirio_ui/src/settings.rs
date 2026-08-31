@@ -43,6 +43,19 @@ const DETAIL_BOTTOM_PADDING: f32 = 12.0;
 const DETAIL_SECTION_MARGIN: f32 = 20.0;
 
 const SEGMENTED_THEME: &[&str] = &["System", "Light", "Dark"];
+/// bezel's five base colours, in its own order. Text rather than swatches:
+/// the five differ by hue at chroma 0.013–0.046, which a 16px pill cannot
+/// show, and the names are Tailwind's — a vocabulary a user may already have.
+const SEGMENTED_BASE_COLOR: &[&str] = &["Neutral", "Stone", "Zinc", "Gray", "Slate"];
+
+/// The segment index of a base colour. `BaseColor::ALL` is the display order,
+/// so the index is its position in that array.
+fn base_color_segment(base: sirio_theme::BaseColor) -> usize {
+    sirio_theme::BaseColor::ALL
+        .iter()
+        .position(|candidate| *candidate == base)
+        .unwrap_or(0)
+}
 /// The file-icon sets this platform can actually render, in display order
 /// (see [`file_icon_choices`]). On macOS both SF Symbols and the embedded
 /// Material set exist; everywhere else only the embedded set does.
@@ -1707,6 +1720,19 @@ impl Settings {
         cx.notify();
     }
 
+    fn set_base_color(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(base) = sirio_theme::BaseColor::ALL.get(index).copied() else {
+            return;
+        };
+        self.base_color = base;
+        Theme::set_base_color(base, cx);
+        // Same reason as set_theme_mode: Theme is a GPUI global, so every
+        // mounted surface repaints from the new palette on its next render.
+        cx.refresh_windows();
+        self.changed();
+        cx.notify();
+    }
+
     fn set_translucency(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.translucency = enabled;
         self.changed();
@@ -2450,6 +2476,16 @@ impl Settings {
                 theme_entity.update(cx, |this, cx| this.set_theme_mode(mode, cx));
             },
         );
+        let base_entity = entity.clone();
+        let base_control = controls::segmented(
+            "appearance-base-color",
+            SEGMENTED_BASE_COLOR,
+            base_color_segment(self.base_color),
+            theme,
+            move |index, cx| {
+                base_entity.update(cx, |this, cx| this.set_base_color(index, cx));
+            },
+        );
         let translucency_entity = entity.clone();
         let translucency = controls::toggle(
             "appearance-translucency",
@@ -2466,6 +2502,13 @@ impl Settings {
                 div()
                     .id("settings-appearance-theme-row")
                     .child(controls::row("Appearance", None, theme_control, theme)),
+            )
+            .child(controls::separator(theme));
+        theme_card = theme_card
+            .child(
+                div()
+                    .id("settings-appearance-base-color-row")
+                    .child(controls::row("Base color", None, base_control, theme)),
             )
             .child(controls::separator(theme));
         theme_card = theme_card.child(
@@ -4582,6 +4625,21 @@ impl Render for Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_base_colour_segments_are_bezels_five_in_order() {
+        assert_eq!(
+            SEGMENTED_BASE_COLOR,
+            &["Neutral", "Stone", "Zinc", "Gray", "Slate"]
+        );
+    }
+
+    #[test]
+    fn every_base_colour_maps_to_its_own_segment() {
+        for (index, base) in sirio_theme::BaseColor::ALL.into_iter().enumerate() {
+            assert_eq!(base_color_segment(base), index, "{base:?}");
+        }
+    }
+
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
     use std::cell::{Cell, RefCell};
