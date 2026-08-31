@@ -54,7 +54,7 @@
 **Interfaces:**
 - Produces: `Scripts/gate-no-value-change.sh <base-ref>` — exits 0 when no numeric literal changed between `<base-ref>` and the working tree, 1 otherwise. Used as the closing step of every Phase 1 task.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 ```bash
 #!/usr/bin/env bash
@@ -91,7 +91,7 @@ diff -u "$before" "$after" >&2 || true
 exit 1
 ```
 
-- [ ] **Step 2: Make it executable and verify it passes on a clean tree**
+- [x] **Step 2: Make it executable and verify it passes on a clean tree**
 
 Run:
 ```bash
@@ -100,7 +100,7 @@ Scripts/gate-no-value-change.sh HEAD
 ```
 Expected: `GATE OK: no numeric literal changed since HEAD`
 
-- [ ] **Step 3: Verify it fails when a number moves**
+- [x] **Step 3: Verify it fails when a number moves**
 
 Run:
 ```bash
@@ -113,7 +113,7 @@ Expected: `GATE FAILED: numeric literals moved since HEAD` and `exit=1`.
 
 A gate that cannot fail is not a gate — this step is what proves it works, and is the reason it is separate from Step 2.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Scripts/gate-no-value-change.sh
@@ -135,7 +135,7 @@ git commit -m "chore: add phase 1 gate for theme rename"
 
 This is the single row the spec marks **review**. It is decided by comparing values, not by argument.
 
-- [ ] **Step 1: Read Sirio's current value**
+- [x] **Step 1: Read Sirio's current value**
 
 Run:
 ```bash
@@ -143,7 +143,7 @@ sed -n '376,380p' rust/crates/sirio_theme/src/lib.rs
 ```
 Expected: `frame_surface` is `softened(frame_fallback, 0.88)` in dark and `softened(frame_fallback, 0.82)` in light — i.e. the frame fallback at 88% / 82% opacity.
 
-- [ ] **Step 2: Read bezel's `band`**
+- [x] **Step 2: Read bezel's `band`**
 
 Run:
 ```bash
@@ -151,13 +151,13 @@ grep -n -B12 'pub fn band_for' \
     /Users/enzopiopalmisano/.cache/fx/bezel-gallery-analysis/crates/theme/src/paint.rs
 ```
 
-- [ ] **Step 3: Record the decision in the spec**
+- [x] **Step 3: Record the decision in the spec**
 
 If `band` is the translucent window-frame material, replace the `frame_surface` row's Note column with the resolved reasoning and drop the **review** marker. If it is not — if `band` turns out to mean a horizontal band rather than the frame material — mark `frame_surface` as retained in `SirioColors` instead, and add it to the Group C table alongside `terminal_surface`.
 
 Whichever way it goes, write one sentence saying which value settled it. Do not leave the marker in place.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-08-30-bezel-theme-adoption-design.md
@@ -178,7 +178,7 @@ git commit -m "docs: settle frame_surface mapping against bezel's band"
 
 This is the only structural change in the whole migration. It is here rather than in Phase 2 because Phase 2's gate forbids structural changes, and C1 requires `git_untracked` to end up somewhere `gauge` does not.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `mod tests` in `rust/crates/sirio_theme/src/lib.rs`:
 
@@ -196,12 +196,12 @@ fn git_untracked_is_its_own_binding_not_the_gauge_blue() {
 }
 ```
 
-- [ ] **Step 2: Run it to confirm it passes today**
+- [x] **Step 2: Run it to confirm it passes today**
 
 Run: `cd rust && cargo test -p sirio_theme git_untracked_is_its_own_binding -- --nocapture`
 Expected: PASS. This test documents the pre-split state; Task 13 inverts its assertions.
 
-- [ ] **Step 3: Introduce the separate binding**
+- [x] **Step 3: Introduce the separate binding**
 
 In `for_appearance`, immediately after the `gauge` binding, add:
 
@@ -213,17 +213,17 @@ let git_untracked = gauge;
 
 and change the struct literal line `git_untracked: gauge,` to `git_untracked,`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme`
 Expected: PASS, including the new test and all provenance tests unchanged.
 
-- [ ] **Step 5: Run the gate**
+- [x] **Step 5: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh HEAD`
 Expected: `GATE OK`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add rust/crates/sirio_theme/src/lib.rs
@@ -253,7 +253,7 @@ Renames, from spec Table 1 and Table 2:
 
 `title_selected`, `tab_focus_accent`, `selection_ring`, `primary_text_color`, `caret` and `code_text` are all aliases of the `text` binding, so they collapse into `text` and cease to exist as fields.
 
-- [ ] **Step 1: Record the base rev**
+- [x] **Step 1: Record the base rev**
 
 Run:
 ```bash
@@ -261,11 +261,11 @@ git rev-parse HEAD > /tmp/phase1-base
 cat /tmp/phase1-base
 ```
 
-- [ ] **Step 2: Rename the struct fields and their bindings**
+- [x] **Step 2: Rename the struct fields and their bindings**
 
 In `rust/crates/sirio_theme/src/lib.rs`: rename the `text_secondary` binding to `text_muted` and `text_tertiary` to `text_faint`; rename the `text_ghost` binding to `text_dim`. In the `ThemeColors` struct, delete the seven alias fields and keep a single `pub text: Rgba`, plus `text_muted`, `text_faint`, `text_dim`. Carry each deleted field's doc-comment content into the surviving field's doc where it says something the survivor's does not.
 
-- [ ] **Step 3: Rename the call sites**
+- [x] **Step 3: Rename the call sites**
 
 Run:
 ```bash
@@ -284,26 +284,26 @@ done
 
 Order matters: `title_selected` must be rewritten before `title`, or `theme.title_selected` becomes `theme.text_selected`. The loop above is already in a safe order — do not reorder it.
 
-- [ ] **Step 4: Build and fix the remainder**
+- [x] **Step 4: Build and fix the remainder**
 
 Run: `cd rust && cargo build -p sirio_theme -p sirio_ui`
 Expected: errors only where a field was reached other than through `theme.`, e.g. a destructuring pattern or a `colors.title` access. Fix each by hand; there should be a handful.
 
-- [ ] **Step 5: Update the tests**
+- [x] **Step 5: Update the tests**
 
 Rename the same fields inside `mod tests`. Assertion *values* must not change — only the field names they read.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS, all provenance tests included.
 
-- [ ] **Step 7: Run the gate**
+- [x] **Step 7: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add rust/crates
@@ -334,11 +334,11 @@ git commit -m "refactor: rename the text ladder to bezel names"
 | `frame_surface` | `band`, or retained — per Task 2 |
 | `terminal_surface` | unchanged; retained |
 
-- [ ] **Step 1: Rename the struct fields and their bindings**
+- [x] **Step 1: Rename the struct fields and their bindings**
 
 As Task 4 Step 2, for the table above. `terminal_surface` keeps its name and gains a doc line saying it is retained because bezel has no terminal-surface concept.
 
-- [ ] **Step 2: Rename the call sites**
+- [x] **Step 2: Rename the call sites**
 
 Run:
 ```bash
@@ -364,25 +364,25 @@ done
 
 Note `theme.sidebar` — check by hand that no unrelated field starts with `sidebar` other than `sidebar_border`, which Task 6 handles. `\b` protects it, but confirm with `grep -rn 'theme\.sidebar' rust/crates` before and after.
 
-- [ ] **Step 3: Build and fix the remainder**
+- [x] **Step 3: Build and fix the remainder**
 
 Run: `cd rust && cargo build -p sirio_theme -p sirio_ui`
 
-- [ ] **Step 4: Update the tests**
+- [x] **Step 4: Update the tests**
 
 Same rule: names change, numbers do not.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates
@@ -415,11 +415,11 @@ git commit -m "refactor: rename the surface ladder to bezel names"
 
 `panel_border` is an opaque hex today while `border` is a veil, so these are two different values collapsing onto one name. **This is the one rename in Phase 1 that cannot preserve both values.** Keep them as two fields for now — rename `panel_border` to `border_opaque` — and collapse it in Phase 2 Task 13, where a value change is allowed. Renaming it to `border` here would move a number and the gate would catch it, which is the gate working correctly.
 
-- [ ] **Step 1: Rename the struct fields and their bindings**
+- [x] **Step 1: Rename the struct fields and their bindings**
 
 Per the table, with `panel_border` → `border_opaque` as noted.
 
-- [ ] **Step 2: Rename the call sites**
+- [x] **Step 2: Rename the call sites**
 
 Run:
 ```bash
@@ -440,25 +440,25 @@ done
 
 `chat_row_hover` must precede `row_hover`. The order above is safe.
 
-- [ ] **Step 3: Build and fix the remainder**
+- [x] **Step 3: Build and fix the remainder**
 
 Run: `cd rust && cargo build -p sirio_theme -p sirio_ui`
 
-- [ ] **Step 4: Update the tests**
+- [x] **Step 4: Update the tests**
 
 `the_veil_ladder_is_geometric` and `veil_backed_structural_washes_are_neutral` read these fields. Rename what they read; leave their assertions alone.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates
@@ -488,9 +488,9 @@ git commit -m "refactor: rename the veil ladder to bezel names"
 | `favorite` | `favorite` (retained — full-chroma warning, its own binding) |
 | `diff_addition_background`, `diff_deletion_background` | unchanged for now; derived in Phase 2 |
 
-- [ ] **Step 1: Rename the struct fields and their bindings**
+- [x] **Step 1: Rename the struct fields and their bindings**
 
-- [ ] **Step 2: Rename the call sites**
+- [x] **Step 2: Rename the call sites**
 
 Run:
 ```bash
@@ -511,25 +511,25 @@ done
 
 Each `*_background` entry must precede its shorter sibling. The order above is safe.
 
-- [ ] **Step 3: Build and fix the remainder**
+- [x] **Step 3: Build and fix the remainder**
 
 Run: `cd rust && cargo build -p sirio_theme -p sirio_ui`
 
-- [ ] **Step 4: Update the tests**
+- [x] **Step 4: Update the tests**
 
 `the_state_hues_are_the_ones_the_swift_app_shipped` and `favorite_is_the_warning_hue_at_full_chroma` read these. Names only.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates
@@ -550,7 +550,7 @@ git commit -m "refactor: rename the status hues to bezel names"
 
 The order is load-bearing: `accent` must vacate the name before `gauge` takes it, or the two briefly collide.
 
-- [ ] **Step 1: Rename `accent` to `brand_coral` first**
+- [x] **Step 1: Rename `accent` to `brand_coral` first**
 
 Run:
 ```bash
@@ -561,7 +561,7 @@ grep -rl 'theme\.accent\b' sirio_ui/src sirio/src --include="*.rs" \
 
 Then rename the binding and the field in `sirio_theme/src/lib.rs`, keeping its whole doc-comment — it explains the two invariants that hold it.
 
-- [ ] **Step 2: Build to confirm `accent` is now free**
+- [x] **Step 2: Build to confirm `accent` is now free**
 
 Run: `cd rust && cargo build -p sirio_theme -p sirio_ui`
 Expected: PASS with no reference to `theme.accent` remaining. Confirm:
@@ -569,7 +569,7 @@ Expected: PASS with no reference to `theme.accent` remaining. Confirm:
 grep -rn 'theme\.accent\b' rust/crates --include="*.rs" || echo "accent is free"
 ```
 
-- [ ] **Step 3: Rename `gauge` to `accent`**
+- [x] **Step 3: Rename `gauge` to `accent`**
 
 Run:
 ```bash
@@ -580,21 +580,21 @@ grep -rl 'theme\.gauge\b' sirio_ui/src sirio/src --include="*.rs" \
 
 Then rename the binding and field. `file_link` remains an alias of it; `git_untracked` stays on its own binding from Task 3.
 
-- [ ] **Step 4: Update the tests**
+- [x] **Step 4: Update the tests**
 
 `accent_clears_contrast_on_its_own_surface` and `accent_is_not_any_agent_brand` now read `brand_coral`. Rename what they read and rename the test functions to `brand_coral_clears_contrast_on_its_own_surface` and `brand_coral_is_not_any_agent_brand`, so the names keep matching what they assert.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates
@@ -612,7 +612,7 @@ git commit -m "refactor: rename accent to brand_coral and gauge to accent"
 - Consumes: Tasks 4–8.
 - Produces: every colour reached through `Deref`, so Phase 2 can repoint it in one place.
 
-- [ ] **Step 1: Find them**
+- [x] **Step 1: Find them**
 
 Run:
 ```bash
@@ -620,7 +620,7 @@ grep -rn 'theme\.colors\.' rust/crates --include="*.rs"
 ```
 Expected: 21 matches.
 
-- [ ] **Step 2: Rewrite them**
+- [x] **Step 2: Rewrite them**
 
 Run:
 ```bash
@@ -635,17 +635,17 @@ grep -rn '\.colors\b' rust/crates --include="*.rs"
 ```
 Any remaining site that passes `colors` as a value rather than reaching through it must keep working; `ThemeColors` still exists at this point.
 
-- [ ] **Step 3: Build and test**
+- [x] **Step 3: Build and test**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 4: Run the gate**
+- [x] **Step 4: Run the gate**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add rust/crates
@@ -659,12 +659,12 @@ git commit -m "refactor: reach theme colours through Deref everywhere"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-08-30-bezel-theme-adoption.md` (tick the Phase 1 boxes)
 
-- [ ] **Step 1: Run the gate against the phase base**
+- [x] **Step 1: Run the gate against the phase base**
 
 Run: `Scripts/gate-no-value-change.sh "$(cat /tmp/phase1-base)"`
 Expected: `GATE OK`. This is the phase's closing evidence: every name moved, no number did.
 
-- [ ] **Step 2: Confirm the provenance tests never changed their assertions**
+- [x] **Step 2: Confirm the provenance tests never changed their assertions**
 
 Run:
 ```bash
@@ -673,17 +673,81 @@ git diff "$(cat /tmp/phase1-base)" -- rust/crates/sirio_theme/src/lib.rs \
 ```
 Expected: `no hex moved in assertions`
 
-- [ ] **Step 3: Run the full available suite**
+- [x] **Step 3: Run the full available suite**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui -p sirio`
 Expected: PASS. `sirio_terminal` is excluded — it needs Zig 0.15.2, see Global Constraints.
 
-- [ ] **Step 4: Commit the tick-through**
+- [x] **Step 4: Commit the tick-through**
 
 ```bash
 git add docs/superpowers/plans/2026-08-30-bezel-theme-adoption.md
 git commit -m "docs: close phase 1 of the bezel theme adoption"
 ```
+
+---
+
+## Phase 1 execution notes
+
+Recorded 2026-08-31, after Tasks 1-10 landed. Every deviation from the steps as
+written, and why.
+
+**The `sed -i '' 's/…\b/…/'` commands in Tasks 4-8 do nothing on macOS.** BSD
+sed's regex engine is POSIX, which has no `\b`; the pattern matches nothing and
+sed exits 0, so the rename silently does not happen. This is the same defect the
+audit found in `Scripts/gate-no-value-change.sh`. Every rename was run with
+`perl -pi -e` instead. Anyone re-running these steps must do the same.
+
+**zsh does not word-split unquoted `$files`.** `xargs -0` off `find -print0` is
+the portable form; a bare `perl -pi -e '…' $files` hands perl one argument
+containing newlines and fails with "File name too long".
+
+**Alias-identity assertions were deleted, not renamed.** Tasks 4-7 collapse each
+alias onto its target field, so assertions of the form
+`assert_eq!(theme.title_selected, theme.title)` become
+`assert_eq!(theme.text, theme.text)` — a tautology. The property they held is now
+held by the type system, so they were removed and the surviving comment says so.
+The assertions that survive are the ones the compiler cannot make: `text_muted`
+is a step below `text`, `element_active` stays tellable from `surface_raised`.
+The same collapse left duplicate rows in `every_adaptive_token_differs_between_
+light_and_dark` and `veil_backed_structural_washes_are_neutral`; those were
+deduplicated and their stale labels renamed to the surviving field.
+
+**`Theme::canvas` was deleted (not in the plan).** `Theme` carried an inherent
+`canvas: Rgba` field duplicating `colors.canvas`. An inherent field shadows
+`Deref`, so it would have survived Task 12's repoint holding the old Sirio value
+while every other token moved to bezel — a silent divergence the gate cannot see.
+Deref serves the same value, so the field and its initialiser were removed.
+
+**Task 9 also removed the `let colors = theme.colors;` bindings.** There were 15
+in `chat.rs`. Task 12 removes `Theme::colors` outright, and Phase 2's gate forbids
+touching files outside `sirio_theme`, so leaving them would have made Task 12
+unlandable. One of them existed to give a `'static` paint closure a `Copy`
+snapshot; that site now copies the two colours it draws with
+(`ring_danger`, `ring_accent`) before the closure.
+
+**`with_translucency` lost four redundant fades.** They faded alias fields that
+are now the same field, which rustc reported as `useless assignment of field of
+type Rgba to itself`.
+
+**One `chore:` commit for rustfmt.** The renames changed identifier lengths, so
+rustfmt rewrapped 13 files that Phase 1 did not otherwise touch. It is a separate
+commit so the rename diffs stay readable. Pre-existing unformatted files outside
+this work (`sirio_apply`, `sirio_control`, `sirio_release`) were left alone.
+
+**Task 10 Step 3 ran without `-p sirio`.** `sirio` depends on `sirio_terminal`,
+which needs Zig exactly 0.15.2; this machine has 0.16.0 and `zig build` fails with
+`build.zig:27:62: error: member function expected 4 argument(s), found 3`. The
+renames in `sirio/` and `sirio_terminal/` are therefore **not compiler-verified**.
+They were applied with the same receiver-anchored patterns as `sirio_ui`, whose
+1 621 call sites did compile. Task 19 unblocks the check.
+
+Evidence at close: `Scripts/gate-no-value-change.sh 632d6cf1` prints `GATE OK`;
+the set of hex literals inside assertions is byte-identical before and after;
+`cargo test -p sirio_theme -p sirio_ui` is 70 + 555 passing. Four `changes::tests`
+and one `settings::tests` case fail only when the whole suite runs at once — they
+shell out to real `git` under a 10 s timeout — and pass per-crate, which is the
+flake `CLAUDE.md` already documents.
 
 ---
 
