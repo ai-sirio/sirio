@@ -44,6 +44,10 @@ use std::sync::OnceLock;
 /// the name is kept because it reads better next to `Appearance` (the
 /// *resolved* one) and because it keeps `sirio_persistence::AppearanceMode`
 /// unambiguous at the one place both are in scope, `sirio`'s `main.rs`.
+mod base_color;
+
+pub use base_color::BaseColor;
+
 pub use bezel::theme::appearance::AppearanceMode as ThemeMode;
 
 /// The resolved light/dark appearance of an active [`Theme`].
