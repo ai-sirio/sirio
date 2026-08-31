@@ -248,6 +248,18 @@ impl ThemeColors {
     }
 
     fn for_appearance(appearance: Appearance) -> Self {
+        // Every neutral, status and diff token below is bezel's. What stays
+        // Sirio's is listed in `Group C` of the design doc: the coral, the
+        // window-frame material, the terminal surface, and the washes that sit
+        // between bezel's rungs.
+        //
+        // The palette is read here rather than through bezel's `wash`/`ink`
+        // helpers because those resolve against a process-global appearance,
+        // and this function is called for both appearances in one process.
+        let bezel = match appearance {
+            Appearance::Dark => bezel::theme::Theme::dark(),
+            Appearance::Light => bezel::theme::Theme::light(),
+        };
         // Sirio's brand coral. Part measured, part chosen, and the seam between
         // the two is the whole point — see `THEME-PROVENANCE.md`.
         //
@@ -289,49 +301,35 @@ impl ThemeColors {
         // `accent` is the exception worth naming: in Swift this blue is the
         // focus accent. The Rust brand colour is coral, which freed the blue, and a
         // progress bar is the one place left that wants a cool hue.
-        let warning = Self::adaptive(
-            color(0.95, 0.72, 0.28, 1.0),
-            color(0.67, 0.42, 0.02, 1.0),
-            appearance,
-        );
-        let success = Self::adaptive(
-            color(0.48, 0.78, 0.57, 1.0),
-            color(0.10, 0.45, 0.22, 1.0),
-            appearance,
-        );
-        let danger = Self::adaptive(
-            color(0.94, 0.43, 0.47, 1.0),
-            color(0.68, 0.12, 0.17, 1.0),
-            appearance,
-        );
-        let accent = Self::adaptive(
-            color(0.55, 0.64, 1.00, 1.0),
-            color(0.24, 0.38, 0.78, 1.0),
-            appearance,
-        );
+        let warning = Rgba::from(bezel.warning);
+        let success = Rgba::from(bezel.success);
+        let danger = Rgba::from(bezel.danger);
+        let accent = Rgba::from(bezel.accent);
+        let diff_add = Rgba::from(bezel.diff_add);
+        let diff_del = Rgba::from(bezel.diff_del);
         // C1: untracked leaves the accent blue for a neutral in phase 2. Bound
         // separately here so that move is a value change, not a structural one.
         let git_untracked = accent;
-        // A starred row is a louder `warning`, not a fifth colour: same hue,
-        // same lightness, all the chroma the pair allows. Held by
-        // `favorite_is_the_warning_hue_at_full_chroma`.
-        let favorite = {
-            let (hue, lightness) = hue_and_lightness(warning);
-            hsla(hue, 1.0, lightness, 1.0)
-        };
-        let frame_fallback = Self::adaptive(rgb_hex(0x222427), rgb_hex(0xDCE5E9), appearance);
+        // A starred row is the warning hue, not a fifth colour. Sirio used to
+        // turn its own warning up to full chroma to make the star the louder
+        // of the two; bezel's warning already is at full chroma, so there is
+        // nothing left to turn up and the two are the same value.
+        let favorite = warning;
+        let frame_fallback = Rgba::from(bezel.bg);
         let frame_surface = match appearance {
             Appearance::Dark => softened(frame_fallback, 0.88),
             Appearance::Light => softened(frame_fallback, 0.82),
         };
-        let panel_surface = Self::adaptive(rgb_hex(0x18191A), rgb_hex(0xF4F7F8), appearance);
+        let panel_surface = Rgba::from(bezel.surface);
+        // Still opaque, still Sirio's: bezel's `border` is a veil. Task 13
+        // collapses this onto `border`, which is the value change phase 2 owes.
         let panel_border = Self::adaptive(rgb_hex(0x27292D), rgb_hex(0xCCD8DD), appearance);
-        let selected_fill = Self::adaptive(rgb_hex(0x2D2F34), rgb_hex(0xD7E2E7), appearance);
-        let text = Self::adaptive(rgb_hex(0xCBCDD4), rgb_hex(0x313A40), appearance);
-        let text_muted = Self::adaptive(rgb_hex(0x85888F), rgb_hex(0x667379), appearance);
-        let text_faint = Self::adaptive(rgb_hex(0x686B71), rgb_hex(0x68757B), appearance);
-        let text_dim = Self::adaptive(rgb_hex(0x575757), rgb_hex(0xA4A4A4), appearance);
-        let raised = Self::adaptive(rgb_hex(0x1D1E21), rgb_hex(0xFBFCFC), appearance);
+        let selected_fill = Rgba::from(bezel.element_active);
+        let text = Rgba::from(bezel.text);
+        let text_muted = Rgba::from(bezel.text_muted);
+        let text_faint = Rgba::from(bezel.text_faint);
+        let text_dim = Rgba::from(bezel.text_dim);
+        let raised = Rgba::from(bezel.surface_raised);
         // One step *into* the page, and derived from the measured surface for
         // the same reason `sidebar` is: a well is a relationship to the page
         // it is cut into, so it should move when the page does. The two
@@ -340,11 +338,7 @@ impl ThemeColors {
         // and would go grey long before it read as a well. Both were picked to
         // make the well legible at a glance and neither is a measurement;
         // `the_depth_ladder_reads_as_depth` holds the ordering.
-        let inset = Self::adaptive(
-            scaled(panel_surface, 0.72),
-            scaled(panel_surface, 0.93),
-            appearance,
-        );
+        let inset = Rgba::from(bezel.input_bg);
         // A terminal is the deepest thing on the page in dark, and paper in
         // light — the same two extremes `inset` already names.
         let terminal_surface = Self::adaptive(
@@ -355,12 +349,12 @@ impl ThemeColors {
         // Everything from here to `danger_soft` is a veil off the ladder — see
         // [`veil`] for why washes cannot be measured and must come from one
         // rule instead.
-        let border = veil(VEIL_LOW, appearance);
-        let border_strong = veil(VEIL_HIGH, appearance);
+        let border = Rgba::from(bezel.border);
+        let border_strong = Rgba::from(bezel.border_strong);
         // Measured off the seam itself, which is two frame pixels wide — one
         // logical pixel at 2x — and flat at 200/200 in both variants, so these
         // are solid values and not a blend of the surfaces either side.
-        let row_hover = veil(VEIL_LOW, appearance);
+        let row_hover = Rgba::from(bezel.element_hover);
         // A chat row is most of the width of the pane. The same veil a sidebar
         // row uses would read as a change of surface at that size, so the
         // large-area hover sits one rung lower.
@@ -370,15 +364,15 @@ impl ThemeColors {
         // once: be visible, and not swallow the glyphs. The top rung of the
         // veil ladder is the strongest wash that still does both in either
         // appearance; `selection_stays_under_its_text` holds the second half.
-        let selection = veil(VEIL_HIGH, appearance);
-        let code_wash = veil(VEIL_LOW, appearance);
+        let selection = Rgba::from(bezel.selection);
+        let code_wash = Rgba::from(bezel.code_wash);
         // An inverted chip — a tooltip, a keycap — is literally the other
         // appearance's page, so it is the same measured pair, swapped. No new
         // number, and it stays right by construction if either is ever
         // re-measured.
-        let inverse = Self::adaptive(rgb_hex(0xF4F7F8), rgb_hex(0x18191A), appearance);
-        let on_inverse = Self::adaptive(rgb_hex(0x313A40), rgb_hex(0xCBCDD4), appearance);
-        let danger_soft = softened(danger, VEIL_MID);
+        let inverse = Rgba::from(bezel.solid);
+        let on_inverse = Rgba::from(bezel.on_solid);
+        let danger_soft = Rgba::from(bezel.danger_muted);
 
         Self {
             frame_surface,
@@ -398,10 +392,10 @@ impl ThemeColors {
             git_untracked,
             // The band under a diff line is the line's own colour turned down,
             // never a second green or a second red — see [`softened`].
-            diff_add: success,
-            diff_add_bg: softened(success, VEIL_MID),
-            diff_del: danger,
-            diff_del_bg: softened(danger, VEIL_MID),
+            diff_add,
+            diff_add_bg: softened(diff_add, VEIL_MID),
+            diff_del,
+            diff_del_bg: softened(diff_del, VEIL_MID),
             file_link: accent,
             surface_raised: raised,
             input_bg: inset,
@@ -1176,7 +1170,10 @@ impl Theme {
             self.success,
             self.warning,
             self.danger,
-            self.favorite,
+            // Not `favorite`: it is `warning`, which is already lane four.
+            // The coral is the one hue in the theme no other lane can collide
+            // with, because no role paints it.
+            self.brand_coral,
         ];
         lanes[index % lanes.len()]
     }
@@ -1607,6 +1604,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn theme_colours_come_from_bezel() {
+        // The swap's defining property: Sirio's neutrals are bezel's, not a
+        // copy that happens to agree today. Read through `Deref`, which is what
+        // every call site uses.
+        for (appearance, bezel) in [
+            (Appearance::Dark, bezel::theme::Theme::dark()),
+            (Appearance::Light, bezel::theme::Theme::light()),
+        ] {
+            let sirio = ThemeColors::for_appearance(appearance);
+            assert_eq!(sirio.surface, Rgba::from(bezel.surface));
+            assert_eq!(sirio.text, Rgba::from(bezel.text));
+            assert_eq!(sirio.border, Rgba::from(bezel.border));
+        }
+    }
+
+    #[test]
     fn git_untracked_is_its_own_binding_not_the_gauge_blue() {
         // C1 moves untracked off the accent binding to a neutral. Splitting the
         // alias is structural and lands in phase 1; the value moves in phase 2.
@@ -1816,8 +1829,15 @@ mod tests {
     #[test]
     fn soft_fills_are_their_own_meanings_colour() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            // `danger_muted` is bezel's and is a *lighter* danger rather than
+            // a turned-down one, so it is checked by hue below instead.
+            let (muted_hue, _) = hue_and_lightness(theme.danger_muted);
+            let (danger_hue, _) = hue_and_lightness(theme.danger);
+            assert!(
+                (muted_hue - danger_hue).abs() < 20.0,
+                "{label}: danger_muted left danger's hue ({muted_hue} vs {danger_hue})"
+            );
             for (name, fill, parent) in [
-                ("danger_muted", theme.danger_muted, theme.diff_del),
                 ("diff_del_bg", theme.diff_del_bg, theme.diff_del),
                 ("diff_add_bg", theme.diff_add_bg, theme.diff_add),
             ] {
@@ -1832,18 +1852,31 @@ mod tests {
         }
     }
 
-    /// A well is always deeper than a card, and deeper than the page, in both
-    /// appearances — the ordering `inset` is derived to produce.
+    /// A well is always tellable from the page it is cut into, and from a card
+    /// raised above it.
+    ///
+    /// Sirio derived `inset` by darkening the page, so the ladder ran
+    /// card > page > well by luminance. bezel builds the well by lightening
+    /// instead — in dark it is a translucent white veil, in light it is pure
+    /// white on a grey page — so the ordering is the other way up and a
+    /// luminance comparison no longer names the property. What has to hold is
+    /// the one the ordering existed for: the three planes stay distinct.
     #[test]
     fn the_depth_ladder_reads_as_depth() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            assert!(
-                relative_luminance(theme.input_bg) < relative_luminance(theme.surface),
-                "{label}: inset is not below the page"
+            let page = composite(theme.input_bg, theme.surface);
+            let card = composite(theme.input_bg, theme.surface_raised);
+            assert_ne!(
+                page, theme.surface,
+                "{label}: the well vanishes into the page"
             );
-            assert!(
-                relative_luminance(theme.input_bg) < relative_luminance(theme.surface_raised),
-                "{label}: inset is not below a raised card"
+            assert_ne!(
+                card, theme.surface_raised,
+                "{label}: the well vanishes into a card"
+            );
+            assert_ne!(
+                theme.surface, theme.surface_raised,
+                "{label}: the page and a raised card are the same plane"
             );
         }
     }
@@ -1867,27 +1900,28 @@ mod tests {
                 chroma(theme.favorite) >= chroma(theme.warning),
                 "{label}: the star is not the louder of the two"
             );
+            // bezel's warning is already full chroma, so "louder" resolves to
+            // "the same". What still has to hold is that a starred row is not
+            // a colour of its own.
+            assert_eq!(theme.favorite, theme.warning);
         }
     }
 
-    /// An inverted chip is the other appearance's page, and its text.
+    /// An inverted chip reads against its own fill.
+    ///
+    /// Sirio used to build the pair by mirroring the other appearance's page
+    /// and text, which made the property an identity. bezel picks `solid` and
+    /// `on_solid` independently, so what is left to hold is the reason the
+    /// mirror existed: a tooltip or keycap has to be legible.
     #[test]
-    fn inverse_is_the_other_appearances_page() {
-        let dark = Theme::dark();
-        let light = Theme::light();
-        expect_color(
-            dark.solid,
-            (light.surface.r, light.surface.g, light.surface.b, 1.0),
-        );
-        expect_color(
-            light.solid,
-            (dark.surface.r, dark.surface.g, dark.surface.b, 1.0),
-        );
-        expect_color(
-            dark.on_solid,
-            (light.text.r, light.text.g, light.text.b, 1.0),
-        );
-        expect_color(light.on_solid, (dark.text.r, dark.text.g, dark.text.b, 1.0));
+    fn an_inverted_chip_is_legible_on_its_own_fill() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            let ratio = contrast_ratio(theme.on_solid, theme.solid);
+            assert!(
+                ratio >= 4.5,
+                "{label}: on_solid against solid is {ratio:.2}:1, under WCAG AA"
+            );
+        }
     }
 
     /// Selected text stays readable through its own selection wash.

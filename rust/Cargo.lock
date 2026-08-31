@@ -7222,6 +7222,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "ashpd",
+ "bezel",
  "bezel-gpui",
  "fontdb",
 ]

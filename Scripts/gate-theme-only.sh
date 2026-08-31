@@ -8,8 +8,12 @@ set -euo pipefail
 
 BASE="${1:?usage: gate-theme-only.sh <base-ref>}"
 
+# rust/Cargo.lock is exempt: adding the bezel dependency to sirio_theme moves it
+# by construction, and a lockfile is not a call site -- it cannot hide a value
+# change the way a .rs file can.
 stray="$(git diff --name-only "$BASE" -- 'rust/' |
-    grep -v '^rust/crates/sirio_theme/' || true)"
+    grep -v '^rust/crates/sirio_theme/' |
+    grep -v '^rust/Cargo.lock$' || true)"
 
 if [[ -z "$stray" ]]; then
     echo "GATE OK: only sirio_theme changed since $BASE"
