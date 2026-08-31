@@ -814,7 +814,7 @@ fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rg
             format!("Cloning… {}%", (progress * 100.0).round() as u8),
             theme.text,
         ),
-        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.tab_error),
+        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.danger),
         CloneStatus::Complete {
             destination,
             truncated: true,
@@ -823,14 +823,14 @@ fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rg
                 "Cloned to {} — progress output was truncated (repository is large)",
                 destination.display()
             ),
-            theme.git_modified,
+            theme.warning,
         ),
         CloneStatus::Complete {
             destination,
             truncated: false,
         } => (
             format!("Cloned to {}", destination.display()),
-            theme.tab_done,
+            theme.success,
         ),
     }
 }
@@ -839,9 +839,9 @@ fn create_status_line(state: &CreateFormState, theme: &Theme) -> (String, gpui::
     match state.status() {
         CreateStatus::Ready => ("Ready to create".to_owned(), theme.text_muted),
         CreateStatus::Running => ("Creating project…".to_owned(), theme.text),
-        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.tab_error),
+        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.danger),
         CreateStatus::Complete(destination) => {
-            (format!("Created {}", destination.display()), theme.tab_done)
+            (format!("Created {}", destination.display()), theme.success)
         }
     }
 }
@@ -1151,11 +1151,11 @@ mod tests {
             "the status line must name the truncation, got: {line:?}"
         );
         assert_ne!(
-            color, theme.tab_error,
+            color, theme.danger,
             "a truncated clone is not a failure and must not use the error color"
         );
         assert_ne!(
-            color, theme.tab_done,
+            color, theme.success,
             "a truncated clone must be visually distinct from a clean completion"
         );
     }

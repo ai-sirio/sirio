@@ -962,7 +962,7 @@ fn render_conflict_banner(
         .flex()
         .items_center()
         .gap(px(12.0))
-        .bg(theme.danger_soft)
+        .bg(theme.danger_muted)
         .border_b_1()
         .border_color(theme.border)
         .text_size(theme.typography.footnote)
@@ -1460,7 +1460,7 @@ impl EditableLine {
                     // most conventional syntax colours there are, and none of
                     // them a brand tint.
                     CodeSpanKind::Keyword => theme.gauge,
-                    CodeSpanKind::Literal => theme.diff_addition,
+                    CodeSpanKind::Literal => theme.diff_add,
                     CodeSpanKind::Comment => theme.text_faint,
                 };
                 (

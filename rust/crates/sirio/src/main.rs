@@ -3433,7 +3433,7 @@ struct WorktreeActivity {
     ///
     /// This used to be a `settings::AgentAccentColor`, i.e. one of the eight
     /// *semantic theme tokens* the agent-colour picker offers, and Claude's
-    /// entry there is `Amber` — `theme.tab_needs_input`. A running Claude
+    /// entry there is `Amber` — `theme.warning`. A running Claude
     /// worktree therefore painted the byte-identical colour as one that
     /// needed input. `sirio_theme::AgentBrandColor` is a separate table for
     /// a separate job, which is also how the reference keeps them apart:
@@ -13055,7 +13055,7 @@ impl SirioWorkspace {
                 UpdateState::Available { version } => (
                     format!("Sirio {version} is available"),
                     Some("Download"),
-                    theme.tab_needs_input,
+                    theme.warning,
                 ),
                 UpdateState::Downloading { progress_percent } => (
                     format!("Downloading Sirio… {progress_percent}%"),
@@ -13063,11 +13063,11 @@ impl SirioWorkspace {
                     theme.text_muted,
                 ),
                 UpdateState::Installing => ("Installing update…".to_string(), None, theme.text_muted),
-                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.tab_done),
+                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.success),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
                     Some("Retry"),
-                    theme.tab_error,
+                    theme.danger,
                 ),
             };
         let progress_percent = match &self.update_state {
@@ -18869,7 +18869,7 @@ mod tests {
         let theme = Theme::dark();
         assert_ne!(
             AgentBrandColor::for_agent_id("claude").color(),
-            theme.tab_needs_input,
+            theme.warning,
             "running Claude and needs-input used to be the identical #E0B36A"
         );
         for (id, brand) in [

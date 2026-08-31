@@ -32,7 +32,7 @@ use crate::controls::card;
 /// `bool` because the two known uses need genuinely different colours for
 /// their default action: Set Title's "OK" is affirmative (the inverted
 /// chip, `theme.solid`),
-/// the close confirm's "Close Anyway" is destructive (`theme.tab_error`) —
+/// the close confirm's "Close Anyway" is destructive (`theme.danger`) —
 /// collapsing both into one "primary" flag would have painted one of them
 /// the wrong colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,7 +228,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
         let (bg, text_color) = match button.tone {
             ModalButtonTone::Plain => (theme.surface_raised, theme.text),
             ModalButtonTone::Accent => (theme.solid, theme.on_solid),
-            ModalButtonTone::Destructive => (theme.tab_error, white),
+            ModalButtonTone::Destructive => (theme.danger, white),
         };
         button_row = button_row.child(
             div()

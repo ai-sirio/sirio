@@ -610,7 +610,7 @@ impl Render for GitHistory {
                 .child(
                     div()
                         .text_size(theme.typography.headline)
-                        .text_color(theme.git_conflict)
+                        .text_color(theme.danger)
                         .child(format!("History unavailable: {error}")),
                 )
                 .child(
@@ -802,7 +802,7 @@ impl Render for GitHistory {
                         .items_center()
                         .gap(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.git_conflict)
+                        .text_color(theme.danger)
                         .child(
                             div()
                                 .flex_1()

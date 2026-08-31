@@ -563,7 +563,7 @@ impl RightPanel {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(theme.git_conflict)
+                        .text_color(theme.danger)
                         .child("⚠"),
                 )
             })
@@ -717,7 +717,7 @@ impl RightPanel {
                 .child(
                     div()
                         .text_size(theme.typography.headline)
-                        .text_color(theme.git_conflict)
+                        .text_color(theme.danger)
                         .child(format!("Files unavailable: {error}")),
                 )
                 .child(files_action_button(
