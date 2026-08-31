@@ -2674,6 +2674,19 @@ fn launch_source_in(launch: &AgentLaunchState, adapter_id: &str) -> sirio_regist
     })
 }
 
+/// Picks the first agent that has a concrete ACP command for generic New Chat
+/// actions, such as the sidebar worktree context menu. The tab-bar picker
+/// normally supplies an explicit adapter; this fallback keeps older generic
+/// entry points on the same resolved-source path instead of asking production
+/// users to configure the test-only `SIRIO_ACP_PROGRAM` escape hatch.
+fn first_resolved_chat_adapter(
+    launch: &AgentLaunchState,
+) -> Option<&'static dyn sirio_agents::AgentAdapter> {
+    AGENT_CATALOG.iter().copied().find(|adapter| {
+        agent_command_for(&launch_source_in(launch, adapter.id())).is_some()
+    })
+}
+
 /// Sirio's cached copy of the registry document lives beside the agents
 /// root, not inside it: the store owns per-agent directories.
 fn registry_cache_path(store: &sirio_registry::InstallStore) -> PathBuf {
@@ -9160,7 +9173,10 @@ impl SirioWorkspace {
 
     fn open_action(&mut self, action: NewTabAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            NewTabAction::NewChat => self.add_chat_tab(window, None, cx),
+            NewTabAction::NewChat => {
+                let adapter = first_resolved_chat_adapter(&self.launch);
+                self.add_chat_tab(window, adapter, cx);
+            }
             NewTabAction::NewTerminal => {
                 self.add_terminal_tab("Terminal", cx);
                 self.focus_active_pane(window, cx);
@@ -22812,6 +22828,32 @@ mod tests {
         assert_eq!(command.program, executable);
         assert_eq!(icon, Some(Icon::Codex));
         assert_eq!(agent_id.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn generic_new_chat_picks_the_first_resolved_chat_agent() {
+        let mut launch = test_launch_state();
+        launch.sources.clear();
+        launch.sources.insert(
+            "codex".into(),
+            sirio_registry::LaunchSource::Builtin {
+                program: "codex-acp".into(),
+                args: Vec::new(),
+            },
+        );
+        launch.sources.insert(
+            "opencode".into(),
+            sirio_registry::LaunchSource::Installed(sirio_registry::InstalledAgent {
+                id: "opencode-acp".into(),
+                version: "1.0.0".into(),
+                executable: "/data/opencode-acp".into(),
+                args: Vec::new(),
+                integrity: sirio_registry::Integrity::Sha256,
+            }),
+        );
+
+        let adapter = first_resolved_chat_adapter(&launch).expect("a chat agent is available");
+        assert_eq!(adapter.id(), "codex", "catalog order is the fallback preference");
     }
 
     fn test_launch_state() -> AgentLaunchState {
