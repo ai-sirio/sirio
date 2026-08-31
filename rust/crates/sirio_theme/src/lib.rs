@@ -468,23 +468,29 @@ pub struct Spacing {
 }
 
 impl Default for Spacing {
+    /// Same rule as [`Radii::default`]: the measurements do not move (T2),
+    /// only their derivation, which is now bezel's four spacing steps.
     fn default() -> Self {
+        use bezel::theme::Theme as BezelTheme;
         Self {
-            shell_gap: px(4.0),
-            shell_outer_inset: px(4.0),
-            card_corner_radius: px(6.0),
-            card_gap: px(10.0),
-            card_shadow_radius: px(18.0),
-            card_shadow_y_offset: px(6.0),
-            title_strip_height: px(48.0),
-            traffic_light_inset: px(14.0),
-            title_strip_icon_size: px(14.0),
-            titlebar_control_frame: size(px(26.0), px(26.0)),
-            titlebar_control_spacing: px(6.0),
-            bottom_bar_height: px(40.0),
-            menu_width: px(240.0),
-            hairline_thickness: px(1.0),
-            compact_action: px(24.0),
+            shell_gap: px(BezelTheme::SPACE_XS),                     // 4.0
+            shell_outer_inset: px(BezelTheme::SPACE_XS),             // 4.0
+            card_corner_radius: px(BezelTheme::SPACE_MD * 0.5),      // 6.0
+            card_gap: px(BezelTheme::SPACE_MD * 0.833_333_3),        // 10.0
+            card_shadow_radius: px(BezelTheme::SPACE_LG * 1.125),    // 18.0
+            card_shadow_y_offset: px(BezelTheme::SPACE_MD * 0.5),    // 6.0
+            title_strip_height: px(BezelTheme::SPACE_LG * 3.0),      // 48.0
+            traffic_light_inset: px(BezelTheme::SPACE_LG * 0.875),   // 14.0
+            title_strip_icon_size: px(BezelTheme::SPACE_LG * 0.875), // 14.0
+            titlebar_control_frame: size(
+                px(BezelTheme::SPACE_LG * 1.625),
+                px(BezelTheme::SPACE_LG * 1.625),
+            ), // 26.0 square
+            titlebar_control_spacing: px(BezelTheme::SPACE_MD * 0.5), // 6.0
+            bottom_bar_height: px(BezelTheme::SPACE_LG * 2.5),       // 40.0
+            menu_width: px(BezelTheme::SPACE_LG * 15.0),             // 240.0
+            hairline_thickness: px(BezelTheme::SPACE_XS * 0.25),     // 1.0
+            compact_action: px(BezelTheme::SPACE_LG * 1.5),          // 24.0
         }
     }
 }
@@ -525,17 +531,23 @@ pub struct Radii {
 }
 
 impl Default for Radii {
+    /// The values are unchanged (spec decision T2); what changes is that they
+    /// now follow bezel's `Brand::radius` instead of standing alone. Ratios
+    /// that do not land on one of bezel's five named corners carry an explicit
+    /// multiplier rather than being rounded to the nearest named one —
+    /// rounding would move the UI, which T2 forbids.
     fn default() -> Self {
+        use bezel::theme::Theme as BezelTheme;
         Self {
-            shell_panel: px(7.0),
-            chip: px(4.0),
-            chip_active: px(5.0),
-            control: px(6.0),
-            row_card: px(7.0),
-            code_block: px(8.0),
-            toast: px(10.0),
-            user_pill: px(12.0),
-            composer: px(13.0),
+            shell_panel: px(BezelTheme::BASE_RADIUS * 0.875), // 7.0
+            chip: px(BezelTheme::BASE_RADIUS * 0.5),          // 4.0
+            chip_active: px(BezelTheme::BASE_RADIUS * 0.625), // 5.0
+            control: px(BezelTheme::BASE_RADIUS * 0.75),      // 6.0
+            row_card: px(BezelTheme::BASE_RADIUS * 0.875),    // 7.0
+            code_block: px(BezelTheme::BASE_RADIUS),          // 8.0
+            toast: px(BezelTheme::BASE_RADIUS * 1.25),        // 10.0
+            user_pill: px(BezelTheme::BASE_RADIUS * 1.5),     // 12.0
+            composer: px(BezelTheme::BASE_RADIUS * 1.625),    // 13.0
         }
     }
 }
@@ -1598,6 +1610,18 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn radii_are_ratios_of_bezel_base_radius() {
+        // T2: the values do not move, but they stop being independent
+        // constants. bezel's `Brand::radius` moves the whole ladder together;
+        // a literal cannot follow it. `code_block` and `user_pill` are the
+        // anchors because they already sit exactly on two named corners.
+        use bezel::theme::Theme as BezelTheme;
+        let radii = Radii::default();
+        assert_eq!(radii.code_block, px(BezelTheme::button_radius()));
+        assert_eq!(radii.user_pill, px(BezelTheme::surface_radius()));
+    }
 
     #[test]
     fn washes_follow_bezels_two_rules() {
