@@ -23894,7 +23894,7 @@ mod tests {
         );
         assert_eq!(
             border_now(&mut cx),
-            Theme::dark().panel_border,
+            Theme::dark().border_opaque,
             "a pointer click must drop the panel back to its resting border"
         );
         assert!(cx.debug_bounds("shell-left-panel").is_some());
@@ -23934,7 +23934,7 @@ mod tests {
         assert!(!shell_chrome::CENTER_PANEL_FOCUS_VISIBLE);
         assert_eq!(
             shell_chrome::panel_border(&Theme::dark(), shell_chrome::CENTER_PANEL_FOCUS_VISIBLE),
-            Theme::dark().panel_border,
+            Theme::dark().border_opaque,
             "the center panel keeps its resting border regardless"
         );
         assert!(cx.debug_bounds("shell-center-panel").is_some());

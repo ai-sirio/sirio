@@ -735,12 +735,19 @@ rustfmt rewrapped 13 files that Phase 1 did not otherwise touch. It is a separat
 commit so the rename diffs stay readable. Pre-existing unformatted files outside
 this work (`sirio_apply`, `sirio_control`, `sirio_release`) were left alone.
 
-**Task 10 Step 3 ran without `-p sirio`.** `sirio` depends on `sirio_terminal`,
-which needs Zig exactly 0.15.2; this machine has 0.16.0 and `zig build` fails with
-`build.zig:27:62: error: member function expected 4 argument(s), found 3`. The
-renames in `sirio/` and `sirio_terminal/` are therefore **not compiler-verified**.
-They were applied with the same receiver-anchored patterns as `sirio_ui`, whose
-1 621 call sites did compile. Task 19 unblocks the check.
+**Zig 0.15.2 is installed but keg-only.** `zig` on PATH resolves to Homebrew's
+0.16.0, which fails with `build.zig:27:62: error: member function expected 4
+argument(s), found 3`. The pinned build lives at `/opt/homebrew/opt/zig@0.15/bin`
+and must be prepended to PATH:
+`export PATH="/opt/homebrew/opt/zig@0.15/bin:$PATH"`. Task 19 is therefore a PATH
+change, not an install.
+
+**Two renames in `sirio` were wrong and only the compiler caught them.** With Zig
+on PATH, `Theme::dark().panel_border` at `main.rs:23897` and `:23937` failed to
+compile: the receiver-anchored patterns covered `theme.`/`colors.` and the
+`Theme::dark().hairline` form, but not `Theme::dark().panel_border`. Fixed to
+`.border_opaque`. The lesson is the general one — a mechanical rename verified
+only by grep is not verified.
 
 Evidence at close: `Scripts/gate-no-value-change.sh 632d6cf1` prints `GATE OK`;
 the set of hex literals inside assertions is byte-identical before and after;
