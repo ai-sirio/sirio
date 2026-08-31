@@ -108,8 +108,8 @@
 //! - File-view code text was 12pt (Swift's mono size), now the frozen
 //!   code size **12** (`typography.code_size`).
 
-use gpui::{FontWeight, Rgba, px};
-use sirio_theme::{Appearance, Theme};
+use gpui::{FontWeight, Rgba, TestAppContext, WindowAppearance, px};
+use sirio_theme::{Appearance, BaseColor, Theme, ThemeMode};
 
 use crate::changes;
 use crate::chat::{CARD_H_PADDING, CARD_V_PADDING, TRANSCRIPT_WIDTH, USER_PILL_MAX_WIDTH};
@@ -140,6 +140,20 @@ fn expect_hex(actual: Rgba, hex: u32, label: &str) {
         );
     }
     assert_eq!(actual.a, 1.0, "{label}.a must be opaque");
+}
+
+#[gpui::test]
+async fn install_into_bezel_makes_theme_of_return_the_branded_palette(cx: &mut TestAppContext) {
+    let _guard = bezel::theme::lock_appearance();
+    let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark, BaseColor::Slate);
+    let expected = theme.to_bezel_theme();
+    assert_ne!(expected.bg, bezel::theme::Theme::dark().bg);
+
+    cx.update(|cx| theme.install_into_bezel(cx));
+    cx.update(|cx| {
+        let installed = bezel::theme::Theme::of(cx);
+        assert_eq!(installed.bg, expected.bg);
+    });
 }
 
 /// The coral is still Sirio's — `#E08B52` dark / `#AD581F` light — and the
