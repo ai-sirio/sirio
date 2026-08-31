@@ -4,6 +4,7 @@
 //! Its small model intentionally lives here instead of depending on
 //! `sirio_registry`: this is a surface to look at, not a new product seam.
 
+use bezel::theme::Theme as BezelTheme;
 use gpui::{
     App, AppContext, Bounds, Context, CursorStyle, Div, Entity, FocusHandle, FontWeight,
     KeyDownEvent, MouseButton, Render, Rgba, TitlebarOptions, Window, WindowBounds, WindowOptions,
@@ -1001,16 +1002,16 @@ impl RegistryBrowseProto {
     fn render_browse(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> Div {
         let mut card = controls::card(theme).child(
             div()
-                .px(px(theme.cosmic.spacing.xs as f32))
-                .py(px(theme.cosmic.spacing.xs as f32))
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_MD))
                 .child(self.render_search(theme, entity.clone(), window)),
         );
         let visible = visible_registry_agents(&self.registry, &self.search);
         if visible.is_empty() {
             card = card.child(controls::separator(theme)).child(
                 div()
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_MD))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
                     .child("No agents match this search."),

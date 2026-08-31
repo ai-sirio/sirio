@@ -7,6 +7,7 @@
 //! `../../../docs/linux-rewrite/SEAMS.md` for the mount seam and the avatar
 //! network-fetch seam this file deliberately does not build.
 
+use bezel::theme::Theme as BezelTheme;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -682,7 +683,7 @@ impl ProjectIconPicker {
         let mut grid = div()
             .flex()
             .flex_wrap()
-            .gap(px(theme.cosmic.spacing.xs as f32));
+            .gap(px(BezelTheme::SPACE_MD));
         for glyph in ProjectGlyph::ALL {
             let glyph_entity = entity.clone();
             let active = selected_glyph == Some(glyph);
@@ -732,7 +733,7 @@ impl ProjectIconPicker {
         div()
             .flex()
             .flex_col()
-            .gap(px(theme.cosmic.spacing.s as f32))
+            .gap(px(BezelTheme::SPACE_LG))
             .child(grid)
             .child(controls::row("Colour", None, tint_picker, theme))
             .child(controls::action_row(
@@ -752,7 +753,7 @@ impl ProjectIconPicker {
             .track_focus(&self.emoji_focus)
             .w(px(96.0))
             .min_h(px(32.0))
-            .px(px(theme.cosmic.spacing.xs as f32))
+            .px(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
@@ -782,12 +783,12 @@ impl ProjectIconPicker {
         let mut column = div()
             .flex()
             .flex_col()
-            .gap(px(theme.cosmic.spacing.s as f32))
+            .gap(px(BezelTheme::SPACE_LG))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(theme.cosmic.spacing.xs as f32))
+                    .gap(px(BezelTheme::SPACE_MD))
                     .child(field)
                     .child(controls::button(
                         "project-icon-emoji-set",
@@ -846,7 +847,7 @@ impl ProjectIconPicker {
         let mut grid = div()
             .flex()
             .flex_wrap()
-            .gap(px(theme.cosmic.spacing.xxs as f32));
+            .gap(px(BezelTheme::SPACE_SM));
         for emoji in &matches {
             let emoji = *emoji;
             let pick_entity = entity.clone();
@@ -882,10 +883,10 @@ impl ProjectIconPicker {
             .id("project-icon-emoji-grid")
             .debug_selector(|| "project-icon-emoji-grid".into())
             .w_full()
-            .p(px(theme.cosmic.spacing.xs as f32))
+            .p(px(BezelTheme::SPACE_MD))
             .flex()
             .flex_col()
-            .gap(px(theme.cosmic.spacing.xs as f32))
+            .gap(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
             .border_1()
             .border_color(theme.border)
@@ -895,7 +896,7 @@ impl ProjectIconPicker {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(theme.cosmic.spacing.xs as f32))
+                    .gap(px(BezelTheme::SPACE_MD))
                     .child(
                         div()
                             .id("project-icon-emoji-grid-query")
@@ -903,7 +904,7 @@ impl ProjectIconPicker {
                             .track_focus(&self.emoji_grid_focus)
                             .flex_1()
                             .min_h(px(28.0))
-                            .px(px(theme.cosmic.spacing.xs as f32))
+                            .px(px(BezelTheme::SPACE_MD))
                             .flex()
                             .items_center()
                             .rounded(theme.radii.control)
@@ -959,7 +960,6 @@ impl ProjectIconPicker {
     }
 
     fn render_avatar_mode(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
-        let spacing = theme.cosmic.spacing;
         let choose_entity = entity.clone();
         let current_avatar_label = match &self.value.value {
             ProjectIconValue::Avatar(AvatarSource::LocalPng(path)) => Some(format!(
@@ -981,7 +981,7 @@ impl ProjectIconPicker {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(spacing.s as f32))
+                .gap(px(BezelTheme::SPACE_LG))
                 .child(controls::action_row(
                     controls::button(
                         "project-icon-choose-png",
@@ -1099,7 +1099,7 @@ impl ProjectIconPicker {
             .track_focus(focus)
             .w(px(220.0))
             .min_h(px(32.0))
-            .px(px(theme.cosmic.spacing.xs as f32))
+            .px(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
@@ -1125,7 +1125,7 @@ impl ProjectIconPicker {
         let mut row = div()
             .flex()
             .items_center()
-            .gap(px(theme.cosmic.spacing.xs as f32))
+            .gap(px(BezelTheme::SPACE_MD))
             .child(field)
             .child(controls::button(
                 button_label,
@@ -1197,7 +1197,7 @@ impl Render for ProjectIconPicker {
         controls::card(theme)
             .child(controls::row("Project icon", None, mode_switch, theme))
             .child(controls::separator(theme))
-            .child(div().p(px(theme.cosmic.spacing.s as f32)).child(body))
+            .child(div().p(px(BezelTheme::SPACE_LG)).child(body))
     }
 }
 

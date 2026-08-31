@@ -34,10 +34,6 @@
 use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
 use std::collections::HashSet;
 
-/// Pop!_OS COSMIC design tokens, consumed by [`Theme::cosmic`] — every
-/// surface that reads `Theme::get(cx)` gets a resolved [`cosmic::CosmicTheme`]
-/// with it. See `docs/linux-rewrite/COSMIC-DESIGN.md`.
-pub mod cosmic;
 use std::ops::Deref;
 use std::sync::OnceLock;
 
@@ -697,21 +693,19 @@ impl Default for BrowserChrome {
 /// # Why this is not COSMIC
 ///
 /// Only what the design system genuinely cannot express lives here. The
-/// neutral buttons — minimize and maximize — read `cosmic.semantic.
-/// icon_button` like every other icon button on this bar, and that is
+/// neutral buttons — minimize and maximize — read the theme's own
+/// `element_hover` like every other icon button on this bar, and that is
 /// fidelity, not a compromise: Windows 11 draws *their* hover as a neutral
 /// veil that follows the light/dark theme. The close button is the one
 /// exception, because its red is a **system constant** that says "this
 /// closes the window" in every Windows app regardless of the app's theme.
 ///
-/// `cosmic.semantic.destructive` cannot stand in for it. In dark mode that
-/// token is `#FFA09A` — a pale salmon whose `on` colour is **black**,
-/// i.e. a light fill carrying dark text; the Windows red is a saturated
-/// fill carrying **white** text. The two run in opposite contrast
-/// directions, so substituting one for the other does not give a different
-/// red, it gives a pink close button with a black glyph. In light mode the
-/// same token flips to `#890418`, a dark maroon, so the two appearances
-/// would not even resemble each other.
+/// The theme's `danger` cannot stand in for it. `danger` is a colour for
+/// *text and marks on a surface*, sized for legibility against the page;
+/// the Windows close red is a saturated **fill** carrying white text. The
+/// two run in opposite contrast directions, so substituting one for the
+/// other does not give a different red, it gives a close button whose glyph
+/// disappears into its own fill.
 ///
 /// # Measured, not transcribed
 ///
@@ -1107,12 +1101,6 @@ pub struct Theme {
     pub spacing: Spacing,
     /// Corner-radius tokens (waku's measured scale).
     pub radii: Radii,
-    /// Pop!_OS COSMIC design tokens — container hierarchy, semantic
-    /// colours, and the COSMIC spacing/radii scales, resolved for the same
-    /// `(mode, appearance)` as the rest of this theme via
-    /// [`cosmic::CosmicTheme::resolve`]. Every surface that already reads
-    /// `Theme::get(cx)` gets these for free.
-    pub cosmic: cosmic::CosmicTheme,
     /// The comet-derived top-bar chrome (P76): traffic-light and
     /// button-cluster geometry, distinct from `Spacing`'s waku-era chrome
     /// tokens (see [`BrowserChrome`]'s own docs for why they don't merge).
@@ -1362,7 +1350,6 @@ impl Theme {
             colors,
             spacing: Spacing::default(),
             radii: Radii::default(),
-            cosmic: cosmic::CosmicTheme::resolve(mode, appearance),
             browser_chrome: BrowserChrome::default(),
             windows_caption: WindowsCaption::default(),
             typography: Typography::default(),
@@ -2456,39 +2443,22 @@ mod tests {
         assert_eq!(Theme::light().typography.ui_family, family);
     }
 
-    /// COSMIC-02: `Theme::dark()`/`light()` must carry a `cosmic` field
-    /// whose `is_dark` agrees with the theme's own appearance — the seam
-    /// that makes `Theme` the single source COSMIC tokens flow through,
-    /// rather than a second, independently-resolved theme a caller could
-    /// forget to install.
+    /// `Theme::for_mode` must resolve for the mode it was asked for, not a
+    /// stale or independently-defaulted one — `System` under a light window
+    /// appearance is a light theme.
+    ///
+    /// This used to check the same thing through the COSMIC sub-theme's
+    /// `is_dark`, which was the seam that made `Theme` the single source
+    /// those tokens flowed through. There is no sub-theme any more; the
+    /// appearance is the theme's own field, so this is what is left to
+    /// assert.
     #[test]
-    fn theme_dark_and_light_carry_agreeing_cosmic_tokens() {
-        assert!(Theme::dark().cosmic.is_dark);
-        assert!(!Theme::light().cosmic.is_dark);
-    }
-
-    /// `Theme::for_mode` must resolve `.cosmic` for the same mode, not a
-    /// stale or independently-defaulted one — `System` under a light
-    /// window appearance should carry a light COSMIC container hierarchy.
-    #[test]
-    fn theme_for_mode_resolves_cosmic_for_the_same_appearance() {
+    fn theme_for_mode_resolves_for_the_appearance_it_was_asked_for() {
         let theme = Theme::for_mode(ThemeMode::Light, WindowAppearance::Light);
-        assert!(!theme.cosmic.is_dark);
         assert_eq!(theme.appearance, Appearance::Light);
 
         let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark);
-        assert!(theme.cosmic.is_dark);
         assert_eq!(theme.appearance, Appearance::Dark);
-    }
-
-    /// A drawn pixel traces to a COSMIC token through `theme.cosmic.spacing`
-    /// and `.radii`, not just the container colours — both scales must be
-    /// populated, not left at some other default.
-    #[test]
-    fn theme_cosmic_carries_the_cosmic_spacing_and_radii_scales() {
-        let theme = Theme::dark();
-        assert_eq!(theme.cosmic.spacing, cosmic::CosmicSpacing::default());
-        assert_eq!(theme.cosmic.radii, cosmic::CosmicRadii::default());
     }
 
     /// The two tokens `codex12` asked for in `QUEUE.md` (P60/P63): a menu

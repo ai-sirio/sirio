@@ -1,5 +1,6 @@
 //! Full-window settings surface and its small fixture model.
 
+use bezel::theme::Theme as BezelTheme;
 use crate::caret;
 use crate::controls;
 use crate::loading;
@@ -2824,8 +2825,8 @@ impl Settings {
                 div()
                     .id(format!("provider-account-error-{title}"))
                     .debug_selector(move || format!("provider-account-error-{title}"))
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.danger)
                     .child(text!(error.clone())),
@@ -2842,7 +2843,7 @@ impl Settings {
             div()
                 .flex()
                 .items_center()
-                .gap(px(theme.cosmic.spacing.xs as f32))
+                .gap(px(BezelTheme::SPACE_MD))
                 .child(
                     div()
                         .id(format!("account-login-pending-{title}"))
@@ -3026,8 +3027,8 @@ impl Settings {
         div()
             .id(id)
             .debug_selector(move || id.to_string())
-            .px(px(theme.cosmic.spacing.xs as f32))
-            .pb(px(theme.cosmic.spacing.xxxs as f32))
+            .px(px(BezelTheme::SPACE_MD))
+            .pb(px(BezelTheme::SPACE_XS))
             .text_size(theme.typography.footnote)
             .text_color(theme.text_muted)
             .child(text!(caption))
@@ -3042,7 +3043,6 @@ impl Settings {
         theme: Theme,
         window: &Window,
     ) -> gpui::Div {
-        let spacing = theme.cosmic.spacing;
         let cookie_text = self.opencode_cookie_input.clone();
         let cookie_is_empty = cookie_text.is_empty();
         // The cookie renders as mask dots only — the real value is never
@@ -3079,8 +3079,8 @@ impl Settings {
             .child(
                 div()
                     .w_full()
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -3119,8 +3119,8 @@ impl Settings {
                 div()
                     .id("provider-opencode-cookie-error")
                     .debug_selector(|| "provider-opencode-cookie-error".to_string())
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.danger)
                     .child(text!(error)),
@@ -3154,8 +3154,8 @@ impl Settings {
         card.child(
             div()
                 .w_full()
-                .px(px(spacing.xs as f32))
-                .py(px(spacing.xxs as f32))
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_SM))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -3186,7 +3186,6 @@ impl Settings {
         theme: Theme,
         window: &Window,
     ) -> gpui::Div {
-        let spacing = theme.cosmic.spacing;
         let cookie_text = self.ollama_cookie_input.clone();
         let cookie_is_empty = cookie_text.is_empty();
         // Mask dots only — the real value is never drawn, matching the
@@ -3222,8 +3221,8 @@ impl Settings {
             .child(
                 div()
                     .w_full()
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -3262,8 +3261,8 @@ impl Settings {
                 div()
                     .id("provider-ollama-cookie-error")
                     .debug_selector(|| "provider-ollama-cookie-error".to_string())
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.danger)
                     .child(text!(error)),
@@ -3603,7 +3602,7 @@ impl Settings {
                     div()
                         .id(("settings-agent-integrity", index))
                         .debug_selector(move || format!("settings-agent-integrity-{index}"))
-                        .px(px(theme.cosmic.spacing.xs as f32))
+                        .px(px(BezelTheme::SPACE_MD))
                         .text_size(theme.typography.footnote)
                         .text_color(theme.text_muted)
                         .child(text!(note)),
@@ -3622,7 +3621,7 @@ impl Settings {
                     div()
                         .id((kind, index))
                         .debug_selector(move || format!("settings-agent-install-{kind}-{index}"))
-                        .px(px(theme.cosmic.spacing.xs as f32))
+                        .px(px(BezelTheme::SPACE_MD))
                         .text_size(theme.typography.footnote)
                         .font_weight(if failed {
                             FontWeight::SEMIBOLD
@@ -4208,8 +4207,8 @@ impl Settings {
                 div()
                     .id("general-install-skill-status")
                     .debug_selector(|| "general-install-skill-status".into())
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
                     .child(text!("Installing… running in a new terminal tab.")),
@@ -4253,8 +4252,8 @@ impl Settings {
                             div()
                                 .id("settings-update-notes")
                                 .debug_selector(|| "settings-update-notes".into())
-                                .px(px(theme.cosmic.spacing.xs as f32))
-                                .py(px(theme.cosmic.spacing.xxs as f32))
+                                .px(px(BezelTheme::SPACE_MD))
+                                .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.text_muted)
                                 .child(text!("Nightly builds track main")),
@@ -4264,8 +4263,8 @@ impl Settings {
                             div()
                                 .id("settings-update-notes")
                                 .debug_selector(|| "settings-update-notes".into())
-                                .px(px(theme.cosmic.spacing.xs as f32))
-                                .py(px(theme.cosmic.spacing.xxs as f32))
+                                .px(px(BezelTheme::SPACE_MD))
+                                .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
                                 .text_color(theme.text_muted)
                                 .child(text!(notes.clone())),
@@ -4376,8 +4375,8 @@ impl Settings {
         let revoke_all = div()
             .id("settings-revoke-all-browser-origins")
             .debug_selector(|| "settings-revoke-all-browser-origins".into())
-            .px(px(theme.cosmic.spacing.xs as f32))
-            .py(px(theme.cosmic.spacing.xxxs as f32))
+            .px(px(BezelTheme::SPACE_MD))
+            .py(px(BezelTheme::SPACE_XS))
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
             .text_color(if origins.is_empty() {
@@ -4408,8 +4407,8 @@ impl Settings {
                     .debug_selector(|| "settings-browser-grants-empty".into())
                     .min_h(px(44.0))
                     .w_full()
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .text_size(theme.typography.callout)
@@ -4427,8 +4426,8 @@ impl Settings {
             let revoke = div()
                 .id(format!("settings-revoke-browser-origin-{index}"))
                 .debug_selector(move || format!("settings-revoke-browser-origin-{index}"))
-                .px(px(theme.cosmic.spacing.xs as f32))
-                .py(px(theme.cosmic.spacing.xxxs as f32))
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_XS))
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.callout)
                 .text_color(theme.text)
@@ -4446,8 +4445,8 @@ impl Settings {
                     .debug_selector(move || format!("settings-browser-grant-{index}"))
                     .min_h(px(44.0))
                     .w_full()
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .justify_between()
