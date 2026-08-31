@@ -4,13 +4,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
+use bezel::ui::input::TextField;
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton,
-    Render, Task, Window, div, prelude::*, px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, Render,
+    Task, Window, div, prelude::*, px,
 };
 use sirio_git::{GitRemote, clone_repository};
 
-use crate::caret;
 use crate::loading;
 use sirio_project::create_project;
 use sirio_theme::Theme;
@@ -138,9 +138,7 @@ enum CloneWorkerMessage {
 pub struct CloneForm {
     parent: PathBuf,
     state: CloneFormState,
-    focus: FocusHandle,
-    /// Blink state of the URL field's insertion caret.
-    blink: caret::Blink,
+    url_field: Entity<TextField>,
     task: Option<Task<()>>,
 }
 
@@ -149,11 +147,21 @@ impl CloneForm {
     /// `parent`. The host can change that location before submission.
     pub fn new(parent: PathBuf, cx: &mut Context<Self>) -> Self {
         ensure_theme(cx);
+        let url_field = cx.new(|cx| {
+            TextField::new(cx).with_placeholder("https://github.com/owner/repository.git")
+        });
+        cx.observe(&url_field, |form, field, cx| {
+            let url = field.read(cx).content().to_string();
+            if url != form.state.url() {
+                form.state.set_url(url);
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             parent,
             state: CloneFormState::default(),
-            focus: cx.focus_handle(),
-            blink: caret::Blink::new(),
+            url_field,
             task: None,
         }
     }
@@ -168,7 +176,10 @@ impl CloneForm {
     }
 
     pub fn set_url(&mut self, url: impl Into<String>, cx: &mut Context<Self>) {
-        self.state.set_url(url);
+        let url = url.into();
+        self.state.set_url(url.clone());
+        self.url_field
+            .update(cx, |field, cx| field.set_content(url, cx));
         cx.notify();
     }
 
@@ -189,6 +200,10 @@ impl CloneForm {
     /// Starts the clone worker, or does nothing when the state guard rejects
     /// the click. Progress is forwarded from GitClone's existing parser.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
+        let url = self.url_field.read(cx).content().to_string();
+        if url != self.state.url() {
+            self.state.set_url(url);
+        }
         if !self.state.begin() {
             return;
         }
@@ -263,60 +278,25 @@ impl CloneForm {
         }));
     }
 
-    /// Blink timer tick for the URL field's insertion caret.
-    fn flip_blink(&mut self, cx: &mut Context<Self>) {
-        self.blink.flip();
-        cx.notify();
-    }
-
     fn on_url_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.blink.wake();
-        match event.keystroke.key.as_str() {
-            "enter" | "return" => self.submit(cx),
-            "backspace" | "delete" => {
-                self.state.url.pop();
-                if !matches!(self.state.status, CloneStatus::Running { .. }) {
-                    self.state.status = CloneStatus::Ready;
-                }
-                cx.notify();
-            }
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                    && character != "\n"
-                {
-                    self.state.url.push_str(character);
-                    if !matches!(self.state.status, CloneStatus::Running { .. }) {
-                        self.state.status = CloneStatus::Ready;
-                    }
-                    cx.notify();
-                }
-            }
+        if matches!(event.keystroke.key.as_str(), "enter" | "return") {
+            self.submit(cx);
         }
     }
 }
 
 impl Focusable for CloneForm {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.url_field.read(cx).focus_handle(cx)
     }
 }
 
 impl EventEmitter<CloneFormEvent> for CloneForm {}
 
 impl Render for CloneForm {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
-        let field_focused = self.focus.is_focused(window);
-        caret::schedule(&mut self.blink, field_focused, Self::flip_blink, cx);
-        let caret_visible = field_focused && self.blink.visible();
-        let url_is_empty = self.state.url().trim().is_empty();
-        let url_value = if url_is_empty {
-            "https://github.com/owner/repository.git".to_owned()
-        } else {
-            self.state.url().to_owned()
-        };
+        let url_field = self.url_field.clone();
         let destination = self
             .destination()
             .map(|path| path.display().to_string())
@@ -355,48 +335,17 @@ impl Render for CloneForm {
                 div()
                     .id("clone-url-field")
                     .debug_selector(|| "clone-url-field".to_owned())
-                    .track_focus(&self.focus)
                     .w_full()
-                    .h(px(32.0))
-                    .px(px(9.0))
-                    .flex()
-                    .items_center()
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
-                    .border_color(if url_is_empty {
-                        theme.border
-                    } else {
-                        theme.text
-                    })
-                    .text_size(theme.typography.footnote)
-                    .text_color(if url_is_empty {
-                        theme.text_faint
-                    } else {
-                        theme.text
-                    })
-                    .cursor(gpui::CursorStyle::IBeam)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
-                    )
                     .on_key_down(cx.listener(Self::on_url_key))
-                    // #212: shrink and ellipsise inside the field rather than
-                    // laying out at natural width and drawing past its border.
-                    // Must shrink without growing: `flex_1` would push the
-                    // end-of-text caret below to the far right.
                     .overflow_hidden()
                     .child(
                         div()
                             .id("clone-url-field-text")
                             .debug_selector(|| "clone-url-field-text".to_owned())
+                            .w_full()
                             .min_w_0()
-                            .text_ellipsis()
-                            .child(url_value),
-                    )
-                    .when(field_focused, |this| {
-                        this.child(caret::bar(px(16.0), theme.text, caret_visible))
-                    }),
+                            .child(url_field),
+                    ),
             )
             .child(form_label("Destination", &theme))
             .child(
@@ -529,20 +478,26 @@ pub enum CreateFormEvent {
 pub struct CreateForm {
     parent: PathBuf,
     state: CreateFormState,
-    focus: FocusHandle,
-    /// Blink state of the name field's insertion caret.
-    blink: caret::Blink,
+    name_field: Entity<TextField>,
     task: Option<Task<()>>,
 }
 
 impl CreateForm {
     pub fn new(parent: PathBuf, cx: &mut Context<Self>) -> Self {
         ensure_theme(cx);
+        let name_field = cx.new(|cx| TextField::new(cx).with_placeholder("project-folder-name"));
+        cx.observe(&name_field, |form, field, cx| {
+            let name = field.read(cx).content().to_string();
+            if name != form.state.name() {
+                form.state.set_name(name);
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             parent,
             state: CreateFormState::default(),
-            focus: cx.focus_handle(),
-            blink: caret::Blink::new(),
+            name_field,
             task: None,
         }
     }
@@ -557,7 +512,10 @@ impl CreateForm {
     }
 
     pub fn set_name(&mut self, name: impl Into<String>, cx: &mut Context<Self>) {
-        self.state.set_name(name);
+        let name = name.into();
+        self.state.set_name(name.clone());
+        self.name_field
+            .update(cx, |field, cx| field.set_content(name, cx));
         cx.notify();
     }
 
@@ -575,6 +533,10 @@ impl CreateForm {
 
     /// Starts directory creation, retaining the draft on failure for retry.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
+        let name = self.name_field.read(cx).content().to_string();
+        if name != self.state.name() {
+            self.state.set_name(name);
+        }
         if !self.state.begin() {
             return;
         }
@@ -600,43 +562,16 @@ impl CreateForm {
         }));
     }
 
-    /// Blink timer tick for the name field's insertion caret.
-    fn flip_blink(&mut self, cx: &mut Context<Self>) {
-        self.blink.flip();
-        cx.notify();
-    }
-
     fn on_name_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.blink.wake();
-        match event.keystroke.key.as_str() {
-            "enter" | "return" => self.submit(cx),
-            "backspace" | "delete" => {
-                self.state.name.pop();
-                if !matches!(self.state.status, CreateStatus::Running) {
-                    self.state.status = CreateStatus::Ready;
-                }
-                cx.notify();
-            }
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                    && character != "\n"
-                {
-                    self.state.name.push_str(character);
-                    if !matches!(self.state.status, CreateStatus::Running) {
-                        self.state.status = CreateStatus::Ready;
-                    }
-                    cx.notify();
-                }
-            }
+        if matches!(event.keystroke.key.as_str(), "enter" | "return") {
+            self.submit(cx);
         }
     }
 }
 
 impl Focusable for CreateForm {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.name_field.read(cx).focus_handle(cx)
     }
 }
 
@@ -645,15 +580,7 @@ impl EventEmitter<CreateFormEvent> for CreateForm {}
 impl Render for CreateForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
-        let field_focused = self.focus.is_focused(window);
-        caret::schedule(&mut self.blink, field_focused, Self::flip_blink, cx);
-        let caret_visible = field_focused && self.blink.visible();
-        let name_is_empty = self.state.name().trim().is_empty();
-        let name_value = if name_is_empty {
-            "project-folder-name".to_owned()
-        } else {
-            self.state.name().to_owned()
-        };
+        let name_field = self.name_field.clone();
         let parent = self.parent.display().to_string();
         let destination = self.destination().display().to_string();
         let (status_line, status_color) = create_status_line(&self.state, &theme);
@@ -691,48 +618,17 @@ impl Render for CreateForm {
                 div()
                     .id("create-name-field")
                     .debug_selector(|| "create-name-field".to_owned())
-                    .track_focus(&self.focus)
                     .w_full()
-                    .h(px(32.0))
-                    .px(px(9.0))
-                    .flex()
-                    .items_center()
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
-                    .border_color(if name_is_empty {
-                        theme.border
-                    } else {
-                        theme.text
-                    })
-                    .text_size(theme.typography.footnote)
-                    .text_color(if name_is_empty {
-                        theme.text_faint
-                    } else {
-                        theme.text
-                    })
-                    .cursor(gpui::CursorStyle::IBeam)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
-                    )
                     .on_key_down(cx.listener(Self::on_name_key))
-                    // #212: shrink and ellipsise inside the field rather than
-                    // laying out at natural width and drawing past its border.
-                    // Must shrink without growing: `flex_1` would push the
-                    // end-of-text caret below to the far right.
                     .overflow_hidden()
                     .child(
                         div()
                             .id("create-name-field-text")
                             .debug_selector(|| "create-name-field-text".to_owned())
+                            .w_full()
                             .min_w_0()
-                            .text_ellipsis()
-                            .child(name_value),
-                    )
-                    .when(field_focused, |this| {
-                        this.child(caret::bar(px(16.0), theme.text, caret_visible))
-                    }),
+                            .child(name_field),
+                    ),
             )
             .child(form_label("Parent location", &theme))
             .child(
@@ -881,6 +777,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::time::Duration;
 
+    fn init_test_ui(cx: &mut gpui::App) {
+        Theme::init(cx);
+        bezel::ui::input::init(cx);
+    }
+
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -937,6 +838,7 @@ mod tests {
     /// Geometry, not text, because geometry is what the defect was.
     #[gpui::test]
     async fn a_long_url_stays_inside_the_clone_url_field(cx: &mut TestAppContext) {
+        cx.update(init_test_ui);
         let parent = TempDir::new("clone-layout");
         let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -971,6 +873,7 @@ mod tests {
 
     #[gpui::test]
     async fn the_drawn_clone_button_cannot_start_a_second_clone(cx: &mut TestAppContext) {
+        cx.update(init_test_ui);
         let source = TempDir::new("clone-source");
         std::fs::write(source.0.join("file.txt"), "hello\n").expect("seed source file");
         git(&source.0, &["init", "-q"]);
@@ -1021,6 +924,7 @@ mod tests {
     /// button and a real filesystem destination.
     #[gpui::test]
     async fn the_drawn_create_button_cannot_start_a_second_creation(cx: &mut TestAppContext) {
+        cx.update(init_test_ui);
         let parent = TempDir::new("create-parent");
         let window = cx.add_window(|_, cx| CreateForm::new(parent.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1063,6 +967,7 @@ mod tests {
 
     #[gpui::test]
     async fn a_cancelled_clone_shows_no_progress_bar(cx: &mut TestAppContext) {
+        cx.update(init_test_ui);
         let parent = TempDir::new("clone-cancelled");
         let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);

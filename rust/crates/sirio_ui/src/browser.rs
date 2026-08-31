@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeSet,
-    ops::Range,
     rc::Rc,
     sync::mpsc,
     time::Duration,
@@ -20,12 +19,11 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::{ffi::c_ulong, time::Instant};
 
+use bezel::ui::input::TextField;
 use gpui::{
-    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle, Focusable,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, KeyDownEvent,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, ShapedLine, SharedString, Style, Task, TextRun, Window, div, fill, point, prelude::*,
-    px, relative, size,
+    App, Bounds, Context, Element, ElementId, FocusHandle, Focusable, GlobalElementId,
+    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, Pixels, Render, Style, Task, Window,
+    div, prelude::*, px, relative,
 };
 use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "linux")]
@@ -331,123 +329,6 @@ impl StartupFailure {
         match self {
             Self::RuntimeMissing => None,
             Self::Failed(error) => Some(error),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AddressEditor {
-    text: String,
-    anchor: usize,
-    caret: usize,
-}
-
-impl AddressEditor {
-    fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
-        let caret = text.len();
-        Self {
-            text,
-            anchor: caret,
-            caret,
-        }
-    }
-
-    fn text(&self) -> &str {
-        &self.text
-    }
-
-    fn selection(&self) -> Range<usize> {
-        self.anchor.min(self.caret)..self.anchor.max(self.caret)
-    }
-
-    fn set_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
-        self.move_to(self.text.len(), false);
-    }
-
-    fn select_all(&mut self) {
-        self.anchor = 0;
-        self.caret = self.text.len();
-    }
-
-    fn move_to(&mut self, offset: usize, extend: bool) {
-        let offset = self.boundary_at_or_before(offset.min(self.text.len()));
-        if !extend {
-            self.anchor = offset;
-        }
-        self.caret = offset;
-    }
-
-    fn replace_selection(&mut self, replacement: &str) {
-        let selection = self.selection();
-        self.text.replace_range(selection.clone(), replacement);
-        let caret = selection.start + replacement.len();
-        self.anchor = caret;
-        self.caret = caret;
-    }
-
-    fn backspace(&mut self) {
-        if self.selection().is_empty() {
-            let previous = self.previous_boundary(self.caret);
-            if previous == self.caret {
-                return;
-            }
-            self.anchor = previous;
-        }
-        self.replace_selection("");
-    }
-
-    fn delete_forward(&mut self) {
-        if self.selection().is_empty() {
-            let next = self.next_boundary(self.caret);
-            if next == self.caret {
-                return;
-            }
-            self.anchor = next;
-        }
-        self.replace_selection("");
-    }
-
-    fn move_left(&mut self, extend: bool) {
-        if !extend && !self.selection().is_empty() {
-            let start = self.selection().start;
-            self.move_to(start, false);
-        } else {
-            self.move_to(self.previous_boundary(self.caret), extend);
-        }
-    }
-
-    fn move_right(&mut self, extend: bool) {
-        if !extend && !self.selection().is_empty() {
-            let end = self.selection().end;
-            self.move_to(end, false);
-        } else {
-            self.move_to(self.next_boundary(self.caret), extend);
-        }
-    }
-
-    fn previous_boundary(&self, offset: usize) -> usize {
-        self.text[..offset]
-            .char_indices()
-            .last()
-            .map(|(index, _)| index)
-            .unwrap_or(0)
-    }
-
-    fn next_boundary(&self, offset: usize) -> usize {
-        self.text[offset..]
-            .chars()
-            .next()
-            .map(|character| offset + character.len_utf8())
-            .unwrap_or(self.text.len())
-    }
-
-    fn boundary_at_or_before(&self, offset: usize) -> usize {
-        if self.text.is_char_boundary(offset) {
-            offset
-        } else {
-            self.previous_boundary(offset)
         }
     }
 }
@@ -1200,19 +1081,12 @@ fn build_production_webview_for_native_child(
 /// pixels live in the native child window below it.
 pub struct BrowserSurface {
     state: BrowserState,
-    address_editor: AddressEditor,
-    address_focus: FocusHandle,
-    address_dragging: bool,
-    /// F-BRW-03: mirrors `address_focus.is_focused(window)`, refreshed each
+    address_field: gpui::Entity<TextField>,
+    /// F-BRW-03: mirrors the TextField focus handle, refreshed each
     /// render (the only place a `Window` is available). Guards the
     /// PageLoad(Finished) address resync below from clobbering a caret or
     /// selection the user is actively editing.
     address_focused: bool,
-    /// The address field's insertion caret. The field is a full text editor
-    /// (selection, click-to-place, select-all), so it blinks like every
-    /// other editable surface rather than holding a permanently-solid bar.
-    address_blink: sirio_ui::caret::Blink,
-    address_caret_visible: bool,
     webview: SharedWebView,
     /// R6.2/R6.3: the engine's profile context, held for the surface's life.
     /// `WebViewBuilder` only borrows it while building, so this is ownership
@@ -1329,7 +1203,11 @@ impl BrowserSurface {
                 Some(error.to_string()),
             ),
         };
-        let address_editor = AddressEditor::new(state.address());
+        let address_field = cx.new(|cx| {
+            let mut field = TextField::new(cx).with_placeholder("");
+            field.set_content(state.address(), cx);
+            field
+        });
         let web_events = Rc::new(RefCell::new(Vec::new()));
         // R6.3: one shared profile in a Sirio-owned directory. Left unset,
         // WebView2 writes `<exe>.WebView2\EBWebView` beside the binary, which
@@ -1358,12 +1236,8 @@ impl BrowserSurface {
 
         Self {
             state,
-            address_editor,
-            address_focus: cx.focus_handle(),
-            address_dragging: false,
+            address_field,
             address_focused: false,
-            address_blink: sirio_ui::caret::Blink::new(),
-            address_caret_visible: false,
             webview,
             _web_context: Some(web_context),
             webview_scale_correction: Rc::new(Cell::new(None)),
@@ -1390,7 +1264,7 @@ impl BrowserSurface {
     ///
     /// Arming from render puts the first tick strictly after construction has
     /// returned. It is the same one-timer-per-surface discipline
-    /// `caret::schedule` and the streaming border already follow, and it
+    /// the streaming border already follows, and it
     /// closes the class rather than the two-tab instance of it.
     ///
     /// Idempotent, and it does not resurrect a closed surface: `close_native`
@@ -1412,7 +1286,7 @@ impl BrowserSurface {
                             // it is what drives the webview at all -- but
                             // the repaint is only owed when the page has
                             // actually done something.
-                            let drained = surface.pump_web_events();
+                            let drained = surface.pump_web_events(cx);
                             #[cfg(target_os = "linux")]
                             while gtk::events_pending() {
                                 gtk::main_iteration_do(false);
@@ -1440,7 +1314,7 @@ impl BrowserSurface {
                             // #195: a 60 Hz unconditional notify repainted
                             // the whole window for as long as any browser
                             // surface existed.
-                            if surface.pump_web_events() {
+                            if surface.pump_web_events(cx) {
                                 cx.notify();
                             }
                         })
@@ -1517,7 +1391,7 @@ impl BrowserSurface {
     /// needs, so the build can run while NO GPUI lease on this surface is
     /// held. That release is the whole point: creating a WebView2 pumps the
     /// platform message loop (#255), and a task queued for this surface —
-    /// the address caret's blink — must be able to lease it during the pump
+    /// the address field — must be able to lease it during the pump
     /// instead of panicking on a double lease. Returns `None` when there is
     /// no profile context to hand the engine, i.e. retrying cannot even be
     /// attempted.
@@ -1590,7 +1464,7 @@ impl BrowserSurface {
                     // The rebuild must NOT run under this surface's GPUI
                     // lease: creating a WebView2 pumps the platform message
                     // loop (#255), and a task queued for this surface — the
-                    // address caret's blink — would re-enter the lease and
+                    // address field — would re-enter the lease and
                     // panic. Take what the build needs out, build lease-free,
                     // then reinstall the outcome.
                     .on_click(move |_, window, cx| {
@@ -1622,7 +1496,6 @@ impl BrowserSurface {
     /// Starts an address-field navigation in WebKit.
     pub fn submit_address(&mut self, input: &str) -> Result<(), BrowserError> {
         let address = self.state.submit_address(input)?;
-        self.address_editor.set_text(address.clone());
         self.load_url(&address)
     }
 
@@ -1634,7 +1507,6 @@ impl BrowserSurface {
     ) -> Result<BrowserEvent, BrowserError> {
         let event = self.state.open_link(url, target)?;
         if let BrowserEvent::Navigate(address) = &event {
-            self.address_editor.set_text(address.clone());
             self.load_url(address)?;
         }
         self.events.push(event.clone());
@@ -1744,7 +1616,7 @@ impl BrowserSurface {
         Ok(())
     }
 
-    fn navigate_history(&mut self, address: Option<String>) {
+    fn navigate_history(&mut self, address: Option<String>, cx: &mut Context<Self>) {
         let Some(address) = address else {
             return;
         };
@@ -1752,15 +1624,16 @@ impl BrowserSurface {
         if let Err(error) = result {
             self.state.did_fail_navigation(error.to_string());
         } else {
-            self.address_editor.set_text(address);
+            self.address_field
+                .update(cx, |field, cx| field.set_content(address, cx));
         }
     }
 
     fn on_back(&mut self, cx: &mut Context<Self>) {
         let address = self.state.go_back();
-        self.navigate_history(address);
+        self.navigate_history(address, cx);
         // F-BRW-02: go_back()/navigate_history() mutate self.state and
-        // self.address_editor correctly, but nothing repaints without an
+        // the state and TextField correctly, but nothing repaints without an
         // explicit notify — unlike on_address_key's "enter" path, which
         // does call it after submit_address().
         cx.notify();
@@ -1768,11 +1641,11 @@ impl BrowserSurface {
 
     fn on_forward(&mut self, cx: &mut Context<Self>) {
         let address = self.state.go_forward();
-        self.navigate_history(address);
+        self.navigate_history(address, cx);
         cx.notify();
     }
 
-    fn on_reload(&mut self) {
+    fn on_reload(&mut self, cx: &mut Context<Self>) {
         let Some(address) = self.state.reload() else {
             return;
         };
@@ -1784,7 +1657,8 @@ impl BrowserSurface {
             self.state
                 .did_fail_navigation("Browser child is unavailable".to_owned());
         }
-        self.address_editor.set_text(address);
+        self.address_field
+            .update(cx, |field, cx| field.set_content(address, cx));
     }
 
     fn on_stop(&mut self) {
@@ -1795,63 +1669,16 @@ impl BrowserSurface {
         }
     }
 
-    fn on_address_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.address_blink.wake();
-        if event.keystroke.key == "a"
-            && (event.keystroke.modifiers.control || event.keystroke.modifiers.platform)
-        {
-            self.address_editor.select_all();
+    fn on_address_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if event.keystroke.key == "enter" {
+            let draft = self.address_field.read(cx).content().to_string();
+            if self.submit_address(&draft).is_ok() {
+                let address = self.state.address().to_owned();
+                self.address_field
+                    .update(cx, |field, cx| field.set_content(address, cx));
+            }
             cx.notify();
-            return;
         }
-
-        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
-            return;
-        }
-
-        let extend = event.keystroke.modifiers.shift;
-        match event.keystroke.key.as_str() {
-            "enter" => {
-                let draft = self.address_editor.text().to_owned();
-                let _ = self.submit_address(&draft);
-                cx.notify();
-            }
-            "backspace" => self.address_editor.backspace(),
-            "delete" => self.address_editor.delete_forward(),
-            "left" => self.address_editor.move_left(extend),
-            "right" => self.address_editor.move_right(extend),
-            "home" => self.address_editor.move_to(0, extend),
-            "end" => self
-                .address_editor
-                .move_to(self.address_editor.text().len(), extend),
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && character != "\n"
-                {
-                    self.address_editor.replace_selection(character);
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    fn set_address_cursor(&mut self, offset: usize, extend: bool) {
-        self.address_editor.move_to(offset, extend);
-    }
-
-    fn begin_address_drag(&mut self, offset: usize, extend: bool) {
-        self.address_dragging = true;
-        self.set_address_cursor(offset, extend);
-    }
-
-    fn update_address_drag(&mut self, offset: usize) {
-        if self.address_dragging {
-            self.set_address_cursor(offset, true);
-        }
-    }
-
-    fn end_address_drag(&mut self) {
-        self.address_dragging = false;
     }
 
     /// Drains the queue the webview callbacks push into, and reports
@@ -1865,7 +1692,7 @@ impl BrowserSurface {
     /// with no scripts, no animation and no timers, that cost 27.6% of a
     /// core against a 5.8% baseline, and backgrounding the tab saved
     /// nothing.
-    fn pump_web_events(&mut self) -> bool {
+    fn pump_web_events(&mut self, cx: &mut Context<Self>) -> bool {
         let pending = std::mem::take(&mut *self.web_events.borrow_mut());
         let drained = !pending.is_empty();
         for event in pending {
@@ -1896,7 +1723,9 @@ impl BrowserSurface {
                     // resync while the user is at the field; `submit_address`
                     // already sets the authoritative text on Enter.
                     if !self.address_focused {
-                        self.address_editor.set_text(self.state.address());
+                        let address = self.state.address().to_owned();
+                        self.address_field
+                            .update(cx, |field, cx| field.set_content(address, cx));
                     }
                     self.events.push(BrowserEvent::PageFinished(url));
                 }
@@ -1909,12 +1738,6 @@ impl BrowserSurface {
         drained
     }
 
-    /// Blink timer tick for the address field's insertion caret.
-    fn flip_address_blink(&mut self, cx: &mut Context<Self>) {
-        self.address_blink.flip();
-        cx.notify();
-    }
-
     fn render_toolbar(
         &self,
         theme: Theme,
@@ -1922,21 +1745,13 @@ impl BrowserSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let address_focus = self.address_focus.clone();
+        let address_field = self.address_field.clone();
+        let address_focus = address_field.read(cx).focus_handle(cx);
         let address_entity = entity.clone();
         let back = entity.clone();
         let forward = entity.clone();
         let reload = entity.clone();
         let stop = entity.clone();
-        let address_text = AddressTextElement::new(
-            entity.clone(),
-            self.address_editor.text().to_owned(),
-            self.address_editor.selection(),
-            self.address_editor.caret,
-            self.address_caret_visible,
-            address_focus.clone(),
-            theme,
-        );
         let page_title = if self.state.page_title().is_empty() {
             "Browser".to_owned()
         } else {
@@ -1979,11 +1794,11 @@ impl BrowserSurface {
                 theme,
                 true,
                 move |cx| {
-                    reload.update(cx, |surface, _| {
+                    reload.update(cx, |surface, cx| {
                         if surface.state.is_loading() {
                             surface.on_stop();
                         } else {
-                            surface.on_reload();
+                            surface.on_reload(cx);
                         }
                     })
                 },
@@ -1992,27 +1807,23 @@ impl BrowserSurface {
                 div()
                     .id("browser-address-field")
                     .debug_selector(|| "browser-address-field".to_owned())
-                    .track_focus(&address_focus)
-                    .focusable()
                     .flex_1()
-                    .h(px(30.0))
                     .flex()
                     .items_center()
-                    .px(px(10.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.surface)
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.text)
                     .on_click(move |_, window, cx| window.focus(&address_focus, cx))
-                    .on_key_down(move |event, window, cx| {
+                    .on_key_down(move |event, _, cx| {
                         address_entity.update(cx, |surface, cx| {
-                            surface.on_address_key(event, window, cx);
+                            surface.on_address_key(event, cx);
                         });
                     })
-                    .child(div().mr(px(8.0)).text_color(theme.text_faint).child("◎"))
-                    .child(div().flex_1().h_full().child(address_text)),
+                    .child(
+                        div()
+                            .ml(px(10.0))
+                            .mr(px(8.0))
+                            .text_color(theme.text_faint)
+                            .child("◎"),
+                    )
+                    .child(div().flex_1().child(address_field)),
             )
             .child(
                 div()
@@ -2099,8 +1910,8 @@ fn browser_button_element(
 /// through `Entity<BrowserSurface>`'s blanket `Focusable` impl and hand the
 /// result straight to `window.focus`, with no bespoke accessor.
 impl Focusable for BrowserSurface {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.address_focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.address_field.read(cx).focus_handle(cx)
     }
 }
 
@@ -2112,14 +1923,11 @@ impl Render for BrowserSurface {
         // F-BRW-03: this is the only place a `Window` is available to ask
         // the focus system directly; pump_web_events (a background timer
         // task) reads this snapshot instead of calling is_focused itself.
-        self.address_focused = self.address_focus.is_focused(window);
-        sirio_ui::caret::schedule(
-            &mut self.address_blink,
-            self.address_focused,
-            Self::flip_address_blink,
-            cx,
-        );
-        self.address_caret_visible = self.address_focused && self.address_blink.visible();
+        self.address_focused = self
+            .address_field
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
         let entity = cx.entity();
         let permission = self.state.permission_prompt().cloned();
         let webview = NativeWebViewElement::new(
@@ -2243,216 +2051,6 @@ impl Drop for BrowserSurface {
         // `XDestroyWindow` issued then would land in the buffer with nothing
         // left to flush it.
         self.close_native();
-    }
-}
-
-struct AddressTextElement {
-    entity: gpui::Entity<BrowserSurface>,
-    text: SharedString,
-    selection: Range<usize>,
-    caret: usize,
-    /// Resolved by `BrowserSurface::render` (focus × blink phase) rather
-    /// than re-derived here: prepaint runs on every frame the toolbar is
-    /// drawn, and the blink is the surface's state, not the element's.
-    caret_visible: bool,
-    focus: FocusHandle,
-    theme: Theme,
-}
-
-struct AddressTextPrepaint {
-    line: ShapedLine,
-    line_origin: Point<Pixels>,
-    cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
-    hitbox: Hitbox,
-}
-
-impl AddressTextElement {
-    fn new(
-        entity: gpui::Entity<BrowserSurface>,
-        text: String,
-        selection: Range<usize>,
-        caret: usize,
-        caret_visible: bool,
-        focus: FocusHandle,
-        theme: Theme,
-    ) -> Self {
-        Self {
-            entity,
-            text: text.into(),
-            selection,
-            caret,
-            caret_visible,
-            focus,
-            theme,
-        }
-    }
-}
-
-impl IntoElement for AddressTextElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for AddressTextElement {
-    type RequestLayoutState = ();
-    type PrepaintState = AddressTextPrepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        _: &mut App,
-    ) -> Self::PrepaintState {
-        let style = window.text_style();
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let run: TextRun = style.to_run(self.text.len());
-        let line = window
-            .text_system()
-            .shape_line(self.text.clone(), font_size, &[run], None);
-        let line_height = window.line_height();
-        let line_origin = point(bounds.left(), bounds.center().y - line_height / 2.0);
-        let selection_start = self.selection.start.min(self.text.len());
-        let selection_end = self.selection.end.min(self.text.len());
-        let selection = if selection_start < selection_end {
-            Some(fill(
-                Bounds::from_corners(
-                    point(
-                        line_origin.x + line.x_for_index(selection_start),
-                        line_origin.y,
-                    ),
-                    point(
-                        line_origin.x + line.x_for_index(selection_end),
-                        line_origin.y + line_height,
-                    ),
-                ),
-                self.theme.element_active,
-            ))
-        } else {
-            None
-        };
-        let cursor = if selection_start == selection_end && self.caret_visible {
-            let caret = self.caret.min(self.text.len());
-            Some(fill(
-                Bounds::new(
-                    point(line_origin.x + line.x_for_index(caret), line_origin.y),
-                    size(px(1.0), line_height),
-                ),
-                self.theme.text,
-            ))
-        } else {
-            None
-        };
-
-        AddressTextPrepaint {
-            line,
-            line_origin,
-            cursor,
-            selection,
-            hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
-        }
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        let _ = prepaint.line.paint(
-            prepaint.line_origin,
-            window.line_height(),
-            gpui::TextAlign::Left,
-            None,
-            window,
-            cx,
-        );
-        if let Some(cursor) = prepaint.cursor.take() {
-            window.paint_quad(cursor);
-        }
-
-        let hitbox = prepaint.hitbox.clone();
-        let line = prepaint.line.clone();
-        let line_origin = prepaint.line_origin;
-        let entity = self.entity.clone();
-        let focus = self.focus.clone();
-        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && event.button == MouseButton::Left
-                && hitbox.is_hovered(window)
-            {
-                let offset = line.closest_index_for_x(event.position.x - line_origin.x);
-                entity.update(cx, |surface, cx| {
-                    surface.begin_address_drag(offset, event.modifiers.shift);
-                    cx.notify();
-                });
-                window.focus(&focus, cx);
-                window.prevent_default();
-            }
-        });
-
-        let hitbox = prepaint.hitbox.clone();
-        let line = prepaint.line.clone();
-        let line_origin = prepaint.line_origin;
-        let entity = self.entity.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && event.dragging() && hitbox.is_hovered(window) {
-                let offset = line.closest_index_for_x(event.position.x - line_origin.x);
-                entity.update(cx, |surface, cx| {
-                    surface.update_address_drag(offset);
-                    cx.notify();
-                });
-            }
-        });
-
-        let hitbox = prepaint.hitbox.clone();
-        let entity = self.entity.clone();
-        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && event.button == MouseButton::Left
-                && hitbox.is_hovered(window)
-            {
-                entity.update(cx, |surface, cx| {
-                    surface.end_address_drag();
-                    cx.notify();
-                });
-            }
-        });
     }
 }
 
@@ -3076,15 +2674,21 @@ mod tests {
         assert!((final_h - requested_h).abs() < 1.0, "final_h = {final_h}");
     }
 
-    #[test]
-    fn address_editor_replaces_selected_text_when_typing() {
-        let mut editor = AddressEditor::new("https://www.iana.org/help/example-domains");
+    #[gpui::test]
+    async fn address_field_keeps_content_in_the_bezel_text_field(cx: &mut gpui::TestAppContext) {
+        let field = cx.update(|cx| {
+            Theme::init(cx);
+            bezel::ui::input::init(cx);
+            cx.new(|cx| {
+                let mut field = TextField::new(cx);
+                field.set_content("https://www.iana.org", cx);
+                field
+            })
+        });
 
-        editor.select_all();
-        editor.replace_selection("https://www.iana.org");
-
-        assert_eq!(editor.text(), "https://www.iana.org");
-        assert_eq!(editor.selection(), editor.text().len()..editor.text().len());
+        cx.update(|cx| {
+            assert_eq!(field.read(cx).content(), "https://www.iana.org");
+        });
     }
 
     /// #255: the pump is armed once, only for a live webview.
@@ -3109,15 +2713,22 @@ mod tests {
         assert!(!should_arm_pump(true, false));
     }
 
-    #[test]
-    fn address_editor_inserts_at_the_clicked_caret_position() {
-        let mut editor = AddressEditor::new("https://example.com");
-
-        editor.move_to(8, false);
-        editor.replace_selection("www.");
-
-        assert_eq!(editor.text(), "https://www.example.com");
-        assert_eq!(editor.selection(), 12..12);
+    #[gpui::test]
+    async fn address_field_programmatic_updates_leave_the_caret_at_the_end(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let field = cx.update(|cx| {
+            Theme::init(cx);
+            bezel::ui::input::init(cx);
+            cx.new(TextField::new)
+        });
+        cx.update(|cx| {
+            field.update(cx, |field, cx| {
+                field.set_content("https://www.example.com", cx)
+            });
+            let field = field.read(cx);
+            assert_eq!(field.cursor(), field.content().len());
+        });
     }
 
     /// #307: on a Windows machine without the WebView2 Runtime the browser

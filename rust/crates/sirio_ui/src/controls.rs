@@ -18,9 +18,9 @@
 //!   waku value.
 
 use bezel::theme::Theme as BezelTheme;
+use bezel::ui::tooltip::Tooltip;
 use gpui::{
-    AnyView, App, ClickEvent, Context, CursorStyle, Div, FontWeight, Render, Rgba, Window, div,
-    prelude::*, px, text,
+    App, ClickEvent, CursorStyle, Div, FontWeight, Rgba, Window, div, prelude::*, px, text,
 };
 use sirio_theme::Theme;
 use std::rc::Rc;
@@ -29,41 +29,6 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 /// A segmented control's selection callback.
 type SegmentCallback = Rc<dyn Fn(usize, &mut App)>;
-
-/// Creates the single-line hover card used by compact icon controls.
-pub fn text_tooltip(
-    text: impl Into<String>,
-    theme: Theme,
-) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    let text = text.into();
-    move |_, cx| {
-        cx.new(|_| TextTooltip {
-            theme,
-            text: text.clone(),
-        })
-        .into()
-    }
-}
-
-struct TextTooltip {
-    theme: Theme,
-    text: String,
-}
-
-impl Render for TextTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(self.theme.radii.control)
-            .bg(self.theme.surface_raised)
-            .border_1()
-            .border_color(self.theme.border)
-            .text_size(self.theme.typography.caption2)
-            .text_color(self.theme.text)
-            .child(self.text.clone())
-    }
-}
 
 /// Creates a titled settings section with a card beneath it.
 pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement {
@@ -290,7 +255,7 @@ pub fn segmented_icons(
                 .text_color(if active { theme.text } else { theme.text_muted })
                 .when(active, |this| this.bg(theme.element_active))
                 .hover(|style| style.bg(theme.element_hover))
-                .tooltip(text_tooltip(tooltip, theme))
+                .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(IconElement::new(icon, IconSize::Small)),
         );

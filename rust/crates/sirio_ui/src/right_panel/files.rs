@@ -3,9 +3,10 @@
 //! drag).
 
 use super::*;
+use bezel::motion::{Fade, Painter};
+use bezel::ui::popover;
 use gpui::{
-    AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, anchored,
-    uniform_list,
+    AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, uniform_list,
 };
 use sirio_git::{DirectoryGitStatus, directory_statuses, status};
 use sirio_project::FileIconKey;
@@ -89,6 +90,7 @@ pub(super) struct FileContextMenu {
     /// would otherwise emit an `OpenFile` for a path no editor opens.
     is_dir: bool,
     position: Point<Pixels>,
+    painter: Painter,
 }
 
 impl RightPanel {
@@ -285,6 +287,7 @@ impl RightPanel {
             path,
             is_dir,
             position,
+            painter: Painter::of(cx),
         });
         cx.notify();
     }
@@ -303,16 +306,12 @@ impl RightPanel {
         let path = menu.path;
         let is_dir = menu.is_dir;
         let position = menu.position;
-        let mut view = div()
+        let painter = menu.painter;
+        let bezel_theme = theme.to_bezel_theme();
+        let mut view = popover::popover_card(&bezel_theme)
             .id("file-context-menu")
             .debug_selector(|| "file-context-menu".to_owned())
-            .w(theme.spacing.menu_width)
-            .p(theme.spacing.titlebar_control_spacing)
-            .rounded(theme.radii.user_pill)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .shadow_lg();
+            .w(theme.spacing.menu_width);
 
         // `Open` is the one entry a directory must not offer: it emits
         // `OpenFile`, and a directory is not a document. Everything
@@ -329,19 +328,16 @@ impl RightPanel {
         for (label, selector) in entries {
             let action_entity = entity.clone();
             let action_path = path.clone();
-            let mut row = div()
+            let mut row = popover::menu_row(
+                &bezel_theme,
+                false,
+                Fade::new(painter, selector),
+            )
                 .id(selector)
                 .debug_selector(move || selector.to_owned())
                 .w_full()
                 .min_h(theme.spacing.titlebar_control_frame.height)
-                .px(theme.spacing.titlebar_control_spacing)
-                .py(theme.spacing.titlebar_control_spacing)
-                .rounded(theme.radii.control)
-                .flex()
-                .items_center()
-                .text_size(theme.typography.footnote)
-                .text_color(theme.text)
-                .hover(|style| style.bg(theme.element_hover));
+                .text_color(bezel_theme.text);
 
             row = match selector {
                 "file-context-open" => row.on_click(move |_, _, cx| {
@@ -383,12 +379,15 @@ impl RightPanel {
             view = view.child(row.child(label));
         }
 
-        anchored()
-            .position(position)
-            .snap_to_window()
-            .child(view.on_mouse_down_out(move |_, _, cx| {
+        popover::menu_at(
+            "file-context-menu-layer",
+            position,
+            view.on_mouse_down_out(move |_, _, cx| {
                 entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
-            }))
+            })
+            .into_any_element(),
+            None,
+        )
     }
 
     fn open_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -600,6 +599,10 @@ impl RightPanel {
     }
 
     fn on_file_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "escape" && self.file_context_menu.is_some() {
+            self.close_file_context_menu(cx);
+            return;
+        }
         let rows = self.file_rows();
         if rows.is_empty() {
             return;
@@ -1515,9 +1518,12 @@ mod tests {
             menu.origin.x,
             row.center().x
         );
+        // Bezel's menu entrance begins 2px above its settled anchor and eases
+        // into place; keep guarding the pointer anchor without rejecting that
+        // deliberate first-frame transform.
         assert!(
-            (menu.origin.y.as_f32() - row.center().y.as_f32()).abs() <= 1.0,
-            "the file context menu starts at the pointer's y coordinate: menu={:?}, pointer={:?}",
+            (menu.origin.y.as_f32() - row.center().y.as_f32()).abs() <= 2.0,
+            "the file context menu starts at the pointer's y coordinate (within bezel's 2px entrance): menu={:?}, pointer={:?}",
             menu.origin.y,
             row.center().y
         );

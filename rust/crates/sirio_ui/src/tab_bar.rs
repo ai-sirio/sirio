@@ -1,8 +1,10 @@
 //! The centre-pane tab strip and its new-tab menu.
 
+use bezel::motion::{Fade, Painter};
+use bezel::ui::popover::{self, Popup};
 use gpui::{
     Anchor, App, Bounds, Context, FocusHandle, KeyBinding, Pixels, Render, Window, actions,
-    anchored, canvas, deferred, div, point, prelude::*, px, text,
+    canvas, div, point, prelude::*, px, text,
 };
 use sirio_agents::{AgentAvailability, discover_availability};
 use sirio_registry::LaunchSource;
@@ -114,31 +116,22 @@ impl TabContextItem {
 }
 
 /// Draws a tab context menu and emits only actions for enabled rows.
-pub fn render_tab_context_menu(
+pub fn render_tab_context_menu<T: 'static>(
     items: Vec<TabContextItem>,
     on_action: Rc<dyn Fn(TabContextAction, &mut Window, &mut App)>,
     theme: Theme,
+    cx: &Context<T>,
 ) -> impl IntoElement {
-    let mut menu = div()
+    let bezel_theme = theme.to_bezel_theme();
+    let painter = Painter::of(cx);
+    let mut menu = popover::popover_card(&bezel_theme)
         .id("tab-context-menu")
         .debug_selector(|| "tab-context-menu".to_owned())
-        .w(theme.spacing.menu_width)
-        .p(theme.spacing.titlebar_control_spacing)
-        .rounded(theme.radii.user_pill)
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.surface_raised)
-        .shadow_lg();
+        .w(theme.spacing.menu_width);
 
     for item in items {
         if item.separator_before {
-            menu = menu.child(
-                div()
-                    .mx(theme.spacing.card_gap)
-                    .my(theme.spacing.titlebar_control_spacing)
-                    .h(theme.spacing.hairline_thickness)
-                    .bg(theme.border),
-            );
+            menu = menu.child(popover::divider());
             continue;
         }
 
@@ -146,26 +139,24 @@ pub fn render_tab_context_menu(
         let enabled = item.enabled;
         let selector = item.selector.clone();
         let selector_for_debug = selector.clone();
-        let mut row = div()
+        let mut row = popover::menu_row(
+            &bezel_theme,
+            false,
+            Fade::new(painter, format!("tab-command-{selector}")),
+        )
             .id(format!("tab-command-{selector}"))
             .debug_selector(move || format!("tab-command-{selector_for_debug}"))
             .w_full()
             .min_h(theme.typography.ui_line_height)
-            .px(theme.spacing.card_gap)
-            .py(theme.spacing.titlebar_control_spacing)
-            .flex()
-            .items_center()
             .justify_between()
             .gap(theme.spacing.titlebar_control_spacing)
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
             .text_color(if enabled {
-                theme.text
+                bezel_theme.text
             } else {
-                theme.text_faint
+                bezel_theme.text_faint
             })
-            .when(enabled, |this| {
-                this.hover(|style| style.bg(theme.element_hover))
+            .when(!enabled, |this| {
+                this.cursor_default().bg(gpui::transparent_black())
             })
             .child(item.label);
 
@@ -175,7 +166,7 @@ pub fn render_tab_context_menu(
                     .id(format!("tab-command-disabled-{selector}"))
                     .debug_selector(move || format!("tab-command-disabled-{selector}"))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.text_faint)
+                    .text_color(bezel_theme.text_faint)
                     .child(reason),
             );
         }
@@ -191,7 +182,7 @@ pub fn render_tab_context_menu(
 
 /// A horizontal tab strip with a callback-driven new-tab menu.
 pub struct TabBar {
-    menu_open: bool,
+    menu_open: Popup<()>,
     chat_picker_open: bool,
     focus_handle: FocusHandle,
     anchor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -223,14 +214,14 @@ impl TabBar {
     }
 
     fn dismiss_menu(&mut self, _: &DismissMenu, _: &mut Window, cx: &mut Context<Self>) {
-        self.close_menu(cx);
+        self.close_menu_now(cx);
     }
 
     /// Creates the menu-only tab-bar host. The shell owns the open tabs.
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self::bind_keys(cx);
         Self {
-            menu_open: false,
+            menu_open: Popup::default(),
             chat_picker_open: false,
             focus_handle: cx.focus_handle(),
             anchor_bounds: Rc::new(Cell::new(None)),
@@ -284,9 +275,13 @@ impl TabBar {
     }
 
     fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu_open = !self.menu_open;
+        if self.menu_open.take_press_was_open() {
+            self.close_menu(cx);
+            return;
+        }
+        self.menu_open.open(());
         self.chat_picker_open = false;
-        if self.menu_open {
+        if self.menu_open.is_open() {
             // The menu is painted through `deferred(...)`, which links its
             // subtree into the window's dispatch tree only after its own
             // (later) paint pass runs — see the identical comment on
@@ -306,38 +301,43 @@ impl TabBar {
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu_open || self.chat_picker_open {
-            self.menu_open = false;
+        let closing = self.menu_open.begin_close();
+        if closing || self.chat_picker_open {
+            self.chat_picker_open = false;
+            if closing {
+                popover::reap_popup(cx, |tab_bar| &mut tab_bar.menu_open);
+            }
+            cx.notify();
+        }
+    }
+
+    fn close_menu_now(&mut self, cx: &mut Context<Self>) {
+        if self.menu_open.get().is_some() || self.chat_picker_open {
+            self.menu_open.close();
             self.chat_picker_open = false;
             cx.notify();
         }
     }
 
     fn emit(&mut self, action: NewTabAction, cx: &mut Context<Self>) {
-        self.menu_open = false;
-        self.chat_picker_open = false;
+        self.close_menu_now(cx);
         if let Some(callback) = &self.on_new_tab {
             callback(action);
         }
-        cx.notify();
     }
 
     fn emit_chat_agent(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        self.menu_open = false;
-        self.chat_picker_open = false;
+        self.close_menu_now(cx);
         if let Some(callback) = &self.on_chat_agent {
             callback(id);
         }
-        cx.notify();
     }
 
     fn emit_open_agent_settings(&mut self, cx: &mut Context<Self>) {
-        self.menu_open = false;
-        self.chat_picker_open = false;
+        self.close_menu_now(cx);
         if let Some(callback) = &self.on_open_agent_settings {
             callback();
         }
-        cx.notify();
     }
 
     fn toggle_chat_picker(&mut self, cx: &mut Context<Self>) {
@@ -350,6 +350,8 @@ impl TabBar {
         action: NewTabAction,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        bezel_theme: &bezel::theme::Theme,
+        painter: Painter,
         chevron: bool,
         hint: Option<&'static str>,
     ) -> impl IntoElement {
@@ -375,19 +377,17 @@ impl TabBar {
             _ => (Icon::File, theme.text_faint),
         };
 
-        div()
+        popover::menu_row(
+            bezel_theme,
+            false,
+            Fade::new(painter, format!("new-tab-item-{}", menu_selector(label))),
+        )
             .id(label)
             .debug_selector(move || format!("new-tab-item-{}", menu_selector(label)))
             .w_full()
             .h(px(29.0))
-            .px(px(12.0))
-            .flex()
-            .items_center()
             .justify_between()
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(bezel_theme.text)
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit(action, cx)))
             .child(
                 div()
@@ -452,31 +452,28 @@ impl TabBar {
             .map(|agent| agent.status_label())
     }
 
-    fn separator(theme: Theme) -> impl IntoElement {
-        div()
-            .mx(px(8.0))
-            .h(theme.spacing.hairline_thickness)
-            .bg(theme.border)
+    fn separator() -> impl IntoElement {
+        popover::divider()
     }
 
     fn render_new_chat_item(
         entity: gpui::Entity<Self>,
         theme: Theme,
+        bezel_theme: &bezel::theme::Theme,
+        painter: Painter,
         expanded: bool,
     ) -> impl IntoElement {
-        div()
+        popover::menu_row(
+            bezel_theme,
+            false,
+            Fade::new(painter, "new-tab-item-new-chat"),
+        )
             .id("New Chat")
             .debug_selector(|| "new-tab-item-new-chat".to_owned())
             .w_full()
             .h(px(29.0))
-            .px(px(12.0))
-            .flex()
-            .items_center()
             .justify_between()
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(bezel_theme.text)
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.toggle_chat_picker(cx)))
             .child(
                 div()
@@ -510,6 +507,8 @@ impl TabBar {
         agent: &AgentAvailability,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        bezel_theme: &bezel::theme::Theme,
+        painter: Painter,
     ) -> impl IntoElement {
         let id = agent.id;
         let selector = format!("new-tab-chat-agent-{id}");
@@ -521,20 +520,13 @@ impl TabBar {
             mark = mark.text_color(tint);
         }
         let mark_element = mark;
-        div()
+        popover::menu_row(bezel_theme, false, Fade::new(painter, selector.clone()))
             .id(selector.clone())
             .debug_selector(move || selector_for_debug.clone())
             .w_full()
             .h(px(29.0))
-            .pl(theme.spacing.card_gap)
-            .pr(px(12.0))
-            .flex()
-            .items_center()
             .gap(px(7.0))
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(bezel_theme.text)
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
             .child(mark_element)
             .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
@@ -546,19 +538,19 @@ impl TabBar {
     /// site, mirroring `render_chat_agent_item`'s identical parameter) lets
     /// a click route through the same `on_open_agent_settings` callback
     /// channel every other TabBar action uses.
-    fn render_chat_empty(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
-        div()
+    fn render_chat_empty(
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        bezel_theme: &bezel::theme::Theme,
+        painter: Painter,
+    ) -> impl IntoElement {
+        popover::menu_row(bezel_theme, false, Fade::new(painter, "new-chat-empty"))
             .id("new-chat-empty")
             .debug_selector(|| "new-chat-empty".to_owned())
             .w_full()
-            .px(theme.spacing.card_gap)
-            .py(theme.spacing.titlebar_control_spacing)
-            .flex()
             .flex_col()
             .gap(theme.spacing.titlebar_control_spacing)
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(bezel_theme.text_faint)
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
             })
@@ -580,23 +572,25 @@ impl TabBar {
     /// it is chrome, not a choice among the agents above it. It shares the
     /// empty state's destination, and carries no "nothing found" caption:
     /// something was found, which is why this variant exists.
-    fn render_other_agents_link(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
-        div()
+    fn render_other_agents_link(
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        bezel_theme: &bezel::theme::Theme,
+        painter: Painter,
+    ) -> impl IntoElement {
+        popover::menu_row(
+            bezel_theme,
+            false,
+            Fade::new(painter, "new-chat-other-agents"),
+        )
             .id("new-chat-other-agents")
             .debug_selector(|| "new-chat-other-agents".to_owned())
             .w_full()
             .h(px(29.0))
-            .pl(theme.spacing.card_gap)
-            .pr(px(12.0))
             .mt(theme.spacing.titlebar_control_spacing)
             .border_t_1()
             .border_color(theme.border)
-            .flex()
-            .items_center()
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.element_hover))
+            .text_color(bezel_theme.text_faint)
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
             })
@@ -607,8 +601,11 @@ impl TabBar {
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
+        let bezel_theme = theme.to_bezel_theme();
+        let painter = Painter::of(cx);
         let entity = cx.entity();
-        let menu_open = self.menu_open;
+        let menu_open = self.menu_open.get().is_some();
+        let menu_closing = self.menu_open.closing_since();
         let chat_picker_open = self.chat_picker_open;
         let anchor_bounds = self.anchor_bounds.clone();
 
@@ -636,7 +633,12 @@ impl Render for TabBar {
             .flex_col()
             .gap(theme.spacing.titlebar_control_spacing);
         if available_chat_agents.is_empty() {
-            chat_agent_menu = chat_agent_menu.child(Self::render_chat_empty(entity.clone(), theme));
+            chat_agent_menu = chat_agent_menu.child(Self::render_chat_empty(
+                entity.clone(),
+                theme,
+                &bezel_theme,
+                painter,
+            ));
         } else {
             // The way to install another agent used to live ONLY in the empty
             // state above: it appeared when nothing was available and vanished
@@ -657,30 +659,32 @@ impl Render for TabBar {
                     agent,
                     entity.clone(),
                     theme,
+                    &bezel_theme,
+                    painter,
                 ));
             }
-            chat_agent_menu =
-                chat_agent_menu.child(Self::render_other_agents_link(entity.clone(), theme));
+            chat_agent_menu = chat_agent_menu.child(Self::render_other_agents_link(
+                entity.clone(),
+                theme,
+                &bezel_theme,
+                painter,
+            ));
         }
 
-        let menu = div()
+        let menu = popover::popover_card(&bezel_theme)
             .id("new-tab-menu")
             .debug_selector(|| "new-tab-menu".to_owned())
             // #205: widened from 170px to fit the "Not found on PATH" note an
             // agent row can carry. Measured, not guessed: the note overran the
             // old border by 76px.
             .w(px(250.0))
-            .p(px(6.0))
-            .rounded(theme.radii.user_pill)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .shadow_lg()
             .child(Self::render_menu_item(
                 "New Terminal",
                 NewTabAction::NewTerminal,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 None,
             ))
@@ -689,6 +693,8 @@ impl Render for TabBar {
                 NewTabAction::NewChanges,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 None,
             ))
@@ -697,15 +703,19 @@ impl Render for TabBar {
                 NewTabAction::NewBrowser,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 None,
             ))
-            .child(Self::separator(theme))
+            .child(Self::separator())
             .child(Self::render_menu_item(
                 "Claude Code",
                 NewTabAction::ClaudeCode,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 self.path_hint("Claude Code"),
             ))
@@ -714,6 +724,8 @@ impl Render for TabBar {
                 NewTabAction::Codex,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 self.path_hint("Codex"),
             ))
@@ -722,6 +734,8 @@ impl Render for TabBar {
                 NewTabAction::OpenCode,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 self.path_hint("OpenCode"),
             ))
@@ -730,6 +744,8 @@ impl Render for TabBar {
                 NewTabAction::Pi,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 self.path_hint("Pi"),
             ))
@@ -738,20 +754,30 @@ impl Render for TabBar {
                 NewTabAction::OhMyPi,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 self.path_hint("Oh-My-Pi"),
             ))
-            .child(Self::separator(theme))
+            .child(Self::separator())
             .child(Self::render_menu_item(
                 "Split Claude Code",
                 NewTabAction::SplitClaudeCode,
                 entity.clone(),
                 theme,
+                &bezel_theme,
+                painter,
                 false,
                 self.path_hint("Split Claude Code"),
             ))
-            .child(Self::separator(theme))
-            .child(Self::render_new_chat_item(entity, theme, chat_picker_open))
+            .child(Self::separator())
+            .child(Self::render_new_chat_item(
+                entity,
+                theme,
+                &bezel_theme,
+                painter,
+                chat_picker_open,
+            ))
             .when(chat_picker_open, |this| this.child(chat_agent_menu));
 
         let menu = menu.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)));
@@ -769,6 +795,9 @@ impl Render for TabBar {
             .text_size(px(14.0))
             .text_color(theme.text_faint)
             .hover(|style| style.bg(theme.element_hover))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, _| {
+                this.menu_open.note_trigger_press();
+            }))
             // Swallowing mouse-down here would stop GPUI ever pairing it
             // with the mouse-up into a click, so the menu never opened.
             // Stop propagation inside the click instead.
@@ -813,22 +842,17 @@ impl Render for TabBar {
             .child(IconElement::new(Icon::Plus, IconSize::Small).text_color(theme.text));
 
         if menu_open {
-            new_tab_button = new_tab_button.child(
-                deferred(
-                    anchored()
-                        .anchor(Anchor::TopLeft)
-                        .position(
-                            self.anchor_bounds
-                                .get()
-                                .map(|bounds| bounds.corner(Anchor::BottomLeft))
-                                .unwrap_or_default(),
-                        )
-                        .offset(point(px(6.0), px(3.0)))
-                        .snap_to_window_with_margin(px(8.0))
-                        .child(menu),
-                )
-                .priority(1),
-            );
+            let anchor = self
+                .anchor_bounds
+                .get()
+                .map(|bounds| bounds.corner(Anchor::BottomLeft))
+                .unwrap_or_default();
+            new_tab_button = new_tab_button.child(popover::menu_at(
+                "new-tab-menu-layer",
+                point(anchor.x + px(6.0), anchor.y + px(3.0)),
+                menu.into_any_element(),
+                menu_closing,
+            ));
         }
 
         div()
@@ -1441,6 +1465,7 @@ mod tests {
                 self.items.clone(),
                 Rc::new(move |action, _, _| actions.borrow_mut().push(action)),
                 *Theme::get(_cx),
+                _cx,
             )
         }
     }

@@ -234,6 +234,19 @@ pub struct ThemeColors {
     pub danger_muted: Rgba,
 }
 
+fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::theme::Theme {
+    bezel::theme::Theme::branded(
+        &bezel::theme::Brand {
+            tint: base_color.tint(),
+            ..Default::default()
+        },
+        match appearance {
+            Appearance::Dark => bezel::theme::Appearance::Dark,
+            Appearance::Light => bezel::theme::Appearance::Light,
+        },
+    )
+}
+
 impl ThemeColors {
     /// Picks the dark or light variant. Call sites pass dark first, then
     /// light, matching the "dark / light" order every palette table in the
@@ -256,16 +269,7 @@ impl ThemeColors {
         // and this function is called for both appearances in one process.
         // `branded` is the same reason the tint arrives as a parameter: a
         // brand global would put back exactly the problem those helpers have.
-        let bezel = bezel::theme::Theme::branded(
-            &bezel::theme::Brand {
-                tint: base.tint(),
-                ..Default::default()
-            },
-            match appearance {
-                Appearance::Dark => bezel::theme::Appearance::Dark,
-                Appearance::Light => bezel::theme::Appearance::Light,
-            },
-        );
+        let bezel = bezel_theme_for(base, appearance);
         // Sirio's brand coral. Part measured, part chosen, and the seam between
         // the two is the whole point — see `docs/THEME-PROVENANCE.md`.
         //
@@ -1202,6 +1206,19 @@ impl Theme {
         });
     }
 
+    /// The bezel theme this Sirio theme is derived from — the same
+    /// `Theme::branded` call used to build Sirio's adaptive colors.
+    pub fn to_bezel_theme(&self) -> bezel::theme::Theme {
+        bezel_theme_for(self.base_color, self.appearance)
+    }
+
+    /// Installs this theme's branded palette into bezel's registry and keeps
+    /// bezel's context-free appearance mirror in sync.
+    pub fn install_into_bezel(&self, cx: &mut bezel::gpui::App) {
+        bezel::theme::Theme::install_custom(self.to_bezel_theme(), cx);
+        self.sync_appearance();
+    }
+
     pub fn install(mode: ThemeMode, cx: &mut App) {
         Self::resolve_font_families(cx);
         // Both the base colour and the translucency flag are recovered from
@@ -1216,7 +1233,7 @@ impl Theme {
         #[cfg(not(target_os = "linux"))]
         let theme = Self::for_mode(mode, cx.window_appearance(), base);
         let theme = theme.with_translucency(translucency);
-        theme.sync_appearance();
+        theme.install_into_bezel(cx);
         cx.set_global(theme);
     }
 
@@ -1287,7 +1304,7 @@ impl Theme {
         #[cfg(not(target_os = "linux"))]
         let theme = Self::for_mode(mode, cx.window_appearance(), base);
         let theme = theme.with_translucency(translucency);
-        theme.sync_appearance();
+        theme.install_into_bezel(cx);
         cx.set_global(theme);
     }
 
@@ -1326,7 +1343,7 @@ impl Theme {
                         cx.global::<Theme>().base_color,
                     )
                     .with_translucency(cx.global::<Theme>().translucency_enabled);
-                    next.sync_appearance();
+                    next.install_into_bezel(cx);
                     cx.set_global(next);
                 }
             });
@@ -2939,4 +2956,3 @@ mod agent_brand_tests {
         }
     }
 }
-
