@@ -2706,11 +2706,7 @@ impl Sidebar {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(if focused {
-                theme.text
-            } else {
-                theme.border
-            })
+            .border_color(if focused { theme.text } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
             .text_color(if value.is_empty() {
@@ -2800,7 +2796,11 @@ impl Sidebar {
                 .items_center()
                 .justify_between()
                 .text_size(theme.typography.footnote)
-                .text_color(if enabled { theme.text } else { theme.text_faint })
+                .text_color(if enabled {
+                    theme.text
+                } else {
+                    theme.text_faint
+                })
                 .when(enabled, |this| {
                     this.hover(|style| style.bg(theme.element_hover))
                 });
@@ -3155,8 +3155,7 @@ impl Sidebar {
                         });
                     })
                     .child(
-                        IconElement::new(Icon::Close, IconSize::XSmall)
-                            .text_color(theme.diff_del),
+                        IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.diff_del),
                     )
                     .child("Remove Project"),
             )
@@ -3538,11 +3537,7 @@ impl Sidebar {
             }
             RowKind::Worktree | RowKind::NewWorktree => theme.text_faint,
         };
-        let text_color = if selected {
-            theme.text
-        } else {
-            theme.text
-        };
+        let text_color = if selected { theme.text } else { theme.text };
         let entity = entity.clone();
         let remove_entity = entity.clone();
         let click_entity = entity.clone();
@@ -3702,7 +3697,8 @@ impl Sidebar {
                                 .invisible()
                                 .group_hover(hover_group.clone(), |element| element.visible())
                                 .child(
-                                    IconElement::new(icon, IconSize::XSmall).text_color(theme.text_faint),
+                                    IconElement::new(icon, IconSize::XSmall)
+                                        .text_color(theme.text_faint),
                                 )
                                 .into_any_element(),
                             None => div().into_any_element(),
@@ -3849,7 +3845,8 @@ impl Sidebar {
                             });
                         })
                         .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text_faint),
+                            IconElement::new(Icon::Close, IconSize::XSmall)
+                                .text_color(theme.text_faint),
                         ),
                 )
             })
@@ -5999,7 +5996,10 @@ mod tests {
     fn a_tab_row_without_an_agent_never_borrows_the_needs_input_amber() {
         for theme in [Theme::dark(), Theme::light()] {
             let plain = Sidebar::tab_row_icon_color(None, false, theme);
-            assert_eq!(plain, theme.text_faint, "a tab with no agent takes the row grey");
+            assert_eq!(
+                plain, theme.text_faint,
+                "a tab with no agent takes the row grey"
+            );
             assert_ne!(
                 plain, theme.warning,
                 "an idle tab must not wear the colour of one waiting on an answer"

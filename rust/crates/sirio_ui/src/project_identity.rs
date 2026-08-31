@@ -698,11 +698,7 @@ impl ProjectIconPicker {
                     .items_center()
                     .justify_center()
                     .border_2()
-                    .border_color(if active {
-                        theme.text
-                    } else {
-                        theme.border
-                    })
+                    .border_color(if active { theme.text } else { theme.border })
                     .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         glyph_entity.update(cx, |picker, cx| picker.select_glyph(glyph, cx));
@@ -937,9 +933,7 @@ impl ProjectIconPicker {
                             })
                             .child(
                                 div()
-                                    .debug_selector(|| {
-                                        "project-icon-emoji-grid-caret".into()
-                                    })
+                                    .debug_selector(|| "project-icon-emoji-grid-caret".into())
                                     .child(caret::bar(
                                         px(14.0),
                                         theme.text,
@@ -1744,9 +1738,7 @@ mod tests {
     /// `on_*_key`, and not one of them drew an insertion bar — across all
     /// three modes. The caret follows focus, so exactly one is ever lit.
     #[gpui::test]
-    async fn every_identity_text_field_draws_a_caret_while_it_holds_focus(
-        cx: &mut TestAppContext,
-    ) {
+    async fn every_identity_text_field_draws_a_caret_while_it_holds_focus(cx: &mut TestAppContext) {
         let (picker, _captured, cx) = picker_view_with_capture(cx);
         picker.update(cx, |picker, cx| picker.set_mode(1, cx));
         refresh_frame(cx);

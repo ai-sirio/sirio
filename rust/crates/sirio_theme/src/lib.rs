@@ -1877,12 +1877,7 @@ mod tests {
         let light = Theme::light();
         expect_color(
             dark.solid,
-            (
-                light.surface.r,
-                light.surface.g,
-                light.surface.b,
-                1.0,
-            ),
+            (light.surface.r, light.surface.g, light.surface.b, 1.0),
         );
         expect_color(
             light.solid,
@@ -1892,10 +1887,7 @@ mod tests {
             dark.on_solid,
             (light.text.r, light.text.g, light.text.b, 1.0),
         );
-        expect_color(
-            light.on_solid,
-            (dark.text.r, dark.text.g, dark.text.b, 1.0),
-        );
+        expect_color(light.on_solid, (dark.text.r, dark.text.g, dark.text.b, 1.0));
     }
 
     /// Selected text stays readable through its own selection wash.
@@ -2434,15 +2426,15 @@ mod tests {
             let translucent = base.with_translucency(true);
 
             assert!(translucent.translucency_enabled);
+            assert_eq!(translucent.surface, softened(base.surface, opacity));
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface, translucent.surface);
             assert_eq!(
-                translucent.surface,
-                softened(base.surface, opacity)
+                translucent.surface_raised,
+                softened(base.surface_raised, opacity)
             );
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface_raised, softened(base.surface_raised, opacity));
             assert_eq!(translucent.surface_raised, translucent.surface_raised);
             assert_eq!(translucent.input_bg, softened(base.input_bg, opacity));
             assert_eq!(
@@ -2454,10 +2446,7 @@ mod tests {
                 translucent.frame_surface, base.frame_surface,
                 "the frame material is already translucent and is not faded twice"
             );
-            assert_eq!(
-                translucent.bg, base.bg,
-                "the opaque fallback stays opaque"
-            );
+            assert_eq!(translucent.bg, base.bg, "the opaque fallback stays opaque");
             assert_eq!(
                 translucent.border_opaque, base.border_opaque,
                 "borders stay crisp on a translucent panel"

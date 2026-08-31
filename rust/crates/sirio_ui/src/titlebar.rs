@@ -848,11 +848,7 @@ impl Render for Titlebar {
                     // the same neutral the title text beside it already uses,
                     // which also keeps this surface inside one palette instead
                     // of mixing the COSMIC roles with the shell's.
-                    div()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded(px(3.0))
-                        .bg(bar.on),
+                    div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(bar.on),
                 )
                 .child(div().text_color(bar.on).text_size(px(13.5)).child(title))
                 .children(subtitle.map(|subtitle| {
@@ -1739,7 +1735,10 @@ mod tests {
             ("close", close),
         ] {
             assert_eq!(bounds.size.width, caption.button_width, "{name} width");
-            assert_eq!(bounds.size.height, bar_height, "{name} fills the row height");
+            assert_eq!(
+                bounds.size.height, bar_height,
+                "{name} fills the row height"
+            );
         }
 
         assert!(

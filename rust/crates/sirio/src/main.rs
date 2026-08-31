@@ -49,7 +49,9 @@ use sirio_ui::{
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize},
     },
-    status_bar::{StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData},
+    status_bar::{
+        StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
+    },
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
@@ -482,16 +484,9 @@ enum AsyncScriptStart {
     NotApplicable,
 }
 
-fn browser_script_result(
-    method: &str,
-    verb: Option<&str>,
-    value: String,
-) -> Vec<(String, String)> {
+fn browser_script_result(method: &str, verb: Option<&str>, value: String) -> Vec<(String, String)> {
     if method == "browser.act" {
-        return vec![(
-            "verb".to_string(),
-            verb.unwrap_or_default().to_string(),
-        )];
+        return vec![("verb".to_string(), verb.unwrap_or_default().to_string())];
     }
     let key = match method {
         "browser.console" => "messages",
@@ -4616,7 +4611,8 @@ impl SirioWorkspace {
         // flag gates the install). A Dev build has no interval and this
         // task exits immediately — the compiled channel already surfaced
         // `Disabled` in the initial state.
-        let Some(interval) = sirio_update::poll_interval(sirio_control::ReleaseChannel::RELEASE_CHANNEL)
+        let Some(interval) =
+            sirio_update::poll_interval(sirio_control::ReleaseChannel::RELEASE_CHANNEL)
         else {
             return;
         };
@@ -4629,9 +4625,7 @@ impl SirioWorkspace {
                     // Opt-out: no polling, no network. Re-check the flag
                     // cheaply; `next_due` is left untouched so re-enabling
                     // makes the next tick due immediately.
-                    cx.background_executor()
-                        .timer(Duration::from_secs(1))
-                        .await;
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     continue;
                 }
                 let now = Instant::now();
@@ -4671,10 +4665,7 @@ impl SirioWorkspace {
                 if !update_wake.swap(false, Ordering::SeqCst) {
                     continue;
                 }
-                let outcome = update_outcomes
-                    .lock()
-                    .ok()
-                    .and_then(|mut slot| slot.take());
+                let outcome = update_outcomes.lock().ok().and_then(|mut slot| slot.take());
                 let Some(outcome) = outcome else {
                     continue;
                 };
@@ -4701,11 +4692,7 @@ impl SirioWorkspace {
     /// both surfaces (§4.1: check results propagate live). An outcome that
     /// arrives after the user opted out mid-flight is dropped: disabling
     /// updates must suppress downloads and indicator changes immediately.
-    fn apply_update_outcome(
-        &mut self,
-        outcome: UpdateHostOutcome,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_update_outcome(&mut self, outcome: UpdateHostOutcome, cx: &mut Context<Self>) {
         if !self.updates_enabled.load(Ordering::SeqCst) {
             return;
         }
@@ -4726,21 +4713,14 @@ impl SirioWorkspace {
                     | Err(_) => {}
                 }
                 let previous = self.live_update_state.clone();
-                let checked_at = self
-                    .updater
-                    .as_ref()
-                    .and_then(|updater| {
-                        updater
-                            .lock()
-                            .ok()
-                            .and_then(|updater| updater.last_checked_at())
-                    });
-                let next = ui_update_state_from_check(
-                    &previous,
-                    result,
-                    checked_at,
-                    SystemTime::now(),
-                );
+                let checked_at = self.updater.as_ref().and_then(|updater| {
+                    updater
+                        .lock()
+                        .ok()
+                        .and_then(|updater| updater.last_checked_at())
+                });
+                let next =
+                    ui_update_state_from_check(&previous, result, checked_at, SystemTime::now());
                 self.push_update_state(next, cx);
             }
             UpdateHostOutcome::Download(Ok(sirio_update::DownloadResult::Ready(verified))) => {
@@ -4772,16 +4752,12 @@ impl SirioWorkspace {
                 // and the staged file stays put for a same-version retry.
                 self.last_verified = Some(update.clone());
                 self.show_toast(
-                    format!(
-                        "Sirio {} applied — relaunch to use it",
-                        update.version
-                    ),
+                    format!("Sirio {} applied — relaunch to use it", update.version),
                     cx,
                 );
             }
             UpdateHostOutcome::Apply {
-                result: Err(error),
-                ..
+                result: Err(error), ..
             } => {
                 let mut next = self.live_update_state.clone();
                 next.status = UiUpdateStatus::Failed {
@@ -4816,9 +4792,10 @@ impl SirioWorkspace {
                 cx.spawn(async move |_this, cx| {
                     let result = cx
                         .background_executor()
-                        .spawn({ let verified = verified.clone(); async move {
-                            sirio_apply::apply(&verified)
-                        } })
+                        .spawn({
+                            let verified = verified.clone();
+                            async move { sirio_apply::apply(&verified) }
+                        })
                         .await;
                     if let Ok(mut slot) = outcomes.lock() {
                         *slot = Some(UpdateHostOutcome::Apply {
@@ -8788,11 +8765,8 @@ impl SirioWorkspace {
         let reply = reply.clone();
         let started = browser.update(cx, |surface, _| {
             surface.evaluate_script_async(&script, move |value| {
-                let payload = browser_script_result(
-                    &method_for_callback,
-                    verb_payload.as_deref(),
-                    value,
-                );
+                let payload =
+                    browser_script_result(&method_for_callback, verb_payload.as_deref(), value);
                 let _ = reply.send(Ok(payload));
             })
         });
@@ -10514,11 +10488,7 @@ impl SirioWorkspace {
         let glyph_color = if icon.is_agent_mark() {
             agent.map_or(theme.text, |agent| agent.brand.color())
         } else if tab.kind == TabKind::AgentChat {
-            if is_file {
-                theme.file_link
-            } else {
-                theme.text
-            }
+            if is_file { theme.file_link } else { theme.text }
         } else {
             theme.text_faint
         };
@@ -10548,11 +10518,7 @@ impl SirioWorkspace {
             .overflow_hidden()
             .rounded_t(px(6.0))
             .text_size(px(13.0))
-            .text_color(if active {
-                theme.text
-            } else {
-                theme.text_muted
-            })
+            .text_color(if active { theme.text } else { theme.text_muted })
             .hover(|style| style.bg(theme.element_hover))
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
             // the same point sidebar.rs's own drag resets `pending_reorder`
@@ -11676,7 +11642,8 @@ impl SirioWorkspace {
                     });
                 })
                 .child(
-                    IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.text_faint),
+                    IconElement::new(Icon::ChevronDown, IconSize::XSmall)
+                        .text_color(theme.text_faint),
                 );
             tabs = tabs.child(overflow_button);
             if self.overflow_menu_open {
@@ -12858,11 +12825,7 @@ impl SirioWorkspace {
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
                     .text_color(if entry.is_enabled() {
-                        if active {
-                            theme.text
-                        } else {
-                            theme.text
-                        }
+                        if active { theme.text } else { theme.text }
                     } else {
                         theme.text_faint
                     })
@@ -13062,7 +13025,9 @@ impl SirioWorkspace {
                     None,
                     theme.text_muted,
                 ),
-                UpdateState::Installing => ("Installing update…".to_string(), None, theme.text_muted),
+                UpdateState::Installing => {
+                    ("Installing update…".to_string(), None, theme.text_muted)
+                }
                 UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.success),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
@@ -14711,9 +14676,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
 }
 
 fn format_update_check_age(now: SystemTime, checked_at: SystemTime) -> String {
-    let age = now
-        .duration_since(checked_at)
-        .unwrap_or(Duration::ZERO);
+    let age = now.duration_since(checked_at).unwrap_or(Duration::ZERO);
     if age < Duration::from_secs(60) {
         "just now".into()
     } else if age < Duration::from_secs(60 * 60) {
@@ -15117,8 +15080,7 @@ fn main() {
             accepted_release_keys(),
         )));
         let updates_enabled = Arc::new(AtomicBool::new(saved_settings.updates_enabled));
-        let update_outcomes =
-            Arc::new(Mutex::new(None::<UpdateHostOutcome>));
+        let update_outcomes = Arc::new(Mutex::new(None::<UpdateHostOutcome>));
         let update_wake = Arc::new(AtomicBool::new(false));
         // F-PERSIST-DB-06: the account-identity cache lives in the same
         // database file the session store already opened above.
@@ -15277,8 +15239,7 @@ fn main() {
                         .on_update_enabled_change({
                             let pending = pending_for_update_enabled.clone();
                             move |enabled| {
-                                let mut settings =
-                                    session_store_for_update_enabled.load_settings();
+                                let mut settings = session_store_for_update_enabled.load_settings();
                                 settings.updates_enabled = enabled;
                                 session_store_for_update_enabled.save_settings(&settings);
                                 // The live half (indicator, polling gate)
@@ -15990,10 +15951,7 @@ mod tests {
         let scratch_root = std::env::temp_dir()
             .canonicalize()
             .expect("canonicalize temp dir")
-            .join(format!(
-                "sirio-update-host-{}-{unique}",
-                std::process::id()
-            ));
+            .join(format!("sirio-update-host-{}-{unique}", std::process::id()));
         let working_directory = scratch_root.join("worktree");
         std::fs::create_dir_all(&working_directory).expect("create update host worktree");
         let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
@@ -18414,7 +18372,9 @@ mod tests {
             "and the bar is lit while the palette holds focus"
         );
 
-        cx.cx.executor().advance_clock(sirio_ui::caret::BLINK_INTERVAL);
+        cx.cx
+            .executor()
+            .advance_clock(sirio_ui::caret::BLINK_INTERVAL);
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
@@ -21685,9 +21645,10 @@ mod tests {
         // `xdg_data_home_for` to accept it (Windows has no `/` root), so
         // point it at the temp dir rather than a unix-only literal.
         let root = std::env::temp_dir();
-        let environment = BTreeMap::from([
-            ("XDG_DATA_HOME".to_string(), root.to_string_lossy().into_owned()),
-        ]);
+        let environment = BTreeMap::from([(
+            "XDG_DATA_HOME".to_string(),
+            root.to_string_lossy().into_owned(),
+        )]);
         assert_eq!(
             update_staging_dir(&environment),
             root.join("Sirio").join("updates")
@@ -21697,9 +21658,7 @@ mod tests {
     /// A host check outcome reaches both surfaces that render it: the
     /// status-bar indicator and the General settings detail (§4.1).
     #[gpui::test]
-    async fn host_check_outcome_propagates_to_status_bar_and_settings(
-        cx: &mut TestAppContext,
-    ) {
+    async fn host_check_outcome_propagates_to_status_bar_and_settings(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -21716,41 +21675,39 @@ mod tests {
             notes: "Fixes".into(),
             artifact: test_manifest_artifact(),
         };
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(
-                    UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Available(
-                        available.clone(),
-                    ))),
-                    cx,
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Available(
+                    available.clone(),
+                ))),
+                cx,
+            );
+        });
 
-        workspace
-            .read_with(&cx.cx, |workspace, app| {
-                assert_eq!(
-                    workspace.live_update_state.status,
-                    UiUpdateStatus::Available {
-                        version: "0.7.0".into(),
-                        notes: "Fixes".into(),
-                    }
-                );
-                assert_eq!(
-                    workspace.status_bar.read(app).update_state().status,
-                    UiUpdateStatus::Available {
-                        version: "0.7.0".into(),
-                        notes: "Fixes".into(),
-                    }
-                );
-                assert_eq!(
-                    workspace.settings.read(app).update_state().status,
-                    UiUpdateStatus::Available {
-                        version: "0.7.0".into(),
-                        notes: "Fixes".into(),
-                    }
-                );
-                assert!(workspace.last_available.is_some());
-            });
+        workspace.read_with(&cx.cx, |workspace, app| {
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                }
+            );
+            assert_eq!(
+                workspace.status_bar.read(app).update_state().status,
+                UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                }
+            );
+            assert_eq!(
+                workspace.settings.read(app).update_state().status,
+                UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                }
+            );
+            assert!(workspace.last_available.is_some());
+        });
     }
 
     /// Opt-out is a real off: the shared flag flips (stopping the poll
@@ -21758,9 +21715,7 @@ mod tests {
     /// and an outcome still in flight when the toggle lands is dropped
     /// rather than applied (§7.2).
     #[gpui::test]
-    async fn host_opt_out_hides_indicator_and_drops_in_flight_outcomes(
-        cx: &mut TestAppContext,
-    ) {
+    async fn host_opt_out_hides_indicator_and_drops_in_flight_outcomes(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -21772,38 +21727,32 @@ mod tests {
                 .expect("workspace root")
         });
 
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.set_updates_enabled(false, cx);
-                assert!(
-                    !workspace.updates_enabled.load(AtomicOrdering::SeqCst),
-                    "the poll loop's shared flag flips immediately"
-                );
-            });
-        workspace
-            .read_with(&cx.cx, |workspace, app| {
-                assert!(!workspace.live_update_state.enabled);
-                assert!(
-                    !workspace.status_bar.read(app).update_state().enabled,
-                    "the indicator surface stops drawing"
-                );
-                assert!(!workspace.settings.read(app).update_state().enabled);
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_updates_enabled(false, cx);
+            assert!(
+                !workspace.updates_enabled.load(AtomicOrdering::SeqCst),
+                "the poll loop's shared flag flips immediately"
+            );
+        });
+        workspace.read_with(&cx.cx, |workspace, app| {
+            assert!(!workspace.live_update_state.enabled);
+            assert!(
+                !workspace.status_bar.read(app).update_state().enabled,
+                "the indicator surface stops drawing"
+            );
+            assert!(!workspace.settings.read(app).update_state().enabled);
+        });
 
         // A check that finished just as the toggle landed must not change
         // any surface: updates are off, so nothing may repaint around them.
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(
-                    UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::UpToDate)),
-                    cx,
-                );
-                assert!(!workspace.live_update_state.enabled);
-                assert_eq!(
-                    workspace.live_update_state.status,
-                    UiUpdateStatus::NotDue
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::UpToDate)),
+                cx,
+            );
+            assert!(!workspace.live_update_state.enabled);
+            assert_eq!(workspace.live_update_state.status, UiUpdateStatus::NotDue);
+        });
     }
 
     /// The apply pipeline: a verified artifact is applied off the UI
@@ -21812,9 +21761,7 @@ mod tests {
     /// `InstallNotFound` — the one outcome this fixture can produce without
     /// touching a real install.
     #[gpui::test]
-    async fn host_apply_runs_verified_update_and_reports_the_outcome(
-        cx: &mut TestAppContext,
-    ) {
+    async fn host_apply_runs_verified_update_and_reports_the_outcome(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -21832,56 +21779,50 @@ mod tests {
             path: PathBuf::from("/tmp/sirio-update-0.7.0"),
             platform: "linux-x86_64".into(),
         };
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(
-                    UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Ready(
-                        verified.clone(),
-                    ))),
-                    cx,
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Ready(verified.clone()))),
+                cx,
+            );
+        });
 
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.begin_update_apply(cx);
-                assert_eq!(
-                    workspace.live_update_state.status,
-                    UiUpdateStatus::Checking,
-                    "the surfaces show activity while the pipeline runs"
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.begin_update_apply(cx);
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::Checking,
+                "the surfaces show activity while the pipeline runs"
+            );
+        });
         cx.run_until_parked();
 
         // No drain loop runs on a Dev-channel test build (the poll task
         // exits at attach), so the apply outcome waits in the shared slot
         // for the real process's loop. Drain it by hand, as that loop does.
-        let outcome = workspace
-            .read_with(&cx.cx, |workspace, _| {
-                workspace
-                    .update_outcomes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                    .expect("the apply task parked its outcome")
-            });
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(outcome, cx);
-                assert!(
-                    matches!(
-                        workspace.live_update_state.status,
-                        UiUpdateStatus::Failed { ref message }
-                            if message.contains("install directory the updater recognizes")
-                    ),
-                    "a refused apply reports itself: {:?}",
-                    workspace.live_update_state.status
-                );
-                assert!(
-                    workspace.toast.is_some(),
-                    "the refused apply raises a dismissible toast"
-                );
-            });
+        let outcome = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .update_outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("the apply task parked its outcome")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(outcome, cx);
+            assert!(
+                matches!(
+                    workspace.live_update_state.status,
+                    UiUpdateStatus::Failed { ref message }
+                        if message.contains("install directory the updater recognizes")
+                ),
+                "a refused apply reports itself: {:?}",
+                workspace.live_update_state.status
+            );
+            assert!(
+                workspace.toast.is_some(),
+                "the refused apply raises a dismissible toast"
+            );
+        });
     }
 
     #[test]
@@ -26615,15 +26556,22 @@ mod tests {
         // Newlines and runs of spaces collapse -- a pasted question must not
         // become a multi-line tab.
         assert_eq!(
-            title_from_prompt("  fix   the
+            title_from_prompt(
+                "  fix   the
 
-browser  profile  "),
+browser  profile  "
+            ),
             Some("fix the browser profile".into())
         );
 
         // Nothing to name from leaves the existing title alone.
-        assert_eq!(title_from_prompt("   
-  "), None);
+        assert_eq!(
+            title_from_prompt(
+                "   
+  "
+            ),
+            None
+        );
         assert_eq!(title_from_prompt(""), None);
     }
 

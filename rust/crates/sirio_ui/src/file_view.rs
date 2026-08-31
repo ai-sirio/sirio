@@ -922,11 +922,7 @@ fn render_mode_option(
         .py(px(2.0))
         .rounded(theme.radii.chip)
         .text_size(theme.typography.caption2)
-        .text_color(if active {
-            theme.text
-        } else {
-            theme.text_faint
-        })
+        .text_color(if active { theme.text } else { theme.text_faint })
         .when(active, |this| this.bg(theme.element_active))
         .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {

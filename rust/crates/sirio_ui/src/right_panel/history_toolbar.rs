@@ -230,7 +230,11 @@ pub(super) fn render_filter_chip(
         .py(px(3.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if active > 0 { theme.text } else { theme.text_faint })
+        .text_color(if active > 0 {
+            theme.text
+        } else {
+            theme.text_faint
+        })
         .bg(if open {
             theme.element_hover
         } else {
@@ -452,7 +456,11 @@ pub(super) fn render_collapsed_chips(
         .py(px(3.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if active > 0 { theme.text } else { theme.text_faint })
+        .text_color(if active > 0 {
+            theme.text
+        } else {
+            theme.text_faint
+        })
         .bg(if open {
             theme.element_hover
         } else {

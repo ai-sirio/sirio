@@ -424,7 +424,11 @@ impl Render for CloneForm {
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if can_submit { theme.text } else { theme.text_faint })
+                    .text_color(if can_submit {
+                        theme.text
+                    } else {
+                        theme.text_faint
+                    })
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
             )
@@ -764,7 +768,11 @@ impl Render for CreateForm {
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if can_submit { theme.text } else { theme.text_faint })
+                    .text_color(if can_submit {
+                        theme.text
+                    } else {
+                        theme.text_faint
+                    })
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
             )
