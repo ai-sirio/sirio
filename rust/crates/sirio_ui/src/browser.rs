@@ -2081,7 +2081,11 @@ fn browser_button_element(
         .justify_center()
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if enabled { theme.text } else { theme.text_faint })
+        .text_color(if enabled {
+            theme.text
+        } else {
+            theme.text_faint
+        })
         .when(enabled, |this| {
             this.hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| callback(cx))
@@ -2349,7 +2353,7 @@ impl Element for AddressTextElement {
                         line_origin.y + line_height,
                     ),
                 ),
-                self.theme.colors.element_active,
+                self.theme.element_active,
             ))
         } else {
             None
