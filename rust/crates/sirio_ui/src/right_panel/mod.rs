@@ -63,9 +63,9 @@ pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
     match status {
         ActivityStatus::Idle => theme.text_faint,
         ActivityStatus::Running => theme.text,
-        ActivityStatus::NeedsInput => theme.tab_needs_input,
-        ActivityStatus::Done => theme.tab_done,
-        ActivityStatus::Error => theme.tab_error,
+        ActivityStatus::NeedsInput => theme.warning,
+        ActivityStatus::Done => theme.success,
+        ActivityStatus::Error => theme.danger,
     }
 }
 
@@ -435,8 +435,8 @@ impl RightPanel {
                     .then_some(badge)
                     .flatten()
                     .map(|status| match status {
-                        ActivityStatus::Error => theme.tab_error,
-                        _ => theme.tab_needs_input,
+                        ActivityStatus::Error => theme.danger,
+                        _ => theme.warning,
                     });
                 div()
                     .id(view.element_id())

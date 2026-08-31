@@ -4125,7 +4125,7 @@ impl gpui::Render for TerminalView {
                                 .py(px(4.0))
                                 .bg(theme.surface_raised)
                                 .text_size(px(12.0))
-                                .text_color(theme.tab_needs_input)
+                                .text_color(theme.warning)
                                 .child("Running"),
                         )
                     } else if let Some(label) = self.exit_status.map(TerminalExitStatus::label) {
@@ -4187,7 +4187,7 @@ impl gpui::Render for TerminalView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.tab_needs_input)
+                            .text_color(theme.warning)
                             .child("Terminal failed to start"),
                     )
                     .child(

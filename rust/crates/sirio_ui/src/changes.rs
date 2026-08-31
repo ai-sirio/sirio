@@ -1394,8 +1394,8 @@ impl ChangesTab {
                     .text_ellipsis()
                     .child(path.to_string_lossy().to_string()),
             )
-            .child(div().text_color(theme.diff_deletion).child(deletions))
-            .child(div().text_color(theme.diff_addition).child(additions))
+            .child(div().text_color(theme.diff_del).child(deletions))
+            .child(div().text_color(theme.diff_add).child(additions))
             .when(expanded, |this| {
                 this.child(
                     div()
@@ -1545,8 +1545,8 @@ impl ChangesTab {
     ) -> impl IntoElement {
         let (background, marker_color, marker) = match line.origin {
             DiffOrigin::Context => (theme.surface, theme.text_faint, " "),
-            DiffOrigin::Addition => (theme.diff_addition_background, theme.diff_addition, "+"),
-            DiffOrigin::Deletion => (theme.diff_deletion_background, theme.diff_deletion, "−"),
+            DiffOrigin::Addition => (theme.diff_add_bg, theme.diff_add, "+"),
+            DiffOrigin::Deletion => (theme.diff_del_bg, theme.diff_del, "−"),
         };
         div()
             .id(format!(
@@ -1856,8 +1856,8 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
     };
     let background = match line.origin {
         DiffOrigin::Context => theme.surface,
-        DiffOrigin::Addition => theme.diff_addition_background,
-        DiffOrigin::Deletion => theme.diff_deletion_background,
+        DiffOrigin::Addition => theme.diff_add_bg,
+        DiffOrigin::Deletion => theme.diff_del_bg,
     };
     let number = if old {
         line.old_line_number
@@ -2065,7 +2065,7 @@ impl ChangesTab {
                 div()
                     .max_w(px(560.0))
                     .text_size(theme.typography.headline)
-                    .text_color(theme.git_conflict)
+                    .text_color(theme.danger)
                     .child(format!("Git is unavailable: {error}")),
             )
             .child(action_text_button(
@@ -2275,7 +2275,7 @@ where
         .rounded(px(6.0))
         .text_size(px(12.5))
         .text_color(theme.text_muted)
-        .hover(|style| style.text_color(theme.git_conflict))
+        .hover(|style| style.text_color(theme.danger))
         .tooltip(controls::text_tooltip(tooltip, theme))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -2305,7 +2305,7 @@ where
         .rounded(px(6.0))
         .text_size(px(12.5))
         .text_color(theme.text_muted)
-        .hover(|style| style.text_color(theme.git_conflict))
+        .hover(|style| style.text_color(theme.danger))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx);
@@ -2744,13 +2744,13 @@ mod tests {
         );
         assert_eq!(
             status_color(&entry, theme),
-            theme.git_staged,
+            theme.success,
             "a staged-then-modified file reads as staged, matching Swift's \
              GitStatusStyle.color and the Files tree marker"
         );
         assert_ne!(
             status_color(&entry, theme),
-            theme.git_modified,
+            theme.warning,
             "the pre-fix order returned git_modified here"
         );
     }

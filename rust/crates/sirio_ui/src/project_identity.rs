@@ -818,7 +818,7 @@ impl ProjectIconPicker {
                     .id("project-icon-emoji-error")
                     .debug_selector(|| "project-icon-emoji-error".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .child(text!(id = "project-icon-emoji-error-text", error.clone())),
             );
         }
@@ -1007,7 +1007,7 @@ impl ProjectIconPicker {
                     .id("project-icon-png-error")
                     .debug_selector(|| "project-icon-png-error".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .child(text!(id = "project-icon-png-error-text", error.clone())),
             );
         }
@@ -1149,7 +1149,7 @@ impl ProjectIconPicker {
                     .id(error_id.clone())
                     .debug_selector(move || error_id.clone())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .child(message.clone()),
             );
         }

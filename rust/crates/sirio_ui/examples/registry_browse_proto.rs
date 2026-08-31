@@ -368,7 +368,7 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
             theme.text_muted
         })
         .bg(if danger {
-            theme.tab_error
+            theme.danger
         } else {
             theme.surface_raised
         })
@@ -759,9 +759,9 @@ impl RegistryBrowseProto {
                 div()
                     .text_size(theme.typography.caption2)
                     .text_color(if marker == "failed" {
-                        theme.tab_error
+                        theme.danger
                     } else {
-                        theme.tab_needs_input
+                        theme.warning
                     })
                     .child(marker),
             );

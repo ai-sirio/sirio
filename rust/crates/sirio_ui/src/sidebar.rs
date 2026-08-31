@@ -45,7 +45,7 @@ use crate::right_panel::ActivityStatus;
 /// The reference has a single `AgentIcon` view used by the worktree badge,
 /// the sidebar tab row and the tab bar alike, so a mark looks the same
 /// wherever it appears. This port had drifted into three different tints for
-/// the same mark — `theme.text` in the tab bar, `theme.tab_needs_input` on
+/// the same mark — `theme.text` in the tab bar, `theme.warning` on
 /// sidebar tab rows, `theme.text` in the worktree badge — and the
 /// last of those is Claude's own brand coral, so every agent's mark was
 /// wearing Claude's colour. Pairing the icon with its brand at the type level
@@ -112,9 +112,9 @@ impl RowStatusGlyph {
             Some(ActivityStatus::Running) => {
                 Self::Running(brand.unwrap_or(AgentBrandColor::Unknown).color())
             }
-            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.tab_needs_input),
-            Some(ActivityStatus::Done) => Self::Dot(theme.tab_done),
-            Some(ActivityStatus::Error) => Self::Dot(theme.tab_error),
+            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.warning),
+            Some(ActivityStatus::Done) => Self::Dot(theme.success),
+            Some(ActivityStatus::Error) => Self::Dot(theme.danger),
         }
     }
 }
@@ -3147,7 +3147,7 @@ impl Sidebar {
                     .gap(px(6.0))
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, window, cx| {
                         remove_entity.update(cx, |sidebar, cx| {
@@ -3156,7 +3156,7 @@ impl Sidebar {
                     })
                     .child(
                         IconElement::new(Icon::Close, IconSize::XSmall)
-                            .text_color(theme.diff_deletion),
+                            .text_color(theme.diff_del),
                     )
                     .child("Remove Project"),
             )
@@ -4151,7 +4151,7 @@ impl Render for Sidebar {
                         .px(px(FILTER_LEFT_INSET))
                         .py(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.diff_deletion)
+                        .text_color(theme.diff_del)
                         .child(notice.unwrap_or_default()),
                 )
             })
@@ -4268,7 +4268,7 @@ impl Render for Sidebar {
                                     this.child(
                                         div()
                                             .text_size(theme.typography.footnote)
-                                            .text_color(theme.diff_deletion)
+                                            .text_color(theme.diff_del)
                                             .child(prompt.error.clone().unwrap_or_default()),
                                     )
                                 })
@@ -5952,7 +5952,7 @@ mod tests {
     ///
     /// 1. A **running** Claude worktree resolved its tint through the
     ///    eight-token settings palette, where Claude was `Amber` — that is
-    ///    `theme.tab_needs_input` itself. Running and needs-input painted the
+    ///    `theme.warning` itself. Running and needs-input painted the
     ///    same `#E0B36A`, leaving a 3x3 dot cluster versus a 6x6 dot as the
     ///    only difference. The reference has no such collision: needs-input
     ///    is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's
@@ -6001,7 +6001,7 @@ mod tests {
             let plain = Sidebar::tab_row_icon_color(None, false, theme);
             assert_eq!(plain, theme.text_faint, "a tab with no agent takes the row grey");
             assert_ne!(
-                plain, theme.tab_needs_input,
+                plain, theme.warning,
                 "an idle tab must not wear the colour of one waiting on an answer"
             );
 
@@ -6049,15 +6049,15 @@ mod tests {
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
-            RowStatusGlyph::Dot(theme.tab_needs_input)
+            RowStatusGlyph::Dot(theme.warning)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Done), None, theme),
-            RowStatusGlyph::Dot(theme.tab_done)
+            RowStatusGlyph::Dot(theme.success)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Error), None, theme),
-            RowStatusGlyph::Dot(theme.tab_error)
+            RowStatusGlyph::Dot(theme.danger)
         );
         // Running is a different *shape*, and the agent id reaches the row
         // only as its tint.

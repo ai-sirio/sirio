@@ -137,12 +137,14 @@ pub struct ThemeColors {
     /// dark mode, retained independently of the shell panel hierarchy. Kept
     /// under its own name because bezel has no terminal-surface concept.
     pub terminal_surface: Rgba,
-    /// Waiting-for-input status.
-    pub tab_needs_input: Rgba,
-    /// Completed status.
-    pub tab_done: Rgba,
-    /// Errored status.
-    pub tab_error: Rgba,
+    /// Waiting-for-input status, a modified file, and the rail down a
+    /// question card — the one card kind that is waiting on the reader, and
+    /// so the one that keeps its colour.
+    pub warning: Rgba,
+    /// Completed status, and a staged file.
+    pub success: Rgba,
+    /// Errored status, and a conflicted file.
+    pub danger: Rgba,
     /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
     /// so it reads as a seam rather than a line.
     pub border: Rgba,
@@ -166,32 +168,19 @@ pub struct ThemeColors {
     pub text_faint: Rgba,
     /// Tree guide stroke, including its source alpha.
     pub tree_guide: Rgba,
-    /// Staged-file status color — the success hue.
-    pub git_staged: Rgba,
-    /// Modified-file status color — the warning hue.
-    pub git_modified: Rgba,
     /// Untracked-file status color — the gauge blue.
     pub git_untracked: Rgba,
-    /// Conflict-file status color — the danger hue.
-    pub git_conflict: Rgba,
     /// Addition diff accent — the success hue.
-    pub diff_addition: Rgba,
+    pub diff_add: Rgba,
     /// Addition diff background — translucent success wash.
-    pub diff_addition_background: Rgba,
+    pub diff_add_bg: Rgba,
     /// Deletion diff accent — the danger hue.
-    pub diff_deletion: Rgba,
+    pub diff_del: Rgba,
     /// Deletion diff background — translucent danger wash.
-    pub diff_deletion_background: Rgba,
+    pub diff_del_bg: Rgba,
     /// Clickable file-link color — the gauge blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
-    /// Question-card rail — the warning hue. The one card kind that is waiting
-    /// on the reader, and so the one that keeps its colour. Every other card
-    /// kind draws [`ThemeColors::border_strong`]: a card's kind is already
-    /// spelled by its icon and title, so the rail only has to separate the
-    /// card from the transcript.
-    pub rail_question: Rgba,
-
     // ── Role tokens: what a value does, rather than who consumes it ───────
     /// Floating cards, popovers, tooltips, the composer and primary pills: a
     /// step *above* the surface.
@@ -245,7 +234,7 @@ pub struct ThemeColors {
     /// Star/favorite amber.
     pub favorite: Rgba,
     /// Soft danger fill (stop button hover).
-    pub danger_soft: Rgba,
+    pub danger_muted: Rgba,
 }
 
 impl ThemeColors {
@@ -398,27 +387,23 @@ impl ThemeColors {
             surface: panel_surface,
             border_opaque: panel_border,
             terminal_surface,
-            tab_needs_input: warning,
-            tab_done: success,
-            tab_error: danger,
+            warning,
+            success,
+            danger,
             border,
             element_hover: row_hover,
             text,
             text_muted,
             text_faint,
             tree_guide: veil(VEIL_MID, appearance),
-            git_staged: success,
-            git_modified: warning,
             git_untracked,
-            git_conflict: danger,
-            diff_addition: success,
             // The band under a diff line is the line's own colour turned down,
             // never a second green or a second red — see [`softened`].
-            diff_addition_background: softened(success, VEIL_MID),
-            diff_deletion: danger,
-            diff_deletion_background: softened(danger, VEIL_MID),
+            diff_add: success,
+            diff_add_bg: softened(success, VEIL_MID),
+            diff_del: danger,
+            diff_del_bg: softened(danger, VEIL_MID),
             file_link: gauge,
-            rail_question: warning,
             surface_raised: raised,
             input_bg: inset,
             overlay,
@@ -433,7 +418,7 @@ impl ThemeColors {
             solid: inverse,
             on_solid: on_inverse,
             favorite,
-            danger_soft,
+            danger_muted: danger_soft,
         }
     }
 }
@@ -1189,9 +1174,9 @@ impl Theme {
         let lanes = [
             self.text,
             self.git_untracked,
-            self.tab_done,
-            self.tab_needs_input,
-            self.tab_error,
+            self.success,
+            self.warning,
+            self.danger,
             self.favorite,
         ];
         lanes[index % lanes.len()]
@@ -1443,7 +1428,7 @@ fn appearance_from_color_scheme(scheme: ashpd::desktop::settings::ColorScheme) -
 ///
 /// **Why this exists at all.** The worktree row's running indicator used to
 /// take its tint from the eight-token `AgentAccentColor` picker enum, where
-/// Claude resolved to `Amber` — i.e. to `theme.tab_needs_input` itself. A
+/// Claude resolved to `Amber` — i.e. to `theme.warning` itself. A
 /// Claude worktree that was *running* therefore painted the byte-identical
 /// `#E0B36A` as a worktree that **needed input**, leaving a 3×3 triple dot
 /// and a 6×6 single dot as the only difference between two states a user has
@@ -1833,17 +1818,9 @@ mod tests {
     fn soft_fills_are_their_own_meanings_colour() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for (name, fill, parent) in [
-                ("danger_soft", theme.danger_soft, theme.diff_deletion),
-                (
-                    "diff_deletion_background",
-                    theme.diff_deletion_background,
-                    theme.diff_deletion,
-                ),
-                (
-                    "diff_addition_background",
-                    theme.diff_addition_background,
-                    theme.diff_addition,
-                ),
+                ("danger_muted", theme.danger_muted, theme.diff_del),
+                ("diff_del_bg", theme.diff_del_bg, theme.diff_del),
+                ("diff_add_bg", theme.diff_add_bg, theme.diff_add),
             ] {
                 assert!(
                     (fill.r - parent.r).abs() < 0.004
@@ -1877,7 +1854,7 @@ mod tests {
     fn favorite_is_the_warning_hue_at_full_chroma() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             let (star_hue, star_light) = hue_and_lightness(theme.favorite);
-            let (warn_hue, warn_light) = hue_and_lightness(theme.tab_needs_input);
+            let (warn_hue, warn_light) = hue_and_lightness(theme.warning);
             assert!(
                 (star_hue - warn_hue).abs() < 1.0,
                 "{label}: star hue {star_hue} left warning's {warn_hue}"
@@ -1888,7 +1865,7 @@ mod tests {
             );
             let chroma = |c: Rgba| c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
             assert!(
-                chroma(theme.favorite) >= chroma(theme.tab_needs_input),
+                chroma(theme.favorite) >= chroma(theme.warning),
                 "{label}: the star is not the louder of the two"
             );
         }
@@ -1974,9 +1951,9 @@ mod tests {
 
         for (dark_mode, theme) in [(true, Theme::dark()), (false, Theme::light())] {
             for (token, ours) in [
-                ("tabNeedsInput", theme.tab_needs_input),
-                ("tabDone", theme.tab_done),
-                ("tabError", theme.tab_error),
+                ("tabNeedsInput", theme.warning),
+                ("tabDone", theme.success),
+                ("tabError", theme.danger),
                 ("tabFocusAccent", theme.gauge),
             ] {
                 let (r, g, b) = declared_for(token, dark_mode);
@@ -2166,9 +2143,9 @@ mod tests {
         );
         // The three state hues, digit for digit from `App/AppTheme.swift`'s
         // `tabNeedsInput` / `tabDone` / `tabError`, dark variants.
-        expect_color(theme.tab_needs_input, f(0.95, 0.72, 0.28));
-        expect_color(theme.tab_done, f(0.48, 0.78, 0.57));
-        expect_color(theme.tab_error, f(0.94, 0.43, 0.47));
+        expect_color(theme.warning, f(0.95, 0.72, 0.28));
+        expect_color(theme.success, f(0.48, 0.78, 0.57));
+        expect_color(theme.danger, f(0.94, 0.43, 0.47));
         // `tab_needs_input`'s hue (39.4°) and lightness (0.615) at s = 1.
         expect_color(theme.favorite, f(1.0, 0.7357, 0.23));
         expect_color(
@@ -2282,9 +2259,9 @@ mod tests {
             ),
         );
         // `App/AppTheme.swift`'s three state hues, light variants.
-        expect_color(theme.tab_needs_input, f(0.67, 0.42, 0.02));
-        expect_color(theme.tab_done, f(0.10, 0.45, 0.22));
-        expect_color(theme.tab_error, f(0.68, 0.12, 0.17));
+        expect_color(theme.warning, f(0.67, 0.42, 0.02));
+        expect_color(theme.success, f(0.10, 0.45, 0.22));
+        expect_color(theme.danger, f(0.68, 0.12, 0.17));
         // `tab_needs_input`'s hue (36.9°) and lightness (0.345) at s = 1.
         expect_color(theme.favorite, f(0.69, 0.4246, 0.0));
         // Light veils are pure black, same ladder.
@@ -2351,13 +2328,9 @@ mod tests {
                 light.terminal_surface,
                 dark.terminal_surface,
             ),
-            (
-                "tab_needs_input",
-                light.tab_needs_input,
-                dark.tab_needs_input,
-            ),
-            ("tab_done", light.tab_done, dark.tab_done),
-            ("tab_error", light.tab_error, dark.tab_error),
+            ("warning", light.warning, dark.warning),
+            ("success", light.success, dark.success),
+            ("danger", light.danger, dark.danger),
             ("border", light.border, dark.border),
             ("element_hover", light.element_hover, dark.element_hover),
             ("element_active", light.element_active, dark.element_active),
@@ -2366,24 +2339,12 @@ mod tests {
             ("text_muted", light.text_muted, dark.text_muted),
             ("text_faint", light.text_faint, dark.text_faint),
             ("tree_guide", light.tree_guide, dark.tree_guide),
-            ("git_staged", light.git_staged, dark.git_staged),
-            ("git_modified", light.git_modified, dark.git_modified),
             ("git_untracked", light.git_untracked, dark.git_untracked),
-            ("git_conflict", light.git_conflict, dark.git_conflict),
-            ("diff_addition", light.diff_addition, dark.diff_addition),
-            (
-                "diff_addition_background",
-                light.diff_addition_background,
-                dark.diff_addition_background,
-            ),
-            ("diff_deletion", light.diff_deletion, dark.diff_deletion),
-            (
-                "diff_deletion_background",
-                light.diff_deletion_background,
-                dark.diff_deletion_background,
-            ),
+            ("diff_add", light.diff_add, dark.diff_add),
+            ("diff_add_bg", light.diff_add_bg, dark.diff_add_bg),
+            ("diff_del", light.diff_del, dark.diff_del),
+            ("diff_del_bg", light.diff_del_bg, dark.diff_del_bg),
             ("file_link", light.file_link, dark.file_link),
-            ("rail_question", light.rail_question, dark.rail_question),
             ("surface_raised", light.surface_raised, dark.surface_raised),
             ("input_bg", light.input_bg, dark.input_bg),
             ("overlay", light.overlay, dark.overlay),
@@ -2397,7 +2358,7 @@ mod tests {
             ("solid", light.solid, dark.solid),
             ("on_solid", light.on_solid, dark.on_solid),
             ("favorite", light.favorite, dark.favorite),
-            ("danger_soft", light.danger_soft, dark.danger_soft),
+            ("danger_muted", light.danger_muted, dark.danger_muted),
         ];
 
         for (name, light, dark) in tokens {
@@ -2910,7 +2871,7 @@ mod agent_brand_tests {
     }
 
     /// The regression this type exists for. `AgentAccentColor::Amber`
-    /// resolved to `theme.tab_needs_input`, so a **running** Claude worktree
+    /// resolved to `theme.warning`, so a **running** Claude worktree
     /// painted the byte-identical `#E0B36A` as one that **needed input** —
     /// two states separated by nothing but a 3×3 versus a 6×6 dot cluster.
     /// No brand colour may equal any status token, in either appearance.
@@ -2926,9 +2887,9 @@ mod agent_brand_tests {
         ];
         for theme in [Theme::dark(), Theme::light()] {
             let statuses = [
-                ("tab_needs_input", theme.tab_needs_input),
-                ("tab_done", theme.tab_done),
-                ("tab_error", theme.tab_error),
+                ("warning", theme.warning),
+                ("success", theme.success),
+                ("danger", theme.danger),
             ];
             for brand in brands {
                 let brand_color = brand.color();

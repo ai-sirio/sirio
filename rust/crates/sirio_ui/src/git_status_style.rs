@@ -31,9 +31,9 @@ use sirio_theme::Theme;
 /// Map a resolved status to its theme colour. The only mapping in the crate.
 pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
     match status {
-        DirectoryGitStatus::Conflicted => theme.git_conflict,
-        DirectoryGitStatus::Staged => theme.git_staged,
-        DirectoryGitStatus::Changed => theme.git_modified,
+        DirectoryGitStatus::Conflicted => theme.danger,
+        DirectoryGitStatus::Staged => theme.success,
+        DirectoryGitStatus::Changed => theme.warning,
         DirectoryGitStatus::Untracked => theme.git_untracked,
     }
 }
@@ -83,10 +83,10 @@ mod tests {
     fn the_four_status_colours_are_mutually_distinct() {
         let theme = Theme::dark();
         let all = [
-            theme.git_conflict,
+            theme.danger,
             theme.git_untracked,
-            theme.git_staged,
-            theme.git_modified,
+            theme.success,
+            theme.warning,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
@@ -111,8 +111,8 @@ mod tests {
         let both = entry(Some(StatusKind::Modified), Some(StatusKind::Modified));
 
         assert!(both.is_staged() && both.has_worktree_changes());
-        assert_eq!(entry_color(&both, theme), theme.git_staged);
-        assert_ne!(entry_color(&both, theme), theme.git_modified);
+        assert_eq!(entry_color(&both, theme), theme.success);
+        assert_ne!(entry_color(&both, theme), theme.warning);
     }
 
     #[test]
@@ -121,7 +121,7 @@ mod tests {
 
         // Conflicted outranks everything, including a staged index entry.
         let conflicted = entry(Some(StatusKind::Unmerged), Some(StatusKind::Modified));
-        assert_eq!(entry_color(&conflicted, theme), theme.git_conflict);
+        assert_eq!(entry_color(&conflicted, theme), theme.danger);
 
         // Untracked outranks staged.
         let untracked = entry(Some(StatusKind::Untracked), None);
@@ -129,11 +129,11 @@ mod tests {
 
         // Staged alone.
         let staged = entry(Some(StatusKind::Added), None);
-        assert_eq!(entry_color(&staged, theme), theme.git_staged);
+        assert_eq!(entry_color(&staged, theme), theme.success);
 
         // Modified alone is the fallback.
         let modified = entry(None, Some(StatusKind::Modified));
-        assert_eq!(entry_color(&modified, theme), theme.git_modified);
+        assert_eq!(entry_color(&modified, theme), theme.warning);
     }
 
     /// The fallback `for_file` alone would not give: an entry carrying no

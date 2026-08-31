@@ -302,9 +302,9 @@ impl AgentAccentColor {
     pub fn resolve(self, theme: Theme) -> Rgba {
         match self {
             Self::Coral => theme.accent,
-            Self::Amber => theme.tab_needs_input,
-            Self::Green => theme.tab_done,
-            Self::Red => theme.tab_error,
+            Self::Amber => theme.warning,
+            Self::Green => theme.success,
+            Self::Red => theme.danger,
             Self::Blue => theme.gauge,
             Self::Purple => theme.border_strong,
             Self::Gold => theme.favorite,
@@ -2694,7 +2694,7 @@ impl Settings {
                     .h(px(8.0))
                     .rounded(px(4.0))
                     .bg(if status.signed_in {
-                        theme.tab_done
+                        theme.success
                     } else {
                         theme.text_faint
                     }),
@@ -2827,7 +2827,7 @@ impl Settings {
                     .px(px(theme.cosmic.spacing.xs as f32))
                     .py(px(theme.cosmic.spacing.xxxs as f32))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_error)
+                    .text_color(theme.danger)
                     .child(text!(error.clone())),
             );
         }
@@ -3122,7 +3122,7 @@ impl Settings {
                     .px(px(spacing.xs as f32))
                     .py(px(spacing.xxxs as f32))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_error)
+                    .text_color(theme.danger)
                     .child(text!(error)),
             );
         }
@@ -3265,7 +3265,7 @@ impl Settings {
                     .px(px(spacing.xs as f32))
                     .py(px(spacing.xxxs as f32))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_error)
+                    .text_color(theme.danger)
                     .child(text!(error)),
             );
         }
@@ -3352,7 +3352,7 @@ impl Settings {
                 .text_size(theme.typography.caption2)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(on_status_fill(&theme))
-                .bg(theme.tab_error)
+                .bg(theme.danger)
                 .child(text!(availability.status_label())),
         }
     }
@@ -3408,7 +3408,7 @@ impl Settings {
                 .text_size(theme.typography.caption2)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(on_status_fill(&theme))
-                .bg(theme.tab_needs_input)
+                .bg(theme.warning)
                 .child(text!(label))
         }
     }
@@ -3755,7 +3755,7 @@ impl Settings {
                     .items_center()
                     .gap(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_needs_input)
+                    .text_color(theme.warning)
                     .child(text!("⚠"))
                     .child(text!(error)),
             );
@@ -4474,9 +4474,9 @@ impl Settings {
 
     fn render_permissions(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
         #[cfg(target_os = "macos")]
-        let granted = theme.tab_done;
+        let granted = theme.success;
         #[cfg(target_os = "macos")]
-        let denied = theme.tab_error;
+        let denied = theme.danger;
         #[cfg(target_os = "macos")]
         let neutral = theme.surface_raised;
         #[cfg(target_os = "macos")]
@@ -8287,8 +8287,8 @@ mod tests {
                 _ => Theme::light(),
             };
             for (name, fill) in [
-                ("tab_error", theme.tab_error),
-                ("tab_needs_input", theme.tab_needs_input),
+                ("tab_error", theme.danger),
+                ("tab_needs_input", theme.warning),
             ] {
                 let ratio = contrast_ratio(on_status_fill(&theme), fill);
                 assert!(

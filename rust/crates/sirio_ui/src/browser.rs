@@ -2146,7 +2146,7 @@ impl Render for BrowserSurface {
                             .w_full()
                             .px(px(12.0))
                             .py(px(8.0))
-                            .bg(theme.tab_error)
+                            .bg(theme.danger)
                             .text_color(theme.bg)
                             .text_size(theme.typography.footnote)
                             .child(error),
@@ -2161,7 +2161,7 @@ impl Render for BrowserSurface {
                         .w_full()
                         .px(px(12.0))
                         .py(px(8.0))
-                        .bg(theme.tab_error)
+                        .bg(theme.danger)
                         .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
                         .child(error),
@@ -2180,7 +2180,7 @@ impl Render for BrowserSurface {
                         .gap(px(8.0))
                         .px(px(12.0))
                         .py(px(8.0))
-                        .bg(theme.tab_needs_input)
+                        .bg(theme.warning)
                         .text_color(theme.bg)
                         .text_size(theme.typography.footnote)
                         .child(format!(

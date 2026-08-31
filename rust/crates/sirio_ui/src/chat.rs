@@ -3753,7 +3753,7 @@ impl Chat {
                     .py(px(5.0))
                     .rounded(theme.radii.control)
                     .text_size(typography.footnote)
-                    .text_color(colors.git_conflict)
+                    .text_color(colors.danger)
                     .hover(|style| style.bg(colors.overlay))
                     .on_click(move |_, _, cx| {
                         cancel_entity.update(cx, |chat, cx| {
@@ -4066,7 +4066,7 @@ impl Chat {
             for span in code_spans(language, trimmed) {
                 let color = match span.kind {
                     CodeSpanKind::Keyword => theme.colors.gauge,
-                    CodeSpanKind::Literal => theme.colors.diff_addition,
+                    CodeSpanKind::Literal => theme.colors.diff_add,
                     CodeSpanKind::Comment => theme.colors.text_faint,
                 };
                 highlights.push((
@@ -4528,18 +4528,18 @@ impl Chat {
                 DiffLine::Context { .. } => (" ", colors.text, None),
                 DiffLine::Removed { .. } => (
                     "-",
-                    colors.diff_deletion,
+                    colors.diff_del,
                     Some(Rgba {
                         a: 0.10,
-                        ..colors.diff_deletion
+                        ..colors.diff_del
                     }),
                 ),
                 DiffLine::Added { .. } => (
                     "+",
-                    colors.diff_addition,
+                    colors.diff_add,
                     Some(Rgba {
                         a: 0.10,
-                        ..colors.diff_addition
+                        ..colors.diff_add
                     }),
                 ),
             };
@@ -4682,12 +4682,12 @@ impl Chat {
                             .gap(px(6.0))
                             .child(
                                 div()
-                                    .text_color(colors.diff_addition)
+                                    .text_color(colors.diff_add)
                                     .child(format!("+{added}")),
                             )
                             .child(
                                 div()
-                                    .text_color(colors.diff_deletion)
+                                    .text_color(colors.diff_del)
                                     .child(format!("-{removed}")),
                             ),
                     ),
@@ -4777,7 +4777,7 @@ impl Chat {
                             .py(px(4.0))
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
-                            .text_color(colors.git_conflict)
+                            .text_color(colors.danger)
                             .hover(|style| style.bg(colors.overlay))
                             .on_click(move |_, _, cx| {
                                 confirm_entity.update(cx, |chat, cx| {
@@ -4815,7 +4815,7 @@ impl Chat {
                         .text_color(if reverting {
                             colors.text_faint
                         } else {
-                            colors.git_conflict
+                            colors.danger
                         })
                         .hover(|style| style.bg(colors.overlay))
                         .on_click(move |_, _, cx| {
@@ -4836,7 +4836,7 @@ impl Chat {
                     .id(("edit-summary-error", entry))
                     .debug_selector(move || format!("edit-summary-error-{entry}"))
                     .text_size(typography.caption2)
-                    .text_color(colors.git_conflict)
+                    .text_color(colors.danger)
                     .child(error),
             );
         }
@@ -5103,7 +5103,7 @@ impl Chat {
                     .rounded(theme.radii.code_block)
                     .bg(colors.surface_raised)
                     .border_l_2()
-                    .border_color(colors.rail_question)
+                    .border_color(colors.warning)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
@@ -5179,7 +5179,7 @@ impl Chat {
                                 .bg(colors.surface_raised)
                                 .text_size(typography.footnote)
                                 .text_color(if option.is_rejection {
-                                    colors.git_conflict
+                                    colors.danger
                                 } else {
                                     colors.text
                                 })
@@ -5299,7 +5299,7 @@ impl Chat {
                                     .bg(colors.surface_raised)
                                     .text_size(typography.footnote)
                                     .text_color(if option.is_rejection {
-                                        colors.git_conflict
+                                        colors.danger
                                     } else {
                                         colors.text
                                     })
@@ -5368,9 +5368,9 @@ impl Chat {
                     (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), colors.text)
                 } else {
                     (
-                        colors.diff_deletion_background,
-                        colors.diff_deletion,
-                        colors.diff_deletion,
+                        colors.diff_del_bg,
+                        colors.diff_del,
+                        colors.diff_del,
                     )
                 };
                 div()
@@ -6762,7 +6762,7 @@ impl Chat {
                                     window.paint_path(
                                         path,
                                         if context_warning {
-                                            colors.git_conflict
+                                            colors.danger
                                         } else {
                                             colors.gauge
                                         },
@@ -7173,7 +7173,7 @@ impl Chat {
                                                 "chat-history-confirm-delete-{tab_id}"
                                             )))
                                             .text_size(typography.footnote)
-                                            .text_color(colors.tab_error)
+                                            .text_color(colors.danger)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.confirm_delete_chat_session(
                                                     confirm_tab_id.clone(),
@@ -7603,7 +7603,7 @@ impl Chat {
                         .debug_selector(|| "attach-error".into())
                         .px(px(4.0))
                         .text_size(typography.caption2)
-                        .text_color(colors.git_conflict)
+                        .text_color(colors.danger)
                         .child(message),
                 )
             })
@@ -8131,9 +8131,9 @@ impl Render for Chat {
                                 .rounded(theme.radii.control)
                                 .bg(bar_colors.surface_raised)
                                 .border_1()
-                                .border_color(bar_colors.rail_question)
+                                .border_color(bar_colors.warning)
                                 .text_size(bar_typography.footnote)
-                                .child(div().text_color(bar_colors.rail_question).child("?"))
+                                .child(div().text_color(bar_colors.warning).child("?"))
                                 .child(
                                     div()
                                         .flex_1()
