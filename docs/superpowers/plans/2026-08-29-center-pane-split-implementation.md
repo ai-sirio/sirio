@@ -48,7 +48,28 @@ where a tab is drawn. Membership is derived from `TabKind`, never stored.
 6. **`ctrl-shift-b`** through the five sibling points.
 7. **Enter promotes the selected Changes row** in the right sidebar (Files
    already has `return_opens_the_selected_file_row`).
+   Done, and larger than this line reads: `ChangesTab` had no keyboard
+   selection to promote *from* — no selected row, no focus handle, no key
+   handler. The selection is keyed by `(section, path)`, not by path, because
+   a partially-staged file appears in two sections at once. Return promotes
+   only where `embedded_in_panel` draws "Open diff"; inside the Changes tab
+   it toggles the row, since the tab is the destination `OpenDiff` reveals.
 8. `Scripts/ci.sh` → `CI OK`, then code review, then commit.
+   Run on macOS 2026-08-31: `sirio` 312 passed / 3 failed, and the three are
+   the pre-existing macOS red recorded on #292
+   (`real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second`,
+   `drawn_changes_open_diff_action_reveals_the_existing_diff_tab`,
+   `opening_changes_with_a_path_reveals_and_focuses_existing_tab`), plus
+   `oh_my_pi_is_only_claimed_once_it_answers` in `sirio_agents` — a crate
+   this branch does not touch; it compares the adapter's ACP claim against
+   the `omp` binary installed on the machine. So `CI OK` is not reachable
+   here until that red is cleared, and no new failure came from this work.
+
+   The split was also checked by eye: the app was launched with
+   `Scripts/build-dev.sh`, driven to a two-pane state through
+   `sirioctl surface changes open`, and the two halves, the divider drag and
+   `ctrl-shift-b` all behaved. The run left no panic or error in
+   `/tmp/sirio-dev.log`.
 
 ## Invariants to hold
 
