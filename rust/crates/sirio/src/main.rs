@@ -3314,6 +3314,30 @@ fn theme_mode(appearance: AppearanceMode) -> ThemeMode {
 
 /// Reads the mode's name through the persisted enum, so the string this shows
 /// cannot drift from the string the database stores.
+/// The persisted base colour as the theme's own enum. The single conversion
+/// between the two, per CLAUDE.md: `sirio_persistence` carries the serde
+/// contract and never depends on `sirio_theme`.
+fn theme_base_color(base: BaseColor) -> sirio_theme::BaseColor {
+    match base {
+        BaseColor::Neutral => sirio_theme::BaseColor::Neutral,
+        BaseColor::Stone => sirio_theme::BaseColor::Stone,
+        BaseColor::Zinc => sirio_theme::BaseColor::Zinc,
+        BaseColor::Gray => sirio_theme::BaseColor::Gray,
+        BaseColor::Slate => sirio_theme::BaseColor::Slate,
+    }
+}
+
+/// The inverse of [`theme_base_color`].
+fn persisted_base_color(base: sirio_theme::BaseColor) -> BaseColor {
+    match base {
+        sirio_theme::BaseColor::Neutral => BaseColor::Neutral,
+        sirio_theme::BaseColor::Stone => BaseColor::Stone,
+        sirio_theme::BaseColor::Zinc => BaseColor::Zinc,
+        sirio_theme::BaseColor::Gray => BaseColor::Gray,
+        sirio_theme::BaseColor::Slate => BaseColor::Slate,
+    }
+}
+
 fn theme_mode_name(mode: ThemeMode) -> &'static str {
     persisted_appearance(mode).raw()
 }
@@ -14902,6 +14926,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         theme: theme_mode(settings.appearance),
         interface_font_size: settings.ui_font_size.clamp(10, 20) as i32,
         terminal_font_size: settings.terminal_font_size.clamp(9, 24) as i32,
+        base_color: theme_base_color(settings.base_color),
         file_icons: match settings.file_icon_theme {
             FileIconTheme::SfSymbols => sirio_ui::settings::FileIconChoice::SfSymbols,
             FileIconTheme::Material => sirio_ui::settings::FileIconChoice::Material,
@@ -14932,7 +14957,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         appearance: persisted_appearance(snapshot.theme),
         ui_font_size: i64::from(snapshot.interface_font_size.clamp(10, 20)),
         terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(9, 24)),
-        base_color: BaseColor::Neutral,
+        base_color: persisted_base_color(snapshot.base_color),
         file_icon_theme: match snapshot.file_icons {
             sirio_ui::settings::FileIconChoice::SfSymbols => FileIconTheme::SfSymbols,
             sirio_ui::settings::FileIconChoice::Material => FileIconTheme::Material,
@@ -15268,6 +15293,10 @@ fn main() {
         // project/worktree id convention.
         session_store.schedule_catalog(&project_catalog);
         let saved_settings = app_settings_with_environment_override(session_store.load_settings());
+        // The base colour first: `Theme::set_mode` recovers it from the
+        // installed theme, so setting the mode before the colour would build
+        // one frame with the default and then throw it away.
+        Theme::set_base_color(theme_base_color(saved_settings.base_color), cx);
         Theme::set_mode(
             settings_snapshot_from_app_settings(saved_settings.clone()).theme,
             cx,
@@ -21960,6 +21989,39 @@ mod tests {
                 "the refused apply raises a dismissible toast"
             );
         });
+    }
+
+    #[test]
+    fn the_base_colour_converts_both_ways_across_the_crate_boundary() {
+        // CLAUDE.md's rule: persistence owns the serde contract, the theme
+        // owns the concept, and main.rs holds the single conversion. Every
+        // variant has to survive the trip or a persisted choice silently
+        // becomes a different colour.
+        let pairs = [
+            (BaseColor::Neutral, sirio_theme::BaseColor::Neutral),
+            (BaseColor::Stone, sirio_theme::BaseColor::Stone),
+            (BaseColor::Zinc, sirio_theme::BaseColor::Zinc),
+            (BaseColor::Gray, sirio_theme::BaseColor::Gray),
+            (BaseColor::Slate, sirio_theme::BaseColor::Slate),
+        ];
+        for (persisted, theme) in pairs {
+            assert_eq!(theme_base_color(persisted), theme, "{persisted:?} inbound");
+            assert_eq!(persisted_base_color(theme), persisted, "{theme:?} outbound");
+        }
+    }
+
+    #[test]
+    fn the_settings_snapshot_carries_the_persisted_base_colour() {
+        let persisted = AppSettings {
+            base_color: BaseColor::Gray,
+            ..AppSettings::default()
+        };
+
+        let snapshot = settings_snapshot_from_app_settings(persisted);
+        assert_eq!(snapshot.base_color, sirio_theme::BaseColor::Gray);
+
+        let back = app_settings_from_snapshot(snapshot);
+        assert_eq!(back.base_color, BaseColor::Gray);
     }
 
     #[test]
