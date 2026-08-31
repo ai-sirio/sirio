@@ -11786,11 +11786,6 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
         window: &Window,
     ) -> impl IntoElement {
-        let left_focus_visible =
-            shell_chrome::focus_is_keyboard_visible(&self.left_panel_focus, window, cx);
-        let right_focus_visible =
-            shell_chrome::focus_is_keyboard_visible(&self.right_panel_focus, window, cx);
-
         let primary_surface = if self.has_current_worktree() {
             div()
                 .id("group-surfaces-wrapper")
@@ -12106,12 +12101,7 @@ impl SirioWorkspace {
             })
             .when(self.sidebar_visible, |row| {
                 row.child(
-                    shell_chrome::panel(
-                        "shell-left-panel",
-                        &self.left_panel_focus,
-                        left_focus_visible,
-                        theme,
-                    )
+                    shell_chrome::panel("shell-left-panel", &self.left_panel_focus, theme)
                     .w(px(left_width.unwrap_or(0.0)))
                     .flex_none()
                     .child(self.sidebar.clone())
@@ -12124,24 +12114,14 @@ impl SirioWorkspace {
                 )
             })
             .child(
-                shell_chrome::panel(
-                    "shell-center-panel",
-                    &self.center_panel_focus,
-                    shell_chrome::CENTER_PANEL_FOCUS_VISIBLE,
-                    theme,
-                )
+                shell_chrome::panel("shell-center-panel", &self.center_panel_focus, theme)
                 .flex_1()
                 .min_w_0()
                 .child(center_column),
             )
             .when(self.right_panel_visible, |row| {
                 row.child(
-                    shell_chrome::panel(
-                        "shell-right-panel",
-                        &self.right_panel_focus,
-                        right_focus_visible,
-                        theme,
-                    )
+                    shell_chrome::panel("shell-right-panel", &self.right_panel_focus, theme)
                     .w(px(right_width.unwrap_or(0.0)))
                     .flex_none()
                     .child(self.right_panel.clone())
@@ -13605,8 +13585,6 @@ impl Render for SirioWorkspace {
         self.hide_offscreen_browsers(self.show_settings, cx);
 
         if self.show_settings {
-            let settings_focus_visible =
-                shell_chrome::focus_is_keyboard_visible(&self.settings_panel_focus, window, cx);
             return div()
                 .id("shell-frame")
                 .debug_selector(|| "shell-frame".into())
@@ -13643,7 +13621,6 @@ impl Render for SirioWorkspace {
                             shell_chrome::panel(
                                 "shell-settings-panel",
                                 &self.settings_panel_focus,
-                                settings_focus_visible,
                                 &theme,
                             )
                             .child(self.settings.clone()),
@@ -24050,8 +24027,11 @@ mod tests {
         assert_eq!(work.bottom() - left.bottom(), px(4.0));
     }
 
+    /// The focus-visible border treatment is gone, but the click-reachability
+    /// half of its old test still matters: a live sidebar row must stay
+    /// pointer reachable through the enclosing shell panel's chrome.
     #[gpui::test]
-    async fn shell_panel_focus_ring_is_keyboard_only(cx: &mut TestAppContext) {
+    async fn sidebar_row_stays_pointer_reachable_inside_the_shell_panel(cx: &mut TestAppContext) {
         cx.set_global(Theme::dark());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -24074,35 +24054,6 @@ mod tests {
             })
         });
 
-        // A real keyboard event establishes focus-visible input before the
-        // existing sidebar child focus fixture enters the left shell panel.
-        cx.simulate_keystrokes("tab");
-        let sidebar_focus = palette_test_sidebar_focus(&workspace, &cx);
-        cx.update(|window, app| sidebar_focus.focus(window, app));
-        cx.run_until_parked();
-
-        // The focus treatment is now the panel's own border rather than a
-        // second ring inside it, so there is no element to look for: assert on
-        // the predicate that decides it and the colour that follows.
-        let left_focus =
-            workspace.update(&mut cx, |workspace, _| workspace.left_panel_focus.clone());
-        let border_now = |cx: &mut VisualTestContext| {
-            cx.update(|window, app| {
-                shell_chrome::panel_border(
-                    &Theme::dark(),
-                    shell_chrome::focus_is_keyboard_visible(&left_focus, window, app),
-                )
-            })
-        };
-        assert_eq!(
-            border_now(&mut cx),
-            Theme::dark().text_muted,
-            "keyboard focus inside the sidebar must brighten the enclosing shell panel's border"
-        );
-
-        // Click a live sidebar row rather than changing the input-mode flag
-        // directly: this proves the panel's child remains pointer reachable
-        // while mouse input removes the focus-visible treatment.
         let sidebar_row = cx
             .debug_bounds("sidebar-row-1")
             .expect("the live sidebar worktree row is pointer reachable");
@@ -24114,52 +24065,7 @@ mod tests {
             &[expected_worktree],
             "the real sidebar row click must reach its SelectWorktree handler"
         );
-        assert_eq!(
-            border_now(&mut cx),
-            Theme::dark().border_opaque,
-            "a pointer click must drop the panel back to its resting border"
-        );
         assert!(cx.debug_bounds("shell-left-panel").is_some());
-    }
-
-    /// #58, both halves: focusing the center panel from the keyboard really
-    /// would qualify for the focus treatment, and the panel is drawn without it
-    /// anyway. Asserting only the second half would pass just as well if the
-    /// focus never reached the panel at all.
-    #[gpui::test]
-    async fn center_panel_never_shows_the_keyboard_focus_ring(cx: &mut TestAppContext) {
-        cx.set_global(Theme::dark());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        cx.simulate_keystrokes("tab");
-        let center_focus =
-            workspace.update(&mut cx, |workspace, _| workspace.center_panel_focus.clone());
-        cx.update(|window, app| center_focus.focus(window, app));
-        cx.run_until_parked();
-
-        assert!(
-            cx.update(|window, app| shell_chrome::focus_is_keyboard_visible(
-                &center_focus,
-                window,
-                app
-            )),
-            "the center panel's own focus is genuinely keyboard-visible here"
-        );
-        assert!(!shell_chrome::CENTER_PANEL_FOCUS_VISIBLE);
-        assert_eq!(
-            shell_chrome::panel_border(&Theme::dark(), shell_chrome::CENTER_PANEL_FOCUS_VISIBLE),
-            Theme::dark().border_opaque,
-            "the center panel keeps its resting border regardless"
-        );
-        assert!(cx.debug_bounds("shell-center-panel").is_some());
     }
 
     #[gpui::test]

@@ -1,4 +1,4 @@
-use gpui::{App, Div, FocusHandle, Stateful, Window, WindowBackgroundAppearance, div, prelude::*};
+use gpui::{Div, FocusHandle, Stateful, WindowBackgroundAppearance, div, prelude::*};
 use sirio_theme::Theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,41 +48,14 @@ impl ShellMaterial {
     }
 }
 
-/// #58: the center terminal panel never takes the shell focus treatment, even
-/// when the keyboard is genuinely inside it — the pane's own contents are the
-/// focus indicator there, and a ring around the whole terminal is noise.
-///
-/// A named constant rather than a `false` literal with a comment beside it, so
-/// the decision is something a test can assert instead of something a reader
-/// has to notice.
-pub(crate) const CENTER_PANEL_FOCUS_VISIBLE: bool = false;
-
-pub(crate) fn panel_border(theme: &Theme, focus_visible: bool) -> gpui::Rgba {
-    if focus_visible {
-        theme.text_muted
-    } else {
-        theme.border_opaque
-    }
-}
-
-pub(crate) fn focus_is_keyboard_visible(
-    focus_handle: &FocusHandle,
-    window: &Window,
-    cx: &App,
-) -> bool {
-    window.last_input_was_keyboard() && focus_handle.contains_focused(window, cx)
-}
-
-/// A shell panel, with keyboard focus shown as a single brightened border.
-///
-/// This used to paint a second, absolutely-positioned ring inside the border
-/// as well. Two rings in the accent coral was the loudest thing on screen; one
-/// border in a neutral says the same thing — this pane has the keyboard —
-/// without competing with the pane's own contents for attention.
+/// A shell panel. Keyboard focus used to brighten this border to `text_muted`
+/// (and before that, paint a second coral ring inside it — #58 already kept
+/// the center panel out of that treatment). Both are gone: the pane's own
+/// contents are the focus indicator, and every panel rests on `border_opaque`
+/// no matter where the keyboard is.
 pub(crate) fn panel(
     id: &'static str,
     focus_handle: &FocusHandle,
-    focus_visible: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
     div()
@@ -92,7 +65,7 @@ pub(crate) fn panel(
         .size_full()
         .bg(theme.surface)
         .border_1()
-        .border_color(panel_border(theme, focus_visible))
+        .border_color(theme.border_opaque)
         .rounded(theme.radii.shell_panel)
         .overflow_hidden()
         .track_focus(focus_handle)
@@ -132,13 +105,5 @@ mod tests {
             ShellMaterial::Blurred.frame_fill(&theme),
             theme.frame_surface
         );
-    }
-
-    #[test]
-    fn panel_border_uses_focus_ring_only_when_focus_is_visible() {
-        let theme = Theme::dark();
-
-        assert_eq!(panel_border(&theme, false), theme.border_opaque);
-        assert_eq!(panel_border(&theme, true), theme.text_muted);
     }
 }
