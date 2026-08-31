@@ -16,10 +16,12 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use bezel::motion::{Fade, Painter};
+use bezel::ui::popover::{self, Popup};
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, deferred,
-    div, img, prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, img,
+    prelude::*, px, rgb,
 };
 use sirio_git::{create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory};
 use sirio_project::{TabKind, display_absolute_path, display_path};
@@ -569,9 +571,9 @@ pub struct Sidebar {
     /// A transient error message (failed creation/removal) shown at the
     /// bottom of the sidebar.
     notice: Option<String>,
-    context_menu: Option<OpenContextMenu>,
+    context_menu: Popup<OpenContextMenu>,
     project_settings: Option<ProjectSettingsCard>,
-    add_project_menu: bool,
+    add_project_menu: Popup<()>,
     project_form: Option<ProjectFormSurface>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
     /// The panel's current width, pushed in by the host each render — the
@@ -696,9 +698,9 @@ impl Sidebar {
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
-            context_menu: None,
+            context_menu: Popup::default(),
             project_settings: None,
-            add_project_menu: false,
+            add_project_menu: Popup::default(),
             project_form: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
@@ -793,9 +795,9 @@ impl Sidebar {
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
-            context_menu: None,
+            context_menu: Popup::default(),
             project_settings: None,
-            add_project_menu: false,
+            add_project_menu: Popup::default(),
             project_form: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
@@ -1124,14 +1126,15 @@ impl Sidebar {
 
     fn open_context_menu(&mut self, row_id: usize, cx: &mut Context<Self>) {
         if let Some(target) = self.context_target(row_id) {
-            self.context_menu = Some(OpenContextMenu { target });
+            self.context_menu.open(OpenContextMenu { target });
             self.project_settings = None;
             cx.notify();
         }
     }
 
     fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        if self.context_menu.take().is_some() {
+        if self.context_menu.begin_close() {
+            popover::reap_popup(cx, |sidebar| &mut sidebar.context_menu);
             cx.notify();
         }
     }
@@ -1459,7 +1462,9 @@ impl Sidebar {
         let Some(path) = row.path.clone() else {
             return;
         };
-        self.context_menu = None;
+        let row_title = row.title.clone();
+        let row_is_git = row.is_git;
+        self.close_context_menu(cx);
         let icon = Rc::new(RefCell::new(
             self.project_identities
                 .get(project_id)
@@ -1480,9 +1485,9 @@ impl Sidebar {
             .project_names
             .get(project_id)
             .cloned()
-            .unwrap_or_else(|| row.title.clone());
-        let display_name = if row.title != base_name {
-            row.title.clone()
+            .unwrap_or_else(|| row_title.clone());
+        let display_name = if row_title != base_name {
+            row_title
         } else {
             Default::default()
         };
@@ -1512,7 +1517,7 @@ impl Sidebar {
             display_name: Rc::new(RefCell::new(display_name)),
             display_name_focus: cx.focus_handle(),
             path,
-            is_git: row.is_git,
+            is_git: row_is_git,
             icon,
             icon_picker,
             default_worktree_base: Rc::new(RefCell::new(default_worktree_base.unwrap_or_default())),
@@ -1542,7 +1547,12 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = None;
+        // A chosen command is a completed transition, so unmount immediately;
+        // keeping the exit overlay alive would occlude an immediate follow-up
+        // right-click on the same row. Pointer dismissal still animates via
+        // `close_context_menu`.
+        self.context_menu.close();
+        cx.notify();
         if action == SidebarContextAction::RemoveProject {
             if let SidebarContextTarget::Project { id, .. } = target {
                 self.request_remove_project(id, window, cx);
@@ -1567,13 +1577,22 @@ impl Sidebar {
     }
 
     fn start_add_project(&mut self, cx: &mut Context<Self>) {
-        self.add_project_menu = !self.add_project_menu;
-        self.context_menu = None;
+        if !self.add_project_menu.take_press_was_open() {
+            self.add_project_menu.open(());
+        }
+        self.close_context_menu(cx);
         cx.notify();
     }
 
+    fn close_add_project_menu(&mut self, cx: &mut Context<Self>) {
+        if self.add_project_menu.begin_close() {
+            popover::reap_popup(cx, |sidebar| &mut sidebar.add_project_menu);
+            cx.notify();
+        }
+    }
+
     fn start_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_project_menu = false;
+        self.add_project_menu.close();
         // GPUI's platform path prompt is the one mechanism this codebase
         // opens a chooser with: it routes to the XDG portal on Linux and
         // the system open-panel on macOS. The sidebar only turns the picked
@@ -1679,7 +1698,7 @@ impl Sidebar {
     }
 
     fn start_clone_project(&mut self, cx: &mut Context<Self>) {
-        self.add_project_menu = false;
+        self.add_project_menu.close();
         let form = cx.new(|cx| CloneForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
@@ -1702,7 +1721,7 @@ impl Sidebar {
     }
 
     fn start_create_project(&mut self, cx: &mut Context<Self>) {
-        self.add_project_menu = false;
+        self.add_project_menu.close();
         let form = cx.new(|cx| CreateForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
@@ -2756,24 +2775,19 @@ impl Sidebar {
     }
 
     fn render_context_menu(
-        menu: OpenContextMenu,
+        popup: &Popup<OpenContextMenu>,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        painter: Painter,
     ) -> impl IntoElement {
+        let menu = popup.get().expect("mounted context menu").clone();
+        let closing = popup.closing_since();
         let target = menu.target;
-        let mut view = div()
+        let bezel_theme = theme.to_bezel_theme();
+        let mut card = popover::popover_card(&bezel_theme)
             .id("sidebar-context-menu")
             .debug_selector(|| "sidebar-context-menu".to_owned())
-            .absolute()
-            .left(px(18.0))
-            .top(px(54.0))
-            .w(px(240.0))
-            .p(px(6.0))
-            .rounded(theme.radii.user_pill)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .shadow_lg();
+            .w(px(240.0));
 
         for item in Self::context_menu_items(&target) {
             let selector = format!(
@@ -2784,25 +2798,23 @@ impl Sidebar {
             let action = item.action;
             let item_target = target.clone();
             let item_entity = entity.clone();
-            let mut row = div()
+            let mut row = popover::menu_row(
+                &bezel_theme,
+                false,
+                Fade::new(painter, selector.clone()),
+            )
                 .id(selector.clone())
                 .debug_selector(move || selector.clone())
                 .w_full()
                 .min_h(px(29.0))
-                .px(px(10.0))
-                .py(px(5.0))
-                .rounded(theme.radii.control)
-                .flex()
-                .items_center()
                 .justify_between()
-                .text_size(theme.typography.footnote)
                 .text_color(if enabled {
-                    theme.text
+                    bezel_theme.text
                 } else {
-                    theme.text_faint
+                    bezel_theme.text_faint
                 })
-                .when(enabled, |this| {
-                    this.hover(|style| style.bg(theme.element_hover))
+                .when(!enabled, |this| {
+                    this.cursor_default().bg(gpui::transparent_black())
                 });
             if enabled {
                 row = row.on_click(move |_, window, cx| {
@@ -2816,46 +2828,47 @@ impl Sidebar {
                 row = row.child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(theme.text_faint)
+                        .text_color(bezel_theme.text_faint)
                         .child(reason.to_string()),
                 );
             }
-            view = view.child(row);
+            card = card.child(row);
         }
-        // F-SID-15: without `deferred(...)` the menu paints in tree order,
-        // so later siblings in the sidebar's own child list (e.g. the New
-        // Worktree… row) painted on top of it and intercepted clicks aimed
-        // at items like Remove Worktree, even though the menu was visibly
-        // drawn above them. See the identical fix/comment on
-        // `render_tab_context_menu` in `sirio/src/main.rs`.
-        deferred(view.on_mouse_down_out(move |_, _, cx| {
+        // F-SID-15: `menu_at` owns the deferred priority-1 layer, so later
+        // sidebar siblings cannot paint over the menu or intercept its rows.
+        // Dismissal stays on the card because bezel intentionally leaves that
+        // listener to the caller.
+        let card = card.on_mouse_down_out(move |_, _, cx| {
             entity.update(cx, |sidebar, cx| sidebar.close_context_menu(cx));
-        }))
-        .with_priority(1)
+        });
+        popover::menu_at(
+            "sidebar-context-menu-layer",
+            gpui::point(px(18.0), px(54.0)),
+            card.into_any_element(),
+            closing,
+        )
     }
 
-    fn render_add_project_menu(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
+    fn render_add_project_menu(
+        popup: &Popup<()>,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        painter: Painter,
+    ) -> impl IntoElement {
         let open_entity = entity.clone();
         let clone_entity = entity.clone();
         let create_entity = entity.clone();
-        div()
+        let bezel_theme = theme.to_bezel_theme();
+        let card = popover::popover_card(&bezel_theme)
             .id("add-project-menu")
             .debug_selector(|| "add-project-menu".to_owned())
-            .absolute()
-            .top(px(30.0))
-            .right(px(12.0))
             .w(px(190.0))
-            .p(px(6.0))
-            .rounded(theme.radii.user_pill)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised)
-            .shadow_lg()
             .child(Self::render_add_project_item(
                 entity.clone(),
                 "Open Project…",
                 "add-project-open",
-                theme,
+                &bezel_theme,
+                painter,
                 move |_, window, cx| {
                     open_entity.update(cx, |sidebar, cx| sidebar.start_open_project(window, cx))
                 },
@@ -2864,7 +2877,8 @@ impl Sidebar {
                 entity.clone(),
                 "Clone Repository…",
                 "add-project-clone",
-                theme,
+                &bezel_theme,
+                painter,
                 move |_, _, cx| {
                     clone_entity.update(cx, |sidebar, cx| sidebar.start_clone_project(cx))
                 },
@@ -2873,31 +2887,36 @@ impl Sidebar {
                 entity.clone(),
                 "Create Project…",
                 "add-project-create",
-                theme,
+                &bezel_theme,
+                painter,
                 move |_, _, cx| {
                     create_entity.update(cx, |sidebar, cx| sidebar.start_create_project(cx))
                 },
             ))
+            .on_mouse_down_out(move |_, _, cx| {
+                entity.update(cx, |sidebar, cx| sidebar.close_add_project_menu(cx));
+            });
+        popover::anchored_menu_below(
+            "add-project-menu-layer",
+            card.into_any_element(),
+            popup.closing_since(),
+        )
     }
 
     fn render_add_project_item(
         entity: gpui::Entity<Self>,
         label: &'static str,
         selector: &'static str,
-        theme: Theme,
+        theme: &bezel::theme::Theme,
+        painter: Painter,
         action: impl Fn(gpui::Entity<Self>, &mut Window, &mut gpui::App) + 'static,
     ) -> impl IntoElement {
-        div()
+        popover::menu_row(theme, false, Fade::new(painter, selector))
             .id(selector)
             .debug_selector(|| selector.to_owned())
             .w_full()
             .min_h(px(29.0))
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
             .child(label)
     }
@@ -3955,6 +3974,14 @@ impl EventEmitter<SidebarEvent> for Sidebar {}
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
+        // Production installs bezel alongside Sirio's theme. Some isolated
+        // shell fixtures set only the Sirio global, so establish the same
+        // invariant before either popup reaches bezel's surface paint.
+        if (self.context_menu.get().is_some() || self.add_project_menu.get().is_some())
+            && cx.try_global::<bezel::theme::Theme>().is_none()
+        {
+            theme.install_into_bezel(cx);
+        }
         let rows = self.visible_rows();
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
@@ -4001,9 +4028,25 @@ impl Render for Sidebar {
         let filter_text = self.filter.clone();
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
-        let context_menu = self.context_menu.clone();
+        let context_menu = self.context_menu.get().map(|_| {
+            Self::render_context_menu(
+                &self.context_menu,
+                entity.clone(),
+                theme,
+                Painter::of(cx),
+            )
+            .into_any_element()
+        });
         let project_settings = self.project_settings.clone();
-        let add_project_menu = self.add_project_menu;
+        let add_project_menu = self.add_project_menu.get().map(|_| {
+            Self::render_add_project_menu(
+                &self.add_project_menu,
+                entity.clone(),
+                theme,
+                Painter::of(cx),
+            )
+            .into_any_element()
+        });
         let project_form = self.project_form.clone();
         let reorder_drop_entity = entity.clone();
         let panel_width = self.panel_width;
@@ -4064,10 +4107,14 @@ impl Render for Sidebar {
                             .text_size(px(17.0))
                             .text_color(theme.text_faint)
                             .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
+                                this.add_project_menu.note_trigger_press();
+                            }))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_add_project(cx);
                             }))
-                            .child("+"),
+                            .child("+")
+                            .when_some(add_project_menu, |this, menu| this.child(menu)),
                     ),
             )
             .child(
@@ -4280,9 +4327,7 @@ impl Render for Sidebar {
                         ),
                 )
             })
-            .when_some(context_menu, |this, menu| {
-                this.child(Self::render_context_menu(menu, entity.clone(), theme))
-            })
+            .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(project_settings, |this, card| {
                 this.child(Self::render_project_settings(
                     card,
@@ -4298,9 +4343,6 @@ impl Render for Sidebar {
             })
             .when_some(project_form, |this, form| {
                 this.child(Self::render_project_form(form, entity.clone(), theme))
-            })
-            .when(add_project_menu, |this| {
-                this.child(Self::render_add_project_menu(entity.clone(), theme))
             })
     }
 }
