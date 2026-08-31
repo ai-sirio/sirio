@@ -337,6 +337,8 @@ pub struct SettingsSnapshot {
     pub theme: ThemeMode,
     pub interface_font_size: i32,
     pub terminal_font_size: i32,
+    /// The bezel base colour the greys are tinted with (Appearance → Theme).
+    pub base_color: sirio_theme::BaseColor,
     pub file_icons: FileIconChoice,
     pub control_socket_enabled: bool,
     /// The control socket's resolved path, routed from the host. This is
@@ -385,6 +387,7 @@ impl Default for SettingsSnapshot {
             theme: ThemeMode::System,
             interface_font_size: 13,
             terminal_font_size: 13,
+            base_color: sirio_theme::BaseColor::Neutral,
             file_icons: FileIconChoice::SfSymbols,
             control_socket_enabled: true,
             socket_path: String::new(),
@@ -926,6 +929,7 @@ pub struct Settings {
     translucency: bool,
     interface_font_size: i32,
     terminal_font_size: i32,
+    base_color: sirio_theme::BaseColor,
     file_icons: FileIconChoice,
     claude_show_in_bar: bool,
     codex_show_in_bar: bool,
@@ -1180,6 +1184,7 @@ impl Settings {
             translucency: initial.translucency,
             interface_font_size: initial.interface_font_size.clamp(10, 20),
             terminal_font_size: initial.terminal_font_size.clamp(9, 24),
+            base_color: initial.base_color,
             // A persisted choice from another platform (the database default
             // is the Swift-parity sfSymbols) is clamped to the first set
             // that exists here, so the surface never shows a choice it
@@ -1630,6 +1635,7 @@ impl Settings {
             theme: self.theme_mode,
             interface_font_size: self.interface_font_size,
             terminal_font_size: self.terminal_font_size,
+            base_color: self.base_color,
             file_icons: self.file_icons,
             control_socket_enabled: self.control_socket_enabled,
             socket_path: self.socket_path.clone(),
