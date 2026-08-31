@@ -10,6 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-31-bezel-gallery-adoption-design.md` (sub-project 1).
 
+> **Revision (2026-08-31, during execution):** Task 4's first build revealed that
+> bezel-ui 0.1.3 does not compile against bezel-gpui 0.3.8 (`GlassEffect` gained
+> six fields; bezel-ui 0.1.3's `material.rs:245` initializer misses them), so the
+> two-commit stage separation is void. Revised flow: the bezel pin moves to
+> `=0.1.4` together with the gpui pins (Task 5 Step 1 happens with Task 3), Tasks
+> 4–5 verification steps run against the combined graph, and **one single commit**
+> lands at the end of Task 6 after the user's visual review, containing the
+> staged vendor changes plus all pin/fallout/provenance work. No commit may exist
+> in the intermediate gpui-0.3.8 + bezel-0.1.3 state — it does not build.
+
 ## Global Constraints
 
 - NEVER run `Scripts/ci.sh` or `Scripts/ci-linux.sh` — workspace gates run only on the user's explicit request. Iterate with `cargo build -p <crate>` / `cargo test -p <crate>`.

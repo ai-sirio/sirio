@@ -59,7 +59,16 @@ document is the umbrella decision record plus the full design for sub-project
 Chosen approach: **two stages on one branch, one commit per stage**, so every
 regression has a single cause — stage A can only introduce gpui
 runtime/API regressions, stage B can only introduce bezel appearance/API
-changes. Alternatives considered and rejected: a single combined bump
+changes.
+
+> **Revision (2026-08-31, during execution):** stage separation proved
+> impossible — bezel-ui 0.1.3 declares `bezel-gpui ^0.3.6` but does not
+> compile against 0.3.8 (`GlassEffect` gained fields `edge`, `edge_aa`,
+> `edge_width` and three more; bezel-ui 0.1.3's `material.rs:245`
+> initializer misses them). An intermediate gpui-0.3.8 + bezel-0.1.3 state
+> does not build and must never be committed. Stages A and B collapse into
+> **one commit**, gated by the stage-B visual review. Work order inside the
+> stages is unchanged. Alternatives considered and rejected: a single combined bump
 (conflates compile fallout with visual changes, hard to bisect) and dropping
 the vendored fork (reintroduces the fixed XDND slow-provider race,
 F-CORE-FILE-03A).
