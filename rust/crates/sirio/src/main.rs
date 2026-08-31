@@ -194,6 +194,7 @@ actions!(
         SaveFile,
         ToggleSidebar,
         ToggleRightPanel,
+        ToggleSecondaryPane,
         RestoreLaunchSnapshot,
         NewBrowser,
         FocusAddressBar,
@@ -215,6 +216,7 @@ enum WindowCommand {
     SaveFile,
     ToggleSidebar,
     ToggleRightPanel,
+    ToggleSecondaryPane,
     RestoreLaunchSnapshot,
     NewBrowser,
     FocusAddressBar,
@@ -232,13 +234,16 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 8] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
     [
         (WindowCommand::NewTerminalTab, "ctrl-t"),
         (WindowCommand::OpenFile, "ctrl-o"),
         (WindowCommand::SaveFile, "ctrl-s"),
         (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
         (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+        // #324: B is what Zed and VS Code both settled on for the secondary
+        // panel, and `ctrl-shift-` is the family the two toggles above use.
+        (WindowCommand::ToggleSecondaryPane, "ctrl-shift-b"),
         // F-WIN-07: Linux stand-in for macOS's `⇧⌘O` "History > Restore
         // Previous Launch" chord.
         (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
@@ -272,6 +277,7 @@ fn window_command_availability(
         | WindowCommand::SaveFile
         | WindowCommand::ToggleSidebar
         | WindowCommand::ToggleRightPanel
+        | WindowCommand::ToggleSecondaryPane
         | WindowCommand::RestoreLaunchSnapshot
         | WindowCommand::NewBrowser
         | WindowCommand::FocusAddressBar => WindowCommandAvailability::Enabled,
@@ -289,6 +295,9 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::ToggleSidebar => KeyBinding::new(shortcut, ToggleSidebar, None),
                 WindowCommand::ToggleRightPanel => {
                     KeyBinding::new(shortcut, ToggleRightPanel, None)
+                }
+                WindowCommand::ToggleSecondaryPane => {
+                    KeyBinding::new(shortcut, ToggleSecondaryPane, None)
                 }
                 WindowCommand::RestoreLaunchSnapshot => {
                     KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
@@ -5069,6 +5078,23 @@ impl SirioWorkspace {
 
     fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.right_panel_visible = !self.right_panel_visible;
+        cx.notify();
+    }
+
+    /// #324: hides or shows the Secondary pane, *keeping* its tabs. This is
+    /// the gesture the persisted flag exists for -- the `×` at the end of the
+    /// Secondary strip closes the tabs instead, and the two must not be
+    /// conflated: if `×` merely hid the pane it would duplicate this and
+    /// should not exist.
+    fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
+        self.secondary_pane_open = !self.secondary_pane_open;
+        self.session
+            .save_secondary_pane_open(&self.working_directory, self.secondary_pane_open);
+        // Hiding the pane the user was typing in would otherwise leave focus
+        // on a half that is no longer drawn.
+        if !self.secondary_pane_open && self.center_split.focused() == PaneRole::Secondary {
+            self.set_focused_pane(PaneRole::Primary);
+        }
         cx.notify();
     }
 
@@ -12879,6 +12905,9 @@ impl SirioWorkspace {
                 WindowCommand::ToggleRightPanel => {
                     window.dispatch_action(Box::new(ToggleRightPanel), cx)
                 }
+                WindowCommand::ToggleSecondaryPane => {
+                    window.dispatch_action(Box::new(ToggleSecondaryPane), cx)
+                }
                 WindowCommand::RestoreLaunchSnapshot => {
                     window.dispatch_action(Box::new(RestoreLaunchSnapshot), cx)
                 }
@@ -13643,6 +13672,9 @@ impl Render for SirioWorkspace {
             }))
             .on_action(cx.listener(|workspace, _: &ToggleRightPanel, _, cx| {
                 workspace.toggle_right_panel(cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
+                workspace.toggle_secondary_pane(cx);
             }))
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
@@ -15975,6 +16007,7 @@ mod tests {
             let save_file = self.fired.clone();
             let toggle_sidebar = self.fired.clone();
             let toggle_right_panel = self.fired.clone();
+            let toggle_secondary_pane = self.fired.clone();
             let restore_launch_snapshot = self.fired.clone();
             let new_browser = self.fired.clone();
             let focus_address_bar = self.fired.clone();
@@ -16001,6 +16034,11 @@ mod tests {
                     toggle_right_panel
                         .borrow_mut()
                         .push(WindowCommand::ToggleRightPanel);
+                }))
+                .on_action(cx.listener(move |_, _: &ToggleSecondaryPane, _, _| {
+                    toggle_secondary_pane
+                        .borrow_mut()
+                        .push(WindowCommand::ToggleSecondaryPane);
                 }))
                 .on_action(cx.listener(move |_, _: &RestoreLaunchSnapshot, _, _| {
                     restore_launch_snapshot
@@ -16270,6 +16308,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         );
         let updater = Arc::new(Mutex::new(sirio_update::Updater::new(
@@ -21470,7 +21509,7 @@ mod tests {
         cx.run_until_parked();
 
         cx.simulate_keystrokes(
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o ctrl-shift-l ctrl-l",
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l",
         );
         cx.run_until_parked();
 
@@ -21482,6 +21521,7 @@ mod tests {
                 WindowCommand::SaveFile,
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleRightPanel,
+                WindowCommand::ToggleSecondaryPane,
                 WindowCommand::RestoreLaunchSnapshot,
                 WindowCommand::NewBrowser,
                 WindowCommand::FocusAddressBar,
@@ -21500,6 +21540,7 @@ mod tests {
                 (WindowCommand::SaveFile, "ctrl-s"),
                 (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
                 (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+                (WindowCommand::ToggleSecondaryPane, "ctrl-shift-b"),
                 (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
                 (WindowCommand::NewBrowser, "ctrl-shift-l"),
                 (WindowCommand::FocusAddressBar, "ctrl-l"),
@@ -26674,6 +26715,56 @@ browser  profile  "
             "a path that resolves to a directory is not a document"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #324: the toggle hides the pane and *keeps* its tabs. Conflating it
+    /// with the strip's `×`, which closes them, is the mistake this guards.
+    #[gpui::test]
+    async fn the_toggle_hides_the_secondary_pane_without_closing_its_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count_and_translucency(cx, 2, false);
+            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.open_secondary_pane();
+            // `rebuild_center_split` reads the focused half off `active_tab`.
+            workspace.active_tab = 1;
+            workspace.rebuild_center_split();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, _| {
+            assert!(workspace.secondary_pane_visible(), "the pane starts open");
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(!workspace.secondary_pane_visible(), "the pane is hidden");
+            assert_eq!(workspace.tabs.len(), 2, "hiding must not close a tab");
+            assert_eq!(
+                workspace.center_split.focused(),
+                PaneRole::Primary,
+                "focus cannot stay on a half that is no longer drawn"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(
+                workspace.secondary_pane_visible(),
+                "the same chord brings it back, tabs intact"
+            );
+        });
     }
 
     /// #323, the save half: an Editor tab's open file is read into the
