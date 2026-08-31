@@ -4,6 +4,7 @@
 //! Its small model intentionally lives here instead of depending on
 //! `sirio_registry`: this is a surface to look at, not a new product seam.
 
+use bezel::theme::Theme as BezelTheme;
 use gpui::{
     App, AppContext, Bounds, Context, CursorStyle, Div, Entity, FocusHandle, FontWeight,
     KeyDownEvent, MouseButton, Render, Rgba, TitlebarOptions, Window, WindowBounds, WindowOptions,
@@ -341,8 +342,8 @@ fn agent_icon(id: &str) -> Icon {
 
 fn agent_icon_color(theme: Theme, id: &str) -> Rgba {
     agent_icon(id)
-        .agent_mark_color(theme.title)
-        .unwrap_or(theme.meta)
+        .agent_mark_color(theme.text)
+        .unwrap_or(theme.text_faint)
 }
 
 fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoElement {
@@ -363,14 +364,14 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
             FontWeight::NORMAL
         })
         .text_color(if danger {
-            theme.background
+            theme.surface
         } else {
-            theme.subtitle
+            theme.text_muted
         })
         .bg(if danger {
-            theme.tab_error
+            theme.danger
         } else {
-            theme.primary_pill_bg
+            theme.surface_raised
         })
         .child(label)
 }
@@ -386,7 +387,7 @@ fn version_label(id: String, version: Option<&str>, theme: Theme) -> impl IntoEl
         .debug_selector(move || selector.clone())
         .flex_none()
         .text_size(theme.typography.caption2)
-        .text_color(theme.meta)
+        .text_color(theme.text_faint)
         .when_some(version_text(version), |this, version| this.child(version))
 }
 
@@ -409,7 +410,7 @@ fn agent_name_line(name: String, version: Option<String>, color: Rgba, theme: Th
             div()
                 .flex_none()
                 .text_size(theme.typography.caption2)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(version),
         );
     }
@@ -439,11 +440,15 @@ fn agent_label(
     enabled: bool,
     theme: Theme,
 ) -> Div {
-    let title_color = if enabled { theme.title } else { theme.meta };
-    let description_color = if enabled {
-        theme.subtitle
+    let title_color = if enabled {
+        theme.text
     } else {
-        theme.text_ghost
+        theme.text_faint
+    };
+    let description_color = if enabled {
+        theme.text_muted
+    } else {
+        theme.text_dim
     };
     let mut text = div()
         .flex_1()
@@ -494,8 +499,8 @@ fn action_button_shell(label: &'static str, theme: Theme) -> Div {
         .rounded(theme.radii.row_card)
         .text_size(theme.typography.caption2)
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.title)
-        .bg(theme.selected_fill)
+        .text_color(theme.text)
+        .bg(theme.element_active)
         .child(label)
 }
 
@@ -510,7 +515,7 @@ fn action_affordance(
     action_button_shell(label, theme)
         .id(id)
         .debug_selector(move || selector.clone())
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .cursor(CursorStyle::PointingHand)
         .on_click(move |_, _, cx| {
             let message = message.clone();
@@ -645,10 +650,10 @@ impl RegistryBrowseProto {
             .py(px(3.0))
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .text_size(theme.typography.caption2)
-            .text_color(theme.title)
-            .hover(|style| style.bg(theme.row_hover))
+            .text_color(theme.text)
+            .hover(|style| style.bg(theme.element_hover))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx| {
                 install_entity.update(cx, |prototype, cx| {
@@ -668,10 +673,10 @@ impl RegistryBrowseProto {
             .py(px(3.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.caption2)
-            .text_color(theme.title)
-            .bg(theme.selected_fill)
+            .text_color(theme.text)
+            .bg(theme.element_active)
             .border_1()
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx| {
                 keep_entity.update(cx, |prototype, cx| {
@@ -680,9 +685,9 @@ impl RegistryBrowseProto {
                 });
             })
             .border_color(if keep_focused {
-                theme.selection_ring
+                theme.text
             } else {
-                theme.selected_fill
+                theme.element_active
             })
             .child(confirmation_default_focus());
         div()
@@ -692,19 +697,19 @@ impl RegistryBrowseProto {
             .mb(px(8.0))
             .p(px(12.0))
             .rounded(theme.radii.control)
-            .bg(theme.background)
+            .bg(theme.surface)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .flex()
             .flex_col()
             .gap(px(8.0))
             .text_size(theme.typography.footnote)
-            .text_color(theme.subtitle)
+            .text_color(theme.text_muted)
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(unverifiable_confirmation_heading(
                         &agent.name,
                         &agent.version,
@@ -750,7 +755,7 @@ impl RegistryBrowseProto {
             version_slot = version_slot.child(
                 div()
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(version),
             );
         }
@@ -759,9 +764,9 @@ impl RegistryBrowseProto {
                 div()
                     .text_size(theme.typography.caption2)
                     .text_color(if marker == "failed" {
-                        theme.tab_error
+                        theme.danger
                     } else {
-                        theme.tab_needs_input
+                        theme.warning
                     })
                     .child(marker),
             );
@@ -808,9 +813,9 @@ impl RegistryBrowseProto {
                         div()
                             .text_size(theme.typography.footnote)
                             .text_color(if line_index == 0 {
-                                theme.title
+                                theme.text
                             } else {
-                                theme.subtitle
+                                theme.text_muted
                             })
                             .child(line.clone()),
                     );
@@ -830,7 +835,7 @@ impl RegistryBrowseProto {
         let row = controls::row_view(
             agent_label(
                 Icon::Sparkles,
-                theme.meta,
+                theme.text_faint,
                 agent.name.clone(),
                 None,
                 if demo.state == DemoUpdateState::InstallFailed {
@@ -854,7 +859,7 @@ impl RegistryBrowseProto {
                         .pr(px(12.0))
                         .text_size(theme.typography.footnote)
                         .font_weight(FontWeight::NORMAL)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(line),
                 );
             }
@@ -922,7 +927,7 @@ impl RegistryBrowseProto {
             None => div()
                 .flex_none()
                 .text_size(theme.typography.callout)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child("Unavailable")
                 .into_any_element(),
             _ => unreachable!("unknown browse action label"),
@@ -931,9 +936,9 @@ impl RegistryBrowseProto {
             agent_label(
                 Icon::Sparkles,
                 if enabled {
-                    theme.meta
+                    theme.text_faint
                 } else {
-                    theme.text_ghost
+                    theme.text_dim
                 },
                 agent.name.clone(),
                 Some(format!("v{}", agent.version)),
@@ -971,13 +976,9 @@ impl RegistryBrowseProto {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
-            .border_color(if focused {
-                theme.selection_ring
-            } else {
-                theme.hairline
-            })
+            .border_color(if focused { theme.text } else { theme.border })
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |_, cx| focus_for_click.focus(window, cx));
@@ -987,9 +988,9 @@ impl RegistryBrowseProto {
             })
             .text_size(theme.typography.callout)
             .text_color(if search.is_empty() {
-                theme.meta
+                theme.text_faint
             } else {
-                theme.title
+                theme.text
             })
             .child(if search.is_empty() {
                 "Search agents by name or description".to_owned()
@@ -1001,18 +1002,18 @@ impl RegistryBrowseProto {
     fn render_browse(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> Div {
         let mut card = controls::card(theme).child(
             div()
-                .px(px(theme.cosmic.spacing.xs as f32))
-                .py(px(theme.cosmic.spacing.xs as f32))
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_MD))
                 .child(self.render_search(theme, entity.clone(), window)),
         );
         let visible = visible_registry_agents(&self.registry, &self.search);
         if visible.is_empty() {
             card = card.child(controls::separator(theme)).child(
                 div()
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_MD))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child("No agents match this search."),
             );
             return card;
@@ -1040,7 +1041,7 @@ impl Render for RegistryBrowseProto {
         div()
             .id("registry-browse-proto")
             .size_full()
-            .bg(theme.background)
+            .bg(theme.surface)
             .overflow_y_scroll()
             .child(
                 div()
@@ -1053,7 +1054,7 @@ impl Render for RegistryBrowseProto {
                             .mb(px(18.0))
                             .text_size(theme.typography.title)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child("Settings · Agents"),
                     )
                     .when_some(self.notice.clone(), |this, notice| {
@@ -1061,7 +1062,7 @@ impl Render for RegistryBrowseProto {
                             div()
                                 .mb(px(12.0))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(notice),
                         )
                     })
@@ -1160,10 +1161,10 @@ mod tests {
         let theme = Theme::dark();
         let expected_height = Length::Definite(theme.typography.ui_line_height.into());
         for mut line in [
-            agent_name_line("Agoragentic".to_owned(), None, theme.title, theme),
+            agent_name_line("Agoragentic".to_owned(), None, theme.text, theme),
             agent_description_line(
                 "Agent marketplace with capabilities".to_owned(),
-                theme.subtitle,
+                theme.text_muted,
                 theme,
             ),
         ] {
@@ -1438,7 +1439,7 @@ mod tests {
 
         let mut button = action_button_shell("Install", theme);
         let style = Styled::style(&mut button);
-        assert_eq!(style.background, Some(theme.selected_fill.into()));
+        assert_eq!(style.background, Some(theme.element_active.into()));
         assert_eq!(style.text.font_size, Some(theme.typography.caption2.into()));
         assert_eq!(style.text.font_weight, Some(FontWeight::SEMIBOLD));
         assert_eq!(builtin_state_margin_right(false), px(8.0));

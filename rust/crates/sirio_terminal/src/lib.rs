@@ -21,15 +21,14 @@ use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Corners, Element, ElementId, EventEmitter, Font,
     FontStyle, FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
-    Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, StatefulInteractiveElement,
-    StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle, Window, anchored, deferred, div,
-    fill, font, point, px, relative, rgba, size,
+    Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine,
+    StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle, Window,
+    anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
 use image::{Frame, RgbaImage};
 use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{
-    DecodePng, DecodedImage, Graphics, ImageFormat, Layer, PlacementIteration,
-    PlacementIterator,
+    DecodePng, DecodedImage, Graphics, ImageFormat, Layer, PlacementIteration, PlacementIterator,
 };
 use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
@@ -880,10 +879,7 @@ fn kitty_image_bounds(
             pane.origin.x + cell_width * place.viewport_col as f32,
             pane.origin.y + LINE_HEIGHT * place.viewport_row as f32,
         ),
-        size(
-            px(place.pixel_width as f32),
-            px(place.pixel_height as f32),
-        ),
+        size(px(place.pixel_width as f32), px(place.pixel_height as f32)),
     )
 }
 
@@ -976,10 +972,8 @@ impl DecodePng for KittyPngDecoder {
         alloc: &'alloc Allocator<'_>,
         data: &[u8],
     ) -> Option<DecodedImage<'alloc>> {
-        let mut reader = image::ImageReader::with_format(
-            std::io::Cursor::new(data),
-            image::ImageFormat::Png,
-        );
+        let mut reader =
+            image::ImageReader::with_format(std::io::Cursor::new(data), image::ImageFormat::Png);
         let mut limits = image::Limits::default();
         limits.max_alloc = Some(KITTY_DECOMPRESSED_MAX_BYTES);
         reader.limits(limits);
@@ -1113,7 +1107,9 @@ impl KittyImageCache {
         let mut dead = Vec::new();
         for &(id, generation) in self.images.keys() {
             match live_generation.get(&id) {
-                Some(&live_generation) if live_generation != generation => dead.push((id, generation)),
+                Some(&live_generation) if live_generation != generation => {
+                    dead.push((id, generation))
+                }
                 None => dead.push((id, generation)),
                 Some(_) => {}
             }
@@ -1380,19 +1376,18 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                 last_title = title.to_string();
                 let _ = event_tx.unbounded_send(TerminalEvent::Title(title.to_string()));
             }
-            if !child_exit_reported
-                && let Ok(Some(status)) = child.try_wait() {
-                    child_exit_reported = true;
-                    // portable-pty reports a signalled exit as a signal
-                    // *name* string, not a number, so a signalled child
-                    // degrades to its (nonzero) code rather than Signal(n).
-                    let status = if status.success() {
-                        TerminalExitStatus::Success
-                    } else {
-                        TerminalExitStatus::from_exit_code(status.exit_code() as i32)
-                    };
-                    let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
-                }
+            if !child_exit_reported && let Ok(Some(status)) = child.try_wait() {
+                child_exit_reported = true;
+                // portable-pty reports a signalled exit as a signal
+                // *name* string, not a number, so a signalled child
+                // degrades to its (nonzero) code rather than Signal(n).
+                let status = if status.success() {
+                    TerminalExitStatus::Success
+                } else {
+                    TerminalExitStatus::from_exit_code(status.exit_code() as i32)
+                };
+                let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
+            }
 
             // #43: refresh the shared tracking gate once per poll-loop
             // iteration so the view can decide Sirio-gesture vs encode from a
@@ -3545,8 +3540,8 @@ impl TerminalPalette {
     fn from_theme(theme: &Theme) -> Self {
         Self {
             background: theme.terminal_surface.into(),
-            foreground: theme.primary_text_color.into(),
-            cursor: theme.primary_text_color.into(),
+            foreground: theme.text.into(),
+            cursor: theme.text.into(),
             selection: theme.selection.into(),
         }
     }
@@ -3684,10 +3679,7 @@ impl Element for TerminalElement {
                     ),
                     size(cell_width, LINE_HEIGHT),
                 );
-                backgrounds.push(fill(
-                    cell_bounds,
-                    color_to_hsla(cell.bg, self.palette),
-                ));
+                backgrounds.push(fill(cell_bounds, color_to_hsla(cell.bg, self.palette)));
                 // #259: a selected cell is *washed*, not repainted -- a second
                 // translucent quad over the guest's own background rather than
                 // instead of it. Replacing it outright would erase the
@@ -3822,40 +3814,22 @@ impl Element for TerminalElement {
             // alpha — suppressing the cells would show the window behind
             // wherever the image is transparent.
             for (image_bounds, image) in state.kitty_below_bg.drain(..) {
-                let _ = window.paint_image(
-                    bounds,
-                    image_bounds,
-                    Corners::default(),
-                    image,
-                    0,
-                    false,
-                );
+                let _ =
+                    window.paint_image(bounds, image_bounds, Corners::default(), image, 0, false);
             }
             for background in state.backgrounds.drain(..) {
                 window.paint_quad(background);
             }
             for (image_bounds, image) in state.kitty_below_text.drain(..) {
-                let _ = window.paint_image(
-                    bounds,
-                    image_bounds,
-                    Corners::default(),
-                    image,
-                    0,
-                    false,
-                );
+                let _ =
+                    window.paint_image(bounds, image_bounds, Corners::default(), image, 0, false);
             }
             for (line, origin) in state.lines.drain(..) {
                 let _ = line.paint(origin, LINE_HEIGHT, gpui::TextAlign::Left, None, window, cx);
             }
             for (image_bounds, image) in state.kitty_above_text.drain(..) {
-                let _ = window.paint_image(
-                    bounds,
-                    image_bounds,
-                    Corners::default(),
-                    image,
-                    0,
-                    false,
-                );
+                let _ =
+                    window.paint_image(bounds, image_bounds, Corners::default(), image, 0, false);
             }
             // R2.6: a refused format must be visible in the pane, not a
             // silent drop.
@@ -3913,8 +3887,8 @@ impl gpui::Render for TerminalView {
                 .p(px(6.0))
                 .rounded(theme.radii.user_pill)
                 .border_1()
-                .border_color(theme.hairline)
-                .bg(theme.card_fill)
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
                 .shadow_lg();
 
             let items = match split_pane_size {
@@ -3946,11 +3920,11 @@ impl gpui::Render for TerminalView {
                         .gap(px(2.0))
                         .text_size(theme.typography.footnote)
                         .when(is_disabled, |this| {
-                            this.text_color(theme.meta).cursor_not_allowed()
+                            this.text_color(theme.text_faint).cursor_not_allowed()
                         })
                         .when(!is_disabled, |this| {
-                            this.text_color(theme.title)
-                                .hover(|style| style.bg(theme.row_hover))
+                            this.text_color(theme.text)
+                                .hover(|style| style.bg(theme.element_hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |terminal, cx| {
                                         terminal.handle_context_action(action, window, cx);
@@ -3965,7 +3939,7 @@ impl gpui::Render for TerminalView {
                                         format!("terminal-context-item-{index}-reason")
                                     })
                                     .text_size(px(12.0))
-                                    .text_color(theme.meta)
+                                    .text_color(theme.text_faint)
                                     .child(reason),
                             )
                         }),
@@ -4007,7 +3981,7 @@ impl gpui::Render for TerminalView {
                     .child(
                         div()
                             .text_size(px(15.0))
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child("No terminal in this pane"),
                     )
                     .child(
@@ -4021,8 +3995,8 @@ impl gpui::Render for TerminalView {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(theme.primary_pill_bg)
-                                    .text_color(theme.title)
+                                    .bg(theme.surface_raised)
+                                    .text_color(theme.text)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(TerminalPromptAction::NewTerminal, cx);
                                     }))
@@ -4035,8 +4009,8 @@ impl gpui::Render for TerminalView {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(theme.card_fill)
-                                    .text_color(theme.title)
+                                    .bg(theme.surface_raised)
+                                    .text_color(theme.text)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(
                                             TerminalPromptAction::NewTerminalWithCommand,
@@ -4100,9 +4074,9 @@ impl gpui::Render for TerminalView {
                             .px(theme.spacing.titlebar_control_spacing)
                             .py(theme.spacing.titlebar_control_spacing)
                             .rounded(theme.radii.control)
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .text_size(theme.typography.caption2)
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child(format!("Dropped diff: {path}")),
                     )
                 })
@@ -4123,9 +4097,9 @@ impl gpui::Render for TerminalView {
                                 .bottom(px(8.0))
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .bg(theme.primary_pill_bg)
+                                .bg(theme.surface_raised)
                                 .text_size(px(12.0))
-                                .text_color(theme.tab_needs_input)
+                                .text_color(theme.warning)
                                 .child("Running"),
                         )
                     } else if let Some(label) = self.exit_status.map(TerminalExitStatus::label) {
@@ -4136,9 +4110,9 @@ impl gpui::Render for TerminalView {
                                 .bottom(px(8.0))
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .bg(theme.primary_pill_bg)
+                                .bg(theme.surface_raised)
                                 .text_size(px(12.0))
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(label),
                         )
                     } else {
@@ -4156,12 +4130,12 @@ impl gpui::Render for TerminalView {
                                     .py(px(4.0))
                                     .max_w(px(560.0))
                                     .rounded(theme.radii.control)
-                                    .bg(theme.card_fill)
+                                    .bg(theme.surface_raised)
                                     .border_1()
-                                    .border_color(theme.hairline)
+                                    .border_color(theme.border)
                                     .font_family(sirio_theme::terminal_family())
                                     .text_size(theme.typography.caption2)
-                                    .text_color(theme.title)
+                                    .text_color(theme.text)
                                     .child(hover.uri),
                             ),
                         )
@@ -4187,14 +4161,14 @@ impl gpui::Render for TerminalView {
                         div()
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.tab_needs_input)
+                            .text_color(theme.warning)
                             .child("Terminal failed to start"),
                     )
                     .child(
                         div()
                             .w_full()
                             .text_size(px(13.0))
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                             .child(message.clone()),
                     )
                     .child(
@@ -4204,10 +4178,10 @@ impl gpui::Render for TerminalView {
                             .px(px(14.0))
                             .py(px(6.0))
                             .rounded(px(6.0))
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .text_size(px(13.0))
-                            .text_color(theme.title)
-                            .hover(|style| style.bg(theme.row_hover))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.element_hover))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(move |_, _, cx| {
                                 retry_entity.update(cx, |view, cx| view.retry(cx));
@@ -4563,8 +4537,12 @@ fn click_selection_range(
     });
     let grid_ref = terminal.grid_ref(point).ok()?;
     let selection = match kind {
-        ClickSelection::Word => terminal.select_word(SelectWordOptions::new(grid_ref)).ok()??,
-        ClickSelection::Line => terminal.select_line(SelectLineOptions::new(grid_ref)).ok()??,
+        ClickSelection::Word => terminal
+            .select_word(SelectWordOptions::new(grid_ref))
+            .ok()??,
+        ClickSelection::Line => terminal
+            .select_line(SelectLineOptions::new(grid_ref))
+            .ok()??,
     };
     let viewport = |grid_ref: &GridRef<'_>| {
         terminal
@@ -4870,12 +4848,18 @@ mod tests {
         assert_eq!(buckets.above_text.len(), 1, "one placement for one image");
         let first = &buckets.above_text[0];
         assert_eq!(first.image_id, 1);
-        assert_eq!(first.format, libghostty_vt::kitty::graphics::ImageFormat::Rgb);
+        assert_eq!(
+            first.format,
+            libghostty_vt::kitty::graphics::ImageFormat::Rgb
+        );
         assert_eq!(&first.data, &[0xFF, 0x00, 0x00], "RGB pixels, verbatim");
         assert_eq!((first.width, first.height), (1, 1));
         assert_eq!((first.viewport_col, first.viewport_row), (0, 0));
         assert_eq!((first.pixel_width, first.pixel_height), (1, 1));
-        assert!(first.generation > 0, "a stored image never has generation zero");
+        assert!(
+            first.generation > 0,
+            "a stored image never has generation zero"
+        );
         let generation_1 = first.generation;
 
         // Retransmit the same image id with different pixels: same id, new
@@ -4885,7 +4869,10 @@ mod tests {
         assert_eq!(buckets.above_text.len(), 1);
         let second = &buckets.above_text[0];
         assert_eq!(second.image_id, 1);
-        assert_ne!(second.generation, generation_1, "retransmit bumps the generation");
+        assert_ne!(
+            second.generation, generation_1,
+            "retransmit bumps the generation"
+        );
         assert_eq!(&second.data, &[0x00, 0x00, 0xFF], "blue now");
     }
 
@@ -4912,7 +4899,11 @@ mod tests {
 
         let buckets = collect_kitty_placements(&mut term);
         assert_eq!(buckets.below_bg.len(), 1, "z < i32::MIN/2 lands BelowBg");
-        assert_eq!(buckets.below_text.len(), 1, "i32::MIN/2 <= z < 0 lands BelowText");
+        assert_eq!(
+            buckets.below_text.len(),
+            1,
+            "i32::MIN/2 <= z < 0 lands BelowText"
+        );
         assert_eq!(buckets.above_text.len(), 1, "z >= 0 lands AboveText");
         assert_eq!(buckets.below_bg[0].image_id, 1);
         assert_eq!(buckets.below_text[0].image_id, 2);
@@ -4997,9 +4988,16 @@ mod tests {
         );
         // After the scroll-position change the placement is still collected
         // with the same untruncated geometry.
-        assert_eq!(after.above_text.len(), 1, "still one placement after scrolling");
         assert_eq!(
-            (after.above_text[0].pixel_width, after.above_text[0].pixel_height),
+            after.above_text.len(),
+            1,
+            "still one placement after scrolling"
+        );
+        assert_eq!(
+            (
+                after.above_text[0].pixel_width,
+                after.above_text[0].pixel_height
+            ),
             (8, 36),
             "scroll change keeps the untruncated geometry"
         );
@@ -5007,7 +5005,10 @@ mod tests {
         // the pane rect as the clip: negative origin, full size.
         let pane = Bounds::new(point(px(10.0), px(20.0)), size(px(640.0), px(432.0)));
         let image_bounds = kitty_image_bounds(pane, px(8.0), half_out);
-        assert!(image_bounds.origin.y < pane.origin.y, "origin stays negative");
+        assert!(
+            image_bounds.origin.y < pane.origin.y,
+            "origin stays negative"
+        );
         assert_eq!(image_bounds.size.height, px(36.0), "height stays full");
         assert_eq!(image_bounds.size.width, px(8.0), "width stays full");
     }
@@ -5107,7 +5108,10 @@ mod tests {
             ..red
         };
         let third = cache.get_or_decode(&blue, tick).expect("decodes");
-        assert!(!Arc::ptr_eq(&first, &third), "new generation must decode anew");
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "new generation must decode anew"
+        );
         assert_eq!(&third.as_bytes(0).unwrap()[0..3], &[0xFF, 0x00, 0x00]);
     }
 
@@ -5115,11 +5119,13 @@ mod tests {
     /// decompressed pixel buffer can be allocated.
     #[test]
     fn kitty_png_decoder_rejects_compressed_images_over_decompression_limit() {
-        let png =
-            image::RgbaImage::from_pixel(4097, 4096, image::Rgba([0x12, 0x34, 0x56, 0xFF]));
+        let png = image::RgbaImage::from_pixel(4097, 4096, image::Rgba([0x12, 0x34, 0x56, 0xFF]));
         let mut encoded = Vec::new();
-        png.write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
-            .expect("encode the compressed test image");
+        png.write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        )
+        .expect("encode the compressed test image");
         assert!(
             encoded.len() < 1024 * 1024,
             "solid image should be much smaller compressed than decompressed"
@@ -5168,14 +5174,10 @@ mod tests {
     #[test]
     fn kitty_png_ingest_decoder_decodes_to_rgba() {
         let mut png = Vec::new();
-        image::RgbaImage::from_raw(
-            2,
-            1,
-            vec![0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80],
-        )
-        .expect("2x1 buffer")
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .expect("encode PNG");
+        image::RgbaImage::from_raw(2, 1, vec![0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80])
+            .expect("2x1 buffer")
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode PNG");
 
         let mut decoder = KittyPngDecoder::new();
         let decoded = decoder
@@ -5206,7 +5208,8 @@ mod tests {
         term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
             .expect("re-apply storage limit");
         assert_eq!(
-            term.kitty_image_storage_limit().expect("read storage limit"),
+            term.kitty_image_storage_limit()
+                .expect("read storage limit"),
             KITTY_IMAGE_STORAGE_LIMIT
         );
     }
@@ -5218,10 +5221,8 @@ mod tests {
     /// owner thread makes) is what the emulator actually calls.
     #[test]
     fn kitty_png_transmit_reaches_the_placement_walk_as_rgba() {
-        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(
-            KittyPngDecoder::new(),
-        )))
-        .expect("register decoder on this thread");
+        libghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(KittyPngDecoder::new())))
+            .expect("register decoder on this thread");
         let mut png = Vec::new();
         image::RgbaImage::from_raw(1, 1, vec![0x12, 0x34, 0x56, 0xFF])
             .expect("1x1 buffer")
@@ -5231,11 +5232,18 @@ mod tests {
 
         let mut term = headless_term(80, 24);
         resize_headless(&mut term, 80, 24);
-        advance_headless(&mut term, format!("\x1b_Ga=t,f=100,s=1,v=1,i=7,q=2;{b64}\x1b\\").as_bytes());
+        advance_headless(
+            &mut term,
+            format!("\x1b_Ga=t,f=100,s=1,v=1,i=7,q=2;{b64}\x1b\\").as_bytes(),
+        );
         advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=7,C=1\x1b\\");
 
         let buckets = collect_kitty_placements(&mut term);
-        assert_eq!(buckets.above_text.len(), 1, "the PNG image stored and placed");
+        assert_eq!(
+            buckets.above_text.len(),
+            1,
+            "the PNG image stored and placed"
+        );
         let place = &buckets.above_text[0];
         assert_eq!(place.image_id, 7);
         assert_eq!(
@@ -5251,7 +5259,7 @@ mod tests {
         assert_eq!((place.width, place.height), (1, 1));
     }
 
-/// #308 test half: a placeable 1x1 RGB image with deterministic pixels.
+    /// #308 test half: a placeable 1x1 RGB image with deterministic pixels.
     fn kitty_pixel_place(image_id: u32, generation: u64) -> KittyPlacement {
         KittyPlacement {
             image_id,
@@ -5294,7 +5302,10 @@ mod tests {
             if handle.kitty_stamp.load(Ordering::Relaxed) == sample {
                 break sample;
             }
-            assert!(std::time::Instant::now() < deadline, "startup never settled");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "startup never settled"
+            );
         };
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(
@@ -5314,7 +5325,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(bumped, "R4.4: output must bump the stamp so prepaint re-scans");
+        assert!(
+            bumped,
+            "R4.4: output must bump the stamp so prepaint re-scans"
+        );
         handle.shutdown();
         let _ = std::fs::remove_dir_all(working_directory);
     }
@@ -5346,19 +5360,29 @@ mod tests {
         advance_headless(&mut term, b"\x1b_Ga=t,f=24,s=1,v=1,i=1,q=2;AAD/\x1b\\");
         let buckets = collect_kitty_placements(&mut term);
         let new_generation = buckets.live[0].1;
-        assert_ne!(old_generation, new_generation, "retransmit bumps the generation");
+        assert_ne!(
+            old_generation, new_generation,
+            "retransmit bumps the generation"
+        );
 
         // The reconcile sees the id live at the NEW generation and names the
         // old key dead; the new pixels decode on the next lookup.
         let dead = cache.dead_keys(&buckets.live);
-        assert_eq!(dead, vec![(1, old_generation)], "only the superseded key is dead");
+        assert_eq!(
+            dead,
+            vec![(1, old_generation)],
+            "only the superseded key is dead"
+        );
         assert!(cache.remove(&dead[0]).is_some());
         assert!(!cache.images.contains_key(&(1, old_generation)));
         let tick = cache.begin_frame();
         let second = cache
             .get_or_decode(&buckets.above_text[0], tick)
             .expect("redecodes from the new generation");
-        assert!(!Arc::ptr_eq(&first, &second), "the replacement is a fresh texture");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "the replacement is a fresh texture"
+        );
     }
 
     /// #308 E2 (R4.5): a guest delete removes placements from the grid. The
@@ -5388,7 +5412,11 @@ mod tests {
         assert!(buckets.live.is_empty(), "delete empties the live set");
 
         let dead = cache.dead_keys(&buckets.live);
-        assert_eq!(dead, vec![(1, generation)], "the vanished id is the dead key");
+        assert_eq!(
+            dead,
+            vec![(1, generation)],
+            "the vanished id is the dead key"
+        );
         assert!(cache.remove(&dead[0]).is_some(), "its texture is released");
         assert!(cache.images.is_empty());
     }
@@ -5410,7 +5438,11 @@ mod tests {
         advance_headless(&mut term, b"\x1b[H");
         advance_headless(
             &mut term,
-            format!("\x1b_Ga=t,f=24,s=8,v=144,i=4,q=2;{}", base64_encode(&pixels)).as_bytes(),
+            format!(
+                "\x1b_Ga=t,f=24,s=8,v=144,i=4,q=2;{}",
+                base64_encode(&pixels)
+            )
+            .as_bytes(),
         );
         advance_headless(&mut term, b"\x1b_Ga=p,q=2,i=4,C=1,z=0\x1b\\");
         let before = collect_kitty_placements(&mut term);
@@ -5447,9 +5479,15 @@ mod tests {
         // And it IS still showable: scroll back and it returns.
         term.scroll_viewport(ScrollViewport::Top);
         let back = collect_kitty_placements(&mut term);
-        assert_eq!(back.above_text.len(), 1, "scroll-back restores the placement");
+        assert_eq!(
+            back.above_text.len(),
+            1,
+            "scroll-back restores the placement"
+        );
         let tick = cache.begin_frame();
-        let restored = cache.get_or_decode(&back.above_text[0], tick).expect("cache hit");
+        let restored = cache
+            .get_or_decode(&back.above_text[0], tick)
+            .expect("cache hit");
         assert!(
             Arc::ptr_eq(&restored, &cache.images[&(4, generation)]),
             "scroll-back is a cache HIT — the texture survives the scroll away"
@@ -5527,8 +5565,12 @@ mod tests {
     fn kitty_pane_close_parks_every_image_for_the_next_paint_to_drop() {
         let mut cache = KittyImageCache::default();
         let tick = cache.begin_frame();
-        let first = cache.get_or_decode(&kitty_pixel_place(1, 1), tick).expect("decodes");
-        let second = cache.get_or_decode(&kitty_pixel_place(2, 4), tick).expect("decodes");
+        let first = cache
+            .get_or_decode(&kitty_pixel_place(1, 1), tick)
+            .expect("decodes");
+        let second = cache
+            .get_or_decode(&kitty_pixel_place(2, 4), tick)
+            .expect("decodes");
 
         drop(cache); // the pane closed
 
@@ -5560,7 +5602,11 @@ mod tests {
             } else {
                 '='
             });
-            out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[n as usize & 63] as char
+            } else {
+                '='
+            });
         }
         out
     }

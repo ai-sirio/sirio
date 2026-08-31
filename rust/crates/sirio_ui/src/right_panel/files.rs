@@ -310,8 +310,8 @@ impl RightPanel {
             .p(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .shadow_lg();
 
         // `Open` is the one entry a directory must not offer: it emits
@@ -340,8 +340,8 @@ impl RightPanel {
                 .flex()
                 .items_center()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
-                .hover(|style| style.bg(theme.row_hover));
+                .text_color(theme.text)
+                .hover(|style| style.bg(theme.element_hover));
 
             row = match selector {
                 "file-context-open" => row.on_click(move |_, _, cx| {
@@ -434,12 +434,12 @@ impl RightPanel {
             if row.node.expanded {
                 Some(
                     IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                        .text_color(theme.subtitle),
+                        .text_color(theme.text_muted),
                 )
             } else {
                 Some(
                     IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                        .text_color(theme.subtitle),
+                        .text_color(theme.text_muted),
                 )
             }
         } else {
@@ -474,12 +474,12 @@ impl RightPanel {
             // (three distinguishable colours, not one "modified" amber),
             // and unreadable directories dim rather than shout.
             .text_color(if read_error.is_some() {
-                theme.subtitle
+                theme.text_muted
             } else {
-                theme.title
+                theme.text
             })
-            .when(selected, |this| this.bg(theme.selected_fill))
-            .hover(|style| style.bg(theme.row_hover))
+            .when(selected, |this| this.bg(theme.element_active))
+            .hover(|style| style.bg(theme.element_hover))
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 file_focus.focus(window, cx);
                 entity.update(cx, |panel, cx| {
@@ -541,7 +541,7 @@ impl RightPanel {
                         .items_center()
                         .justify_center()
                         .child(
-                            IconElement::new(glyph, IconSize::Medium).text_color(theme.subtitle),
+                            IconElement::new(glyph, IconSize::Medium).text_color(theme.text_muted),
                         ),
                 )
             })
@@ -563,7 +563,7 @@ impl RightPanel {
                 this.child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(theme.git_conflict)
+                        .text_color(theme.danger)
                         .child("⚠"),
                 )
             })
@@ -684,7 +684,7 @@ impl RightPanel {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(loading::indeterminate(
                     "files-loading-orb",
                     loading::GENERIC_ORB,
@@ -717,7 +717,7 @@ impl RightPanel {
                 .child(
                     div()
                         .text_size(theme.typography.headline)
-                        .text_color(theme.git_conflict)
+                        .text_color(theme.danger)
                         .child(format!("Files unavailable: {error}")),
                 )
                 .child(files_action_button(
@@ -779,8 +779,8 @@ fn files_action_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.title)
-        .hover(|style| style.bg(theme.row_hover))
+        .text_color(theme.text)
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);

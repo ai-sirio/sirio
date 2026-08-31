@@ -7,6 +7,9 @@ publish.workspace = true
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true
+# The colour tokens themselves: `ThemeColors::for_appearance` reads
+# `bezel::theme::Theme` rather than carrying its own palette.
+bezel.workspace = true
 # Font discovery for the runtime-resolved code family: fontdb is the same
 # database gpui's Linux text system loads, so the generic "monospace" answer
 # here is the system's own (fontconfig's alias), not a hard-coded guess.

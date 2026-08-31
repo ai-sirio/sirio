@@ -42,7 +42,7 @@ impl ShellMaterial {
 
     pub(crate) fn frame_fill(self, theme: &Theme) -> gpui::Rgba {
         match self {
-            Self::Opaque => theme.frame_fallback,
+            Self::Opaque => theme.bg,
             Self::Blurred => theme.frame_surface,
         }
     }
@@ -59,9 +59,9 @@ pub(crate) const CENTER_PANEL_FOCUS_VISIBLE: bool = false;
 
 pub(crate) fn panel_border(theme: &Theme, focus_visible: bool) -> gpui::Rgba {
     if focus_visible {
-        theme.panel_focus_ring
+        theme.text_muted
     } else {
-        theme.panel_border
+        theme.border_opaque
     }
 }
 
@@ -90,7 +90,7 @@ pub(crate) fn panel(
         .debug_selector(move || id.into())
         .relative()
         .size_full()
-        .bg(theme.panel_surface)
+        .bg(theme.surface)
         .border_1()
         .border_color(panel_border(theme, focus_visible))
         .rounded(theme.radii.shell_panel)
@@ -127,10 +127,7 @@ mod tests {
             ShellMaterial::Blurred.window_background(),
             WindowBackgroundAppearance::Blurred
         );
-        assert_eq!(
-            ShellMaterial::Opaque.frame_fill(&theme),
-            theme.frame_fallback
-        );
+        assert_eq!(ShellMaterial::Opaque.frame_fill(&theme), theme.bg);
         assert_eq!(
             ShellMaterial::Blurred.frame_fill(&theme),
             theme.frame_surface
@@ -141,7 +138,7 @@ mod tests {
     fn panel_border_uses_focus_ring_only_when_focus_is_visible() {
         let theme = Theme::dark();
 
-        assert_eq!(panel_border(&theme, false), theme.panel_border);
-        assert_eq!(panel_border(&theme, true), theme.panel_focus_ring);
+        assert_eq!(panel_border(&theme, false), theme.border_opaque);
+        assert_eq!(panel_border(&theme, true), theme.text_muted);
     }
 }

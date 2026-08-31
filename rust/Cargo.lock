@@ -7058,6 +7058,7 @@ name = "sirio"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "bezel",
  "bezel-gpui",
  "bezel-gpui-platform",
  "chrono",
@@ -7222,6 +7223,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "ashpd",
+ "bezel",
  "bezel-gpui",
  "fontdb",
 ]

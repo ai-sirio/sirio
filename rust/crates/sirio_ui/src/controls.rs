@@ -1,24 +1,23 @@
 //! Reusable controls used by the settings surface.
 //!
-//! COSMIC-02: this file's spacing and radii now come from
-//! [`sirio_theme::cosmic`] instead of bare `px()` literals. Two kinds of
-//! literal remain deliberately:
+//! This file's spacing and radii come from [`bezel::theme`]'s scale rather
+//! than bare `px()` literals. They used to come from COSMIC's, which had the
+//! same four steps at the same four values; only the source moved. Two kinds
+//! of literal remain deliberately:
 //!
 //! - **Component geometry** — a control's own fixed footprint (a toggle's
 //!   36×20 track, a stepper's 28px buttons, the 20×20 colour picker swatch)
 //!   stays a frozen literal, the same "geometry is waku's, colour/radius
-//!   language is COSMIC's" split `titlebar.rs` already established. The
+//!   language is the design system's" split `titlebar.rs` already
+//!   established. The
 //!   "full circle is half the box" idiom from [`sirio_theme::Radii`]'s own
 //!   doc comment applies here too (the swatch's `radius(10)` for a 20×20
 //!   box, the toggle's `radius(7)` for a 14×14 knob).
-//! - **Content spacing** (gaps, padding, margins between elements) now
-//!   reads `theme.cosmic.spacing.*`, rounded to the nearest COSMIC step from
-//!   its original waku value.
-//!
-//! `card()`'s corner radius and fill are the one place this file draws a
-//! COSMIC *container* colour, not just a spacing/radius number — see its
-//! doc comment for the container-level decision.
+//! - **Content spacing** (gaps, padding, margins between elements) reads
+//!   `BezelTheme::SPACE_*`, rounded to the nearest step from its original
+//!   waku value.
 
+use bezel::theme::Theme as BezelTheme;
 use gpui::{
     AnyView, App, ClickEvent, Context, CursorStyle, Div, FontWeight, Render, Rgba, Window, div,
     prelude::*, px, text,
@@ -57,28 +56,27 @@ impl Render for TextTooltip {
             .px(px(8.0))
             .py(px(4.0))
             .rounded(self.theme.radii.control)
-            .bg(self.theme.raised)
+            .bg(self.theme.surface_raised)
             .border_1()
-            .border_color(self.theme.hairline)
+            .border_color(self.theme.border)
             .text_size(self.theme.typography.caption2)
-            .text_color(self.theme.title)
+            .text_color(self.theme.text)
             .child(self.text.clone())
     }
 }
 
 /// Creates a titled settings section with a card beneath it.
 pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement {
-    let spacing = theme.cosmic.spacing;
     div()
         .id(format!("settings-section-{title}"))
         .w_full()
-        .mb(px(spacing.l as f32))
+        .mb(px(BezelTheme::SPACE_LG * 2.0))
         .child(
             div()
-                .mb(px(spacing.xxs as f32))
+                .mb(px(BezelTheme::SPACE_SM))
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(text!(id = format!("settings-section-title-{title}"), title)),
         )
         .child(card)
@@ -91,9 +89,9 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
 pub fn card(theme: Theme) -> Div {
     div()
         .w_full()
-        .rounded(px(theme.cosmic.radii.radius_s[0]))
+        .rounded(px(BezelTheme::BASE_RADIUS)) // 8.0
         .overflow_hidden()
-        .bg(theme.raised)
+        .bg(theme.surface_raised)
 }
 
 /// Creates one labelled row. `description` adds the secondary line used by
@@ -110,15 +108,15 @@ pub fn row(
         .justify_center()
         .flex_1()
         .text_size(theme.typography.headline)
-        .text_color(theme.title)
+        .text_color(theme.text)
         .child(text!(id = format!("settings-row-label-{label}"), label));
 
     if let Some(description) = description {
         label_view = label_view.child(
             div()
-                .mt(px(theme.cosmic.spacing.xxxs as f32))
+                .mt(px(BezelTheme::SPACE_XS))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(description),
         );
     }
@@ -132,18 +130,17 @@ pub fn row(
 /// Creates a row from a pre-built label view. This is used when a row needs
 /// an icon or a status marker before its text, while retaining the same row
 /// geometry as [`row`].
-pub fn row_view(label_view: Div, control: impl IntoElement, theme: Theme) -> Div {
-    let spacing = theme.cosmic.spacing;
+pub fn row_view(label_view: Div, control: impl IntoElement, _theme: Theme) -> Div {
     div()
         // 44px minimum touch target — component geometry, not spacing;
         // frozen the same way `titlebar.rs`'s `CONTROL_SIZE` is.
         .min_h(px(44.0))
         .w_full()
-        .px(px(spacing.xs as f32))
-        .py(px(spacing.xxs as f32))
+        .px(px(BezelTheme::SPACE_MD))
+        .py(px(BezelTheme::SPACE_SM))
         .flex()
         .items_center()
-        .gap(px(spacing.xs as f32))
+        .gap(px(BezelTheme::SPACE_MD))
         // A flex child's `min-width` defaults to `auto` — its own
         // min-content width (the CSS flexbox rule gpui inherits) — so
         // `flex_1` alone does NOT let a long label shrink. It pushes
@@ -160,9 +157,9 @@ pub fn row_view(label_view: Div, control: impl IntoElement, theme: Theme) -> Div
 /// Adds a one-pixel separator between rows in a card.
 pub fn separator(theme: Theme) -> Div {
     div()
-        .mx(px(theme.cosmic.spacing.xs as f32))
+        .mx(px(BezelTheme::SPACE_MD))
         .h(theme.spacing.hairline_thickness)
-        .bg(theme.hairline)
+        .bg(theme.border)
 }
 
 /// A compact on/off switch.
@@ -185,7 +182,7 @@ where
         // rather than the active-chrome tint: `title` and `title_selected`
         // are the same value, which would have put the knob's colour on the
         // track's colour and made the knob vanish.
-        .bg(if on { theme.inverse } else { theme.hairline })
+        .bg(if on { theme.solid } else { theme.border })
         .hover(|style| style.opacity(0.9))
         .on_click(callback)
         .child(
@@ -196,11 +193,7 @@ where
                 .w(px(14.0))
                 .h(px(14.0))
                 .rounded(px(7.0))
-                .bg(if on {
-                    theme.on_inverse
-                } else {
-                    theme.title_selected
-                }),
+                .bg(if on { theme.on_solid } else { theme.text }),
         )
 }
 
@@ -222,7 +215,7 @@ pub fn segmented(
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .p(px(2.0));
 
     for (index, label) in options.iter().enumerate() {
@@ -234,7 +227,7 @@ pub fn segmented(
                 .debug_selector(move || format!("{id}-{index}"))
                 .h(px(22.0))
                 .min_w(px(56.0))
-                .px(px(theme.cosmic.spacing.xs as f32))
+                .px(px(BezelTheme::SPACE_MD))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -245,13 +238,9 @@ pub fn segmented(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if active {
-                    theme.title_selected
-                } else {
-                    theme.subtitle
-                })
-                .when(active, |this| this.bg(theme.selected_fill))
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .when(active, |this| this.bg(theme.element_active))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(text!(id = ("segmented-option", index), *label)),
         );
@@ -275,7 +264,7 @@ pub fn segmented_icons(
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .p(px(2.0));
 
     for (index, (icon, tooltip)) in options.iter().copied().enumerate() {
@@ -287,7 +276,7 @@ pub fn segmented_icons(
                 .debug_selector(move || format!("{id}-{index}"))
                 .h(px(22.0))
                 .min_w(px(56.0))
-                .px(px(theme.cosmic.spacing.xs as f32))
+                .px(px(BezelTheme::SPACE_MD))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -298,13 +287,9 @@ pub fn segmented_icons(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if active {
-                    theme.title_selected
-                } else {
-                    theme.subtitle
-                })
-                .when(active, |this| this.bg(theme.selected_fill))
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .when(active, |this| this.bg(theme.element_active))
+                .hover(|style| style.bg(theme.element_hover))
                 .tooltip(text_tooltip(tooltip, theme))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(IconElement::new(icon, IconSize::Small)),
@@ -339,7 +324,7 @@ where
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .child(
             div()
                 .id(format!("{id}-decrement"))
@@ -350,19 +335,19 @@ where
                 .items_center()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.meta)
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(theme.text_faint)
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| decrement(value - 1, cx))
                 .child("⌄"),
         )
         .child(
             div()
                 .min_w(px(48.0))
-                .px(px(theme.cosmic.spacing.xxxs as f32))
+                .px(px(BezelTheme::SPACE_XS))
                 .flex()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(if unit.is_empty() {
                     value.to_string()
                 } else {
@@ -379,8 +364,8 @@ where
                 .items_center()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.meta)
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(theme.text_faint)
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
                 .child("⌃"),
         )
@@ -388,10 +373,9 @@ where
 
 /// A short status/action badge, matching the pills used by Settings rows.
 pub fn badge(theme: Theme, label: &'static str, background: Rgba, foreground: Rgba) -> Div {
-    let spacing = theme.cosmic.spacing;
     div()
-        .px(px(spacing.xxxs as f32))
-        .py(px(spacing.xxxs as f32))
+        .px(px(BezelTheme::SPACE_XS))
+        .py(px(BezelTheme::SPACE_XS))
         .rounded(theme.radii.row_card)
         .text_size(theme.typography.caption2)
         .font_weight(FontWeight::SEMIBOLD)
@@ -407,12 +391,11 @@ pub fn subsection_header(
     action: impl IntoElement,
     theme: Theme,
 ) -> Div {
-    let spacing = theme.cosmic.spacing;
     div()
         .w_full()
-        .px(px(spacing.xs as f32))
-        .pt(px(spacing.xs as f32))
-        .pb(px(spacing.xxxs as f32))
+        .px(px(BezelTheme::SPACE_MD))
+        .pt(px(BezelTheme::SPACE_MD))
+        .pb(px(BezelTheme::SPACE_XS))
         .flex()
         .items_start()
         .justify_between()
@@ -420,12 +403,12 @@ pub fn subsection_header(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(spacing.xxxs as f32))
+                .gap(px(BezelTheme::SPACE_XS))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(theme.typography.headline)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .child(text!(
                             id = format!("settings-subsection-title-{title}"),
                             title
@@ -434,7 +417,7 @@ pub fn subsection_header(
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(
                             id = format!("settings-subsection-description-{title}"),
                             description
@@ -446,17 +429,16 @@ pub fn subsection_header(
 
 /// A full-width row containing a single left-aligned action button.
 pub fn action_row(action: impl IntoElement, theme: Theme) -> Div {
-    let spacing = theme.cosmic.spacing;
     div()
         // 44px minimum touch target — component geometry, matches `row_view`.
         .min_h(px(44.0))
         .w_full()
-        .px(px(spacing.xs as f32))
-        .py(px(spacing.xxs as f32))
+        .px(px(BezelTheme::SPACE_MD))
+        .py(px(BezelTheme::SPACE_SM))
         .flex()
         .items_center()
         .child(action)
-        .bg(theme.card_fill)
+        .bg(theme.surface_raised)
 }
 
 /// A compact, selectable account row with the two status pills used by
@@ -476,25 +458,24 @@ pub fn account_row<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    let spacing = theme.cosmic.spacing;
     let mut badges = div()
         .flex()
         .items_center()
-        .gap(px(spacing.xxxs as f32))
+        .gap(px(BezelTheme::SPACE_XS))
         .child(badge(
             theme,
             "This device",
-            theme.primary_pill_bg,
-            theme.title,
+            theme.surface_raised,
+            theme.text,
         ));
     if active {
-        badges = badges.child(badge(theme, "Active", theme.inverse, theme.on_inverse));
+        badges = badges.child(badge(theme, "Active", theme.solid, theme.on_solid));
     }
 
     div()
         .w_full()
-        .px(px(spacing.xs as f32))
-        .py(px(spacing.xxxs as f32))
+        .px(px(BezelTheme::SPACE_MD))
+        .py(px(BezelTheme::SPACE_XS))
         .flex()
         .items_start()
         .justify_between()
@@ -502,17 +483,17 @@ where
             div()
                 .flex()
                 .flex_col()
-                .gap(px(spacing.xxxs as f32))
+                .gap(px(BezelTheme::SPACE_XS))
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(spacing.xxs as f32))
+                        .gap(px(BezelTheme::SPACE_SM))
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(theme.typography.headline)
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .child(text!(
                                     id = format!("settings-account-label-{row_id}"),
                                     label.clone()
@@ -523,7 +504,7 @@ where
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(
                             id = format!("settings-account-subtitle-{row_id}"),
                             subtitle
@@ -533,7 +514,7 @@ where
         .id(row_id.clone())
         .debug_selector(move || row_id.clone())
         .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(on_select)
 }
 
@@ -547,17 +528,16 @@ pub fn button<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    let spacing = theme.cosmic.spacing;
     div()
         .id(id)
         .debug_selector(move || id.to_string())
-        .px(px(spacing.xs as f32))
-        .py(px(spacing.xxxs as f32))
+        .px(px(BezelTheme::SPACE_MD))
+        .py(px(BezelTheme::SPACE_XS))
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
-        .text_color(theme.title)
-        .bg(theme.primary_pill_bg)
-        .hover(|style| style.bg(theme.row_hover))
+        .text_color(theme.text)
+        .bg(theme.surface_raised)
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(callback)
         .child(text!(id = format!("settings-button-{id}"), label))
 }
@@ -576,21 +556,24 @@ pub fn button_maybe<F>(
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    let spacing = theme.cosmic.spacing;
     let enabled = callback.is_some();
     let mut element = div()
         .id(id)
         .debug_selector(move || id.to_string())
-        .px(px(spacing.xs as f32))
-        .py(px(spacing.xxxs as f32))
+        .px(px(BezelTheme::SPACE_MD))
+        .py(px(BezelTheme::SPACE_XS))
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
-        .text_color(if enabled { theme.title } else { theme.meta })
-        .bg(theme.primary_pill_bg)
+        .text_color(if enabled {
+            theme.text
+        } else {
+            theme.text_faint
+        })
+        .bg(theme.surface_raised)
         .child(text!(id = format!("settings-button-{id}"), label));
     if let Some(callback) = callback {
         element = element
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(callback);
     }
     element
@@ -600,7 +583,7 @@ where
 /// (F-SET-22). It replaces what used to be a single 44×22 display-only
 /// swatch pill with no `on_click`, so no colour choice existed to
 /// exercise. Each option here is its own clickable swatch; the selected
-/// one draws a highlight ring in `theme.selection_ring` instead of a
+/// one draws a highlight ring in `theme.text` instead of a
 /// checkmark glyph, so the choice stays legible without adding new
 /// iconography.
 pub fn color_picker(
@@ -619,7 +602,7 @@ pub fn color_picker(
         .flex()
         .flex_wrap()
         .items_center()
-        .gap(px(theme.cosmic.spacing.xxs as f32));
+        .gap(px(BezelTheme::SPACE_SM));
     for (key, color) in options.iter().copied() {
         let callback = callback.clone();
         let active = key == selected;
@@ -632,11 +615,7 @@ pub fn color_picker(
                 .rounded(px(10.0))
                 .bg(color)
                 .border_2()
-                .border_color(if active {
-                    theme.selection_ring
-                } else {
-                    theme.hairline
-                })
+                .border_color(if active { theme.text } else { theme.border })
                 .cursor(CursorStyle::PointingHand)
                 .on_click(move |_, _, cx| callback(key, cx)),
         );
@@ -655,15 +634,15 @@ mod tests {
     #[test]
     fn card_uses_the_raised_surface_in_dark_mode() {
         let theme = Theme::dark();
-        assert!(theme.cosmic.is_dark);
+        assert_eq!(theme.appearance, sirio_theme::Appearance::Dark);
         assert_eq!(
-            theme.cosmic.radii.radius_s[0], 8.0,
-            "card()'s radius token must still be the measured COSMIC radius_s step"
+            BezelTheme::BASE_RADIUS, 8.0,
+            "card()'s radius must still be bezel's base corner"
         );
         let mut card = card(theme);
         assert_eq!(
             Styled::style(&mut card).background,
-            Some(theme.raised.into()),
+            Some(theme.surface_raised.into()),
             "card()'s final dark background must be the raised surface"
         );
     }
@@ -673,30 +652,28 @@ mod tests {
     #[test]
     fn card_uses_the_raised_surface_in_light_mode() {
         let theme = Theme::light();
-        assert!(!theme.cosmic.is_dark);
+        assert_eq!(theme.appearance, sirio_theme::Appearance::Light);
         assert_ne!(
-            theme.raised,
-            Theme::dark().raised,
+            theme.surface_raised,
+            Theme::dark().surface_raised,
             "light and dark raised surfaces must not collapse to the same fill"
         );
         let mut card = card(theme);
         assert_eq!(
             Styled::style(&mut card).background,
-            Some(theme.raised.into()),
+            Some(theme.surface_raised.into()),
             "card()'s final light background must be the raised surface"
         );
     }
 
-    /// `row_view` used to hardcode every literal despite taking `_theme`;
-    /// this pins that it now reads spacing from the COSMIC scale, not a
-    /// bare number — a regression here means the parameter went back to
-    /// being decorative.
+    /// The two steps this file leans on hardest keep their measured values.
+    /// `row_view` used to hardcode every literal despite taking `_theme`; the
+    /// numbers are bezel's now, and a bump that moved them would silently
+    /// re-space every settings row.
     #[test]
-    fn row_view_spacing_comes_from_the_cosmic_scale() {
-        let theme = Theme::dark();
-        let spacing = theme.cosmic.spacing;
-        assert_eq!(spacing.xs, 12);
-        assert_eq!(spacing.xxs, 8);
+    fn the_spacing_steps_this_file_uses_keep_their_values() {
+        assert_eq!(BezelTheme::SPACE_MD, 12.0);
+        assert_eq!(BezelTheme::SPACE_SM, 8.0);
     }
 
     /// `separator()`'s height is the new `hairline_thickness` token, not a

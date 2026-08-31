@@ -17,8 +17,8 @@ impl Render for SettingsDemo {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
-            .child(div().h(px(32.0)).flex_none().bg(theme.background))
+            .bg(theme.surface)
+            .child(div().h(px(32.0)).flex_none().bg(theme.surface))
             .child(div().flex_1().child(self.settings.clone()))
     }
 }

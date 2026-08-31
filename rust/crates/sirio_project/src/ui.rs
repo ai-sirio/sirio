@@ -1,26 +1,3 @@
-/// User appearance preference and its resolved effective theme.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppearanceMode {
-    System,
-    Light,
-    Dark,
-}
-
-impl AppearanceMode {
-    pub fn resolve(self, system_is_dark: bool) -> Self {
-        match self {
-            Self::System => {
-                if system_is_dark {
-                    Self::Dark
-                } else {
-                    Self::Light
-                }
-            }
-            explicit => explicit,
-        }
-    }
-}
-
 /// Native updater state, independent of whichever Linux update transport is
 /// eventually selected.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,13 +41,6 @@ impl UpdateState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn appearance_follows_system_only_in_system_mode() {
-        assert_eq!(AppearanceMode::System.resolve(true), AppearanceMode::Dark);
-        assert_eq!(AppearanceMode::System.resolve(false), AppearanceMode::Light);
-        assert_eq!(AppearanceMode::Light.resolve(true), AppearanceMode::Light);
-    }
 
     #[test]
     fn updater_reaches_every_user_visible_state_and_clamps_progress() {

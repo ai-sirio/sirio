@@ -45,8 +45,8 @@ use crate::right_panel::ActivityStatus;
 /// The reference has a single `AgentIcon` view used by the worktree badge,
 /// the sidebar tab row and the tab bar alike, so a mark looks the same
 /// wherever it appears. This port had drifted into three different tints for
-/// the same mark — `theme.title` in the tab bar, `theme.tab_needs_input` on
-/// sidebar tab rows, `theme.tab_focus_accent` in the worktree badge — and the
+/// the same mark — `theme.text` in the tab bar, `theme.warning` on
+/// sidebar tab rows, `theme.text` in the worktree badge — and the
 /// last of those is Claude's own brand coral, so every agent's mark was
 /// wearing Claude's colour. Pairing the icon with its brand at the type level
 /// is what makes one rule enforceable across all three.
@@ -112,9 +112,9 @@ impl RowStatusGlyph {
             Some(ActivityStatus::Running) => {
                 Self::Running(brand.unwrap_or(AgentBrandColor::Unknown).color())
             }
-            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.tab_needs_input),
-            Some(ActivityStatus::Done) => Self::Dot(theme.tab_done),
-            Some(ActivityStatus::Error) => Self::Dot(theme.tab_error),
+            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.warning),
+            Some(ActivityStatus::Done) => Self::Dot(theme.success),
+            Some(ActivityStatus::Error) => Self::Dot(theme.danger),
         }
     }
 }
@@ -2630,7 +2630,7 @@ impl Sidebar {
     ) -> Rgba {
         agent_brand
             .filter(|_| has_agent_icon)
-            .map_or(theme.meta, AgentBrandColor::color)
+            .map_or(theme.text_faint, AgentBrandColor::color)
     }
 
     fn row_icon(row: &SidebarRow) -> Icon {
@@ -2704,19 +2704,15 @@ impl Sidebar {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
-            .border_color(if focused {
-                theme.selection_ring
-            } else {
-                theme.hairline
-            })
+            .border_color(if focused { theme.text } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
             .text_color(if value.is_empty() {
-                theme.meta
+                theme.text_faint
             } else {
-                theme.title
+                theme.text
             })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
@@ -2755,7 +2751,7 @@ impl Sidebar {
             // always append. `caret_shown` already folds in the field being
             // focused and the blink phase.
             .when(focused, |this| {
-                this.child(caret::bar(px(14.0), theme.caret, caret_shown))
+                this.child(caret::bar(px(14.0), theme.text, caret_shown))
             })
     }
 
@@ -2775,8 +2771,8 @@ impl Sidebar {
             .p(px(6.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .shadow_lg();
 
         for item in Self::context_menu_items(&target) {
@@ -2800,9 +2796,13 @@ impl Sidebar {
                 .items_center()
                 .justify_between()
                 .text_size(theme.typography.footnote)
-                .text_color(if enabled { theme.title } else { theme.meta })
+                .text_color(if enabled {
+                    theme.text
+                } else {
+                    theme.text_faint
+                })
                 .when(enabled, |this| {
-                    this.hover(|style| style.bg(theme.row_hover))
+                    this.hover(|style| style.bg(theme.element_hover))
                 });
             if enabled {
                 row = row.on_click(move |_, window, cx| {
@@ -2816,7 +2816,7 @@ impl Sidebar {
                 row = row.child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(theme.meta)
+                        .text_color(theme.text_faint)
                         .child(reason.to_string()),
                 );
             }
@@ -2848,8 +2848,8 @@ impl Sidebar {
             .p(px(6.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .child(Self::render_add_project_item(
                 entity.clone(),
@@ -2896,8 +2896,8 @@ impl Sidebar {
             .py(px(5.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(theme.title)
-            .hover(|style| style.bg(theme.row_hover))
+            .text_color(theme.text)
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
             .child(label)
     }
@@ -2932,8 +2932,8 @@ impl Sidebar {
                     .w(px(300.0))
                     .rounded(theme.radii.toast)
                     .border_1()
-                    .border_color(theme.hairline)
-                    .bg(theme.background)
+                    .border_color(theme.border)
+                    .bg(theme.surface)
                     .child(form_view)
                     .child(
                         div()
@@ -2945,8 +2945,8 @@ impl Sidebar {
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(theme.radii.control)
-                            .text_color(theme.title)
-                            .hover(|style| style.bg(theme.row_hover))
+                            .text_color(theme.text)
+                            .hover(|style| style.bg(theme.element_hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |sidebar, cx| {
                                     sidebar.project_form = None;
@@ -3003,7 +3003,7 @@ impl Sidebar {
             // finally the only thing a click on it can reach.
             .occlude()
             .p(px(16.0))
-            .bg(theme.sidebar)
+            .bg(theme.surface)
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -3011,19 +3011,19 @@ impl Sidebar {
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(format!("Project Settings · {heading_name}")),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(display_path(&card.path)),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(if card.is_git {
                         "Repository: Git"
                     } else {
@@ -3041,14 +3041,14 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .text_size(theme.typography.footnote)
                     .text_color(if display_name.trim().is_empty() {
-                        theme.meta
+                        theme.text_faint
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3078,7 +3078,7 @@ impl Sidebar {
                             }),
                     )
                     .when(name_focused, |this| {
-                        this.child(caret::bar(px(14.0), theme.caret, caret_visible))
+                        this.child(caret::bar(px(14.0), theme.text, caret_visible))
                     }),
             )
             .when(!card.is_git, |this| {
@@ -3093,9 +3093,9 @@ impl Sidebar {
                         .items_center()
                         .justify_center()
                         .rounded(theme.radii.control)
-                        .bg(theme.primary_pill_bg)
+                        .bg(theme.surface_raised)
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .on_click(move |_, _, cx| {
                             initialize_entity.update(cx, |_, cx| {
                                 cx.emit(SidebarEvent::ContextAction {
@@ -3114,7 +3114,7 @@ impl Sidebar {
                     .w_full()
                     .p(px(8.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.background)
+                    .bg(theme.surface)
                     .child(card.icon_picker.clone()),
             )
             .when(card.is_git, |this| {
@@ -3147,16 +3147,15 @@ impl Sidebar {
                     .gap(px(6.0))
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .text_color(theme.diff_del)
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, window, cx| {
                         remove_entity.update(cx, |sidebar, cx| {
                             sidebar.request_remove_project(remove_project_id.clone(), window, cx);
                         });
                     })
                     .child(
-                        IconElement::new(Icon::Close, IconSize::XSmall)
-                            .text_color(theme.diff_deletion),
+                        IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.diff_del),
                     )
                     .child("Remove Project"),
             )
@@ -3169,8 +3168,8 @@ impl Sidebar {
                     .px(px(10.0))
                     .py(px(6.0))
                     .rounded(theme.radii.control)
-                    .text_color(theme.title)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .text_color(theme.text)
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         close_entity.update(cx, |sidebar, cx| {
                             sidebar.project_settings = None;
@@ -3182,7 +3181,7 @@ impl Sidebar {
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(card.id),
             )
     }
@@ -3224,7 +3223,7 @@ impl Sidebar {
                 div()
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child("Default Worktree Base"),
             )
             .child(
@@ -3240,13 +3239,13 @@ impl Sidebar {
                             .child(
                                 div()
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.title)
+                                    .text_color(theme.text)
                                     .child(effective_base),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(theme.meta)
+                                    .text_color(theme.text_faint)
                                     .child(subtitle),
                             ),
                     )
@@ -3256,8 +3255,8 @@ impl Sidebar {
                             .debug_selector(|| "project-worktree-base-use-primary".to_owned())
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
-                            .hover(|style| style.text_color(theme.title))
+                            .text_color(theme.text_faint)
+                            .hover(|style| style.text_color(theme.text))
                             .on_click(move |_, _, cx| {
                                 primary_entity.update(cx, |sidebar, cx| {
                                     sidebar.use_primary_worktree_base(cx);
@@ -3277,14 +3276,14 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .text_size(theme.typography.footnote)
                     .text_color(if draft.trim().is_empty() {
-                        theme.meta
+                        theme.text_faint
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3314,7 +3313,7 @@ impl Sidebar {
                             }),
                     )
                     .when(focused, |this| {
-                        this.child(caret::bar(px(14.0), theme.caret, caret_visible))
+                        this.child(caret::bar(px(14.0), theme.text, caret_visible))
                     }),
             )
     }
@@ -3350,13 +3349,13 @@ impl Sidebar {
                 div()
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child("Worktree Location"),
             )
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(format!(
                         "Parent folder for new worktrees. Empty uses the default: {default_location}"
                     )),
@@ -3377,11 +3376,11 @@ impl Sidebar {
                             .flex()
                             .items_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.filter_field_bg)
+                            .bg(theme.input_bg)
                             .border_1()
-                            .border_color(theme.hairline)
+                            .border_color(theme.border)
                             .text_size(theme.typography.footnote)
-                            .text_color(if has_override { theme.title } else { theme.meta })
+                            .text_color(if has_override { theme.text } else { theme.text_faint })
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 focus_entity.update(cx, |sidebar, cx| {
@@ -3410,7 +3409,7 @@ impl Sidebar {
                                     }),
                             )
                             .when(focused, |this| {
-                                this.child(caret::bar(px(14.0), theme.caret, caret_visible))
+                                this.child(caret::bar(px(14.0), theme.text, caret_visible))
                             }),
                     )
                     .child(
@@ -3424,9 +3423,9 @@ impl Sidebar {
                             .items_center()
                             .justify_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .on_click(move |_, window, cx| {
                                 choose_entity.update(cx, |sidebar, cx| {
                                     sidebar.choose_worktree_location(window, cx);
@@ -3442,8 +3441,8 @@ impl Sidebar {
                         .debug_selector(|| "project-worktree-location-restore".to_owned())
                         .cursor(gpui::CursorStyle::PointingHand)
                         .text_size(px(11.0))
-                        .text_color(theme.meta)
-                        .hover(|style| style.text_color(theme.title))
+                        .text_color(theme.text_faint)
+                        .hover(|style| style.text_color(theme.text))
                         .on_click(move |_, _, cx| {
                             restore_entity.update(cx, |sidebar, cx| {
                                 sidebar.restore_default_worktree_location(cx);
@@ -3536,13 +3535,9 @@ impl Sidebar {
             RowKind::Tab => {
                 Self::tab_row_icon_color(row.agent_brand, row.agent_icon.is_some(), theme)
             }
-            RowKind::Worktree | RowKind::NewWorktree => theme.meta,
+            RowKind::Worktree | RowKind::NewWorktree => theme.text_faint,
         };
-        let text_color = if selected {
-            theme.title_selected
-        } else {
-            theme.title
-        };
+        let text_color = if selected { theme.text } else { theme.text };
         let entity = entity.clone();
         let remove_entity = entity.clone();
         let click_entity = entity.clone();
@@ -3600,7 +3595,7 @@ impl Sidebar {
             .cursor_default()
             .text_size(px(14.5))
             .text_color(text_color)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
                     if let Some(tab_id) = tab_id {
@@ -3656,7 +3651,7 @@ impl Sidebar {
         }
 
         if selected {
-            row_view = row_view.bg(theme.selected_fill);
+            row_view = row_view.bg(theme.element_active);
         }
 
         // The card's main line. The disclosure chevron and every per-row
@@ -3674,7 +3669,7 @@ impl Sidebar {
                     .items_center()
                     .justify_center()
                     .text_size(px(12.0))
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(match status_glyph {
                         // Swift's `RunningDots`, tinted by the agent: a
                         // different *shape* from a lifecycle dot, so a
@@ -3702,7 +3697,8 @@ impl Sidebar {
                                 .invisible()
                                 .group_hover(hover_group.clone(), |element| element.visible())
                                 .child(
-                                    IconElement::new(icon, IconSize::XSmall).text_color(theme.meta),
+                                    IconElement::new(icon, IconSize::XSmall)
+                                        .text_color(theme.text_faint),
                                 )
                                 .into_any_element(),
                             None => div().into_any_element(),
@@ -3768,12 +3764,12 @@ impl Sidebar {
                         .w(px(16.0))
                         .flex_none()
                         .text_size(px(13.0))
-                        .text_color(theme.meta)
+                        .text_color(theme.text_faint)
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .child(
                             IconElement::new(Icon::Settings, IconSize::XSmall)
-                                .text_color(theme.title),
+                                .text_color(theme.text),
                         )
                         .on_click(move |_, _window, cx| {
                             if let Some(project_id) = project_id.clone() {
@@ -3808,19 +3804,19 @@ impl Sidebar {
                                 .flex_none()
                                 .items_center()
                                 // Each mark in its own brand. Every mark used
-                                // to be tinted `theme.tab_focus_accent`, a
+                                // to be tinted `theme.text`, a
                                 // coral near enough to Claude's brand to read
                                 // as it, so a Codex or Pi mark was drawn in
                                 // Claude's colour. Shape carried identity;
                                 // colour actively contradicted it. Codex is the
                                 // one exception: its mark is drawn in
-                                // `theme.title` (white) like everywhere else
+                                // `theme.text` (white) like everywhere else
                                 // in the app — tab bar and status bar never
                                 // use its blue brand hex, so the badge must
                                 // not be the only blue Codex mark on screen.
                                 .child(IconElement::new(mark.icon, IconSize::Small).text_color(
                                     if matches!(mark.icon, Icon::Codex) {
-                                        theme.title
+                                        theme.text
                                     } else {
                                         mark.brand.color()
                                     },
@@ -3837,9 +3833,9 @@ impl Sidebar {
                         .w(px(16.0))
                         .flex_none()
                         .text_size(px(12.0))
-                        .text_color(theme.meta)
+                        .text_color(theme.text_faint)
                         .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .hover(|style| style.bg(theme.element_hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, window, cx| {
@@ -3849,7 +3845,8 @@ impl Sidebar {
                             });
                         })
                         .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.meta),
+                            IconElement::new(Icon::Close, IconSize::XSmall)
+                                .text_color(theme.text_faint),
                         ),
                 )
             })
@@ -3861,9 +3858,9 @@ impl Sidebar {
                         .w(px(16.0))
                         .flex_none()
                         .text_size(px(14.0))
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .hover(|style| style.bg(theme.element_hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
@@ -3873,7 +3870,7 @@ impl Sidebar {
                             });
                         })
                         .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.title),
+                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text),
                         ),
                 )
             });
@@ -3890,7 +3887,7 @@ impl Sidebar {
                     .gap(px(8.0))
                     .text_size(px(12.5))
                     .line_height(px(ROW_SUB_LINE_HEIGHT))
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .when(row.is_primary, |this| {
                         this.child(
                             div()
@@ -3898,8 +3895,8 @@ impl Sidebar {
                                 .debug_selector(move || format!("sidebar-primary-pill-{row_id}"))
                                 .px(px(5.0))
                                 .rounded(theme.radii.chip)
-                                .bg(theme.primary_pill_bg)
-                                .text_color(theme.title)
+                                .bg(theme.surface_raised)
+                                .text_color(theme.text)
                                 .text_size(px(11.0))
                                 .child("Primary"),
                         )
@@ -3919,7 +3916,7 @@ impl Sidebar {
                                     })
                                     .min_w_0()
                                     .truncate()
-                                    .text_color(theme.meta)
+                                    .text_color(theme.text_faint)
                                     .child(comment),
                             )
                         },
@@ -4039,9 +4036,9 @@ impl Render for Sidebar {
             .w(px(panel_width))
             .h_full()
             .overflow_hidden()
-            .bg(theme.sidebar)
+            .bg(theme.surface)
             .border_r_1()
-            .border_color(theme.sidebar_border)
+            .border_color(theme.border_opaque)
             .pt(px(8.0))
             .child(
                 div()
@@ -4053,7 +4050,7 @@ impl Render for Sidebar {
                     .justify_between()
                     .text_size(px(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("Projects")
                     .child(
                         div()
@@ -4065,8 +4062,8 @@ impl Render for Sidebar {
                             .items_center()
                             .justify_center()
                             .text_size(px(17.0))
-                            .text_color(theme.meta)
-                            .hover(|style| style.bg(theme.row_hover).rounded(theme.radii.control))
+                            .text_color(theme.text_faint)
+                            .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_add_project(cx);
                             }))
@@ -4088,12 +4085,12 @@ impl Render for Sidebar {
                     .items_center()
                     .gap(px(7.0))
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(if filter_is_focused {
-                        theme.selection_ring
+                        theme.text
                     } else {
-                        theme.hairline
+                        theme.border
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(
@@ -4103,15 +4100,15 @@ impl Render for Sidebar {
                         }),
                     )
                     .on_key_down(cx.listener(Self::on_filter_key))
-                    .child(div().text_size(px(12.5)).text_color(theme.meta).child("⌕"))
+                    .child(div().text_size(px(12.5)).text_color(theme.text_faint).child("⌕"))
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(12.5))
                             .text_color(if filter_text.is_empty() {
-                                theme.meta
+                                theme.text_faint
                             } else {
-                                theme.title
+                                theme.text
                             })
                             .child(if filter_text.is_empty() {
                                 "Filter".to_owned()
@@ -4119,7 +4116,7 @@ impl Render for Sidebar {
                                 filter_text
                             })
                             .when(filter_is_focused, |this| {
-                                this.child(caret::bar(px(12.0), theme.caret, field_caret_visible))
+                                this.child(caret::bar(px(12.0), theme.text, field_caret_visible))
                             }),
                     ),
             )
@@ -4151,7 +4148,7 @@ impl Render for Sidebar {
                         .px(px(FILTER_LEFT_INSET))
                         .py(px(6.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.diff_deletion)
+                        .text_color(theme.diff_del)
                         .child(notice.unwrap_or_default()),
                 )
             })
@@ -4185,9 +4182,9 @@ impl Render for Sidebar {
                                 .track_focus(&prompt.focus)
                                 .w(px(260.0))
                                 .rounded(theme.radii.toast)
-                                .bg(theme.chat_surface)
+                                .bg(theme.surface)
                                 .border_1()
-                                .border_color(theme.hairline)
+                                .border_color(theme.border)
                                 .px(px(14.0))
                                 .py(px(12.0))
                                 .flex()
@@ -4209,7 +4206,7 @@ impl Render for Sidebar {
                                     div()
                                         .text_size(theme.typography.headline)
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.title)
+                                        .text_color(theme.text)
                                         .child(format!("New worktree in {}", prompt.project_name)),
                                 )
                                 .child(Self::render_worktree_prompt_field(
@@ -4268,14 +4265,14 @@ impl Render for Sidebar {
                                     this.child(
                                         div()
                                             .text_size(theme.typography.footnote)
-                                            .text_color(theme.diff_deletion)
+                                            .text_color(theme.diff_del)
                                             .child(prompt.error.clone().unwrap_or_default()),
                                     )
                                 })
                                 .child(
                                     div()
                                         .text_size(theme.typography.caption2)
-                                        .text_color(theme.meta)
+                                        .text_color(theme.text_faint)
                                         .child(
                                             "Tab to switch field · Enter to create · Esc to cancel",
                                         ),
@@ -5952,12 +5949,12 @@ mod tests {
     ///
     /// 1. A **running** Claude worktree resolved its tint through the
     ///    eight-token settings palette, where Claude was `Amber` — that is
-    ///    `theme.tab_needs_input` itself. Running and needs-input painted the
+    ///    `theme.warning` itself. Running and needs-input painted the
     ///    same `#E0B36A`, leaving a 3x3 dot cluster versus a 6x6 dot as the
     ///    only difference. The reference has no such collision: needs-input
     ///    is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's
     ///    own colour.
-    /// 2. Every badge mark was tinted `theme.tab_focus_accent`, a coral near
+    /// 2. Every badge mark was tinted `theme.text`, a coral near
     ///    enough to Claude's brand to read as it, so a Codex or Pi mark was
     ///    drawn in Claude's colour.
     #[test]
@@ -5999,9 +5996,12 @@ mod tests {
     fn a_tab_row_without_an_agent_never_borrows_the_needs_input_amber() {
         for theme in [Theme::dark(), Theme::light()] {
             let plain = Sidebar::tab_row_icon_color(None, false, theme);
-            assert_eq!(plain, theme.meta, "a tab with no agent takes the row grey");
+            assert_eq!(
+                plain, theme.text_faint,
+                "a tab with no agent takes the row grey"
+            );
             assert_ne!(
-                plain, theme.tab_needs_input,
+                plain, theme.warning,
                 "an idle tab must not wear the colour of one waiting on an answer"
             );
 
@@ -6012,7 +6012,7 @@ mod tests {
             );
             assert_eq!(
                 Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), false, theme),
-                theme.meta,
+                theme.text_faint,
                 "a brand with no mark to paint falls back like any other tab"
             );
         }
@@ -6049,15 +6049,15 @@ mod tests {
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
-            RowStatusGlyph::Dot(theme.tab_needs_input)
+            RowStatusGlyph::Dot(theme.warning)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Done), None, theme),
-            RowStatusGlyph::Dot(theme.tab_done)
+            RowStatusGlyph::Dot(theme.success)
         );
         assert_eq!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Error), None, theme),
-            RowStatusGlyph::Dot(theme.tab_error)
+            RowStatusGlyph::Dot(theme.danger)
         );
         // Running is a different *shape*, and the agent id reaches the row
         // only as its tint.
