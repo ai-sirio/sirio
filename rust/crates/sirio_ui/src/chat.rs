@@ -7,12 +7,11 @@
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
-    InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
-    ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
-    canvas, div, linear_color_stop, linear_gradient, list, point, prelude::*, px, quad, rgb,
-    transparent_black,
+    FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
+    StyledText, Task, Window, actions, canvas, div, linear_color_stop, linear_gradient, list,
+    point, prelude::*, px, quad, rgb, transparent_black,
 };
 use sirio_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
@@ -20,7 +19,10 @@ use sirio_acp::{
     ToolCallLocationInfo,
 };
 use sirio_git::{GitActions, status as git_status};
-use sirio_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
+use sirio_markdown::{
+    Alignment as LegacyAlignment, Block as LegacyBlock, Document as LegacyDocument,
+    Inline as LegacyInline, ListKind as LegacyListKind,
+};
 use sirio_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatSessionSummary, ChatToolLocation, ChatTranscript, ChatTurn,
@@ -35,8 +37,6 @@ use std::rc::Rc;
 
 use crate::caret;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
-use crate::editor::Language;
-use crate::file_view::{CodeSpanKind, code_spans};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
@@ -46,6 +46,184 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 /// default of every link opening via `cx.open_url`, which is right for
 /// assistant-authored chat prose.
 pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+fn highlight_markdown_code(
+    language: &str,
+    code: &str,
+) -> Option<Vec<(Range<usize>, bezel::theme::HighlightKind)>> {
+    syntax::highlight(code, language)
+}
+
+/// Installs the app-owned syntax highlighter used by bezel-markdown code
+/// blocks. The renderer remains usable without this registration and simply
+/// paints an unknown language as plain code.
+pub fn init(cx: &mut App) {
+    markdown::set_highlighter(
+        cx,
+        highlight_markdown_code,
+        syntax::lang::LANGS.iter().map(|language| language.name),
+    );
+}
+
+fn markdown_link_at(document: &markdown::Doc, cursor: markdown::Cursor) -> Option<String> {
+    let text = document.blocks.get(cursor.block)?.text_at(cursor.part)?;
+    text.marks.iter().rev().find_map(|span| {
+        if !span.range.contains(&cursor.offset) {
+            return None;
+        }
+        match &span.mark {
+            markdown::Mark::Link(target) | markdown::Mark::Image(target) => Some(target.clone()),
+            markdown::Mark::Mention { url, .. } => Some(url.clone()),
+            _ => None,
+        }
+    })
+}
+
+fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<String> {
+    match &document.blocks.get(block)?.kind {
+        markdown::BlockKind::Bookmark { url, .. } | markdown::BlockKind::Image { url, .. } => {
+            Some(url.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Defers bezel-markdown's build until gpui supplies the `Window` and `App`
+/// required by `markdown::render`. File Preview can therefore keep its
+/// existing source-only seam while chat entries use the same renderer.
+struct MarkdownBody {
+    document: markdown::Doc,
+    link_click: Option<LinkClickOverride>,
+    rendered: Option<AnyElement>,
+}
+
+impl MarkdownBody {
+    fn new(document: markdown::Doc) -> Self {
+        Self {
+            document,
+            link_click: None,
+            rendered: None,
+        }
+    }
+
+    fn with_link_override(document: markdown::Doc, link_click: LinkClickOverride) -> Self {
+        Self {
+            document,
+            link_click: Some(link_click),
+            rendered: None,
+        }
+    }
+
+    fn build(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let Some(link_click) = self.link_click.clone() else {
+            return markdown::render(&self.document, markdown::Caption::Shown, window, cx);
+        };
+
+        let layouts = markdown::BlockLayouts::default();
+        let rendered = markdown::render_with_selection(
+            &self.document,
+            None,
+            Some(&layouts),
+            None,
+            markdown::Caption::Shown,
+            window,
+            cx,
+        );
+        let document = self.document.clone();
+        let click_layouts = layouts.clone();
+        div()
+            .w_full()
+            .capture_any_mouse_up(move |event, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                let inline = click_layouts
+                    .over_text(event.position)
+                    .then(|| click_layouts.hit(event.position))
+                    .flatten()
+                    .and_then(|cursor| markdown_link_at(&document, cursor));
+                let block = click_layouts
+                    .block_at(event.position)
+                    .and_then(|block| markdown_block_link_at(&document, block));
+                if let Some(target) = inline.or(block) {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    link_click(&target, window, cx);
+                }
+            })
+            .child(rendered)
+            .into_any_element()
+    }
+}
+
+impl Element for MarkdownBody {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        if self.rendered.is_none() {
+            self.rendered = Some(self.build(window, cx));
+        }
+        let rendered = self
+            .rendered
+            .as_mut()
+            .expect("markdown body was built during layout");
+        (rendered.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.rendered
+            .as_mut()
+            .expect("markdown body requested layout before prepaint")
+            .prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.rendered
+            .as_mut()
+            .expect("markdown body prepainted before paint")
+            .paint(window, cx);
+    }
+}
+
+impl IntoElement for MarkdownBody {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
 
 /// The transcript's content column maximum — the Bezel Transcript pattern's
 /// 700 (spec §2). Settings and the markdown column keep waku's 720; this one
@@ -62,6 +240,161 @@ const TOOL_CALL_GROUP_MEMBER_INDENT: f32 =
 /// The user turn's bubble: rounded, right-aligned, capped at the Bezel
 /// Activity pattern's 440. The assistant reply has no container at all.
 pub(crate) const USER_PILL_MAX_WIDTH: f32 = 440.0;
+pub(crate) const USER_PILL_H_PADDING: f32 = 14.0;
+pub(crate) const USER_PILL_V_PADDING: f32 = 9.0;
+pub(crate) const USER_PILL_TEXT_SIZE: f32 = 13.5;
+pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
+
+fn parse_chat_markdown(source: &str) -> markdown::Doc {
+    markdown::parse(source)
+}
+
+fn bezel_doc_from_legacy(document: LegacyDocument) -> markdown::Doc {
+    let mut blocks = Vec::new();
+    for block in document.blocks {
+        push_legacy_block(block, 0, false, &mut blocks);
+    }
+    markdown::Doc { blocks }
+}
+
+fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec<markdown::Block>) {
+    let at = |kind| markdown::Block::at(kind, indent);
+    match block {
+        LegacyBlock::Heading { level, inline } => out.push(at(if quoted {
+            markdown::BlockKind::Quote(bezel_text(&inline))
+        } else {
+            markdown::BlockKind::Heading {
+                level,
+                text: bezel_text(&inline),
+            }
+        })),
+        LegacyBlock::Paragraph { inline } => out.push(at(if quoted {
+            markdown::BlockKind::Quote(bezel_text(&inline))
+        } else {
+            markdown::BlockKind::Paragraph(bezel_text(&inline))
+        })),
+        LegacyBlock::List { kind, items, .. } => {
+            for (index, item) in items.into_iter().enumerate() {
+                let mut item_blocks = item.blocks.into_iter();
+                let text = item_blocks.next().map_or_else(
+                    || markdown::Text::plain(""),
+                    |first| match first {
+                        LegacyBlock::Heading { inline, .. } | LegacyBlock::Paragraph { inline } => {
+                            bezel_text(&inline)
+                        }
+                        other => markdown::Text::plain(other.plain_text()),
+                    },
+                );
+                let kind = match item.checked {
+                    Some(checked) => markdown::BlockKind::Task { checked, text },
+                    None => match kind {
+                        LegacyListKind::Bullet => markdown::BlockKind::Bullet(text),
+                        LegacyListKind::Ordered { start } => markdown::BlockKind::Ordered {
+                            number: start + index as u64,
+                            text,
+                        },
+                    },
+                };
+                out.push(at(kind));
+                for child in item_blocks {
+                    push_legacy_block(child, indent.saturating_add(1), quoted, out);
+                }
+            }
+        }
+        LegacyBlock::BlockQuote { blocks } => {
+            for block in blocks {
+                push_legacy_block(block, indent, true, out);
+            }
+        }
+        LegacyBlock::CodeBlock { language, text, .. } => out.push(at(markdown::BlockKind::Code {
+            language,
+            code: markdown::Text::plain(text.trim_end_matches('\n')),
+        })),
+        LegacyBlock::Table {
+            alignment,
+            header,
+            rows,
+        } => out.push(at(markdown::BlockKind::Table {
+            align: alignment
+                .into_iter()
+                .map(|alignment| match alignment {
+                    LegacyAlignment::Center => markdown::Align::Center,
+                    LegacyAlignment::Right => markdown::Align::Right,
+                    LegacyAlignment::None | LegacyAlignment::Left => markdown::Align::Left,
+                })
+                .collect(),
+            header: header
+                .into_iter()
+                .map(|cell| bezel_text(&cell.inline))
+                .collect(),
+            rows: rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| bezel_text(&cell.inline))
+                        .collect()
+                })
+                .collect(),
+        })),
+        LegacyBlock::ThematicBreak => out.push(at(markdown::BlockKind::Rule)),
+        LegacyBlock::Html { text } => {
+            out.push(at(markdown::BlockKind::Paragraph(markdown::Text::plain(
+                text,
+            ))));
+        }
+    }
+}
+
+fn bezel_text(inlines: &[LegacyInline]) -> markdown::Text {
+    let mut text = markdown::Text::default();
+    for inline in inlines {
+        push_legacy_inline(inline, &mut text);
+    }
+    text
+}
+
+fn push_marked_inlines(mark: markdown::Mark, inlines: &[LegacyInline], text: &mut markdown::Text) {
+    let index = text.marks.len();
+    let start = text.text.len();
+    text.marks.push(markdown::MarkSpan {
+        range: start..start,
+        mark,
+    });
+    for inline in inlines {
+        push_legacy_inline(inline, text);
+    }
+    text.marks[index].range.end = text.text.len();
+}
+
+fn push_legacy_inline(inline: &LegacyInline, text: &mut markdown::Text) {
+    match inline {
+        LegacyInline::Text(value) | LegacyInline::Html(value) => text.text.push_str(value),
+        LegacyInline::Emphasis(children) => {
+            push_marked_inlines(markdown::Mark::Italic, children, text)
+        }
+        LegacyInline::Strong(children) => push_marked_inlines(markdown::Mark::Bold, children, text),
+        LegacyInline::Code(value) => {
+            let start = text.text.len();
+            text.text.push_str(value);
+            text.marks.push(markdown::MarkSpan {
+                range: start..text.text.len(),
+                mark: markdown::Mark::Code,
+            });
+        }
+        LegacyInline::Link {
+            target, children, ..
+        } => push_marked_inlines(markdown::Mark::Link(target.clone()), children, text),
+        LegacyInline::Image { target, alt, .. } => {
+            let start = text.text.len();
+            text.text.push_str(alt);
+            text.marks.push(markdown::MarkSpan {
+                range: start..text.text.len(),
+                mark: markdown::Mark::Image(target.clone()),
+            });
+        }
+        LegacyInline::SoftBreak | LegacyInline::HardBreak => text.text.push('\n'),
+    }
+}
 
 actions!(
     chat_composer,
@@ -164,13 +497,16 @@ struct SubagentToolCall {
 /// One rendered element of the transcript.
 #[derive(Clone, Debug)]
 enum Entry {
-    /// The user's own turn, shown as a full-width card.
+    /// The user's own turn, shown as the gallery's right-aligned raised pill.
     User(String),
     /// A streamed assistant reply, grown in place as chunks arrive.
     ///
     /// The parsed tree is updated at ingestion time rather than during
     /// rendering, so a redraw never reparses the entire reply.
-    Assistant { text: String, document: Document },
+    Assistant {
+        text: String,
+        document: markdown::Doc,
+    },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
     /// `expanded` starts `false` (F-CHAT-21): thinking renders collapsed to
@@ -263,7 +599,7 @@ impl Entry {
         match self {
             Self::User(text) => text.clone(),
             Self::Thought { text, .. } => text.clone(),
-            Self::Assistant { document, .. } => document.plain_text(),
+            Self::Assistant { text, .. } => text.clone(),
             Self::ToolCall {
                 title,
                 status,
@@ -451,7 +787,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
     match entry {
         ChatEntry::UserMessage { text } => Entry::User(text),
         ChatEntry::AssistantMessage { text } => Entry::Assistant {
-            document: parse(&text),
+            document: parse_chat_markdown(&text),
             text,
         },
         ChatEntry::Thought { text } => Entry::Thought {
@@ -633,13 +969,11 @@ struct TranscriptSelection {
     head: usize,
 }
 
-/// The one copy affordance currently showing its short-lived confirmation.
-/// A target, rather than a boolean, ensures one response's acknowledgement
-/// never leaks onto another response or a nested code block.
+/// The assistant-response copy affordance currently showing its short-lived
+/// confirmation. Code blocks own their native bezel-markdown copy state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CopyTarget {
     Assistant(usize),
-    CodeBlock { entry: usize, block: String },
 }
 
 /// A host-owned action requested by an edit-summary card.
@@ -691,10 +1025,6 @@ impl TranscriptSelection {
 struct TranscriptInteraction {
     chat: Entity<Chat>,
     focus: FocusHandle,
-    /// The owning assistant entry, if this markdown is part of the chat
-    /// transcript rather than the read-only file preview renderer.
-    entry_index: Option<usize>,
-    copied_target: Option<CopyTarget>,
 }
 
 /// A styled text run whose selection range is anchored in the complete
@@ -1465,11 +1795,11 @@ impl Chat {
                 }) = self.entries.last_mut()
                 {
                     existing.push_str(&text);
-                    *document = parse(existing);
+                    *document = parse_chat_markdown(existing);
                     self.remeasure_entry(self.entries.len() - 1);
                 } else {
                     self.push_entry(Entry::Assistant {
-                        document: parse(&text),
+                        document: parse_chat_markdown(&text),
                         text,
                     });
                 }
@@ -2296,7 +2626,7 @@ impl Chat {
         }
         self.push_entry(Entry::Assistant {
             text: transcript.to_string(),
-            document: parse(transcript),
+            document: parse_chat_markdown(transcript),
         });
         self.has_completed_turn = true;
         cx.notify();
@@ -3764,263 +4094,6 @@ impl Chat {
             .into_any_element()
     }
 
-    fn render_markdown(
-        document: Document,
-        theme: &Theme,
-        interaction: Option<TranscriptInteraction>,
-        source_start: usize,
-        link_click: Option<LinkClickOverride>,
-    ) -> AnyElement {
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .children(document.blocks.into_iter().enumerate().scan(
-                source_start,
-                move |block_start, (index, block)| {
-                    let rendered = Self::render_markdown_block(
-                        block.clone(),
-                        theme,
-                        format!("assistant-block-{index}"),
-                        interaction.as_ref(),
-                        *block_start,
-                        link_click.clone(),
-                    );
-                    *block_start += block.plain_text().len() + 2;
-                    Some(rendered)
-                },
-            ))
-            .into_any_element()
-    }
-
-    /// Shared markdown renderer used by file tabs. Keeping this entry point
-    /// on `Chat` means file tabs use the same structured `sirio_markdown`
-    /// tree and styling as the transcript rather than growing a second
-    /// markdown renderer.
-    ///
-    /// Every rendered link's click is routed through `link_click` instead of
-    /// the transcript's default `cx.open_url` (F-CORE-FILE-04). File Preview
-    /// mode uses this so a relative link resolves against the open file's
-    /// directory and opens as a tab, the same way the Code-mode +
-    /// platform-click path already does — Preview is the file view's
-    /// default mode, so it must not fall back to unconditionally handing
-    /// every link to `cx.open_url`.
-    pub(crate) fn render_markdown_document_with_link_override(
-        document: Document,
-        theme: &Theme,
-        link_click: LinkClickOverride,
-    ) -> AnyElement {
-        Self::render_markdown(document, theme, None, 0, Some(link_click))
-    }
-
-    fn render_markdown_block(
-        block: Block,
-        theme: &Theme,
-        id: String,
-        interaction: Option<&TranscriptInteraction>,
-        source_start: usize,
-        link_click: Option<LinkClickOverride>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        match block {
-            Block::Heading { level, inline } => div()
-                .w_full()
-                .text_size(markdown_heading_size(level, typography))
-                .line_height(px(
-                    f32::from(markdown_heading_size(level, typography)) * 1.42
-                ))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme.text)
-                .child(Self::render_inline(
-                    inline,
-                    theme,
-                    id,
-                    interaction,
-                    source_start,
-                    link_click.clone(),
-                ))
-                .into_any_element(),
-            Block::Paragraph { inline } => div()
-                .w_full()
-                .text_size(typography.headline)
-                .line_height(typography.body_line_height)
-                .text_color(theme.text)
-                .child(Self::render_inline(
-                    inline,
-                    theme,
-                    id,
-                    interaction,
-                    source_start,
-                    link_click.clone(),
-                ))
-                .into_any_element(),
-            Block::List { kind, items, .. } => Self::render_markdown_list(
-                kind,
-                items,
-                theme,
-                id,
-                0,
-                source_start,
-                interaction,
-                link_click.clone(),
-            ),
-            Block::BlockQuote { blocks } => div()
-                .w_full()
-                .flex()
-                .border_l_2()
-                .border_color(theme.text_muted)
-                .pl(px(12.0))
-                .child(div().w_full().flex().flex_col().gap(px(7.0)).children(
-                    blocks.into_iter().enumerate().scan(
-                        source_start,
-                        move |block_start, (index, block)| {
-                            let rendered = Self::render_markdown_block(
-                                block.clone(),
-                                theme,
-                                format!("{id}-quote-{index}"),
-                                interaction,
-                                *block_start,
-                                link_click.clone(),
-                            );
-                            *block_start += block.plain_text().len() + 2;
-                            Some(rendered)
-                        },
-                    ),
-                ))
-                .into_any_element(),
-            Block::CodeBlock {
-                language,
-                text,
-                open,
-            } => {
-                let fence_language = language
-                    .as_deref()
-                    .map(Self::language_from_fence_tag)
-                    .unwrap_or(Language::PlainText);
-                let language_label = language.unwrap_or_else(|| "code".to_string());
-                let language_label = if open {
-                    format!("{language_label} · streaming")
-                } else {
-                    language_label
-                };
-                let code_copy = interaction.and_then(|interaction| {
-                    let entry = interaction.entry_index?;
-                    let target = CopyTarget::CodeBlock {
-                        entry,
-                        block: id.clone(),
-                    };
-                    let copied = interaction.copied_target.as_ref() == Some(&target);
-                    let selector = format!("code-block-copy-{entry}-{id}");
-                    let confirmation_selector = format!("code-block-copy-confirmed-{entry}-{id}");
-                    let copy_entity = interaction.chat.clone();
-                    let copy_target = target.clone();
-                    let copy_text = text.clone();
-                    let mut button = div()
-                        .id(selector.clone())
-                        .debug_selector(move || selector.clone())
-                        .px(px(7.0))
-                        .py(px(4.0))
-                        .rounded(theme.radii.control)
-                        .text_size(typography.footnote)
-                        .text_color(theme.text_faint)
-                        .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(theme.overlay))
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            copy_entity.update(cx, |chat, cx| {
-                                chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
-                            });
-                        });
-                    if copied {
-                        button = button.child(
-                            div()
-                                .id(confirmation_selector.clone())
-                                .debug_selector(move || confirmation_selector.clone())
-                                .child("Copied ✓"),
-                        );
-                    } else {
-                        button = button.child("Copy");
-                    }
-                    Some(button.into_any_element())
-                });
-                div()
-                    .w_full()
-                    .rounded(theme.radii.code_block)
-                    .bg(theme.input_bg)
-                    .px(px(12.0))
-                    .py(px(9.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(7.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .text_size(typography.footnote)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_faint)
-                            .child(div().flex_1().child(Self::render_plain_text(
-                                language_label.clone(),
-                                theme,
-                                format!("{id}-language"),
-                                source_start,
-                                interaction,
-                            )))
-                            .children(code_copy),
-                    )
-                    .child(
-                        div()
-                            .font_family(typography.code_family)
-                            .text_size(typography.code_size)
-                            .line_height(typography.code_line_height)
-                            .text_color(theme.text)
-                            .child(Self::render_highlighted_code(
-                                text,
-                                fence_language,
-                                theme,
-                                format!("{id}-code"),
-                                source_start + language_label.len() + 1,
-                                interaction,
-                            )),
-                    )
-                    .into_any_element()
-            }
-            Block::Table {
-                alignment,
-                header,
-                rows,
-            } => Self::render_markdown_table(
-                alignment,
-                header,
-                rows,
-                theme,
-                id,
-                interaction,
-                source_start,
-                link_click,
-            ),
-            Block::ThematicBreak => div()
-                .w_full()
-                .h(px(1.0))
-                .my(px(4.0))
-                .bg(theme.border)
-                .into_any_element(),
-            Block::Html { text } => div()
-                .w_full()
-                .text_size(typography.headline)
-                .text_color(theme.text)
-                .child(Self::render_plain_text(
-                    text,
-                    theme,
-                    id,
-                    source_start,
-                    interaction,
-                ))
-                .into_any_element(),
-        }
-    }
-
     fn render_plain_text(
         text: String,
         theme: &Theme,
@@ -4044,395 +4117,18 @@ impl Chat {
         }
     }
 
-    /// F-EDIT-07: a fenced code block's rendered text, but with per-token
-    /// highlighting — the same `code_spans` pass the editor's own code
-    /// surface (`file_view.rs`) uses, so keywords/literals/comments in a
-    /// Markdown preview's fenced block no longer render as flat plain text
-    /// (the defect: `render_plain_text` applies zero `HighlightStyle`s).
-    fn render_highlighted_code(
-        text: String,
-        language: Language,
-        theme: &Theme,
-        id: String,
-        source_start: usize,
-        interaction: Option<&TranscriptInteraction>,
+    /// Shared bezel-markdown renderer used by file tabs. The legacy parsed
+    /// tree is converted to bezel's flat Doc at the seam; BlockLayouts then
+    /// lets the existing per-render link callback win before bezel's default
+    /// external opener runs.
+    pub(crate) fn render_markdown_document_with_link_override(
+        document: LegacyDocument,
+        _theme: &Theme,
+        link_click: LinkClickOverride,
     ) -> AnyElement {
-        let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-        let mut offset = 0usize;
-        for line in text.split_inclusive('\n') {
-            let trimmed = line.strip_suffix('\n').unwrap_or(line);
-            for span in code_spans(language, trimmed) {
-                let color = match span.kind {
-                    CodeSpanKind::Keyword => theme.accent,
-                    CodeSpanKind::Literal => theme.diff_add,
-                    CodeSpanKind::Comment => theme.text_faint,
-                };
-                highlights.push((
-                    offset + span.range.start..offset + span.range.end,
-                    HighlightStyle {
-                        color: Some(color.into()),
-                        ..Default::default()
-                    },
-                ));
-            }
-            offset += line.len();
-        }
-        highlights.sort_by_key(|(range, _)| range.start);
-        let styled = StyledText::new(text.clone()).with_highlights(highlights);
-        if let Some(interaction) = interaction {
-            TranscriptSelectableText::new(
-                ElementId::Name(id.into()),
-                styled,
-                source_start..source_start + text.len(),
-                interaction.clone(),
-                theme.element_active,
-                Vec::new(),
-            )
-            .into_any_element()
-        } else {
-            styled.into_any_element()
-        }
-    }
-
-    /// Maps a fenced code block's info-string language tag (as written
-    /// after the opening ` ``` `) to the editor's [`Language`] so the
-    /// preview's highlighter picks the right keyword vocabulary. Unknown or
-    /// absent tags fall back to `PlainText`, same as the editor.
-    fn language_from_fence_tag(tag: &str) -> Language {
-        match tag.trim().to_ascii_lowercase().as_str() {
-            "rust" | "rs" => Language::Rust,
-            "python" | "py" => Language::Python,
-            "javascript" | "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
-            "typescript" | "ts" | "tsx" => Language::TypeScript,
-            "bash" | "sh" | "shell" | "zsh" | "fish" | "console" => Language::Shell,
-            "json" => Language::Json,
-            "yaml" | "yml" => Language::Yaml,
-            "toml" => Language::Toml,
-            "c" | "h" => Language::C,
-            "cpp" | "c++" | "cc" | "cxx" | "hpp" => Language::Cpp,
-            "go" | "golang" => Language::Go,
-            "swift" => Language::Swift,
-            "kotlin" | "kt" => Language::Kotlin,
-            "java" => Language::Java,
-            "ruby" | "rb" => Language::Ruby,
-            "php" => Language::Php,
-            "html" | "htm" => Language::Html,
-            "css" => Language::Css,
-            "sql" => Language::Sql,
-            "xml" => Language::Xml,
-            "lua" => Language::Lua,
-            "zig" => Language::Zig,
-            "markdown" | "md" => Language::Markdown,
-            _ => Language::PlainText,
-        }
-    }
-
-    /// Estimates a marker column from its widest marker's character count.
-    fn markdown_list_marker_width(marker_chars: usize, headline: Pixels) -> Pixels {
-        // This is an estimate: gpui cannot measure text before the frame, and
-        // render_markdown_list has no Window. Its safe failure mode is a
-        // slightly wide column, never clipped or wrapped text because the
-        // marker is nowrap.
-        px((marker_chars as f32 * f32::from(headline) * 0.6).max(18.0))
-    }
-
-    fn render_markdown_list(
-        kind: ListKind,
-        items: Vec<ListItem>,
-        theme: &Theme,
-        id: String,
-        depth: usize,
-        source_start: usize,
-        interaction: Option<&TranscriptInteraction>,
-        link_click: Option<LinkClickOverride>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let marker_chars = match kind {
-            ListKind::Bullet => 1,
-            ListKind::Ordered { start } => {
-                format!("{}.", start + items.len().saturating_sub(1) as u64)
-                    .chars()
-                    .count()
-            }
-        };
-        let marker_width = Self::markdown_list_marker_width(marker_chars, typography.headline);
-        div()
-            .w_full()
-            .pl(px(18.0 * depth as f32))
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
-            .children(items.into_iter().enumerate().scan(
-                source_start,
-                move |item_start, (index, item)| {
-                    let marker = match kind {
-                        ListKind::Bullet => "•".to_string(),
-                        ListKind::Ordered { start } => format!("{}.", start + index as u64),
-                    };
-                    let marker = item
-                        .checked
-                        .map(|checked| if checked { "☑" } else { "☐" })
-                        .unwrap_or(&marker)
-                        .to_string();
-                    let block_source_start = *item_start + marker.len() + 1;
-                    let item_text = item
-                        .blocks
-                        .iter()
-                        .map(Block::plain_text)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let item_length = marker.len() + 1 + item_text.len();
-                    let children = item.blocks.into_iter().enumerate().scan(
-                        block_source_start,
-                        |block_start, (block_index, block)| {
-                            let rendered = match block.clone() {
-                                Block::List { kind, items, .. } => Self::render_markdown_list(
-                                    kind,
-                                    items,
-                                    theme,
-                                    format!("{id}-{index}-{block_index}"),
-                                    depth + 1,
-                                    *block_start,
-                                    interaction,
-                                    link_click.clone(),
-                                ),
-                                block => Self::render_markdown_block(
-                                    block,
-                                    theme,
-                                    format!("{id}-{index}-{block_index}"),
-                                    interaction,
-                                    *block_start,
-                                    link_click.clone(),
-                                ),
-                            };
-                            *block_start += block.plain_text().len() + 1;
-                            Some(rendered)
-                        },
-                    );
-                    let rendered = div()
-                        .w_full()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .debug_selector(|| "markdown-list-marker".into())
-                                .w(marker_width)
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .text_size(typography.headline)
-                                .text_color(theme.file_link)
-                                .child(Self::render_plain_text(
-                                    marker,
-                                    theme,
-                                    format!("{id}-{index}-marker"),
-                                    *item_start,
-                                    interaction,
-                                )),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(5.0))
-                                .children(children),
-                        );
-                    *item_start += item_length + 1;
-                    Some(rendered)
-                },
-            ))
+        MarkdownBody::with_link_override(bezel_doc_from_legacy(document), link_click)
             .into_any_element()
     }
-
-    fn render_markdown_table(
-        alignment: Vec<Alignment>,
-        header: Vec<sirio_markdown::TableCell>,
-        rows: Vec<Vec<sirio_markdown::TableCell>>,
-        theme: &Theme,
-        id: String,
-        interaction: Option<&TranscriptInteraction>,
-        source_start: usize,
-        link_click: Option<LinkClickOverride>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-
-        // Column widths, as flex weights.
-        //
-        // Every cell used to be `flex_1`: an equal share of the row whatever
-        // it held, so a two-column table split 50/50 even when one side was
-        // `[255, 0, 0, 255]` and the other a sentence. A blind review called
-        // the result "two loosely floating text blocks rather than a grid" --
-        // the dead space between a value and its label is what breaks the
-        // row-to-column association once a table is long.
-        //
-        // Equal shares were not arbitrary, though: flex rows lay out
-        // independently, so identical weights are the only reason columns line
-        // up across rows at all. Sizing each cell to its own content would
-        // stagger every row. The weight therefore belongs to the COLUMN, taken
-        // across the header and every row, and applied identically to each
-        // cell in it -- proportional widths that still align.
-        //
-        // Character count is a proxy for rendered width, not a measurement:
-        // proportional text makes `iiii` narrower than `WWWW`. It is the right
-        // proxy here because it needs no text system on the layout path, which
-        // `prepaint` cannot afford, and because the failure it fixes is a
-        // factor-of-several mismatch that no per-glyph accuracy would change.
-        let cell_text =
-            |cell: &sirio_markdown::TableCell| sirio_markdown::Inline::plain_text_all(&cell.inline);
-        let column_weights = markdown_table_column_weights(
-            &header.iter().map(&cell_text).collect::<Vec<_>>(),
-            &rows
-                .iter()
-                .map(|row| row.iter().map(&cell_text).collect::<Vec<_>>())
-                .collect::<Vec<_>>(),
-        );
-
-        let render_row = |cells: Vec<sirio_markdown::TableCell>,
-                          row_id: String,
-                          header_row: bool,
-                          row_start: usize| {
-            div()
-                .w_full()
-                .flex()
-                .border_b_1()
-                .border_color(theme.border)
-                .when(header_row, |this| this.bg(theme.surface_raised))
-                .children(cells.into_iter().enumerate().scan(
-                    row_start,
-                    |cell_start, (index, cell)| {
-                        let alignment = alignment.get(index).copied().unwrap_or(Alignment::None);
-                        let cell_text = sirio_markdown::Inline::plain_text_all(&cell.inline);
-                        let mut cell_view = div()
-                            .flex_grow(column_weights.get(index).copied().unwrap_or(1.0))
-                            .flex_basis(px(0.0))
-                            // Without this a long word sets the cell's minimum
-                            // and the weights stop deciding anything.
-                            .min_w_0()
-                            .px(px(8.0))
-                            .py(px(5.0))
-                            .flex()
-                            .text_size(typography.callout)
-                            .text_color(theme.text)
-                            // The rule the grid was missing. Not on the first
-                            // column, where it would double the table border.
-                            .when(index > 0, |this| {
-                                this.border_l_1().border_color(theme.border)
-                            });
-                        cell_view = match alignment {
-                            Alignment::Center => cell_view.justify_center(),
-                            Alignment::Right => cell_view.justify_end(),
-                            Alignment::None | Alignment::Left => cell_view.justify_start(),
-                        };
-                        cell_view = cell_view.child(Self::render_inline(
-                            cell.inline,
-                            theme,
-                            format!("{row_id}-cell-{index}"),
-                            interaction,
-                            *cell_start,
-                            link_click.clone(),
-                        ));
-                        *cell_start += cell_text.len() + 1;
-                        Some(cell_view.into_any_element())
-                    },
-                ))
-        };
-
-        let header_text_len = header
-            .iter()
-            .map(|cell| sirio_markdown::Inline::plain_text_all(&cell.inline).len() + 1)
-            .sum::<usize>();
-
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .border_1()
-            .border_color(theme.border)
-            .rounded(theme.radii.control)
-            .overflow_hidden()
-            .child(render_row(
-                header,
-                format!("{id}-header"),
-                true,
-                source_start,
-            ))
-            .children(rows.into_iter().enumerate().scan(
-                source_start + header_text_len,
-                |row_start, (index, row)| {
-                    let row_text_len = row
-                        .iter()
-                        .map(|cell| sirio_markdown::Inline::plain_text_all(&cell.inline).len() + 1)
-                        .sum::<usize>();
-                    let rendered = render_row(row, format!("{id}-row-{index}"), false, *row_start);
-                    *row_start += row_text_len + 1;
-                    Some(rendered)
-                },
-            ))
-            .into_any_element()
-    }
-
-    fn render_inline(
-        inline: Vec<Inline>,
-        theme: &Theme,
-        id: String,
-        interaction: Option<&TranscriptInteraction>,
-        source_start: usize,
-        link_click: Option<LinkClickOverride>,
-    ) -> AnyElement {
-        let mut builder = InlineBuilder::default();
-        for inline in &inline {
-            builder.append(inline, theme);
-        }
-
-        let links = builder.links.clone();
-        let rendered_len = builder.text.len();
-        let link_ranges = links
-            .iter()
-            .map(|(range, _)| range.clone())
-            .collect::<Vec<_>>();
-        let link_targets = links
-            .clone()
-            .into_iter()
-            .map(|(_, target)| target)
-            .collect::<Vec<_>>();
-        let styled = StyledText::new(builder.text)
-            .with_highlights(builder.highlights)
-            .with_font_family_overrides(builder.font_overrides);
-        let text = if let Some(interaction) = interaction {
-            TranscriptSelectableText::new(
-                ElementId::Name(id.into()),
-                styled,
-                source_start..source_start + rendered_len,
-                interaction.clone(),
-                theme.element_active,
-                links,
-            )
-            .into_any_element()
-        } else if link_ranges.is_empty() {
-            styled.into_any_element()
-        } else {
-            InteractiveText::new(ElementId::Name(id.into()), styled)
-                .on_click(link_ranges, move |index, window, cx| {
-                    if let Some(target) = link_targets.get(index) {
-                        // F-CORE-FILE-04: File Preview supplies an override
-                        // that tries to resolve the link as another local
-                        // file first; assistant-authored prose (no override)
-                        // keeps opening every link externally.
-                        match &link_click {
-                            Some(handler) => handler(target, window, cx),
-                            None => cx.open_url(target),
-                        }
-                    }
-                })
-                .into_any_element()
-        };
-        div().w_full().child(text).into_any_element()
-    }
-
-    /// F-CHAT-23: a tool call's text output, tail-truncated (large MCP
-    /// results in particular can run long, and the tail is where the
-    /// result usually lands) rather than shown in full.
     fn render_tool_output_text(text: &str, theme: &Theme) -> AnyElement {
         let typography = theme.typography;
         let (shown, truncated) = truncate_tool_output(text);
@@ -4848,8 +4544,6 @@ impl Chat {
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
             focus: transcript_focus,
-            entry_index: Some(entry_index),
-            copied_target: copied_target.clone(),
         };
         match entry {
             Entry::User(text) => div()
@@ -4869,10 +4563,9 @@ impl Chat {
                         .max_w(px(USER_PILL_MAX_WIDTH))
                         .rounded(theme.radii.user_pill)
                         .bg(theme.surface_raised)
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .text_size(typography.headline)
-                        .line_height(typography.body_line_height)
+                        .px(px(USER_PILL_H_PADDING))
+                        .py(px(USER_PILL_V_PADDING))
+                        .text_size(px(USER_PILL_TEXT_SIZE))
                         .text_color(theme.text)
                         .child(Self::render_plain_text(
                             text,
@@ -4931,13 +4624,7 @@ impl Chat {
                     .relative()
                     .group(hover_group)
                     .w_full()
-                    .child(Self::render_markdown(
-                        document,
-                        theme,
-                        Some(interaction),
-                        source_start,
-                        None,
-                    ))
+                    .child(MarkdownBody::new(document))
                     .child(copy)
                     .into_any_element()
             }
@@ -6017,8 +5704,6 @@ impl Chat {
                         TranscriptInteraction {
                             chat: entity.clone(),
                             focus: transcript_focus.clone(),
-                            entry_index: Some(member_index),
-                            copied_target: None,
                         },
                         theme,
                         entity.clone(),
@@ -7893,7 +7578,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(10.0))
+                                            .pb(px(TURN_BOTTOM_PADDING))
                                             .child(Chat::render_turn_fold_row(
                                                 turn_id,
                                                 label,
@@ -7919,7 +7604,7 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(10.0))
+                                            .pb(px(TURN_BOTTOM_PADDING))
                                             .child(
                                                 div()
                                                     .id(("turn-refold", turn_id))
@@ -8016,11 +7701,17 @@ impl Render for Chat {
                                     .get(entry_index)
                                     .cloned()
                                     .map(|entry| {
+                                        let bottom_padding =
+                                            if matches!(entry, Entry::TurnFooter(_)) {
+                                                TURN_BOTTOM_PADDING
+                                            } else {
+                                                10.0
+                                            };
                                         div()
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(10.0))
+                                            .pb(px(bottom_padding))
                                             .child(Chat::render_entry(
                                                 entry,
                                                 entry_index,
@@ -8291,145 +7982,6 @@ fn finish_mention_matches(mut relative_paths: Vec<String>, query: &str) -> Vec<S
     });
     ranked.truncate(8);
     ranked
-}
-
-/// The size a markdown heading renders at, on its own scale rather than the
-/// UI type scale (#216).
-///
-/// Six heading levels needing monotonic separation from body text is a
-/// different problem from six UI roles, and reusing one scale for the other is
-/// what put `####` at exactly the body size: `title3` and `headline` are the
-/// same 15px, so a heading and a bold paragraph became indistinguishable.
-/// `sirio_theme`'s own doc comment on `headline` already records that
-/// collision. `###` fared little better at one pixel above body.
-///
-/// The top four levels are therefore derived from the body size — what
-/// [`Block::Paragraph`] renders at — using the ratios Zed's markdown renderer
-/// uses (`text_3xl`/`2xl`/`xl`/`lg` against `text_base`). Deriving rather than
-/// hardcoding matters: [`sirio_theme::Typography::for_base_size`] builds the
-/// whole scale as an offset from 13.5, so fixed pixel values would freeze the
-/// headings while the Settings font-size control grew the text under them.
-///
-/// Levels 5 and 6 are deliberately left alone. Sitting at and just below body
-/// size is what Zed does (`text_base`, `text_sm`) and what HTML's own default
-/// scale does, so they were never the defect.
-fn markdown_heading_size(level: u8, typography: sirio_theme::Typography) -> gpui::Pixels {
-    match level {
-        1 => typography.headline * 1.875,
-        2 => typography.headline * 1.5,
-        3 => typography.headline * 1.25,
-        4 => typography.headline * 1.125,
-        5 => typography.headline,
-        _ => typography.callout,
-    }
-}
-
-#[derive(Default)]
-struct InlineBuilder {
-    text: String,
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
-    font_overrides: Vec<(Range<usize>, SharedString)>,
-    links: Vec<(Range<usize>, String)>,
-}
-
-impl InlineBuilder {
-    fn append(&mut self, inline: &Inline, theme: &Theme) {
-        self.append_with_style(inline, theme, false, false, false, None);
-    }
-
-    fn append_with_style(
-        &mut self,
-        inline: &Inline,
-        theme: &Theme,
-        strong: bool,
-        emphasis: bool,
-        code: bool,
-        link_target: Option<&str>,
-    ) {
-        match inline {
-            Inline::Text(text) => {
-                let start = self.text.len();
-                self.text.push_str(text);
-                let end = self.text.len();
-                if start == end {
-                    return;
-                }
-
-                let mut highlight = HighlightStyle {
-                    font_weight: strong.then_some(FontWeight::BOLD),
-                    font_style: emphasis.then_some(FontStyle::Italic),
-                    ..Default::default()
-                };
-                if code {
-                    // waku spends its one saturated colour on inline code:
-                    // the warm `code_text` on a faint `code_wash` ground.
-                    highlight.color = Some(theme.text.into());
-                    highlight.background_color = Some(theme.code_wash.into());
-                    self.font_overrides
-                        .push((start..end, theme.typography.code_family.into()));
-                }
-                if let Some(target) = link_target {
-                    highlight.color = Some(theme.file_link.into());
-                    highlight.underline = Some(UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(theme.file_link.into()),
-                        wavy: false,
-                    });
-                    self.links.push((start..end, target.to_string()));
-                }
-                if highlight != HighlightStyle::default() {
-                    self.highlights.push((start..end, highlight));
-                }
-            }
-            Inline::Emphasis(children) => {
-                for child in children {
-                    self.append_with_style(child, theme, strong, true, code, link_target);
-                }
-            }
-            Inline::Strong(children) => {
-                for child in children {
-                    self.append_with_style(child, theme, true, emphasis, code, link_target);
-                }
-            }
-            Inline::Code(value) => {
-                let start = self.text.len();
-                self.text.push_str(value);
-                let end = self.text.len();
-                if start < end {
-                    let mut highlight = HighlightStyle {
-                        color: Some(theme.text.into()),
-                        background_color: Some(theme.code_wash.into()),
-                        ..Default::default()
-                    };
-                    highlight.font_weight = strong.then_some(FontWeight::BOLD);
-                    highlight.font_style = emphasis.then_some(FontStyle::Italic);
-                    if let Some(target) = link_target {
-                        highlight.color = Some(theme.file_link.into());
-                        self.links.push((start..end, target.to_string()));
-                    }
-                    self.highlights.push((start..end, highlight));
-                    self.font_overrides
-                        .push((start..end, theme.typography.code_family.into()));
-                }
-            }
-            Inline::Link {
-                target, children, ..
-            } => {
-                for child in children {
-                    self.append_with_style(child, theme, strong, emphasis, code, Some(target));
-                }
-            }
-            Inline::Image { alt, .. } => {
-                let image = Inline::Text(alt.clone());
-                self.append_with_style(&image, theme, strong, emphasis, code, link_target);
-            }
-            Inline::SoftBreak | Inline::HardBreak => self.text.push('\n'),
-            Inline::Html(html) => {
-                let html = Inline::Text(html.clone());
-                self.append_with_style(&html, theme, strong, emphasis, code, link_target);
-            }
-        }
-    }
 }
 
 fn option_hash(option: &AnswerOption) -> usize {
@@ -8750,38 +8302,6 @@ impl ToolCallPlainText {
 
 /// Names the first file a collapsed tool call touched, keeping the path
 /// useful without repeating a path already present in the tool title.
-/// Column widths for a markdown table, as flex weights.
-///
-/// One weight per column, taken from the widest cell in that column across the
-/// header and every row, and applied identically to each cell in it. Both
-/// halves matter: proportional so a four-character column stops claiming half
-/// the table, identical down a column so the rows still line up -- flex rows
-/// lay out independently, so per-cell sizing would stagger them.
-///
-/// Character count is a proxy for rendered width, not a measurement, since
-/// proportional text makes `iiii` narrower than `WWWW`. It is the right proxy
-/// here: it needs no text system on the layout path, and the failure it
-/// corrects is a factor-of-several mismatch that per-glyph accuracy would not
-/// change.
-fn markdown_table_column_weights(header: &[String], rows: &[Vec<String>]) -> Vec<f32> {
-    let mut widths: Vec<usize> = Vec::new();
-    for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
-        for (index, text) in row.iter().enumerate() {
-            let len = text.chars().count();
-            match widths.get_mut(index) {
-                Some(slot) => *slot = (*slot).max(len),
-                None => widths.push(len),
-            }
-        }
-    }
-    widths
-        .into_iter()
-        // A floor keeps a column of empty cells from collapsing to a hairline.
-        // The set stays relative, so equal-length columns still split evenly.
-        .map(|len| len.max(3) as f32)
-        .collect()
-}
-
 fn collapsed_tool_row_text(
     status: &str,
     title: &str,
@@ -8917,74 +8437,36 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    /// #216: a strict `>` is not enough here. The reported symptom was `###`
-    /// at 16px against a 15px body — one pixel, visually indistinguishable
-    /// from a bold paragraph, yet it satisfies `>`. The floor is the decided
-    /// ratio for each level minus a small tolerance, so the test fails on the
-    /// separation a reader can actually see rather than on bare ordering.
+    /// A typical streamed answer is reparsed as deltas arrive. This deliberately
+    /// uses a coarse wall-clock ceiling: it catches an accidental super-linear
+    /// parse/build path without pretending to be a benchmark.
     #[test]
-    fn every_heading_above_level_five_clears_body_text() {
-        let typography = sirio_theme::Typography::default_scale();
-        let body = f32::from(typography.headline);
-        for (level, ratio) in [(1u8, 1.875f32), (2, 1.5), (3, 1.25), (4, 1.125)] {
-            let size = f32::from(markdown_heading_size(level, typography));
-            let floor = body * (ratio - 0.05);
-            assert!(
-                size >= floor,
-                "h{level} renders at {size}px against a {body}px body — \
-                 {:.2}x, below the {ratio}x this level owes",
-                size / body
-            );
-        }
-    }
+    fn a_four_kib_streaming_turn_builds_a_bezel_doc_within_the_frame_budget() {
+        let fragment = "## Result\n\n- [x] parsed\n- [ ] rendered\n\n```rust\nlet answer = 42;\n```\n\n| step | state |\n| --- | --- |\n| parse | done |\n\n";
+        let source = fragment.repeat(35);
+        assert!(
+            (4_096..=5_120).contains(&source.len()),
+            "fixture must stay close to 4 KiB, got {} bytes",
+            source.len()
+        );
 
-    #[test]
-    fn heading_sizes_descend_monotonically() {
-        let typography = sirio_theme::Typography::default_scale();
-        let sizes: Vec<gpui::Pixels> = (1u8..=6)
-            .map(|level| markdown_heading_size(level, typography))
-            .collect();
-        for (index, pair) in sizes.windows(2).enumerate() {
-            assert!(
-                pair[0] > pair[1],
-                "h{} ({:?}) not above h{} ({:?})",
-                index + 1,
-                pair[0],
-                index + 2,
-                pair[1]
-            );
-        }
-    }
+        let started = std::time::Instant::now();
+        let document = parse_chat_markdown(&source);
+        let elapsed = started.elapsed();
+        let budget = if cfg!(debug_assertions) {
+            std::time::Duration::from_millis(50)
+        } else {
+            std::time::Duration::from_millis(5)
+        };
 
-    /// The guard against over-correcting: Zed's h5 is body-sized and its h6
-    /// sits below body, and Sirio's already matched — levels 5 and 6 must
-    /// not move.
-    #[test]
-    fn the_bottom_two_levels_keep_their_current_sizes() {
-        let typography = sirio_theme::Typography::default_scale();
-        assert_eq!(markdown_heading_size(5, typography), typography.headline);
-        assert_eq!(markdown_heading_size(6, typography), typography.callout);
-    }
-
-    /// Regression guard for hardcoding: every level 1-4 must grow when the
-    /// Settings font-size base grows, and still clear that scale's own body.
-    #[test]
-    fn heading_sizes_follow_the_body_size_setting() {
-        let typography = sirio_theme::Typography::default_scale();
-        let larger = sirio_theme::Typography::for_base_size(f32::from(typography.base_size) + 6.0);
-        for level in 1u8..=4 {
-            let before = markdown_heading_size(level, typography);
-            let after = markdown_heading_size(level, larger);
-            assert!(
-                after > before,
-                "h{level} renders at {after:?}, did not grow from {before:?}"
-            );
-            assert!(
-                after > larger.headline,
-                "h{level} renders at {after:?}, does not clear larger body at {:?}",
-                larger.headline
-            );
-        }
+        assert!(
+            !document.blocks.is_empty(),
+            "parse/build must produce the bezel document rendered by chat"
+        );
+        assert!(
+            elapsed < budget,
+            "4 KiB markdown parse/build took {elapsed:?}, budget is {budget:?}"
+        );
     }
 
     /// Sirio has no truthful per-thought duration today, so the label is the
@@ -9327,6 +8809,7 @@ mod tests {
         fixture_args: &[&str],
     ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {
         cx.update(Theme::init);
+        cx.update(init);
         let args = fixture_args.to_vec();
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut command = AgentCommand::new("python3").arg(CHAT_FIXTURE);
@@ -9346,32 +8829,26 @@ mod tests {
     }
 
     struct MarkdownHarness {
-        document: Document,
+        document: markdown::Doc,
     }
 
     impl Render for MarkdownHarness {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let theme = *Theme::get(cx);
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(
                 div()
                     .id("assistant-response-0")
                     .debug_selector(|| "assistant-response-0".into())
                     .w_full()
-                    .child(Chat::render_markdown(
-                        self.document.clone(),
-                        &theme,
-                        None,
-                        0,
-                        None,
-                    )),
+                    .child(MarkdownBody::new(self.document.clone())),
             )
         }
     }
 
     fn markdown_view(cx: &mut TestAppContext, markdown: String) -> VisualTestContext {
         cx.update(Theme::init);
+        cx.update(init);
         let window = cx.open_window(size(px(900.0), px(900.0)), move |_, _| MarkdownHarness {
-            document: parse(&markdown),
+            document: parse_chat_markdown(&markdown),
         });
         VisualTestContext::from_window(window.into(), cx)
     }
@@ -9801,73 +9278,55 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn fifteen_item_ordered_list_keeps_each_marker_on_its_item_line(cx: &mut TestAppContext) {
-        let markdown = (1..=15)
-            .map(|number| format!("{number}. item {number}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut cx = markdown_view(cx, markdown);
-        refresh_frame(&mut cx);
+    async fn bezel_markdown_renders_lists_tasks_code_and_tables(cx: &mut TestAppContext) {
+        let source = r#"1. first
+2. second
 
-        let response = cx
-            .debug_bounds("assistant-response-0")
-            .expect("the ordered list response is drawn");
+- [x] done
+- [ ] pending
+
+```rust
+let answer = 42;
+```
+
+| left | right |
+| --- | --- |
+| one | two |"#;
+        let document = parse_chat_markdown(source);
         assert!(
-            response.size.height <= px(450.0),
-            "a wrapped marker would add a stray period line: response={response:?}"
+            document
+                .blocks
+                .iter()
+                .any(|block| matches!(block.kind, markdown::BlockKind::Ordered { .. })),
+            "ordered lists stay structured in the bezel Doc"
         );
-        assert_eq!(
-            cx.debug_bounds("markdown-list-marker")
-                .expect("the final marker is drawn")
-                .size
-                .width,
-            px(27.0),
-            "the fifteen-item list sizes its marker column for three glyphs"
-        );
-    }
-
-    #[gpui::test]
-    async fn three_digit_ordered_markers_keep_the_item_column_aligned(cx: &mut TestAppContext) {
-        let markdown = (98..=102)
-            .map(|number| format!("{number}. item {number}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut cx = markdown_view(cx, markdown);
-        refresh_frame(&mut cx);
-
-        let response = cx
-            .debug_bounds("assistant-response-0")
-            .expect("the ordered list response is drawn");
         assert!(
-            response.size.height <= px(150.0),
-            "three-digit markers must stay intact instead of wrapping: response={response:?}"
+            document
+                .blocks
+                .iter()
+                .any(|block| matches!(block.kind, markdown::BlockKind::Task { .. })),
+            "task lists stay structured in the bezel Doc"
         );
-        assert_eq!(
-            cx.debug_bounds("markdown-list-marker")
-                .expect("the final marker is drawn")
-                .size
-                .width,
-            px(36.0),
-            "the item column starts after a four-glyph marker column"
+        assert!(
+            document
+                .blocks
+                .iter()
+                .any(|block| matches!(block.kind, markdown::BlockKind::Code { .. })),
+            "fenced code stays structured in the bezel Doc"
         );
-    }
+        assert!(
+            document
+                .blocks
+                .iter()
+                .any(|block| matches!(block.kind, markdown::BlockKind::Table { .. })),
+            "tables stay structured in the bezel Doc"
+        );
 
-    #[gpui::test]
-    async fn nine_item_ordered_list_keeps_the_existing_marker_column(cx: &mut TestAppContext) {
-        let markdown = (1..=9)
-            .map(|number| format!("{number}. item {number}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut cx = markdown_view(cx, markdown);
+        let mut cx = markdown_view(cx, source.into());
         refresh_frame(&mut cx);
-
-        assert_eq!(
-            cx.debug_bounds("markdown-list-marker")
-                .expect("the final marker is drawn")
-                .size
-                .width,
-            px(18.0),
-            "the common two-glyph case keeps its 18px marker column"
+        assert!(
+            cx.debug_bounds("assistant-response-0").is_some(),
+            "the mixed markdown document renders as an assistant response"
         );
     }
 
@@ -9877,7 +9336,7 @@ mod tests {
             Entry::User("inspect".into()),
             Entry::Assistant {
                 text: "done".into(),
-                document: parse("done"),
+                document: parse_chat_markdown("done"),
             },
             Entry::TurnFooter("12:00".into()),
             Entry::User("still streaming".into()),
@@ -10173,7 +9632,7 @@ mod tests {
             );
             chat.push_entry(Entry::Assistant {
                 text: "copy this assistant response".into(),
-                document: parse("copy this assistant response"),
+                document: parse_chat_markdown("copy this assistant response"),
             });
             chat
         });
@@ -10208,6 +9667,7 @@ mod tests {
     #[gpui::test]
     async fn code_block_copy_writes_code_and_confirms(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -10216,27 +9676,30 @@ mod tests {
             );
             chat.push_entry(Entry::Assistant {
                 text: "```rust\nlet answer = 42;\n```".into(),
-                document: parse("```rust\nlet answer = 42;\n```"),
+                document: parse_chat_markdown("```rust\nlet answer = 42;\n```"),
             });
             chat
         });
         refresh_frame(cx);
 
-        let copy = cx
-            .debug_bounds("code-block-copy-0-assistant-block-0")
-            .expect("a code block exposes its own Copy control");
-        cx.simulate_click(copy.center(), Modifiers::none());
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the fenced code response is drawn");
+        // bezel-markdown's native copy control is positioned 5px from the
+        // block's right edge and 3px from its top. Its stable element id is
+        // intentionally not a GPUI debug selector, so exercise its actual hit
+        // target relative to the single-block response rather than duplicating
+        // the control in Sirio just for test instrumentation.
+        cx.simulate_click(
+            point(response.right() - px(24.0), response.top() + px(13.0)),
+            Modifiers::none(),
+        );
         cx.run_until_parked();
 
         assert_eq!(
             cx.cx.read_from_clipboard().and_then(|item| item.text()),
-            Some("let answer = 42;\n".into()),
+            Some("let answer = 42;".into()),
             "code-block Copy writes raw code, without the fence or language label"
-        );
-        assert!(
-            cx.debug_bounds("code-block-copy-confirmed-0-assistant-block-0")
-                .is_some(),
-            "the clicked code-block control visibly acknowledges success"
         );
         let _ = chat;
     }
@@ -10308,7 +9771,7 @@ mod tests {
             });
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
-                document: parse("done"),
+                document: parse_chat_markdown("done"),
             });
             chat.push_entry(Entry::ToolCall {
                 id: "edit-stale".into(),
@@ -13369,7 +12832,7 @@ mod tests {
             chat.push_entry(Entry::User("user question".into()));
             chat.push_entry(Entry::Assistant {
                 text: "assistant answer".into(),
-                document: parse("assistant answer"),
+                document: parse_chat_markdown("assistant answer"),
             });
             chat
         });
@@ -13406,7 +12869,7 @@ mod tests {
             chat.push_entry(Entry::User("question".into()));
             chat.push_entry(Entry::Assistant {
                 text: "answer".into(),
-                document: parse("answer"),
+                document: parse_chat_markdown("answer"),
             });
             chat
         });
@@ -14192,59 +13655,6 @@ mod tests {
     /// blind review of the composer read it as "a lone chevron floating
     /// mid-row, orphaned from whatever it belongs to", and read the model
     /// value as a caption rather than something clickable.
-    /// A markdown table sizes its columns to their content, and the same
-    /// column gets the same width in every row.
-    ///
-    /// The weights are what make both true at once. Per-cell content sizing
-    /// would stagger the rows -- flex rows lay out independently -- and the
-    /// equal shares this replaced gave a two-column table a 50/50 split
-    /// whatever it held.
-    #[test]
-    fn table_column_weights_follow_content_and_are_shared_down_a_column() {
-        let weights = markdown_table_column_weights(
-            &["id".into(), "what the measurement showed".into()],
-            &[
-                vec!["#268".into(), "BGRA, settled by sampling pixels".into()],
-                vec!["#264".into(), "zero graphics APCs from three CLIs".into()],
-            ],
-        );
-        assert_eq!(weights.len(), 2);
-        assert!(
-            weights[1] > weights[0] * 3.0,
-            "a sentence column must outweigh a four-character one, not tie              with it: {weights:?}"
-        );
-        // The widest cell in a column decides, header included.
-        let header_wins = markdown_table_column_weights(
-            &["a considerably longer header".into(), "b".into()],
-            &[vec!["x".into(), "y".into()]],
-        );
-        assert!(header_wins[0] > header_wins[1]);
-    }
-
-    /// Equal content still splits evenly -- the change is proportional, not a
-    /// new bias.
-    #[test]
-    fn table_columns_of_equal_content_still_split_evenly() {
-        // Genuinely equal: "left"/"same" are both four characters, as are the
-        // body cells. An earlier version of this test used "left"/"right" and
-        // failed on the one-character difference -- which is the rule working.
-        let weights = markdown_table_column_weights(
-            &["left".into(), "same".into()],
-            &[vec!["aaaa".into(), "bbbb".into()]],
-        );
-        assert_eq!(weights[0], weights[1]);
-    }
-
-    /// An empty column keeps a floor rather than collapsing to a hairline.
-    #[test]
-    fn an_empty_table_column_does_not_collapse() {
-        let weights = markdown_table_column_weights(
-            &["".into(), "a much longer column".into()],
-            &[vec!["".into(), "more text here".into()]],
-        );
-        assert!(weights[0] >= 3.0, "{weights:?}");
-    }
-
     #[gpui::test]
     async fn the_model_chips_chevron_stays_beside_the_model_name(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
@@ -14490,49 +13900,6 @@ mod tests {
         );
     }
 
-    /// F-EDIT-07: a fenced code block's info-string tag resolves to the
-    /// same `Language` the editor uses, so the preview highlighter picks
-    /// the right keyword vocabulary instead of always falling back to
-    /// `PlainText` (which would produce zero highlights, reproducing the
-    /// original flat-color defect).
-    #[test]
-    fn fence_tag_resolves_to_editor_language() {
-        assert_eq!(Chat::language_from_fence_tag("bash"), Language::Shell);
-        assert_eq!(Chat::language_from_fence_tag("Rust"), Language::Rust);
-        assert_eq!(Chat::language_from_fence_tag("py"), Language::Python);
-        assert_eq!(
-            Chat::language_from_fence_tag("not-a-real-language"),
-            Language::PlainText
-        );
-    }
-
-    /// F-EDIT-07: the fenced `CodeBlock` render path now runs the same
-    /// `code_spans` pass the editor's code surface uses, producing at
-    /// least one highlighted keyword span for a comment-and-command shell
-    /// block — the exact case the critic's pixel inspection caught
-    /// rendering as flat, unhighlighted text.
-    #[test]
-    fn shell_code_block_produces_keyword_and_comment_highlights() {
-        let language = Chat::language_from_fence_tag("bash");
-        let text = "# comment\nif [ -f x ]; then\n  echo hi\nfi";
-        let mut saw_comment = false;
-        let mut saw_keyword = false;
-        for line in text.split('\n') {
-            for span in code_spans(language, line) {
-                match span.kind {
-                    CodeSpanKind::Comment => saw_comment = true,
-                    CodeSpanKind::Keyword => saw_keyword = true,
-                    CodeSpanKind::Literal => {}
-                }
-            }
-        }
-        assert!(
-            saw_comment,
-            "the comment line should highlight as a comment"
-        );
-        assert!(saw_keyword, "if/then/fi should highlight as keywords");
-    }
-
     // ---------------------------------------------------------------
     // F-CHAT-22 (turn half), F-CHAT-23 (locations), F-CHAT-31 (diff)
     // ---------------------------------------------------------------
@@ -14588,7 +13955,7 @@ mod tests {
         let entries = vec![
             Entry::Assistant {
                 text: "leading note".into(),
-                document: parse("leading note"),
+                document: parse_chat_markdown("leading note"),
             },
             Entry::User("what does this do?\nsecond line".into()),
             Entry::TurnFooter("10:00".into()),
@@ -14604,7 +13971,7 @@ mod tests {
         let entries = vec![
             Entry::Assistant {
                 text: "no question here".into(),
-                document: parse("no question here"),
+                document: parse_chat_markdown("no question here"),
             },
             Entry::TurnFooter("10:00".into()),
         ];

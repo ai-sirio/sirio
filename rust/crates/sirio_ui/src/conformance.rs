@@ -72,7 +72,7 @@
 //!   every call site already spells it.
 //! - **User pill text at body 13.5/21 instead of waku's 14/20**: Sirio
 //!   keeps one body size; the pill is distinguished by its container
-//!   (max 540, r12, raised, px12/py8 — all pinned below), not by a second
+//!   (max 440, r12, raised, px14/py9 — all pinned below), not by a second
 //!   reading size.
 //! - **Plain-text file tabs have no column cap**: a code viewer, not
 //!   prose; waku has no file view at all.
@@ -112,7 +112,10 @@ use gpui::{FontWeight, Rgba, TestAppContext, WindowAppearance, px};
 use sirio_theme::{Appearance, BaseColor, Theme, ThemeMode};
 
 use crate::changes;
-use crate::chat::{CARD_H_PADDING, CARD_V_PADDING, TRANSCRIPT_WIDTH, USER_PILL_MAX_WIDTH};
+use crate::chat::{
+    CARD_H_PADDING, CARD_V_PADDING, TRANSCRIPT_WIDTH, TURN_BOTTOM_PADDING, USER_PILL_H_PADDING,
+    USER_PILL_MAX_WIDTH, USER_PILL_TEXT_SIZE, USER_PILL_V_PADDING,
+};
 use crate::file_view::MARKDOWN_COLUMN_WIDTH;
 use crate::right_panel;
 use crate::settings::CONTENT_WIDTH;
@@ -337,6 +340,10 @@ fn the_live_transcript_follows_the_bezel_transcript_pattern() {
         "transcript column (Bezel Transcript)"
     );
     assert_eq!(USER_PILL_MAX_WIDTH, 440.0, "user bubble (Bezel Activity)");
+    assert_eq!(USER_PILL_H_PADDING, 14.0, "user bubble horizontal padding");
+    assert_eq!(USER_PILL_V_PADDING, 9.0, "user bubble vertical padding");
+    assert_eq!(USER_PILL_TEXT_SIZE, 13.5, "user bubble text size");
+    assert_eq!(TURN_BOTTOM_PADDING, 28.0, "whole-turn bottom padding");
 }
 
 /// The named waku components are the ones the conformance story hinges on;
@@ -352,9 +359,10 @@ fn named_components_keep_their_frozen_geometry() {
     assert_eq!(CARD_H_PADDING, 14.0);
     assert_eq!(CARD_V_PADDING, 10.0);
 
-    // The user pill is now the Bezel 440, r12, px12/py8 — the container
-    // metrics are frozen except for the width; the text deliberately stays
-    // at body size (see ledger).
+    // The user pill is the Bezel 440, r12, px14/py9, 13.5px composition.
     assert_eq!(Theme::dark().radii.user_pill, px(12.0));
     assert_eq!(USER_PILL_MAX_WIDTH, 440.0);
+    assert_eq!(USER_PILL_H_PADDING, 14.0);
+    assert_eq!(USER_PILL_V_PADDING, 9.0);
+    assert_eq!(USER_PILL_TEXT_SIZE, 13.5);
 }

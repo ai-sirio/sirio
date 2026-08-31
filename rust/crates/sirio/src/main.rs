@@ -15214,6 +15214,7 @@ fn main() {
         register_fonts(cx);
         Theme::init(cx);
         bezel::ui::input::init(cx);
+        sirio_ui::chat::init(cx);
 
         // Restore the stored layout; a missing, corrupt or newer-schema
         // database logs and falls back to the default layout — the app must
