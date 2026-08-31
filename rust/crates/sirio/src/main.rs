@@ -20,7 +20,7 @@ use sirio_control::{
 use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
-use sirio_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, FileIconTheme};
+use sirio_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor};
 use sirio_project::{
     OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
     display_path, is_git_repository, numeric_tab_selection, read_head_label,
@@ -3205,10 +3205,6 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
         (
             "terminalFontSize".to_string(),
             snapshot.terminal_font_size.to_string(),
-        ),
-        (
-            "fileIcons".to_string(),
-            snapshot.file_icons.title().to_string(),
         ),
         (
             "controlSocketEnabled".to_string(),
@@ -14927,10 +14923,6 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         interface_font_size: settings.ui_font_size.clamp(10, 20) as i32,
         terminal_font_size: settings.terminal_font_size.clamp(9, 24) as i32,
         base_color: theme_base_color(settings.base_color),
-        file_icons: match settings.file_icon_theme {
-            FileIconTheme::SfSymbols => sirio_ui::settings::FileIconChoice::SfSymbols,
-            FileIconTheme::Material => sirio_ui::settings::FileIconChoice::Material,
-        },
         control_socket_enabled: settings.control_socket_enabled,
         // The live socket path is supplied by the host after this conversion;
         // it is runtime state, not an AppSettings field.
@@ -14958,10 +14950,6 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         ui_font_size: i64::from(snapshot.interface_font_size.clamp(10, 20)),
         terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(9, 24)),
         base_color: persisted_base_color(snapshot.base_color),
-        file_icon_theme: match snapshot.file_icons {
-            sirio_ui::settings::FileIconChoice::SfSymbols => FileIconTheme::SfSymbols,
-            sirio_ui::settings::FileIconChoice::Material => FileIconTheme::Material,
-        },
         control_socket_enabled: snapshot.control_socket_enabled,
         // `SettingsSnapshot` carries only UI-owned values; the update opt-out
         // is persisted by its dedicated host callback.
@@ -15796,7 +15784,7 @@ mod tests {
         FocusHandle, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
         TestAppContext, VisualTestContext,
     };
-    use sirio_persistence::{AppSettings, AppearanceMode, FileIconTheme};
+    use sirio_persistence::{AppSettings, AppearanceMode};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -22031,7 +22019,6 @@ mod tests {
             ui_font_size: 17,
             terminal_font_size: 19,
             base_color: BaseColor::Neutral,
-            file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
             updates_enabled: true,
             resume_agent_sessions: false,
@@ -22057,10 +22044,6 @@ mod tests {
         assert_eq!(snapshot.theme, sirio_theme::ThemeMode::Dark);
         assert_eq!(snapshot.interface_font_size, 17);
         assert_eq!(snapshot.terminal_font_size, 19);
-        assert_eq!(
-            snapshot.file_icons,
-            sirio_ui::settings::FileIconChoice::Material
-        );
         assert!(!snapshot.control_socket_enabled);
         assert!(!snapshot.resume_agent_sessions);
         assert!(snapshot.auto_naming);
@@ -22084,7 +22067,6 @@ mod tests {
         assert_eq!(restored.appearance, persisted.appearance);
         assert_eq!(restored.ui_font_size, persisted.ui_font_size);
         assert_eq!(restored.terminal_font_size, persisted.terminal_font_size);
-        assert_eq!(restored.file_icon_theme, persisted.file_icon_theme);
         assert_eq!(
             restored.control_socket_enabled,
             persisted.control_socket_enabled
@@ -22142,7 +22124,6 @@ mod tests {
             ui_font_size: 17,
             terminal_font_size: 19,
             base_color: BaseColor::Neutral,
-            file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
             updates_enabled: true,
             resume_agent_sessions: false,
@@ -22173,7 +22154,6 @@ mod tests {
         assert_eq!(restored.appearance, AppearanceMode::Light);
         assert_eq!(restored.ui_font_size, persisted.ui_font_size);
         assert_eq!(restored.terminal_font_size, persisted.terminal_font_size);
-        assert_eq!(restored.file_icon_theme, persisted.file_icon_theme);
         assert_eq!(
             restored.control_socket_enabled,
             persisted.control_socket_enabled

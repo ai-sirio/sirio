@@ -1763,7 +1763,7 @@ fn flush_if_due(inner: &SessionInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sirio_persistence::{AppearanceMode, FileIconTheme, ProjectRecord};
+    use sirio_persistence::{AppearanceMode, ProjectRecord};
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     struct TempDir(PathBuf);
@@ -2049,7 +2049,6 @@ mod tests {
             ui_font_size: 17,
             terminal_font_size: 19,
             base_color: BaseColor::Neutral,
-            file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
             updates_enabled: true,
             resume_agent_sessions: false,
@@ -2094,8 +2093,7 @@ mod tests {
             vec![
                 ("appearance.baseColor".into(), "neutral".into()),
                 ("appearance.centerSplitRatio".into(), "610".into()),
-                ("appearance.fileIconTheme".into(), "material".into()),
-                ("appearance.rightPanelWidth".into(), "500".into()),
+                    ("appearance.rightPanelWidth".into(), "500".into()),
                 ("appearance.sidebarWidth".into(), "300".into()),
                 ("appearance.terminalFontSize".into(), "19".into()),
                 ("appearance.theme".into(), "dark".into()),

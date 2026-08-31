@@ -366,31 +366,6 @@ impl AppearanceMode {
     }
 }
 
-/// The file-icon theme for the Files explorer, mirroring Swift's
-/// `FileIconTheme` raw values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileIconTheme {
-    SfSymbols,
-    Material,
-}
-
-impl FileIconTheme {
-    pub fn raw(self) -> &'static str {
-        match self {
-            FileIconTheme::SfSymbols => "sfSymbols",
-            FileIconTheme::Material => "material",
-        }
-    }
-
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "sfSymbols" => Some(FileIconTheme::SfSymbols),
-            "material" => Some(FileIconTheme::Material),
-            _ => None,
-        }
-    }
-}
-
 /// The bezel base colour the palette's greys are tinted with. The serde
 /// half of `sirio_theme::BaseColor`, kept here for the same reason
 /// `AppearanceMode` is: this crate carries the storage contract and must not
@@ -442,8 +417,6 @@ pub struct AppSettings {
     pub terminal_font_size: i64,
     /// "appearance.baseColor" — default: neutral.
     pub base_color: BaseColor,
-    /// "appearance.fileIconTheme" — default: sfSymbols.
-    pub file_icon_theme: FileIconTheme,
     /// "controlSocket.enabled" — default: true.
     pub control_socket_enabled: bool,
     /// "updates.enabled" — default: true. A real per-install opt-out: when
@@ -506,7 +479,6 @@ impl Default for AppSettings {
             ui_font_size: 13,
             terminal_font_size: 13,
             base_color: BaseColor::Neutral,
-            file_icon_theme: FileIconTheme::SfSymbols,
             control_socket_enabled: true,
             updates_enabled: true,
             resume_agent_sessions: true,
@@ -538,7 +510,6 @@ pub mod settings_keys {
     pub const UI_FONT_SIZE: &str = "appearance.uiFontSize";
     pub const TERMINAL_FONT_SIZE: &str = "appearance.terminalFontSize";
     pub const BASE_COLOR: &str = "appearance.baseColor";
-    pub const FILE_ICON_THEME: &str = "appearance.fileIconTheme";
     pub const CONTROL_SOCKET_ENABLED: &str = "controlSocket.enabled";
     pub const UPDATES_ENABLED: &str = "updates.enabled";
     pub const RESUME_AGENT_SESSIONS: &str = "session.resumeAgentSessions";
@@ -627,7 +598,6 @@ mod tests {
         assert_eq!(defaults.appearance, AppearanceMode::System);
         assert_eq!(defaults.ui_font_size, 13);
         assert_eq!(defaults.terminal_font_size, 13);
-        assert_eq!(defaults.file_icon_theme, FileIconTheme::SfSymbols);
         assert!(defaults.control_socket_enabled);
     }
 
@@ -639,7 +609,6 @@ mod tests {
             settings_keys::TERMINAL_FONT_SIZE,
             "appearance.terminalFontSize"
         );
-        assert_eq!(settings_keys::FILE_ICON_THEME, "appearance.fileIconTheme");
         assert_eq!(
             settings_keys::CONTROL_SOCKET_ENABLED,
             "controlSocket.enabled"
@@ -655,15 +624,6 @@ mod tests {
         assert_eq!(AppearanceMode::parse("light"), Some(AppearanceMode::Light));
         assert_eq!(AppearanceMode::parse("dark"), Some(AppearanceMode::Dark));
         assert_eq!(AppearanceMode::parse("banana"), None);
-        assert_eq!(
-            FileIconTheme::parse("sfSymbols"),
-            Some(FileIconTheme::SfSymbols)
-        );
-        assert_eq!(
-            FileIconTheme::parse("material"),
-            Some(FileIconTheme::Material)
-        );
-        assert_eq!(FileIconTheme::parse("banana"), None);
     }
 
     #[test]
