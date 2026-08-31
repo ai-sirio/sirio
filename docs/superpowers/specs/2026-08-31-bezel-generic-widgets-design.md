@@ -23,33 +23,49 @@ scroll handling), editor/file_view, orbit, project_identity avatars.
 Families with no real call site in Sirio are not adopted: combobox, date,
 pagination, stats, hover_card, palette.
 
-## The five families, in execution order (rising risk)
+> **Revision (2026-08-31, pre-plan verification):** two families dropped by
+> the spec's own no-real-site rule — **table** (the history commit list has
+> no header and no sort; its adaptive column budget is app logic, not a
+> table) and **scroll** (settings scrolls via gpui's native
+> `overflow_y_scroll`; the only hand-rolled scrollbar logic lives in chat, a
+> sub-project-3 surface). The titlebar window menu is the native platform
+> menu (`Window::show_window_menu`) and leaves the menus family; the twin
+> `render_tab_context_menu` in `sirio/src/main.rs` joins it instead. A new
+> prerequisite emerged: nothing calls bezel's `Theme::install_custom`, so
+> bezel components that read `Theme::of(cx)` internally (Tooltip, menu
+> chrome) would render with the unbranded palette — wiring Sirio's branded
+> theme into bezel's registry precedes the families. Every editable surface
+> in `sirio_ui` is a custom `StyledText` editor sharing `caret::Blink`; this
+> sub-project converts only the three input sites listed below, the other
+> caret consumers stay for sub-project 3 or later.
+
+## The families, in execution order (rising risk)
 
 One branch; one commit per family; each commit builds and passes per-crate
 tests before the next family starts. A single user visual review gates the
 end of the whole sub-project, not each family.
 
+0. **theme wiring (prerequisite)** — install Sirio's branded bezel theme
+   into bezel's own registry (`bezel::theme::Theme::install_custom`, kept in
+   sync where `sirio_theme` already syncs appearance), so `Theme::of(cx)`
+   inside bezel components resolves to the branded palette, not the default.
 1. **tooltip** — bezel `Tooltip::text` / `Tooltip::with_keystroke` replaces
    `TextTooltip` and `controls::text_tooltip` (`controls.rs`), which are
-   deleted. Call sites: `controls.rs`, `status_bar.rs`,
-   `right_panel/history.rs`.
-2. **menus/popover** — the five custom menus move to bezel `popover::Popup<T>`
-   plus `floating::panel` (and `menubar::{Menu, Item}` only if the titlebar
-   window menu already has menubar shape): sidebar row context menu, sidebar
-   add-project menu, tab_bar overflow menu, right_panel/files context menu,
-   titlebar window menu. Behavioral contract is invariant: same items, same
-   actions, dismissal on outside-click/Esc; the existing tests over these
-   menus are the net.
-3. **table** — the commit list in `right_panel/history.rs` adopts
-   `table::{Column, Sort, next_sort}` and bezel's `table`/`header`/`row`
-   paint helpers.
-4. **scroll** — the settings detail column's hand-rolled wheel handling
-   adopts `scroll::ScrollbarState` / `transient`.
-5. **input** — settings provider/cookie fields, `project_forms.rs` fields and
-   the browser address bar adopt `input::TextField` (placeholder, undo,
-   selection included). Requires wiring `input::init(cx)` into app bootstrap
-   (`sirio`'s `main.rs`) and into every `TestAppContext` setup that exercises
-   these fields; same for `menubar::init(cx)` if family 2 uses `Menubar`.
+   deleted. Call sites: `controls.rs:293` and three `.tooltip(...)` lines in
+   `changes.rs` (mechanical swap only — changes stays a sub-project-3
+   surface otherwise).
+2. **menus/popover** — the five custom menus move to bezel
+   `popover::{Popup, menu_at, anchored_menu_below, popover_card, menu_row,
+   reap_popup}`: sidebar row context menu, sidebar add-project menu,
+   tab_bar tab context menu, right_panel/files context menu, and the twin
+   tab context menu in `sirio/src/main.rs`. Behavioral contract is
+   invariant: same items, same actions, dismissal on outside-click/Esc; the
+   existing tests over these menus are the net.
+3. **input** — settings provider/cookie fields, `project_forms.rs` fields and
+   the browser address bar (`AddressEditor`) adopt `input::TextField`
+   (placeholder, undo, selection included). Requires wiring
+   `input::init(cx)` into app bootstrap (`sirio`'s `main.rs`) and into every
+   `TestAppContext` setup that exercises these fields.
 
 ## Constraints
 
