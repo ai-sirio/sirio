@@ -13137,7 +13137,7 @@ impl SirioWorkspace {
                                     .h(px(5.0))
                                     .rounded(px(3.0))
                                     // A bar filling up is a quantity, not a status.
-                                    .bg(theme.gauge)
+                                    .bg(theme.accent)
                                     .w(px(280.0 * (progress_percent as f32 / 100.0))),
                             ),
                     )

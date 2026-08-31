@@ -7,7 +7,7 @@
 //! contrast rather than hue, and semantic hues retain their existing state
 //! meanings. Colour is spent on two things only: data (a diff, a git status, an
 //! agent's brand) and attention (needs-input, error). The brand coral no longer
-//! has a role — see [`ThemeColors::accent`].
+//! has a role — see [`ThemeColors::brand_coral`].
 //!
 //! Where each value comes from is recorded in
 //! `docs/linux-rewrite/THEME-PROVENANCE.md`. The re-runnable
@@ -106,12 +106,11 @@ impl ThemeMode {
 
 /// All adaptive colors used by Sirio.
 ///
-/// Two naming layers live here on purpose. The first names what a component
-/// *is* (`tab_focus_accent`, `filter_field_bg`) and is what the UI has always
-/// consumed; the second names what a value *does* in the design system
-/// (`accent`, `raised`, `inset`, `overlay`, …) and is where the first ones
-/// resolve to. Components can migrate from the former to the latter without
-/// anything being re-derived.
+/// Names say what a value *does* in the design system (`surface_raised`,
+/// `input_bg`, `overlay`, …) rather than which component consumes it. The
+/// component-named layer this file used to carry alongside it — the
+/// `tab_focus_accent`/`filter_field_bg` aliases — has been collapsed into the
+/// roles it resolved to.
 ///
 /// Where each value comes from — measured off a reference frame, or chosen by
 /// us because no frame could settle it — is in
@@ -168,7 +167,7 @@ pub struct ThemeColors {
     pub text_faint: Rgba,
     /// Tree guide stroke, including its source alpha.
     pub tree_guide: Rgba,
-    /// Untracked-file status color — the gauge blue.
+    /// Untracked-file status color — the accent blue.
     pub git_untracked: Rgba,
     /// Addition diff accent — the success hue.
     pub diff_add: Rgba,
@@ -178,7 +177,7 @@ pub struct ThemeColors {
     pub diff_del: Rgba,
     /// Deletion diff background — translucent danger wash.
     pub diff_del_bg: Rgba,
-    /// Clickable file-link color — the gauge blue, the one place blue means
+    /// Clickable file-link color — the accent blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
     // ── Role tokens: what a value does, rather than who consumes it ───────
@@ -209,11 +208,11 @@ pub struct ThemeColors {
     /// as a literal there, so the picker keeps drawing from `Theme` — and so
     /// the two invariants this value carries (it clears AA on its own surface,
     /// and it is not any agent's brand) still have something to hold.
-    pub accent: Rgba,
+    pub brand_coral: Rgba,
     /// Quantity blue: quota meters, and the clone and update progress bars.
     /// Blue means "how much", which is why a progress bar is never painted in
     /// a status hue — a bar filling up is not an alert.
-    pub gauge: Rgba,
+    pub accent: Rgba,
     /// Selected-row fill, and the resting fill of a control the user clicks.
     /// Must stay distinguishable from [`ThemeColors::surface_raised`]; that is
     /// the property this token exists to preserve.
@@ -249,12 +248,12 @@ impl ThemeColors {
     }
 
     fn for_appearance(appearance: Appearance) -> Self {
-        // Sirio's accent. Part measured, part chosen, and the seam between
+        // Sirio's brand coral. Part measured, part chosen, and the seam between
         // the two is the whole point — see `THEME-PROVENANCE.md`.
         //
         // Measured: the hue, 24.3°, taken from the warm family the reference
         // frames actually render (their inline-code tone, `#E0A882`, agreeing
-        // across three independent spans). Neither frame contains an accent to
+        // across three independent spans). Neither frame contains a coral to
         // sample directly — both show one idle chat with no logo, caret, focus
         // ring or activity dot, and a search of the whole frame finds zero
         // pixels within 37 units of any coral — so hue is as much as looking
@@ -264,15 +263,15 @@ impl ThemeColors {
         // constraints rather than taste. Each variant clears WCAG AA on the
         // surface it is painted on (6.62:1 dark, 4.61:1 light — the light one
         // is the first lightness step that does), held by
-        // `accent_clears_contrast_on_its_own_surface`. And both stay clear of
+        // `brand_coral_clears_contrast_on_its_own_surface`. And both stay clear of
         // every `AgentBrandColor`, held by
         // `worktree_activity_colours_name_the_agent_and_never_a_status`: a tab
-        // shows its accent and its agent's mark side by side, so an accent
+        // shows its coral and its agent's mark side by side, so a coral
         // that lands on a brand makes the mark stop meaning anything. Claude's
         // `#D97757` is the near one at 22 units, which is also why the obvious
-        // shortcut — reusing our own Swift's Claude fill for the accent — is
+        // shortcut — reusing our own Swift's Claude fill for the coral — is
         // the one coral this app cannot have.
-        let accent = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0xAD581F), appearance);
+        let brand_coral = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0xAD581F), appearance);
         // The state hues are not a fresh design problem: Sirio already
         // shipped them. These four are the sRGB components of
         // `App/AppTheme.swift`'s `tabNeedsInput`, `tabDone`, `tabError` and
@@ -282,13 +281,13 @@ impl ThemeColors {
         // as hex so the two files can be diffed by eye.
         //
         // Nothing here could have come off the reference frames anyway: both
-        // show one idle chat session — no error, no progress gauge, no starred
+        // show one idle chat session — no error, no progress bar, no starred
         // row, no terminal — so there is no pixel of any of these states to
         // sample. Reusing our own is the strictly better answer than inventing
         // a second vocabulary for a meaning we had already fixed.
         //
-        // `gauge` is the exception worth naming: in Swift this blue is the
-        // focus accent. The Rust accent is coral, which freed the blue, and a
+        // `accent` is the exception worth naming: in Swift this blue is the
+        // focus accent. The Rust brand colour is coral, which freed the blue, and a
         // progress bar is the one place left that wants a cool hue.
         let warning = Self::adaptive(
             color(0.95, 0.72, 0.28, 1.0),
@@ -305,14 +304,14 @@ impl ThemeColors {
             color(0.68, 0.12, 0.17, 1.0),
             appearance,
         );
-        let gauge = Self::adaptive(
+        let accent = Self::adaptive(
             color(0.55, 0.64, 1.00, 1.0),
             color(0.24, 0.38, 0.78, 1.0),
             appearance,
         );
-        // C1: untracked leaves the gauge blue for a neutral in phase 2. Bound
+        // C1: untracked leaves the accent blue for a neutral in phase 2. Bound
         // separately here so that move is a value change, not a structural one.
-        let git_untracked = gauge;
+        let git_untracked = accent;
         // A starred row is a louder `warning`, not a fifth colour: same hue,
         // same lightness, all the chroma the pair allows. Held by
         // `favorite_is_the_warning_hue_at_full_chroma`.
@@ -403,15 +402,15 @@ impl ThemeColors {
             diff_add_bg: softened(success, VEIL_MID),
             diff_del: danger,
             diff_del_bg: softened(danger, VEIL_MID),
-            file_link: gauge,
+            file_link: accent,
             surface_raised: raised,
             input_bg: inset,
             overlay,
             overlay_strong,
             border_strong,
             text_dim,
+            brand_coral,
             accent,
-            gauge,
             selection,
             element_active: selected_fill,
             code_wash,
@@ -1609,14 +1608,14 @@ mod tests {
 
     #[test]
     fn git_untracked_is_its_own_binding_not_the_gauge_blue() {
-        // C1 moves untracked off the gauge binding to a neutral. Splitting the
+        // C1 moves untracked off the accent binding to a neutral. Splitting the
         // alias is structural and lands in phase 1; the value moves in phase 2.
         // Until then both are the same colour, so this test asserts the *binding*
-        // exists separately by checking the field is reachable without gauge.
+        // exists separately by checking the field is reachable without accent.
         let dark = ThemeColors::for_appearance(Appearance::Dark);
         let light = ThemeColors::for_appearance(Appearance::Light);
-        assert_eq!(dark.git_untracked, dark.gauge, "phase 1 keeps the value");
-        assert_eq!(light.git_untracked, light.gauge, "phase 1 keeps the value");
+        assert_eq!(dark.git_untracked, dark.accent, "phase 1 keeps the value");
+        assert_eq!(light.git_untracked, light.accent, "phase 1 keeps the value");
     }
 
     #[test]
@@ -1725,8 +1724,8 @@ mod tests {
             assert_ne!(theme.text_muted, theme.border_opaque);
             // The coral is still a value the theme hands out — the agent-colour
             // picker offers it — but no role paints it any more. This is the
-            // assertion that catches an accent creeping back into the chrome.
-            assert_ne!(theme.text, theme.accent);
+            // assertion that catches the coral creeping back into the chrome.
+            assert_ne!(theme.text, theme.brand_coral);
         }
     }
 
@@ -1901,7 +1900,7 @@ mod tests {
 
     /// Selected text stays readable through its own selection wash.
     ///
-    /// Selection is the accent turned down, and the accent is a mid-lightness
+    /// Selection used to be the coral turned down, and the coral is a mid-lightness
     /// coral, so this is the constraint that fixes *how far* down: the two
     /// alphas are the loudest each appearance can take while the glyphs under
     /// them still clear WCAG AA.
@@ -1920,7 +1919,7 @@ mod tests {
     /// The four state hues are still the ones the original macOS app shipped.
     ///
     /// They are not measurable — neither reference frame contains an error, a
-    /// gauge, a starred row or a terminal — so their provenance is that Sirio
+    /// progress bar, a starred row or a terminal — so their provenance is that Sirio
     /// already had them, for the same four meanings on the same tab strip.
     ///
     /// This used to read `App/AppTheme.swift` at compile time (`include_str!`)
@@ -1954,7 +1953,7 @@ mod tests {
                 ("tabNeedsInput", theme.warning),
                 ("tabDone", theme.success),
                 ("tabError", theme.danger),
-                ("tabFocusAccent", theme.gauge),
+                ("tabFocusAccent", theme.accent),
             ] {
                 let (r, g, b) = declared_for(token, dark_mode);
                 expect_color(ours, (r, g, b, 1.0));
@@ -1962,35 +1961,35 @@ mod tests {
         }
     }
 
-    /// The accent must stay legible on the surface it is painted on, in both
+    /// The coral must stay legible on the surface it is painted on, in both
     /// appearances.
     ///
-    /// This is the rule the light accent is *derived* from rather than a
+    /// This is the rule the light coral is *derived* from rather than a
     /// property observed after the fact, which is the point: the value it
     /// replaced was carried over from another project's source and managed
     /// only 3.73:1 here, so nothing but a test keeps a future edit from
     /// drifting back under the line.
     #[test]
-    fn accent_clears_contrast_on_its_own_surface() {
+    fn brand_coral_clears_contrast_on_its_own_surface() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let ratio = contrast_ratio(theme.accent, theme.surface);
+            let ratio = contrast_ratio(theme.brand_coral, theme.surface);
             assert!(
                 ratio >= 4.5,
-                "{label}: accent contrast against its surface is {ratio:.2}:1, under WCAG AA 4.5:1"
+                "{label}: coral contrast against its surface is {ratio:.2}:1, under WCAG AA 4.5:1"
             );
         }
     }
 
-    /// The accent must never be one of the agent brands.
+    /// The coral must never be one of the agent brands.
     ///
-    /// A tab row paints its accent and its agent's mark at the same time, so
-    /// an accent that lands on a brand makes that mark stop distinguishing
+    /// A tab row paints its coral and its agent's mark at the same time, so
+    /// a coral that lands on a brand makes that mark stop distinguishing
     /// anything — the row looks identically tinted whichever agent is running.
     /// This is not hypothetical: Claude's `#D97757` is the nearest brand to
-    /// where the accent sits, so the tempting move of reusing our own Swift's
+    /// where the coral sits, so the tempting move of reusing our own Swift's
     /// Claude fill is exactly the one that breaks it.
     #[test]
-    fn accent_is_not_any_agent_brand() {
+    fn brand_coral_is_not_any_agent_brand() {
         let brands = [
             AgentBrandColor::Claude,
             AgentBrandColor::Codex,
@@ -2002,9 +2001,9 @@ mod tests {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for brand in brands {
                 assert_ne!(
-                    theme.accent,
+                    theme.brand_coral,
                     brand.color(),
-                    "{label}: the accent is {brand:?}'s brand, so that agent's mark \
+                    "{label}: the coral is {brand:?}'s brand, so that agent's mark \
                      no longer marks anything"
                 );
             }
@@ -2091,7 +2090,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.accent,
+            theme.brand_coral,
             f(
                 0xE0 as f32 / 255.0,
                 0x8B as f32 / 255.0,
@@ -2108,7 +2107,7 @@ mod tests {
             ),
         );
         // Swift `AppTheme.tabFocusAccent`, dark.
-        expect_color(theme.gauge, f(0.55, 0.64, 1.00));
+        expect_color(theme.accent, f(0.55, 0.64, 1.00));
         expect_color(
             theme.text,
             f(
@@ -2189,7 +2188,7 @@ mod tests {
             ),
         );
         // Selection is the top rung of the veil ladder, neither a turned-down
-        // accent nor a borrowed browser blue.
+        // coral nor a borrowed browser blue.
         expect_color(theme.selection, (1.0, 1.0, 1.0, VEIL_HIGH));
     }
 
@@ -2225,7 +2224,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.accent,
+            theme.brand_coral,
             f(
                 0xAD as f32 / 255.0,
                 0x58 as f32 / 255.0,
@@ -2233,7 +2232,7 @@ mod tests {
             ),
         );
         // Swift `AppTheme.tabFocusAccent`, light.
-        expect_color(theme.gauge, f(0.24, 0.38, 0.78));
+        expect_color(theme.accent, f(0.24, 0.38, 0.78));
         expect_color(
             theme.text,
             f(
@@ -2351,8 +2350,8 @@ mod tests {
             ("overlay_strong", light.overlay_strong, dark.overlay_strong),
             ("border_strong", light.border_strong, dark.border_strong),
             ("text_dim", light.text_dim, dark.text_dim),
+            ("brand_coral", light.brand_coral, dark.brand_coral),
             ("accent", light.accent, dark.accent),
-            ("gauge", light.gauge, dark.gauge),
             ("selection", light.selection, dark.selection),
             ("code_wash", light.code_wash, dark.code_wash),
             ("solid", light.solid, dark.solid),
