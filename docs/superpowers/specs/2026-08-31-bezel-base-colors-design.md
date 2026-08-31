@@ -142,8 +142,17 @@ seam between a tinted frame and a neutral well is the price of not overturning
 a documented decision on no evidence.
 
 `frame_fallback` is `Rgba::from(bezel.bg)` (`lib.rs:309`), so the window frame
-follows the tint on its own. So do `text`, the borders and the whole surface
-ladder. Nothing extra is needed for them.
+follows the tint on its own, as do `text` and the surface ladder. Nothing extra
+is needed for them.
+
+**The borders do not, and that is bezel's rule, not an omission.** `Brand::apply`
+tints a token only `if slot.a == 1.0 && slot.s <= f32::EPSILON` (`brand.rs:180`):
+opaque and achromatic. Sirio's seams are translucent veils since `border_opaque`
+collapsed onto `border`, so they are skipped — bezel's own comment says
+translucent ink "paints over whatever is beneath it, which is tinted already".
+A border therefore reads the tint through compositing rather than carrying it.
+Found by the executor when the planned `assert_ne!` on `border` proved
+unsatisfiable against the pin.
 
 ### P1 — One new key, no migration
 
@@ -200,10 +209,15 @@ The Material assets stay. They are what the file tree actually renders.
 The Agent Colors section is a *user override* of which colour each of the five
 agents wears, persisted in a side key-value store because `AppSettings` never
 grew a column for it (F-SET-22, `session.rs:153`). Removed:
-`render_agent_colors` and `sirio_ui::settings::AgentAccentColor`,
-`load_agent_color_ids` / `save_agent_color_id` (`session.rs:1622/1635`), the
-`agent_colors` field on the snapshot, the restore loop at `main.rs:15388` and
-the save loop at `main.rs:15568`.
+`render_agent_colors`, `load_agent_color_ids` / `save_agent_color_id`
+(`session.rs:1622/1635`), the `agent_colors` field on the snapshot, the restore
+loop at `main.rs:15388` and the save loop at `main.rs:15568`.
+
+**`sirio_ui::settings::AgentAccentColor` stays.** An earlier draft of this
+section had it deleted with the picker; it is also the palette behind the
+project-icon tint picker (`project_identity.rs:106`, `:714`), which persists a
+tint per project and has nothing to do with agents. Only the per-agent override
+goes.
 
 `sirio_theme::AgentBrandColor` **stays whole**. It is a separate table
 (`lib.rs:1450`), and `for_agent_id` is load-bearing: the sidebar

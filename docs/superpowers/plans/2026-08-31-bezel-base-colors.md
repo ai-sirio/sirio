@@ -245,7 +245,11 @@ Add to the existing `mod tests` in `rust/crates/sirio_theme/src/lib.rs`:
 
             assert_ne!(slate.bg, neutral.bg, "{appearance:?} page takes the tint");
             assert_ne!(slate.surface, neutral.surface);
-            assert_ne!(slate.border, neutral.border);
+            // The seam does NOT move. `Brand::apply` tints only opaque,
+            // achromatic ink (`slot.a == 1.0 && slot.s <= f32::EPSILON`), and
+            // Sirio's borders are translucent veils — they read the tint
+            // through compositing instead of carrying it.
+            assert_eq!(slate.border, neutral.border);
 
             assert_eq!(
                 slate.brand_coral, neutral.brand_coral,
@@ -1137,7 +1141,7 @@ git commit -m "refactor: drop the file-icon setting the renderer never read"
 The picker and its side store go; the brand table stays.
 
 **Files:**
-- Modify: `rust/crates/sirio_ui/src/settings.rs` — delete `AgentAccentColor` and its impl (`:263-330` — the enum, `ALL`, `id`, `resolve`, `parse`), the snapshot field (`:384`) and its default (`:416`), the surface field (`:1125`), the construction (`:1267`), the emit (`:1672`), `set_agent_color` (`:1762`), `render_agent_colors` (`:2573-2643`), the `agent_card` binding and the `settings_section("Agent Colors", …)` child in `render_appearance` (`:2560`), and the tests covering them
+- Modify: `rust/crates/sirio_ui/src/settings.rs` — delete the snapshot field (`:384`) and its default (`:416`), the surface field (`:1125`), the construction (`:1267`), the emit (`:1672`), `set_agent_color` (`:1762`), `render_agent_colors` (`:2573-2643`), the `agent_card` binding and the `settings_section("Agent Colors", …)` child in `render_appearance` (`:2560`), and the tests covering them
 - Modify: `rust/crates/sirio/src/session.rs` — delete `load_agent_color_ids` (`:1622`), `save_agent_color_id` (`:1635`) and the doc-comment at `:153` that explains them
 - Modify: `rust/crates/sirio/src/main.rs` — delete the snapshot default at `:14926`, the restore block at `:15383-15392`, and the save loop at `:15566-15570`
 - Test: the existing suites; this task removes tests rather than adding them
@@ -1145,6 +1149,8 @@ The picker and its side store go; the brand table stays.
 **Interfaces:**
 - Consumes: nothing.
 - Produces: nothing.
+
+Do **not** delete `sirio_ui::settings::AgentAccentColor` (`:263-330`). Despite its name it is also the palette behind the project-icon tint picker (`project_identity.rs:106`, `:714`, `:1260`), which persists a tint per project and is unrelated to agents. Only the per-agent override is being removed.
 
 Do **not** touch `sirio_theme::AgentBrandColor` (`lib.rs:1450`) or `for_agent_id`. The sidebar (`sidebar.rs:60`), the icons (`icons.rs:378`) and the tab strip read it; removing it strips every agent mark of its colour. Do **not** remove `brand_coral` — it loses the picker's Coral entry and keeps `loading::bezel_theme`. Do **not** remove `controls::color_picker`; `project_identity.rs:720` uses it.
 
