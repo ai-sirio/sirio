@@ -124,7 +124,7 @@ pub fn render_tab_context_menu(
         .rounded(theme.radii.user_pill)
         .border_1()
         .border_color(theme.hairline)
-        .bg(theme.card_fill)
+        .bg(theme.surface_raised)
         .shadow_lg();
 
     for item in items {
@@ -664,7 +664,7 @@ impl Render for TabBar {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .child(Self::render_menu_item(
                 "New Terminal",
@@ -830,7 +830,7 @@ impl Render for TabBar {
             .h(px(HEIGHT))
             .flex()
             .items_center()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 div()
                     .flex_1()

@@ -336,7 +336,7 @@ impl Render for CloneForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
@@ -362,7 +362,7 @@ impl Render for CloneForm {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(if url_is_empty {
                         theme.hairline
@@ -418,9 +418,9 @@ impl Render for CloneForm {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .bg(if can_submit {
-                        theme.selected_fill
+                        theme.element_active
                     } else {
-                        theme.primary_pill_bg
+                        theme.surface_raised
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
@@ -668,7 +668,7 @@ impl Render for CreateForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
@@ -694,7 +694,7 @@ impl Render for CreateForm {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(if name_is_empty {
                         theme.hairline
@@ -758,9 +758,9 @@ impl Render for CreateForm {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .bg(if can_submit {
-                        theme.selected_fill
+                        theme.element_active
                     } else {
-                        theme.primary_pill_bg
+                        theme.surface_raised
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)

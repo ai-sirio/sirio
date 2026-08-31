@@ -311,7 +311,7 @@ impl RightPanel {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .bg(theme.surface_raised)
             .shadow_lg();
 
         // `Open` is the one entry a directory must not offer: it emits
@@ -478,7 +478,7 @@ impl RightPanel {
             } else {
                 theme.text
             })
-            .when(selected, |this| this.bg(theme.selected_fill))
+            .when(selected, |this| this.bg(theme.element_active))
             .hover(|style| style.bg(theme.row_hover))
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 file_focus.focus(window, cx);

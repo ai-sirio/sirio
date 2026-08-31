@@ -1544,7 +1544,7 @@ impl ChangesTab {
         theme: Theme,
     ) -> impl IntoElement {
         let (background, marker_color, marker) = match line.origin {
-            DiffOrigin::Context => (theme.background, theme.text_faint, " "),
+            DiffOrigin::Context => (theme.surface, theme.text_faint, " "),
             DiffOrigin::Addition => (theme.diff_addition_background, theme.diff_addition, "+"),
             DiffOrigin::Deletion => (theme.diff_deletion_background, theme.diff_deletion, "−"),
         };
@@ -1852,10 +1852,10 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
         // has no number and a recessed ground. Leaving it unpainted made
         // the zip's own padding — half of what F-GIT-DIFF-03 asks the
         // renderer to show — invisible in a photograph.
-        return cell.bg(theme.code_inset_fill);
+        return cell.bg(theme.input_bg);
     };
     let background = match line.origin {
-        DiffOrigin::Context => theme.background,
+        DiffOrigin::Context => theme.surface,
         DiffOrigin::Addition => theme.diff_addition_background,
         DiffOrigin::Deletion => theme.diff_deletion_background,
     };
@@ -2098,7 +2098,7 @@ impl Render for ChangesTab {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(self.render_toolbar(entity.clone(), theme, mode, _window, cx))
             .child(self.render_body(entity, theme, mode, _window, cx))
     }
@@ -2165,7 +2165,7 @@ impl Render for DiffDragPreview {
             .px(self.theme.spacing.titlebar_control_spacing)
             .py(self.theme.spacing.titlebar_control_spacing)
             .rounded(self.theme.radii.control)
-            .bg(self.theme.primary_pill_bg)
+            .bg(self.theme.surface_raised)
             .text_color(self.theme.text)
             .child("Diff")
     }

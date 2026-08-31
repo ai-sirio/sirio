@@ -363,14 +363,14 @@ fn pill(id: String, label: String, theme: Theme, danger: bool) -> impl IntoEleme
             FontWeight::NORMAL
         })
         .text_color(if danger {
-            theme.background
+            theme.surface
         } else {
             theme.text_muted
         })
         .bg(if danger {
             theme.tab_error
         } else {
-            theme.primary_pill_bg
+            theme.surface_raised
         })
         .child(label)
 }
@@ -495,7 +495,7 @@ fn action_button_shell(label: &'static str, theme: Theme) -> Div {
         .text_size(theme.typography.caption2)
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
-        .bg(theme.selected_fill)
+        .bg(theme.element_active)
         .child(label)
 }
 
@@ -669,7 +669,7 @@ impl RegistryBrowseProto {
             .rounded(theme.radii.control)
             .text_size(theme.typography.caption2)
             .text_color(theme.text)
-            .bg(theme.selected_fill)
+            .bg(theme.element_active)
             .border_1()
             .hover(|style| style.bg(theme.row_hover))
             .cursor(CursorStyle::PointingHand)
@@ -682,7 +682,7 @@ impl RegistryBrowseProto {
             .border_color(if keep_focused {
                 theme.text
             } else {
-                theme.selected_fill
+                theme.element_active
             })
             .child(confirmation_default_focus());
         div()
@@ -692,7 +692,7 @@ impl RegistryBrowseProto {
             .mb(px(8.0))
             .p(px(12.0))
             .rounded(theme.radii.control)
-            .bg(theme.background)
+            .bg(theme.surface)
             .border_1()
             .border_color(theme.hairline)
             .flex()
@@ -971,7 +971,7 @@ impl RegistryBrowseProto {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
             .border_color(if focused {
                 theme.text
@@ -1040,7 +1040,7 @@ impl Render for RegistryBrowseProto {
         div()
             .id("registry-browse-proto")
             .size_full()
-            .bg(theme.background)
+            .bg(theme.surface)
             .overflow_y_scroll()
             .child(
                 div()
@@ -1438,7 +1438,7 @@ mod tests {
 
         let mut button = action_button_shell("Install", theme);
         let style = Styled::style(&mut button);
-        assert_eq!(style.background, Some(theme.selected_fill.into()));
+        assert_eq!(style.background, Some(theme.element_active.into()));
         assert_eq!(style.text.font_size, Some(theme.typography.caption2.into()));
         assert_eq!(style.text.font_weight, Some(FontWeight::SEMIBOLD));
         assert_eq!(builtin_state_margin_right(false), px(8.0));

@@ -31,7 +31,7 @@ use crate::controls::card;
 /// which semantic role, it draws with. Three states rather than a bare
 /// `bool` because the two known uses need genuinely different colours for
 /// their default action: Set Title's "OK" is affirmative (the inverted
-/// chip, `theme.inverse`),
+/// chip, `theme.solid`),
 /// the close confirm's "Close Anyway" is destructive (`theme.tab_error`) —
 /// collapsing both into one "primary" flag would have painted one of them
 /// the wrong colour.
@@ -184,7 +184,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .flex()
                 .items_center()
                 .rounded(theme.radii.control)
-                .bg(theme.filter_field_bg)
+                .bg(theme.input_bg)
                 .border_1()
                 .border_color(theme.text)
                 .text_size(theme.typography.footnote)
@@ -226,8 +226,8 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
         // element type quietly pick whichever arm the compiler saw first.
         let white: gpui::Rgba = gpui::white().into();
         let (bg, text_color) = match button.tone {
-            ModalButtonTone::Plain => (theme.primary_pill_bg, theme.text),
-            ModalButtonTone::Accent => (theme.inverse, theme.on_inverse),
+            ModalButtonTone::Plain => (theme.surface_raised, theme.text),
+            ModalButtonTone::Accent => (theme.solid, theme.on_solid),
             ModalButtonTone::Destructive => (theme.tab_error, white),
         };
         button_row = button_row.child(

@@ -1075,7 +1075,7 @@ impl Render for CommitTooltip {
             .px(px(8.0))
             .py(px(5.0))
             .rounded(self.theme.radii.control)
-            .bg(self.theme.raised)
+            .bg(self.theme.surface_raised)
             .border_1()
             .border_color(self.theme.hairline)
             .child(

@@ -57,7 +57,7 @@ impl Render for TextTooltip {
             .px(px(8.0))
             .py(px(4.0))
             .rounded(self.theme.radii.control)
-            .bg(self.theme.raised)
+            .bg(self.theme.surface_raised)
             .border_1()
             .border_color(self.theme.hairline)
             .text_size(self.theme.typography.caption2)
@@ -93,7 +93,7 @@ pub fn card(theme: Theme) -> Div {
         .w_full()
         .rounded(px(theme.cosmic.radii.radius_s[0]))
         .overflow_hidden()
-        .bg(theme.raised)
+        .bg(theme.surface_raised)
 }
 
 /// Creates one labelled row. `description` adds the secondary line used by
@@ -185,7 +185,7 @@ where
         // rather than the active-chrome tint: `title` and `title_selected`
         // are the same value, which would have put the knob's colour on the
         // track's colour and made the knob vanish.
-        .bg(if on { theme.inverse } else { theme.hairline })
+        .bg(if on { theme.solid } else { theme.hairline })
         .hover(|style| style.opacity(0.9))
         .on_click(callback)
         .child(
@@ -197,7 +197,7 @@ where
                 .h(px(14.0))
                 .rounded(px(7.0))
                 .bg(if on {
-                    theme.on_inverse
+                    theme.on_solid
                 } else {
                     theme.text
                 }),
@@ -222,7 +222,7 @@ pub fn segmented(
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .p(px(2.0));
 
     for (index, label) in options.iter().enumerate() {
@@ -250,7 +250,7 @@ pub fn segmented(
                 } else {
                     theme.text_muted
                 })
-                .when(active, |this| this.bg(theme.selected_fill))
+                .when(active, |this| this.bg(theme.element_active))
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(text!(id = ("segmented-option", index), *label)),
@@ -275,7 +275,7 @@ pub fn segmented_icons(
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .p(px(2.0));
 
     for (index, (icon, tooltip)) in options.iter().copied().enumerate() {
@@ -303,7 +303,7 @@ pub fn segmented_icons(
                 } else {
                     theme.text_muted
                 })
-                .when(active, |this| this.bg(theme.selected_fill))
+                .when(active, |this| this.bg(theme.element_active))
                 .hover(|style| style.bg(theme.row_hover))
                 .tooltip(text_tooltip(tooltip, theme))
                 .on_click(move |_, _, cx| callback(index, cx))
@@ -339,7 +339,7 @@ where
         .flex()
         .items_center()
         .rounded(theme.radii.control)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .child(
             div()
                 .id(format!("{id}-decrement"))
@@ -456,7 +456,7 @@ pub fn action_row(action: impl IntoElement, theme: Theme) -> Div {
         .flex()
         .items_center()
         .child(action)
-        .bg(theme.card_fill)
+        .bg(theme.surface_raised)
 }
 
 /// A compact, selectable account row with the two status pills used by
@@ -484,11 +484,11 @@ where
         .child(badge(
             theme,
             "This device",
-            theme.primary_pill_bg,
+            theme.surface_raised,
             theme.text,
         ));
     if active {
-        badges = badges.child(badge(theme, "Active", theme.inverse, theme.on_inverse));
+        badges = badges.child(badge(theme, "Active", theme.solid, theme.on_solid));
     }
 
     div()
@@ -556,7 +556,7 @@ where
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
         .text_color(theme.text)
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .hover(|style| style.bg(theme.row_hover))
         .on_click(callback)
         .child(text!(id = format!("settings-button-{id}"), label))
@@ -586,7 +586,7 @@ where
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
         .text_color(if enabled { theme.text } else { theme.text_faint })
-        .bg(theme.primary_pill_bg)
+        .bg(theme.surface_raised)
         .child(text!(id = format!("settings-button-{id}"), label));
     if let Some(callback) = callback {
         element = element
@@ -663,7 +663,7 @@ mod tests {
         let mut card = card(theme);
         assert_eq!(
             Styled::style(&mut card).background,
-            Some(theme.raised.into()),
+            Some(theme.surface_raised.into()),
             "card()'s final dark background must be the raised surface"
         );
     }
@@ -675,14 +675,14 @@ mod tests {
         let theme = Theme::light();
         assert!(!theme.cosmic.is_dark);
         assert_ne!(
-            theme.raised,
-            Theme::dark().raised,
+            theme.surface_raised,
+            Theme::dark().surface_raised,
             "light and dark raised surfaces must not collapse to the same fill"
         );
         let mut card = card(theme);
         assert_eq!(
             Styled::style(&mut card).background,
-            Some(theme.raised.into()),
+            Some(theme.surface_raised.into()),
             "card()'s final light background must be the raised surface"
         );
     }

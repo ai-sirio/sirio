@@ -119,22 +119,21 @@ impl ThemeMode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColors {
     /// Translucent window-frame material. Its RGB value is paired with
-    /// [`ThemeColors::frame_fallback`] for platforms without translucency.
+    /// [`ThemeColors::bg`] for platforms without translucency.
     pub frame_surface: Rgba,
-    /// Opaque fallback behind the app shell and window canvas.
-    pub frame_fallback: Rgba,
-    /// Opaque reading and sidebar surface inside the shell.
-    pub panel_surface: Rgba,
+    /// Opaque fallback behind the app shell and window canvas, and behind the
+    /// working columns when translucency is unavailable.
+    pub bg: Rgba,
+    /// Opaque reading surface inside the shell: panels, the sidebar, the tab
+    /// bar, the workspace column, the right panel, settings, and the chat
+    /// transcript, which reads directly on the central panel rather than on a
+    /// floating card.
+    pub surface: Rgba,
     /// Opaque separator between shell panels.
     pub panel_border: Rgba,
-    /// Compatibility alias for [`ThemeColors::panel_surface`], used by the tab
-    /// bar, workspace column, right panel, and settings.
-    pub background: Rgba,
-    /// Compatibility alias for [`ThemeColors::frame_fallback`], used behind
-    /// the working columns when translucency is unavailable.
-    pub canvas: Rgba,
     /// Terminal surface — paper-white in light and the pre-shell dark well in
-    /// dark mode, retained independently of the shell panel hierarchy.
+    /// dark mode, retained independently of the shell panel hierarchy. Kept
+    /// under its own name because bezel has no terminal-surface concept.
     pub terminal_surface: Rgba,
     /// Waiting-for-input status.
     pub tab_needs_input: Rgba,
@@ -142,11 +141,6 @@ pub struct ThemeColors {
     pub tab_done: Rgba,
     /// Errored status.
     pub tab_error: Rgba,
-    /// Compatibility alias for [`ThemeColors::panel_surface`]; the transcript
-    /// reads directly on the central panel rather than a floating card.
-    pub chat_surface: Rgba,
-    /// Legacy sidebar material tint, aliased to [`ThemeColors::panel_surface`].
-    pub chrome_tint: Rgba,
     /// Tab-chip underline, aliased to [`ThemeColors::panel_border`].
     pub tab_chip_underline: Rgba,
     /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
@@ -158,9 +152,6 @@ pub struct ThemeColors {
     /// `row_hover` because transcript rows are wider and a 6% wash over that
     /// area reads as a block.
     pub chat_row_hover: Rgba,
-    /// Selected-row fill, aliased to [`ThemeColors::selected_fill`]. Text
-    /// selection is a different concept: see [`ThemeColors::selection`].
-    pub selection_fill: Rgba,
     /// Primary text neutral, and the shell's whole "this is active" channel:
     /// row titles selected or not, the tab strip's underline and dirty dot, a
     /// menu's checkmark, a running worktree's badge, focused-field borders,
@@ -177,13 +168,6 @@ pub struct ThemeColors {
     /// labels. Body-size secondary text uses [`ThemeColors::text_muted`],
     /// which clears WCAG AA on the panel surface.
     pub text_faint: Rgba,
-    /// Primary pill fill.
-    pub primary_pill_bg: Rgba,
-    /// Resting fill of a control the user clicks. Must stay distinguishable
-    /// from `raised`; that is the property this token exists to preserve.
-    pub primary_action_bg: Rgba,
-    /// Filter field fill.
-    pub filter_field_bg: Rgba,
     /// Tree guide stroke, including its source alpha.
     pub tree_guide: Rgba,
     /// Staged-file status color — the success hue.
@@ -204,10 +188,6 @@ pub struct ThemeColors {
     pub diff_deletion_background: Rgba,
     /// Hunk diff background — the same wash inline code sits on.
     pub diff_hunk_background: Rgba,
-    /// Chat card fill — cards are raised above the transcript.
-    pub card_fill: Rgba,
-    /// Recessed code/diff fill — the inverse move: code sits *in* the card.
-    pub code_inset_fill: Rgba,
     /// Clickable file-link color — the gauge blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
@@ -223,15 +203,12 @@ pub struct ThemeColors {
     pub rail_tool: Rgba,
 
     // ── Role tokens: what a value does, rather than who consumes it ───────
-    /// The sidebar fill, retained as an alias for [`ThemeColors::panel_surface`]
-    /// while existing consumers migrate to the semantic shell role.
-    pub sidebar: Rgba,
-    /// Floating cards, popovers, tooltips: a step *above* the surface.
-    pub raised: Rgba,
-    /// Composer card fill.
-    pub composer: Rgba,
-    /// Recessed wells: a step *below* the surface.
-    pub inset: Rgba,
+    /// Floating cards, popovers, tooltips, the composer and primary pills: a
+    /// step *above* the surface.
+    pub surface_raised: Rgba,
+    /// Recessed wells — filter fields, code and diff insets: a step *below*
+    /// the surface. Code sits *in* the card, the inverse of a raised move.
+    pub input_bg: Rgba,
     /// Generic hover wash — 5% neutral.
     pub overlay: Rgba,
     /// Pressed wash — 9% neutral, so press reads as more than hover.
@@ -257,20 +234,22 @@ pub struct ThemeColors {
     /// Blue means "how much", which is why a progress bar is never painted in
     /// a status hue — a bar filling up is not an alert.
     pub gauge: Rgba,
-    /// Approved selected-row fill, aliased by [`ThemeColors::selection_fill`].
+    /// Selected-row fill, and the resting fill of a control the user clicks.
+    /// Must stay distinguishable from [`ThemeColors::surface_raised`]; that is
+    /// the property this token exists to preserve.
     /// [`ThemeColors::selection`] remains reserved for text-selection under
     /// glyphs.
-    pub selected_fill: Rgba,
+    pub element_active: Rgba,
     /// Text-selection wash, painted *under* glyphs: the top rung of the veil
     /// ladder, neutral in both appearances. Never used for row chrome — that
-    /// is [`ThemeColors::selection_fill`].
+    /// is [`ThemeColors::element_active`].
     pub selection: Rgba,
     /// Inline `code` rounded wash.
     pub code_wash: Rgba,
     /// Light fill for primary buttons, dark glyph on top.
-    pub inverse: Rgba,
+    pub solid: Rgba,
     /// Glyph on primary buttons.
-    pub on_inverse: Rgba,
+    pub on_solid: Rgba,
     /// Star/favorite amber.
     pub favorite: Rgba,
     /// Soft danger fill (stop button hover).
@@ -386,7 +365,6 @@ impl ThemeColors {
             scaled(panel_surface, 0.93),
             appearance,
         );
-        let composer = raised;
         // A terminal is the deepest thing on the page in dark, and paper in
         // light — the same two extremes `inset` already names.
         let terminal_surface = Self::adaptive(
@@ -425,28 +403,20 @@ impl ThemeColors {
 
         Self {
             frame_surface,
-            frame_fallback,
-            panel_surface,
+            bg: frame_fallback,
+            surface: panel_surface,
             panel_border,
-            background: panel_surface,
-            canvas: frame_fallback,
             terminal_surface,
             tab_needs_input: warning,
             tab_done: success,
             tab_error: danger,
-            chat_surface: panel_surface,
-            chrome_tint: panel_surface,
             tab_chip_underline: panel_border,
             hairline: border,
             row_hover,
             chat_row_hover: overlay,
-            selection_fill: selected_fill,
             text,
             text_muted,
             text_faint,
-            primary_pill_bg: raised,
-            primary_action_bg: selected_fill,
-            filter_field_bg: inset,
             tree_guide: veil(VEIL_MID, appearance),
             git_staged: success,
             git_modified: warning,
@@ -459,17 +429,13 @@ impl ThemeColors {
             diff_deletion: danger,
             diff_deletion_background: softened(danger, VEIL_MID),
             diff_hunk_background: code_wash,
-            card_fill: raised,
-            code_inset_fill: inset,
             file_link: gauge,
             rail_task: border_strong,
             rail_question: warning,
             rail_edit: border_strong,
             rail_tool: border_strong,
-            sidebar: panel_surface,
-            raised,
-            composer,
-            inset,
+            surface_raised: raised,
+            input_bg: inset,
             overlay,
             overlay_strong,
             border_strong,
@@ -478,10 +444,10 @@ impl ThemeColors {
             accent,
             gauge,
             selection,
-            selected_fill,
+            element_active: selected_fill,
             code_wash,
-            inverse,
-            on_inverse,
+            solid: inverse,
+            on_solid: on_inverse,
             favorite,
             danger_soft,
         }
@@ -1210,8 +1176,6 @@ pub struct Theme {
     /// window blur. Carried on the theme so every reinstall (`install`,
     /// `set_mode`, the portal follower) preserves it by construction.
     pub translucency_enabled: bool,
-    /// Compatibility accessor for the original scaffold and the app shell.
-    pub canvas: Rgba,
 }
 
 impl Global for Theme {}
@@ -1408,14 +1372,9 @@ impl Theme {
         }
         let opacity = Self::surface_opacity(true);
         let fade = |surface: Rgba| softened(surface, opacity);
-        theme.colors.panel_surface = fade(theme.colors.panel_surface);
-        theme.colors.background = theme.colors.panel_surface;
-        theme.colors.sidebar = theme.colors.panel_surface;
-        theme.colors.chat_surface = theme.colors.panel_surface;
-        theme.colors.chrome_tint = theme.colors.panel_surface;
-        theme.colors.raised = fade(theme.colors.raised);
-        theme.colors.composer = theme.colors.raised;
-        theme.colors.inset = fade(theme.colors.inset);
+        theme.colors.surface = fade(theme.colors.surface);
+        theme.colors.surface_raised = fade(theme.colors.surface_raised);
+        theme.colors.input_bg = fade(theme.colors.input_bg);
         theme.colors.terminal_surface = fade(theme.colors.terminal_surface);
         theme
     }
@@ -1425,7 +1384,6 @@ impl Theme {
         Self {
             mode,
             appearance,
-            canvas: colors.canvas,
             colors,
             spacing: Spacing::default(),
             radii: Radii::default(),
@@ -1744,7 +1702,7 @@ mod tests {
     fn intellij_shell_palette_matches_the_approved_reference() {
         let dark = Theme::dark();
         let light = Theme::light();
-        assert_eq!(dark.frame_fallback, rgb_hex(0x222427));
+        assert_eq!(dark.bg, rgb_hex(0x222427));
         assert_eq!(
             dark.frame_surface,
             Rgba {
@@ -1754,16 +1712,16 @@ mod tests {
                 a: 0.88,
             }
         );
-        assert_eq!(dark.panel_surface, rgb_hex(0x18191A));
-        assert_eq!(dark.selected_fill, rgb_hex(0x2D2F34));
+        assert_eq!(dark.surface, rgb_hex(0x18191A));
+        assert_eq!(dark.element_active, rgb_hex(0x2D2F34));
         assert_eq!(dark.panel_border, rgb_hex(0x27292D));
-        assert_eq!(dark.raised, rgb_hex(0x1D1E21));
-        assert_eq!(dark.inset, scaled(dark.panel_surface, 0.72));
+        assert_eq!(dark.surface_raised, rgb_hex(0x1D1E21));
+        assert_eq!(dark.input_bg, scaled(dark.surface, 0.72));
         assert_eq!(dark.text, rgb_hex(0xCBCDD4));
         assert_eq!(dark.text_muted, rgb_hex(0x85888F));
         assert_eq!(dark.text_faint, rgb_hex(0x686B71));
 
-        assert_eq!(light.frame_fallback, rgb_hex(0xDCE5E9));
+        assert_eq!(light.bg, rgb_hex(0xDCE5E9));
         assert_eq!(
             light.frame_surface,
             Rgba {
@@ -1773,30 +1731,24 @@ mod tests {
                 a: 0.82,
             }
         );
-        assert_eq!(light.panel_surface, rgb_hex(0xF4F7F8));
-        assert_eq!(light.selected_fill, rgb_hex(0xD7E2E7));
+        assert_eq!(light.surface, rgb_hex(0xF4F7F8));
+        assert_eq!(light.element_active, rgb_hex(0xD7E2E7));
         assert_eq!(light.panel_border, rgb_hex(0xCCD8DD));
-        assert_eq!(light.raised, rgb_hex(0xFBFCFC));
-        assert_eq!(light.inset, scaled(light.panel_surface, 0.93));
+        assert_eq!(light.surface_raised, rgb_hex(0xFBFCFC));
+        assert_eq!(light.input_bg, scaled(light.surface, 0.93));
         assert_eq!(light.text, rgb_hex(0x313A40));
         assert_eq!(light.text_muted, rgb_hex(0x667379));
         assert_eq!(light.text_faint, rgb_hex(0x68757B));
 
         for theme in [dark, light] {
-            assert_eq!(theme.background, theme.panel_surface);
-            assert_eq!(theme.sidebar, theme.panel_surface);
-            assert_eq!(theme.chat_surface, theme.panel_surface);
-            assert_eq!(theme.chrome_tint, theme.panel_surface);
-            assert_eq!(theme.canvas, theme.frame_fallback);
-            assert_eq!(theme.selection_fill, theme.selected_fill);
+            assert_eq!(theme.surface, theme.surface);
             assert_eq!(theme.sidebar_border, theme.panel_border);
             assert_eq!(theme.tab_chip_underline, theme.panel_border);
-            assert_eq!(theme.composer, theme.raised);
-            assert_eq!(theme.card_fill, theme.raised);
-            assert_eq!(theme.primary_pill_bg, theme.raised);
-            assert_ne!(theme.primary_action_bg, theme.raised);
-            assert_eq!(theme.filter_field_bg, theme.inset);
-            assert_eq!(theme.code_inset_fill, theme.inset);
+            // The surface ladder's aliases are now one field each, so the
+            // compiler holds the identities these assertions used to hold.
+            // What is left is the separation the type system cannot say: a
+            // control the user clicks must stay tellable from a raised card.
+            assert_ne!(theme.element_active, theme.surface_raised);
             // Active chrome, the caret and inline code used to be separate
             // fields aliased onto the text neutral; they are now that one
             // field, so the compiler holds what these assertions held. What is
@@ -1816,7 +1768,7 @@ mod tests {
     fn shell_body_text_meets_wcag_aa_on_its_panel() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for (role, text) in [("primary", theme.text), ("secondary", theme.text_muted)] {
-                let ratio = contrast_ratio(text, theme.panel_surface);
+                let ratio = contrast_ratio(text, theme.surface);
                 assert!(
                     ratio >= 4.5,
                     "{label} {role} text contrast on the panel is {ratio:.2}:1, under WCAG AA"
@@ -1930,11 +1882,11 @@ mod tests {
     fn the_depth_ladder_reads_as_depth() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             assert!(
-                relative_luminance(theme.inset) < relative_luminance(theme.background),
+                relative_luminance(theme.input_bg) < relative_luminance(theme.surface),
                 "{label}: inset is not below the page"
             );
             assert!(
-                relative_luminance(theme.inset) < relative_luminance(theme.raised),
+                relative_luminance(theme.input_bg) < relative_luminance(theme.surface_raised),
                 "{label}: inset is not below a raised card"
             );
         }
@@ -1968,24 +1920,24 @@ mod tests {
         let dark = Theme::dark();
         let light = Theme::light();
         expect_color(
-            dark.inverse,
+            dark.solid,
             (
-                light.background.r,
-                light.background.g,
-                light.background.b,
+                light.surface.r,
+                light.surface.g,
+                light.surface.b,
                 1.0,
             ),
         );
         expect_color(
-            light.inverse,
-            (dark.background.r, dark.background.g, dark.background.b, 1.0),
+            light.solid,
+            (dark.surface.r, dark.surface.g, dark.surface.b, 1.0),
         );
         expect_color(
-            dark.on_inverse,
+            dark.on_solid,
             (light.text.r, light.text.g, light.text.b, 1.0),
         );
         expect_color(
-            light.on_inverse,
+            light.on_solid,
             (dark.text.r, dark.text.g, dark.text.b, 1.0),
         );
     }
@@ -1999,7 +1951,7 @@ mod tests {
     #[test]
     fn selection_stays_under_its_text() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let seen = composite(theme.selection, theme.background);
+            let seen = composite(theme.selection, theme.surface);
             let ratio = contrast_ratio(theme.text, seen);
             assert!(
                 ratio >= 4.5,
@@ -2064,7 +2016,7 @@ mod tests {
     #[test]
     fn accent_clears_contrast_on_its_own_surface() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            let ratio = contrast_ratio(theme.accent, theme.background);
+            let ratio = contrast_ratio(theme.accent, theme.surface);
             assert!(
                 ratio >= 4.5,
                 "{label}: accent contrast against its surface is {ratio:.2}:1, under WCAG AA 4.5:1"
@@ -2129,7 +2081,7 @@ mod tests {
         let f = |r, g, b| (r, g, b, 1.0);
 
         expect_color(
-            theme.canvas,
+            theme.bg,
             f(
                 0x22 as f32 / 255.0,
                 0x24 as f32 / 255.0,
@@ -2137,7 +2089,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.background,
+            theme.surface,
             f(
                 0x18 as f32 / 255.0,
                 0x19 as f32 / 255.0,
@@ -2145,7 +2097,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.sidebar,
+            theme.surface,
             f(
                 0x18 as f32 / 255.0,
                 0x19 as f32 / 255.0,
@@ -2158,7 +2110,7 @@ mod tests {
         let well = 0x1A as f32 * 0.72 / 255.0;
         expect_color(theme.terminal_surface, f(well, well, well));
         expect_color(
-            theme.raised,
+            theme.surface_raised,
             f(
                 0x1D as f32 / 255.0,
                 0x1E as f32 / 255.0,
@@ -2166,7 +2118,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.composer,
+            theme.surface_raised,
             f(
                 0x1D as f32 / 255.0,
                 0x1E as f32 / 255.0,
@@ -2174,7 +2126,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.inset,
+            theme.input_bg,
             f(
                 0x18 as f32 * 0.72 / 255.0,
                 0x19 as f32 * 0.72 / 255.0,
@@ -2250,7 +2202,7 @@ mod tests {
         // An inverted chip in dark is the *light* page and the light page's
         // text — the measured pair, swapped.
         expect_color(
-            theme.inverse,
+            theme.solid,
             f(
                 0xF4 as f32 / 255.0,
                 0xF7 as f32 / 255.0,
@@ -2258,7 +2210,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.on_inverse,
+            theme.on_solid,
             f(
                 0x31 as f32 / 255.0,
                 0x3A as f32 / 255.0,
@@ -2291,7 +2243,7 @@ mod tests {
         let f = |r, g, b| (r, g, b, 1.0);
 
         expect_color(
-            theme.canvas,
+            theme.bg,
             f(
                 0xDC as f32 / 255.0,
                 0xE5 as f32 / 255.0,
@@ -2299,7 +2251,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.background,
+            theme.surface,
             f(
                 0xF4 as f32 / 255.0,
                 0xF7 as f32 / 255.0,
@@ -2308,7 +2260,7 @@ mod tests {
         );
         expect_color(theme.terminal_surface, f(1.0, 1.0, 1.0));
         expect_color(
-            theme.raised,
+            theme.surface_raised,
             f(
                 0xFB as f32 / 255.0,
                 0xFC as f32 / 255.0,
@@ -2371,7 +2323,7 @@ mod tests {
         // The well, mirrored: the light page has far less room below it, so
         // the step is 0.93 rather than dark's 0.72.
         expect_color(
-            theme.inset,
+            theme.input_bg,
             f(
                 0xF4 as f32 * 0.93 / 255.0,
                 0xF7 as f32 * 0.93 / 255.0,
@@ -2388,7 +2340,7 @@ mod tests {
         );
         // And in light, an inverted chip is the *dark* page and its text.
         expect_color(
-            theme.inverse,
+            theme.solid,
             f(
                 0x18 as f32 / 255.0,
                 0x19 as f32 / 255.0,
@@ -2396,7 +2348,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.on_inverse,
+            theme.on_solid,
             f(
                 0xCB as f32 / 255.0,
                 0xCD as f32 / 255.0,
@@ -2411,12 +2363,9 @@ mod tests {
         let dark = Theme::dark().colors;
         let tokens = [
             ("frame_surface", light.frame_surface, dark.frame_surface),
-            ("frame_fallback", light.frame_fallback, dark.frame_fallback),
-            ("panel_surface", light.panel_surface, dark.panel_surface),
+            ("bg", light.bg, dark.bg),
+            ("surface", light.surface, dark.surface),
             ("panel_border", light.panel_border, dark.panel_border),
-            ("background", light.background, dark.background),
-            ("canvas", light.canvas, dark.canvas),
-            ("sidebar", light.sidebar, dark.sidebar),
             (
                 "terminal_surface",
                 light.terminal_surface,
@@ -2429,8 +2378,6 @@ mod tests {
             ),
             ("tab_done", light.tab_done, dark.tab_done),
             ("tab_error", light.tab_error, dark.tab_error),
-            ("chat_surface", light.chat_surface, dark.chat_surface),
-            ("chrome_tint", light.chrome_tint, dark.chrome_tint),
             (
                 "tab_chip_underline",
                 light.tab_chip_underline,
@@ -2439,27 +2386,11 @@ mod tests {
             ("hairline", light.hairline, dark.hairline),
             ("row_hover", light.row_hover, dark.row_hover),
             ("chat_row_hover", light.chat_row_hover, dark.chat_row_hover),
-            ("selection_fill", light.selection_fill, dark.selection_fill),
-            ("selected_fill", light.selected_fill, dark.selected_fill),
+            ("element_active", light.element_active, dark.element_active),
             ("selection", light.selection, dark.selection),
             ("text", light.text, dark.text),
             ("text_muted", light.text_muted, dark.text_muted),
             ("text_faint", light.text_faint, dark.text_faint),
-            (
-                "primary_pill_bg",
-                light.primary_pill_bg,
-                dark.primary_pill_bg,
-            ),
-            (
-                "primary_action_bg",
-                light.primary_action_bg,
-                dark.primary_action_bg,
-            ),
-            (
-                "filter_field_bg",
-                light.filter_field_bg,
-                dark.filter_field_bg,
-            ),
             ("tree_guide", light.tree_guide, dark.tree_guide),
             ("git_staged", light.git_staged, dark.git_staged),
             ("git_modified", light.git_modified, dark.git_modified),
@@ -2482,20 +2413,13 @@ mod tests {
                 light.diff_hunk_background,
                 dark.diff_hunk_background,
             ),
-            ("card_fill", light.card_fill, dark.card_fill),
-            (
-                "code_inset_fill",
-                light.code_inset_fill,
-                dark.code_inset_fill,
-            ),
             ("file_link", light.file_link, dark.file_link),
             ("rail_task", light.rail_task, dark.rail_task),
             ("rail_question", light.rail_question, dark.rail_question),
             ("rail_edit", light.rail_edit, dark.rail_edit),
             ("rail_tool", light.rail_tool, dark.rail_tool),
-            ("raised", light.raised, dark.raised),
-            ("composer", light.composer, dark.composer),
-            ("inset", light.inset, dark.inset),
+            ("surface_raised", light.surface_raised, dark.surface_raised),
+            ("input_bg", light.input_bg, dark.input_bg),
             ("overlay", light.overlay, dark.overlay),
             ("overlay_strong", light.overlay_strong, dark.overlay_strong),
             ("border_strong", light.border_strong, dark.border_strong),
@@ -2505,8 +2429,8 @@ mod tests {
             ("gauge", light.gauge, dark.gauge),
             ("selection", light.selection, dark.selection),
             ("code_wash", light.code_wash, dark.code_wash),
-            ("inverse", light.inverse, dark.inverse),
-            ("on_inverse", light.on_inverse, dark.on_inverse),
+            ("solid", light.solid, dark.solid),
+            ("on_solid", light.on_solid, dark.on_solid),
             ("favorite", light.favorite, dark.favorite),
             ("danger_soft", light.danger_soft, dark.danger_soft),
         ];
@@ -2586,16 +2510,16 @@ mod tests {
 
             assert!(translucent.translucency_enabled);
             assert_eq!(
-                translucent.panel_surface,
-                softened(base.panel_surface, opacity)
+                translucent.surface,
+                softened(base.surface, opacity)
             );
-            assert_eq!(translucent.background, translucent.panel_surface);
-            assert_eq!(translucent.sidebar, translucent.panel_surface);
-            assert_eq!(translucent.chat_surface, translucent.panel_surface);
-            assert_eq!(translucent.chrome_tint, translucent.panel_surface);
-            assert_eq!(translucent.raised, softened(base.raised, opacity));
-            assert_eq!(translucent.composer, translucent.raised);
-            assert_eq!(translucent.inset, softened(base.inset, opacity));
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface, translucent.surface);
+            assert_eq!(translucent.surface_raised, softened(base.surface_raised, opacity));
+            assert_eq!(translucent.surface_raised, translucent.surface_raised);
+            assert_eq!(translucent.input_bg, softened(base.input_bg, opacity));
             assert_eq!(
                 translucent.terminal_surface,
                 softened(base.terminal_surface, opacity)
@@ -2606,7 +2530,7 @@ mod tests {
                 "the frame material is already translucent and is not faded twice"
             );
             assert_eq!(
-                translucent.frame_fallback, base.frame_fallback,
+                translucent.bg, base.bg,
                 "the opaque fallback stays opaque"
             );
             assert_eq!(
