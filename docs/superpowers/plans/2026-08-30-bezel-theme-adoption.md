@@ -1485,16 +1485,16 @@ caused by the theme. `sirio_theme` (72) and `sirio_ui` (555) are green.
 
 Spec risk R5. This machine has Zig 0.16.0; `libghostty-vt-sys` needs exactly 0.15.2, and a *newer* Zig fails too.
 
-- [ ] **Step 1: Confirm the current state**
+- [x] **Step 1: Confirm the current state**
 
 Run: `zig version`
 Expected: `0.16.0` — the wrong version.
 
-- [ ] **Step 2: Install 0.15.2 alongside**
+- [x] **Step 2: Install 0.15.2 alongside**
 
 This needs the user: ask them to run the install themselves, since it touches the machine rather than the repo. Suggest they type `! brew install zig@0.15` in the session, or fetch the 0.15.2 tarball from ziglang.org/download and put it first on PATH. Do not uninstall 0.16.0 — other projects may need it.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 Run: `zig version && Scripts/ci.sh`
 Expected: `0.15.2`, then `CI OK`.
@@ -1515,7 +1515,7 @@ If `Scripts/ci.sh` fails for reasons unrelated to Zig, record them before contin
 - Consumes: Phase 2's bezel-backed `Theme`.
 - Produces: a `sirio_theme` with no COSMIC tokens.
 
-- [ ] **Step 1: Find every consumer**
+- [x] **Step 1: Find every consumer**
 
 Run:
 ```bash
@@ -1523,7 +1523,7 @@ grep -rn 'cosmic' rust/crates --include="*.rs" | grep -v 'sirio_theme/src/cosmic
 ```
 Expected: 59 sites, concentrated in `titlebar.rs`, plus the example.
 
-- [ ] **Step 2: Rewrite `titlebar.rs`**
+- [x] **Step 2: Rewrite `titlebar.rs`**
 
 The three tokens it reads map as:
 
@@ -1538,11 +1538,11 @@ let control_radius = px(bezel::theme::Theme::control_radius());
 
 Update the module doc-comment at `titlebar.rs:73`, which currently explains the COSMIC mapping, to say the bar now reads bezel tokens like every other surface.
 
-- [ ] **Step 3: Rewrite the example**
+- [x] **Step 3: Rewrite the example**
 
 `registry_browse_proto.rs` uses `theme.cosmic.spacing.xs` for padding. Replace with `px(bezel::theme::Theme::SPACE_XS)`.
 
-- [ ] **Step 4: Delete the module**
+- [x] **Step 4: Delete the module**
 
 ```bash
 git rm -r rust/crates/sirio_theme/src/cosmic
@@ -1550,16 +1550,16 @@ git rm -r rust/crates/sirio_theme/src/cosmic
 
 Remove `pub mod cosmic;` from `lib.rs:40`, the `cosmic` field from `Theme`, its construction in `for_appearance`, and the three `*_cosmic_*` tests.
 
-- [ ] **Step 5: Build and test**
+- [x] **Step 5: Build and test**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 6: Check the titlebar on Linux**
+- [x] **Step 6: Check the titlebar on Linux**
 
 The COSMIC tokens existed for Pop!_OS adherence, so this is where the accepted cost of B3 becomes visible. If a Linux machine is not available, say so rather than claiming it was checked.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates
@@ -1580,7 +1580,7 @@ git commit -m "refactor: drop COSMIC tokens for bezel's"
 - Consumes: Task 20.
 - Produces: two appearance enums instead of four — the persisted one and bezel's.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `rust/crates/sirio_persistence/src/model.rs`'s tests:
 
@@ -1600,31 +1600,31 @@ fn appearance_mode_round_trips_through_bezel() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd rust && cargo test -p sirio_persistence appearance_mode_round_trips`
 Expected: FAIL — the `From` impls do not exist.
 
-- [ ] **Step 3: Add the conversions**
+- [x] **Step 3: Add the conversions**
 
 Add `From<AppearanceMode> for bezel::theme::appearance::AppearanceMode` and its inverse in `sirio_persistence`. Its serde representation does not change — the stored strings `"system"`, `"light"`, `"dark"` stay exactly as they are, so existing session databases keep working.
 
-- [ ] **Step 4: Delete the duplicates**
+- [x] **Step 4: Delete the duplicates**
 
 Remove `sirio_theme::ThemeMode` and `sirio_project::ui::AppearanceMode`, and replace the two `match` blocks at `main.rs:14639` and `:14676` with the `From` impls. `main.rs:3275-3277` maps the mode to a display string — point it at the persisted enum.
 
 `Theme::for_mode` and `Theme::set_mode` take `bezel::theme::appearance::AppearanceMode` instead of `ThemeMode`.
 
-- [ ] **Step 5: Run the test and the suite**
+- [x] **Step 5: Run the test and the suite**
 
 Run: `cd rust && cargo test -p sirio_persistence -p sirio_theme -p sirio_ui`
 Expected: PASS, including `system_mode_follows_window_appearance`.
 
-- [ ] **Step 6: Verify a stored preference still loads**
+- [x] **Step 6: Verify a stored preference still loads**
 
 Launch the app, set the appearance to Light, quit, relaunch. Expected: it opens Light. A serde break would show here and in no test.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates
@@ -1639,26 +1639,121 @@ git commit -m "refactor: collapse the appearance enums onto bezel's"
 - Modify: `CLAUDE.md` (the crate description of `sirio_theme`)
 - Modify: this plan
 
-- [ ] **Step 1: Run the full gate**
+- [x] **Step 1: Run the full gate**
 
 Run: `Scripts/ci.sh`
 Expected: `CI OK`. If Zig is still wrong, this is blocked on Task 19 — say so rather than skipping it.
 
-- [ ] **Step 2: Confirm what `sirio_theme` became**
+- [x] **Step 2: Confirm what `sirio_theme` became**
 
 Run: `wc -l rust/crates/sirio_theme/src/*.rs`
 Expected: substantially below the starting 4357 lines, holding only `SirioColors`, `Typography`, `Spacing`, `Radii`, `AgentBrandColor`, `graph_lane`, `BrowserChrome`, `WindowsCaption` and the terminal families.
 
-- [ ] **Step 3: Update `CLAUDE.md`**
+- [x] **Step 3: Update `CLAUDE.md`**
 
 Its crate-boundary diagram lists `sirio_theme` as a leaf with no local dependencies. It now depends on `bezel`. Update the diagram and add a line saying colours, spacing and radii come from `bezel::theme`, so a future reader does not go looking for a palette that is no longer there.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add CLAUDE.md docs/superpowers/plans/2026-08-30-bezel-theme-adoption.md
 git commit -m "docs: record bezel as the theme source"
 ```
+
+---
+
+## Phase 3 execution notes
+
+**Task 19 was never a blocker.** The plan treats Zig as spec risk R5 and asks
+the user to install 0.15.2. It was already installed — as a keg-only Homebrew
+formula at `/opt/homebrew/opt/zig@0.15/bin`, which is not on `PATH`, so
+`zig version` answered `0.16.0` and the earlier report of a missing toolchain
+was wrong. Prepending that directory is the whole fix.
+
+**Task 20 was roughly twice the size the plan states.** It names `titlebar.rs`
+and one example, 59 sites. The real count was **101 sites across six files** —
+`settings.rs` (24), `controls.rs` (22), `titlebar.rs` (15),
+`project_identity.rs` (14), the example (4), `modal.rs` (1).
+
+The measurements survived exactly, which is what could have gone wrong. The four
+COSMIC spacing steps in use are 4/8/12/16 and bezel's `SPACE_XS/SM/MD/LG` are
+4/8/12/16; `radius_xs`/`radius_s` (4.0/8.0) are `BASE_RADIUS * 0.5` and
+`BASE_RADIUS`. The one step outside that set, `spacing.l` (32), is written
+`SPACE_LG * 2.0` rather than rounded to a named corner.
+
+Two things the plan got wrong about the titlebar:
+
+- It maps `radius_xs[0]` to `Theme::control_radius()`. That is `radius(0.75)` =
+  **6.0**, not 4.0 — following it would have moved the control corners. The
+  binding is `BASE_RADIUS * 0.5` instead.
+- It maps `containers.background` to a bar fill. `bar` was only ever read as
+  `bar.on`: the row paints `gpui::transparent_black()` and lets the window
+  surface through, which is what "one continuous surface" meant. The binding is
+  `theme.text`, renamed `bar_on` so the next reader is not misled the same way.
+
+The colours do move, and that is B3's accepted cost. COSMIC's `Component`
+carried a resting/hover/pressed set per semantic colour and the theme carries
+one value per meaning, so the traffic lights derive their hover as the same 12%
+darkening COSMIC's own pairs describe (`#FFA09A` -> `#E0948F`) rather than a
+shade re-picked by eye, and the icon buttons read a local `IconButtonColors` —
+local because nothing outside the titlebar draws a control with its own three
+states. **Not checked on Linux**, which is exactly where the cost of B3 shows;
+no Linux machine was available.
+
+**Task 21 — one of the four enums was already dead.**
+`sirio_project::ui::AppearanceMode` had no consumer outside its own test and the
+`pub use` re-exporting it. Deleting it cost nothing.
+
+**Task 21 — the conversion is not where the plan puts it.** It says to add
+`From` impls in `sirio_persistence`. That crate is deliberately kept out of the
+workspace table with three dependencies (`rusqlite`, `serde`, `serde_json`) and
+no gpui; taking `bezel` would pull the entire UI stack into the persistence
+layer to serve three match arms. `sirio` is the only crate that depends on both
+sides and already held the two `match` blocks, so `persisted_appearance` /
+`theme_mode` live there, with the round-trip test. `sirio_theme::ThemeMode`
+becomes `pub use bezel::theme::appearance::AppearanceMode as ThemeMode`, which
+collapses the type without moving 65 call sites; `resolve`/`resolve_system`
+become free functions because the type is no longer this crate's to extend.
+
+The launch-set-quit-relaunch check in Task 21 Step 6 needs a GUI and was not
+run. What is covered instead: `AppearanceMode::raw`/`parse` are untouched, and
+the stored `"system"`/`"light"`/`"dark"` are asserted directly, with
+`theme_mode_name` now reading through `raw` so the displayed and stored strings
+cannot drift.
+
+**Task 22 — what `sirio_theme` became.** 4357 lines across 11 files, down to
+**2665 in one**. What is left is the token structs, `Typography`, `Spacing`,
+`Radii`, `AgentBrandColor`, `graph_lane`, `BrowserChrome`, `WindowsCaption` and
+the terminal families — no palette of its own.
+
+**On the test flakes.** Running `-p sirio_persistence -p sirio_theme -p sirio_ui
+-p sirio_project` together failed 4 `sirio_ui` tests; `-p sirio_ui` alone passes
+555. A second concurrent run failed a *different* test
+(`chat::tests::stopping_via_click_with_a_queued_item_still_sends_it`), which
+also passes alone. `Scripts/ci.sh` then failed a *third* one,
+`tests::workspace_wires_real_osc_title_into_activity_model`, which likewise
+passes alone (2.24s). This is the load sensitivity `CLAUDE.md` documents, not a
+regression — but it means a green workspace-wide run is not something this tree
+produces reliably, and per-crate runs are the real signal. The six `sirio`
+failures listed in the Phase 2 notes are a different thing: those fail in
+isolation too, and fail identically at `29cee6a6`.
+
+**`Scripts/ci.sh` does not print `CI OK`, and this work is not why.** The build
+is clean. The gate fails on three targets:
+
+- `-p sirio --bin sirio` — the six pre-existing failures plus
+  `workspace_wires_real_osc_title_into_activity_model`, which passes alone.
+- `-p sirio_ui --lib` — three `changes::tests::*`; all 37 of that module pass
+  alone (7.23s). They shell out to real `git`.
+- `-p sirio_agents --test acp_conformance` —
+  `oh_my_pi_is_only_claimed_once_it_answers`, which fails in isolation too.
+  `sirio_agents` depends on `serde_json` and nothing else — no theme, no gpui —
+  and the test compares the adapter's `builtin_acp()` claim against what the
+  `omp` binary installed on *this machine* actually answers. It is an
+  environment conformance check, structurally unreachable from a theme change.
+
+Per `CLAUDE.md` the macOS gate has never been green (Phase 0 of the macOS
+release spec is still open), so this is the state the tree was already in.
 
 ---
 

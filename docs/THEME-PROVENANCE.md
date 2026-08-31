@@ -87,6 +87,14 @@ Recorded because no test covers any of it:
 - **`solid` / `on_solid` stopped being the mirrored page.** They are bezel's own
   pair now; what is still asserted is the reason the mirror existed, that an
   inverted chip stays legible.
+- **The COSMIC tokens are gone** (spec decision B3). The four spacing steps and
+  two radii Sirio read from them are bezel's at the same values, so no drawn
+  pixel moved; the colours did. COSMIC carried a resting/hover/pressed set per
+  semantic colour and bezel carries one value per meaning, so the titlebar's
+  traffic lights derive their hover as the 12% darkening COSMIC's own pairs
+  described, and its icon buttons read `text` on
+  `element_hover`/`element_active`. Untested on Linux, which is where the loss
+  of Pop!_OS adherence actually shows.
 - **Geist is the face on every platform**, macOS included, registered by
   `bezel::ui::register_fonts`. Sirio's own `assets/fonts` copies are gone, and
   with them a latent Linux bug: they carried no 500/600/700 statics, and gpui's
