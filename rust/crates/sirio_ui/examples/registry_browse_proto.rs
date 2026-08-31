@@ -510,7 +510,7 @@ fn action_affordance(
     action_button_shell(label, theme)
         .id(id)
         .debug_selector(move || selector.clone())
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .cursor(CursorStyle::PointingHand)
         .on_click(move |_, _, cx| {
             let message = message.clone();
@@ -645,10 +645,10 @@ impl RegistryBrowseProto {
             .py(px(3.0))
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .text_size(theme.typography.caption2)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx| {
                 install_entity.update(cx, |prototype, cx| {
@@ -671,7 +671,7 @@ impl RegistryBrowseProto {
             .text_color(theme.text)
             .bg(theme.element_active)
             .border_1()
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .cursor(CursorStyle::PointingHand)
             .on_click(move |_, _, cx| {
                 keep_entity.update(cx, |prototype, cx| {
@@ -694,7 +694,7 @@ impl RegistryBrowseProto {
             .rounded(theme.radii.control)
             .bg(theme.surface)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -976,7 +976,7 @@ impl RegistryBrowseProto {
             .border_color(if focused {
                 theme.text
             } else {
-                theme.hairline
+                theme.border
             })
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {

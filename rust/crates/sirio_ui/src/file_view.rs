@@ -670,7 +670,7 @@ impl FileView {
         div()
             .w_full()
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .px(px(20.0))
             .py(px(10.0))
             .flex()
@@ -928,7 +928,7 @@ fn render_mode_option(
             theme.text_faint
         })
         .when(active, |this| this.bg(theme.element_active))
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
         })
@@ -964,7 +964,7 @@ fn render_conflict_banner(
         .gap(px(12.0))
         .bg(theme.danger_soft)
         .border_b_1()
-        .border_color(theme.hairline)
+        .border_color(theme.border)
         .text_size(theme.typography.footnote)
         .text_color(theme.text)
         .child(div().flex_1().child(message))
@@ -976,7 +976,7 @@ fn render_conflict_banner(
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         let _ = reload_entity.update(cx, |view, cx| view.reload(cx));
                     })
@@ -989,7 +989,7 @@ fn render_conflict_banner(
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         keep_entity.update(cx, |view, cx| view.keep(cx));
                     })
@@ -1017,7 +1017,7 @@ fn render_markdown_toolbar(
         .items_center()
         .gap(theme.spacing.titlebar_control_spacing)
         .border_b_1()
-        .border_color(theme.hairline)
+        .border_color(theme.border)
         .bg(theme.surface_raised)
         .child(render_format_button(
             "B",
@@ -1082,7 +1082,7 @@ fn render_format_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
         .text_color(theme.text)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| {
                 let _ = view.format_markdown(operation.clone(), selection, cx);
@@ -1213,7 +1213,7 @@ fn render_content(
                                     .px(px(8.0))
                                     .py(px(4.0))
                                     .rounded(theme.radii.control)
-                                    .hover(|style| style.bg(theme.row_hover))
+                                    .hover(|style| style.bg(theme.element_hover))
                                     .on_click(move |_, _, cx| {
                                         preview_entity.update(cx, |view, cx| {
                                             view.set_markdown_mode(MarkdownMode::Preview, cx);

@@ -71,7 +71,7 @@ impl RightPanel {
             .flex()
             .items_center()
             .gap(px(7.0))
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 select_entity.update(cx, |_, cx| {
                     cx.emit(RightPanelEvent::SelectActivity(index));

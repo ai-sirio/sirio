@@ -306,9 +306,9 @@ impl AgentAccentColor {
             Self::Green => theme.tab_done,
             Self::Red => theme.tab_error,
             Self::Blue => theme.gauge,
-            Self::Purple => theme.rail_task,
+            Self::Purple => theme.border_strong,
             Self::Gold => theme.favorite,
-            Self::Slate => theme.rail_tool,
+            Self::Slate => theme.border_strong,
         }
     }
 
@@ -2379,7 +2379,7 @@ impl Settings {
                     .justify_center()
                     .rounded(theme.radii.chip_active)
                     .text_color(theme.text)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, _| {
                         if let Some(callback) = &back {
                             callback();
@@ -2438,7 +2438,7 @@ impl Settings {
                         theme.text_muted
                     })
                     .when(selected, |this| this.bg(theme.element_active))
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| this.select_category(category, cx));
                     })
@@ -2981,7 +2981,7 @@ impl Settings {
             .border_color(if is_focused {
                 theme.text
             } else {
-                theme.hairline
+                theme.border
             })
             .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3549,7 +3549,7 @@ impl Settings {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
                         .bg(theme.element_active)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .hover(|style| style.bg(theme.element_hover))
                         .on_click(move |_, _, cx| {
                             install_entity.update(cx, |_, cx| {
                                 cx.emit(event.clone());
@@ -3671,7 +3671,7 @@ impl Settings {
                             .border_color(if search_is_focused {
                                 theme.text
                             } else {
-                                theme.hairline
+                                theme.border
                             })
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3811,7 +3811,7 @@ impl Settings {
             .text_color(if enabled { theme.text } else { theme.text_faint })
             .bg(theme.surface_raised)
             .when(enabled, |this| {
-                this.hover(|style| style.bg(theme.row_hover))
+                this.hover(|style| style.bg(theme.element_hover))
             })
             .on_click(move |_, window, cx| {
                 toggle_entity.update(cx, |this, cx| this.toggle_summarizer_picker(window, cx));
@@ -3821,7 +3821,7 @@ impl Settings {
                 IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(if enabled {
                     theme.text
                 } else {
-                    theme.hairline
+                    theme.border
                 }),
             )
     }
@@ -3854,7 +3854,7 @@ impl Settings {
             .p(px(4.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg();
         for choice in SummarizerChoice::ALL {
@@ -3877,7 +3877,7 @@ impl Settings {
                         theme.text
                     })
                     .when(is_selected, |this| this.bg(theme.element_active))
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         choice_entity.update(cx, |this, cx| {
                             this.set_summarizer_agent(choice, cx);
@@ -4393,7 +4393,7 @@ impl Settings {
             .bg(theme.surface_raised)
             .child(text!("Revoke all"));
         let revoke_all = revoke_all.when(!origins.is_empty(), move |this| {
-            this.hover(|style| style.bg(theme.row_hover))
+            this.hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     revoke_all_entity
                         .update(cx, |settings, cx| settings.revoke_all_browser_origins(cx));
@@ -4438,7 +4438,7 @@ impl Settings {
                 .text_size(theme.typography.callout)
                 .text_color(theme.text)
                 .bg(theme.surface_raised)
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     origin_entity.update(cx, |settings, cx| {
                         settings.revoke_browser_origin(origin.clone(), cx)
@@ -4632,7 +4632,7 @@ impl Render for Settings {
             .flex_col()
             .bg(theme.surface)
             .child(self.render_header(theme))
-            .child(div().h(px(1.0)).w_full().bg(theme.hairline))
+            .child(div().h(px(1.0)).w_full().bg(theme.border))
             .child(
                 // `min_h(0)` is what lets this row be shorter than what it
                 // holds. A column flex item takes its content height as its
@@ -4647,7 +4647,7 @@ impl Render for Settings {
                     .w_full()
                     .flex()
                     .child(category_sidebar)
-                    .child(div().w(px(1.0)).h_full().bg(theme.hairline))
+                    .child(div().w(px(1.0)).h_full().bg(theme.border))
                     .child(
                         // A column, not a row. GPUI derives a scroller's
                         // `content_size` from its children's laid-out bounds,

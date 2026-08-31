@@ -621,8 +621,8 @@ impl Render for GitHistory {
                         .py(px(5.0))
                         .rounded(theme.radii.control)
                         .text_color(theme.text)
-                        .bg(theme.row_hover)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .bg(theme.element_hover)
+                        .hover(|style| style.bg(theme.element_hover))
                         .on_click(move |_, _, cx| {
                             retry_entity.update(cx, |history, cx| history.retry(cx));
                         })
@@ -818,7 +818,7 @@ impl Render for GitHistory {
                                 .py(px(3.0))
                                 .rounded(theme.radii.control)
                                 .text_color(theme.text)
-                                .bg(theme.row_hover)
+                                .bg(theme.element_hover)
                                 .on_click(move |_, _, cx| {
                                     retry_entity.update(cx, |history, cx| history.retry(cx));
                                 })
@@ -877,7 +877,7 @@ fn render_history_row(
         .items_center()
         .gap(px(ROW_GAP))
         .px(px(8.0))
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .tooltip(move |_, cx| -> gpui::AnyView {
             cx.new(|_| CommitTooltip {
                 theme,
@@ -1077,7 +1077,7 @@ impl Render for CommitTooltip {
             .rounded(self.theme.radii.control)
             .bg(self.theme.surface_raised)
             .border_1()
-            .border_color(self.theme.hairline)
+            .border_color(self.theme.border)
             .child(
                 div()
                     .text_size(self.theme.typography.footnote)

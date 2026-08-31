@@ -451,7 +451,7 @@ impl Render for StatusBar {
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text)
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .child(IconElement::new(icon, IconSize::Medium).text_color(theme.text))
         };
 
@@ -529,7 +529,7 @@ impl Render for StatusBar {
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 refresh_entity.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
             })
@@ -643,7 +643,7 @@ impl Render for StatusBarTooltip {
             .rounded(self.theme.radii.control)
             .bg(self.theme.surface_raised)
             .border_1()
-            .border_color(self.theme.hairline)
+            .border_color(self.theme.border)
             .text_size(self.theme.typography.caption2)
             .text_color(self.theme.text)
             .child(self.text.clone())

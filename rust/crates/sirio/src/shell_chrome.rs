@@ -61,7 +61,7 @@ pub(crate) fn panel_border(theme: &Theme, focus_visible: bool) -> gpui::Rgba {
     if focus_visible {
         theme.text_muted
     } else {
-        theme.panel_border
+        theme.border_opaque
     }
 }
 
@@ -141,7 +141,7 @@ mod tests {
     fn panel_border_uses_focus_ring_only_when_focus_is_visible() {
         let theme = Theme::dark();
 
-        assert_eq!(panel_border(&theme, false), theme.panel_border);
+        assert_eq!(panel_border(&theme, false), theme.border_opaque);
         assert_eq!(panel_border(&theme, true), theme.text_muted);
     }
 }

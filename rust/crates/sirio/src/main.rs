@@ -10553,7 +10553,7 @@ impl SirioWorkspace {
             } else {
                 theme.text_muted
             })
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
             // the same point sidebar.rs's own drag resets `pending_reorder`
             // at. Snapshot the pre-drag tab order here so Escape has
@@ -10703,7 +10703,7 @@ impl SirioWorkspace {
                         .justify_center()
                         .text_size(px(14.0))
                         .text_color(theme.text_muted)
-                        .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
+                        .hover(|style| style.bg(theme.element_hover).rounded(px(4.0)))
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             close_entity.update(cx, |this, cx| {
@@ -11499,7 +11499,7 @@ impl SirioWorkspace {
             .gap(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg()
             .on_mouse_down_out(move |_, _, cx| {
@@ -11530,7 +11530,7 @@ impl SirioWorkspace {
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
                 .text_color(if active { theme.text } else { theme.text_muted })
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, window, cx| {
                     select_entity.update(cx, |workspace, cx| {
                         workspace.select_tab(id, Some(window), cx);
@@ -11667,7 +11667,7 @@ impl SirioWorkspace {
                 .justify_center()
                 .rounded(theme.radii.control)
                 .text_color(theme.text_faint)
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     overflow_entity.update(cx, |workspace, cx| {
                         workspace.overflow_menu_open = !workspace.overflow_menu_open;
@@ -12870,7 +12870,7 @@ impl SirioWorkspace {
                         this.bg(theme.element_active)
                     })
                     .when(entry.is_enabled(), move |this| {
-                        this.hover(|style| style.bg(theme.row_hover)).on_click(
+                        this.hover(|style| style.bg(theme.element_hover)).on_click(
                             move |_, window, cx| {
                                 entity.update(cx, |workspace, cx| {
                                     workspace.dispatch_palette_command(entry.command, window, cx)
@@ -12948,7 +12948,7 @@ impl SirioWorkspace {
             .p(px(8.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg()
             .child(
@@ -13020,7 +13020,7 @@ impl SirioWorkspace {
                 .py(px(10.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.hairline)
+                .border_color(theme.border)
                 .bg(theme.surface_raised)
                 .shadow_lg()
                 .text_size(theme.typography.footnote)
@@ -13090,7 +13090,7 @@ impl SirioWorkspace {
                 .py(px(10.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.hairline)
+                .border_color(theme.border)
                 .bg(theme.surface_raised)
                 .shadow_lg()
                 .child(

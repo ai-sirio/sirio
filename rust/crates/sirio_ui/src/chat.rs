@@ -3683,7 +3683,7 @@ impl Chat {
                     .border_color(if question_answer.for_request == Some(request_id) {
                         colors.text
                     } else {
-                        colors.hairline
+                        colors.border
                     })
                     .text_size(typography.headline)
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
@@ -3736,7 +3736,7 @@ impl Chat {
                     .bg(colors.surface_raised)
                     .text_size(typography.footnote)
                     .text_color(colors.text)
-                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .hover(|style| style.bg(colors.overlay))
                     .on_click(move |_, _, cx| {
                         send_entity.update(cx, |chat, cx| {
                             let draft = chat.question_answer.draft.clone();
@@ -3754,7 +3754,7 @@ impl Chat {
                     .rounded(theme.radii.control)
                     .text_size(typography.footnote)
                     .text_color(colors.git_conflict)
-                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .hover(|style| style.bg(colors.overlay))
                     .on_click(move |_, _, cx| {
                         cancel_entity.update(cx, |chat, cx| {
                             chat.cancel_question(request_id, cx);
@@ -3927,7 +3927,7 @@ impl Chat {
                         .text_size(typography.footnote)
                         .text_color(colors.text_faint)
                         .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(colors.chat_row_hover))
+                        .hover(|style| style.bg(colors.overlay))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             copy_entity.update(cx, |chat, cx| {
@@ -4006,7 +4006,7 @@ impl Chat {
                 .w_full()
                 .h(px(1.0))
                 .my(px(4.0))
-                .bg(colors.hairline)
+                .bg(colors.border)
                 .into_any_element(),
             Block::Html { text } => div()
                 .w_full()
@@ -4300,7 +4300,7 @@ impl Chat {
                 .w_full()
                 .flex()
                 .border_b_1()
-                .border_color(colors.hairline)
+                .border_color(colors.border)
                 .when(header_row, |this| this.bg(colors.surface_raised))
                 .children(cells.into_iter().enumerate().scan(
                     row_start,
@@ -4321,7 +4321,7 @@ impl Chat {
                             // The rule the grid was missing. Not on the first
                             // column, where it would double the table border.
                             .when(index > 0, |this| {
-                                this.border_l_1().border_color(colors.hairline)
+                                this.border_l_1().border_color(colors.border)
                             });
                         cell_view = match alignment {
                             Alignment::Center => cell_view.justify_center(),
@@ -4352,7 +4352,7 @@ impl Chat {
             .flex()
             .flex_col()
             .border_1()
-            .border_color(colors.hairline)
+            .border_color(colors.border)
             .rounded(theme.radii.control)
             .overflow_hidden()
             .child(render_row(
@@ -4778,7 +4778,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.git_conflict)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(move |_, _, cx| {
                                 confirm_entity.update(cx, |chat, cx| {
                                     chat.confirm_edit_revert(entry, confirm_path.clone(), cx);
@@ -4795,7 +4795,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.text_faint)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(move |_, _, cx| {
                                 cancel_entity.update(cx, |chat, cx| {
                                     chat.cancel_edit_revert(entry, cx);
@@ -4817,7 +4817,7 @@ impl Chat {
                         } else {
                             colors.git_conflict
                         })
-                        .hover(|style| style.bg(colors.chat_row_hover))
+                        .hover(|style| style.bg(colors.overlay))
                         .on_click(move |_, _, cx| {
                             if !reverting {
                                 request_entity.update(cx, |chat, cx| {
@@ -4915,7 +4915,7 @@ impl Chat {
                     .text_size(typography.footnote)
                     .text_color(colors.text_faint)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .hover(|style| style.bg(colors.overlay))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         copy_entity.update(cx, |chat, cx| {
@@ -5008,7 +5008,7 @@ impl Chat {
                             .id(("thought-body", entry_index))
                             .relative()
                             .border_l_1()
-                            .border_color(colors.hairline)
+                            .border_color(colors.border)
                             .pl(px(12.0))
                             .pr(px(14.0))
                             .max_h(px(160.0))
@@ -5183,7 +5183,7 @@ impl Chat {
                                 } else {
                                     colors.text
                                 })
-                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .hover(|style| style.bg(colors.overlay))
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |chat, cx| {
                                         chat.respond_permission(request_id, &option_for_click, cx);
@@ -5206,7 +5206,7 @@ impl Chat {
                             .bg(colors.surface_raised)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(move |_, _, cx| {
                                 dismiss_entity.update(cx, |chat, cx| {
                                     chat.dismiss_permission(request_id, cx);
@@ -5227,7 +5227,7 @@ impl Chat {
                     .rounded(theme.radii.code_block)
                     .bg(colors.surface_raised)
                     .border_l_2()
-                    .border_color(colors.rail_task)
+                    .border_color(colors.border_strong)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
@@ -5248,7 +5248,7 @@ impl Chat {
                     );
                 for row in entries {
                     let (glyph, tint) = match row.status.as_str() {
-                        "completed" => ("✓", colors.rail_edit),
+                        "completed" => ("✓", colors.border_strong),
                         "in_progress" => ("◌", colors.text),
                         _ => ("○", colors.text_faint),
                     };
@@ -5303,7 +5303,7 @@ impl Chat {
                                     } else {
                                         colors.text
                                     })
-                                    .hover(|style| style.bg(colors.chat_row_hover))
+                                    .hover(|style| style.bg(colors.overlay))
                                     .on_click(move |_, _, cx| {
                                         entity.update(cx, |chat, cx| {
                                             chat.respond_permission(
@@ -5327,14 +5327,14 @@ impl Chat {
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(div().h(px(1.0)).flex_1().bg(colors.hairline))
+                .child(div().h(px(1.0)).flex_1().bg(colors.border))
                 .child(
                     div()
                         .text_size(typography.footnote)
                         .text_color(colors.text_faint)
                         .child(at.clone()),
                 )
-                .child(div().h(px(1.0)).flex_1().bg(colors.hairline))
+                .child(div().h(px(1.0)).flex_1().bg(colors.border))
                 .into_any_element(),
             Entry::Error {
                 message,
@@ -5428,7 +5428,7 @@ impl Chat {
                                 .rounded(theme.radii.control)
                                 .text_color(colors.text)
                                 .bg(colors.surface_raised)
-                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .hover(|style| style.bg(colors.overlay))
                                 .on_click(move |_, _, cx| {
                                     // Same underlying call as Retry
                                     // (`Chat::retry` -> `start_connection`)
@@ -5464,7 +5464,7 @@ impl Chat {
                                 .rounded(theme.radii.control)
                                 .text_color(colors.text)
                                 .bg(colors.surface_raised)
-                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .hover(|style| style.bg(colors.overlay))
                                 .on_click(move |_, _, cx| {
                                     settings_entity
                                         .update(cx, |_, cx| cx.emit(ChatEvent::OpenSettings));
@@ -5494,7 +5494,7 @@ impl Chat {
                                 .rounded(theme.radii.control)
                                 .text_color(colors.text)
                                 .bg(colors.surface_raised)
-                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .hover(|style| style.bg(colors.overlay))
                                 .on_click(move |_, _, cx| {
                                     dismiss_entity.update(cx, |chat, cx| {
                                         chat.dismiss_error(entry_index, cx);
@@ -5543,7 +5543,7 @@ impl Chat {
             .child(
                 div()
                     .text_size(typography.footnote)
-                    .text_color(colors.rail_task)
+                    .text_color(colors.border_strong)
                     .child("Subagent"),
             )
             .child(
@@ -5571,7 +5571,7 @@ impl Chat {
             .rounded(theme.radii.code_block)
             .bg(colors.surface_raised)
             .border_l_2()
-            .border_color(colors.rail_task)
+            .border_color(colors.border_strong)
             .child(header);
         if expanded {
             for (child_index, call) in tool_calls.into_iter().enumerate() {
@@ -5814,7 +5814,7 @@ impl Chat {
             .rounded(theme.radii.code_block)
             .bg(colors.surface_raised)
             .border_l_2()
-            .border_color(colors.rail_tool)
+            .border_color(colors.border_strong)
             .child(header);
         if expanded {
             let mut body = div()
@@ -5936,7 +5936,7 @@ impl Chat {
             .rounded(theme.radii.code_block)
             .bg(colors.surface_raised)
             .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.bg(colors.chat_row_hover))
+            .hover(|style| style.bg(colors.overlay))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |chat, cx| {
                     chat.toggle_turn_unfolded(turn_id, cx);
@@ -6212,7 +6212,7 @@ impl Chat {
         };
         let status_pill = status_pill
             .when(mode_selectable, |this| {
-                this.hover(|style| style.bg(colors.chat_row_hover))
+                this.hover(|style| style.bg(colors.overlay))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_mode_picker(window, cx);
                     }))
@@ -6280,7 +6280,7 @@ impl Chat {
                 // caption rather than a picker. `min_w_0` still lets it
                 // shrink, which is what keeps the name's ellipsis working.
                 .min_w_0()
-                .hover(|style| style.bg(colors.chat_row_hover))
+                .hover(|style| style.bg(colors.overlay))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
                 }))
@@ -6365,7 +6365,7 @@ impl Chat {
                     .rounded(theme.radii.control)
                     .bg(colors.surface_raised)
                     .text_size(typography.ui_size)
-                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .hover(|style| style.bg(colors.overlay))
                     .on_click(move |_, window, cx| {
                         effort_entity
                             .update(cx, |chat, cx| chat.toggle_model_picker(window, cx));
@@ -6420,7 +6420,7 @@ impl Chat {
                     .rounded(theme.radii.toast)
                     .bg(colors.surface_raised)
                     .border_1()
-                    .border_color(colors.hairline)
+                    .border_color(colors.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.model_picker_open = false;
@@ -6438,7 +6438,7 @@ impl Chat {
                                 .rounded(theme.radii.control)
                                 .bg(colors.surface_raised)
                                 .border_1()
-                                .border_color(colors.hairline)
+                                .border_color(colors.border)
                                 .text_size(typography.footnote)
                                 .flex()
                                 .items_center()
@@ -6504,7 +6504,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(move |_, _, cx| {
                                 option_entity
                                     .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
@@ -6565,7 +6565,7 @@ impl Chat {
                                     .text_size(typography.caption2)
                                     .text_color(colors.text)
                                     .when(is_selected, |this| this.bg(colors.element_active))
-                                    .hover(|style| style.bg(colors.chat_row_hover))
+                                    .hover(|style| style.bg(colors.overlay))
                                     .on_click(move |_, _, cx| {
                                         row_entity.update(cx, |chat, cx| {
                                             chat.select_effort(choice_value.clone(), cx);
@@ -6575,7 +6575,7 @@ impl Chat {
                                     .into_any_element()
                             })
                             .collect::<Vec<_>>();
-                        this.child(div().h(px(1.0)).w_full().bg(colors.hairline))
+                        this.child(div().h(px(1.0)).w_full().bg(colors.border))
                             .child(
                                 div()
                                     .flex()
@@ -6632,7 +6632,7 @@ impl Chat {
                     .rounded(theme.radii.toast)
                     .bg(colors.surface_raised)
                     .border_1()
-                    .border_color(colors.hairline)
+                    .border_color(colors.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.mode_picker_open = false;
@@ -6664,7 +6664,7 @@ impl Chat {
                             .text_size(typography.footnote)
                             .text_color(colors.text)
                             .when(is_selected, |this| this.bg(colors.element_active))
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(move |_, _, cx| {
                                 row_entity
                                     .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
@@ -6700,8 +6700,8 @@ impl Chat {
             .h(px(16.0))
             .rounded(px(8.0))
             .border_1()
-            .border_color(colors.hairline)
-            .hover(|style| style.bg(colors.chat_row_hover))
+            .border_color(colors.border)
+            .hover(|style| style.bg(colors.overlay))
             .on_click(move |_, window, cx| {
                 context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
             })
@@ -6792,7 +6792,7 @@ impl Chat {
                     .rounded(theme.radii.toast)
                     .bg(colors.surface_raised)
                     .border_1()
-                    .border_color(colors.hairline)
+                    .border_color(colors.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.context_popover_open = false;
@@ -6850,7 +6850,7 @@ impl Chat {
                                         .mt(px(6.0))
                                         .pt(px(6.0))
                                         .border_t_1()
-                                        .border_color(colors.hairline)
+                                        .border_color(colors.border)
                                         .flex()
                                         .flex_col()
                                         .gap(px(2.0))
@@ -6922,7 +6922,7 @@ impl Chat {
                         .rounded(theme.radii.toast)
                         .bg(colors.surface_raised)
                         .border_1()
-                        .border_color(colors.hairline)
+                        .border_color(colors.border)
                         .shadow_lg()
                         .children(candidates.into_iter().enumerate().map(
                             move |(index, command)| {
@@ -6985,7 +6985,7 @@ impl Chat {
                         .rounded(theme.radii.toast)
                         .bg(colors.surface_raised)
                         .border_1()
-                        .border_color(colors.hairline)
+                        .border_color(colors.border)
                         .shadow_lg()
                         .children(candidates.into_iter().map(move |path| {
                             let row_entity = mention_entity.clone();
@@ -7001,7 +7001,7 @@ impl Chat {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.0))
-                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .hover(|style| style.bg(colors.overlay))
                                 .on_click(move |_, _, cx| {
                                     row_entity.update(cx, |chat, cx| {
                                         chat.accept_mention(&path_for_accept, cx);
@@ -7049,7 +7049,7 @@ impl Chat {
                     .rounded(theme.radii.toast)
                     .bg(colors.surface_raised)
                     .border_1()
-                    .border_color(colors.hairline)
+                    .border_color(colors.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.overflow_open = false;
@@ -7065,7 +7065,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.following_edited_files = !this.following_edited_files;
                                 cx.notify();
@@ -7082,7 +7082,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.new_conversation(cx);
                             }))
@@ -7098,7 +7098,7 @@ impl Chat {
                             .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.text)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_chat_history(window, cx);
                             }))
@@ -7147,7 +7147,7 @@ impl Chat {
                             .px(px(8.0))
                             .py(px(6.0))
                             .rounded(theme.radii.control)
-                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .hover(|style| style.bg(colors.overlay))
                             .child(
                                 div()
                                     .id(SharedString::from(format!("chat-history-open-{tab_id}")))
@@ -7228,7 +7228,7 @@ impl Chat {
                     .rounded(theme.radii.toast)
                     .bg(colors.surface_raised)
                     .border_1()
-                    .border_color(colors.hairline)
+                    .border_color(colors.border)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.history_open = false;
@@ -7250,7 +7250,7 @@ impl Chat {
             .flex()
             .items_center()
             .justify_center()
-            .hover(|style| style.bg(colors.chat_row_hover))
+            .hover(|style| style.bg(colors.overlay))
             .on_click(move |_, window, cx| {
                 attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
             })
@@ -7266,7 +7266,7 @@ impl Chat {
             .flex()
             .items_center()
             .justify_center()
-            .hover(|style| style.bg(colors.chat_row_hover))
+            .hover(|style| style.bg(colors.overlay))
             .on_click(move |_, window, cx| {
                 overflow_entity.update(cx, |chat, cx| chat.toggle_overflow(window, cx));
             })
@@ -7454,7 +7454,7 @@ impl Chat {
                                 colors.surface_raised
                             })
                             .border_1()
-                            .border_color(colors.hairline)
+                            .border_color(colors.border)
                             .text_size(typography.caption2)
                             .child(div().text_color(colors.text_faint).child(glyph))
                             .child(div().text_color(colors.text).child(label))
@@ -7466,7 +7466,7 @@ impl Chat {
                                     .rounded(px(2.0))
                                     .text_size(typography.caption2)
                                     .text_color(colors.text_faint)
-                                    .hover(|style| style.bg(colors.chat_row_hover))
+                                    .hover(|style| style.bg(colors.overlay))
                                     .on_click(move |_, window, cx| {
                                         // F-CHAT-12: the × removes the chip
                                         // from the model correctly on its
@@ -7524,7 +7524,7 @@ impl Chat {
             .border_color(if focused {
                 colors.text
             } else {
-                colors.hairline
+                colors.border
             })
             .rounded(theme.radii.composer)
             .bg(colors.surface_raised)
@@ -7586,7 +7586,7 @@ impl Chat {
                                 .px(px(4.0))
                                 .rounded(px(3.0))
                                 .text_color(colors.text_faint)
-                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .hover(|style| style.bg(colors.overlay))
                                 .on_click(move |_, _, cx| {
                                     remove_entity.update(cx, |chat, cx| {
                                         chat.remove_queued_item(cx);
@@ -8149,7 +8149,7 @@ impl Render for Chat {
                                         .rounded(theme.radii.control)
                                         .text_size(bar_typography.caption2)
                                         .text_color(bar_colors.text_faint)
-                                        .hover(|style| style.bg(bar_colors.chat_row_hover))
+                                        .hover(|style| style.bg(bar_colors.overlay))
                                         .on_click(move |_, _, cx| {
                                             show_entity.update(cx, |chat, cx| {
                                                 chat.list_state.scroll_to_reveal_item(index);

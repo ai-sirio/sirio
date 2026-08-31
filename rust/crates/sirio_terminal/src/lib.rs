@@ -3913,7 +3913,7 @@ impl gpui::Render for TerminalView {
                 .p(px(6.0))
                 .rounded(theme.radii.user_pill)
                 .border_1()
-                .border_color(theme.hairline)
+                .border_color(theme.border)
                 .bg(theme.surface_raised)
                 .shadow_lg();
 
@@ -3950,7 +3950,7 @@ impl gpui::Render for TerminalView {
                         })
                         .when(!is_disabled, |this| {
                             this.text_color(theme.text)
-                                .hover(|style| style.bg(theme.row_hover))
+                                .hover(|style| style.bg(theme.element_hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |terminal, cx| {
                                         terminal.handle_context_action(action, window, cx);
@@ -4158,7 +4158,7 @@ impl gpui::Render for TerminalView {
                                     .rounded(theme.radii.control)
                                     .bg(theme.surface_raised)
                                     .border_1()
-                                    .border_color(theme.hairline)
+                                    .border_color(theme.border)
                                     .font_family(sirio_theme::terminal_family())
                                     .text_size(theme.typography.caption2)
                                     .text_color(theme.text)
@@ -4207,7 +4207,7 @@ impl gpui::Render for TerminalView {
                             .bg(theme.surface_raised)
                             .text_size(px(13.0))
                             .text_color(theme.text)
-                            .hover(|style| style.bg(theme.row_hover))
+                            .hover(|style| style.bg(theme.element_hover))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(move |_, _, cx| {
                                 retry_entity.update(cx, |view, cx| view.retry(cx));
