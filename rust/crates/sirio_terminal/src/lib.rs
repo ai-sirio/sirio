@@ -1247,6 +1247,10 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
 
         let mut last_title = String::new();
         let mut child_exit_reported = false;
+        // A command that arrived while this thread was parked at the bottom of
+        // the loop, carried forward to be served at the top of the next
+        // iteration rather than handled out of order down there.
+        let mut carried: Option<TerminalCommand> = None;
         loop {
             // 1. Drain whatever the PTY produced into the parser.
             let mut had_output = false;
@@ -1267,7 +1271,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             // 2. Serve queued commands.
             let mut kitty_mutated = false;
             let mut shutdown = false;
-            while let Ok(command) = command_rx.try_recv() {
+            while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
                 match command {
                     TerminalCommand::Input(bytes) => {
                         let _ = writer.write_all(&bytes);
@@ -1396,7 +1400,26 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             let tracking = terminal.is_mouse_tracking().unwrap_or(false);
             mouse_tracking.store(tracking, Ordering::Relaxed);
 
-            std::thread::sleep(EVENT_POLL_INTERVAL);
+            // 4. Park until a command arrives or the poll tick elapses.
+            //
+            // This used to be a flat `sleep(EVENT_POLL_INTERVAL)`, which made
+            // every blocking round-trip -- `Snapshot` above all, which the
+            // renderer issues from `prepaint` on *every frame* -- wait for
+            // this thread to finish a nap it had only just started. Measured
+            // at 5.9ms per frame for a 200x50 pane, of which 5.3ms was this
+            // wait and 0.6ms was the actual grid rebuild: the main thread
+            // stalled for most of a frame, per visible pane, doing nothing.
+            //
+            // Blocking on the channel instead wakes this thread the instant a
+            // command lands, while the timeout preserves the tick that drives
+            // the PTY drain and the title/exit diffing above.
+            match command_rx.recv_timeout(EVENT_POLL_INTERVAL) {
+                Ok(command) => carried = Some(command),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // Every handle is gone; nothing will ever command this
+                // terminal again.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
         }
     });
 }
@@ -2322,8 +2345,17 @@ struct LinkHover {
 /// polls the channel with `try_recv`; the alacritty reader thread therefore
 /// never wakes the deterministic test scheduler directly.
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(4);
-/// Cap on events drained into one redraw, bounding notify rate under a flood.
+/// Cap on events drained in one poll tick, bounding how long the pump can
+/// hold the executor before yielding. The *repaint* rate is bounded by
+/// [`REPAINT_FRAME_BUDGET`], not by this.
 const EVENT_COALESCE_CAP: usize = 100;
+/// Floor on the interval between two repaints while output keeps arriving.
+/// `TerminalElement::prepaint` rebuilds every visible cell from scratch, which
+/// costs milliseconds on a maximised pane, so a PTY that never stops writing
+/// must not be allowed to drive that rebuild faster than a frame. It is a
+/// floor and not a delay: output arriving into a quiet pane -- every
+/// keystroke a user actually types -- repaints on the very next poll tick.
+const REPAINT_FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 /// #301 R1.3 + #308 R4.6: the Kitty ingest ceilings and the atlas cache cap
 /// are ALL decided together and stated as one coordinated pair of numbers —
@@ -2795,73 +2827,134 @@ impl TerminalView {
         cx: &mut gpui::Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
+            // Output that has been drawn but not yet reported to the activity
+            // model, plus how long the channel has been quiet since. The two
+            // deadlines are deliberately different: the screen must repaint on
+            // the very next poll tick, while the activity model must not see a
+            // turn until it has stopped moving.
+            let mut unsettled_output = false;
+            let mut quiet_for = Duration::ZERO;
+            // Output drawn into the emulator that the view has not been told
+            // about yet, and how long it has been since the last repaint. A
+            // pane that has been quiet accumulates `since_repaint` well past
+            // the budget, so the first byte after a pause always redraws at
+            // once; only sustained output is held to the frame floor.
+            let mut awaiting_repaint = false;
+            let mut since_repaint = REPAINT_FRAME_BUDGET;
             loop {
                 // Do not await the cross-thread channel. Its waker runs on
                 // the PTY reader thread, which violates GPUI's deterministic
                 // TestAppContext scheduler. Polling from this task keeps all
                 // scheduler interaction on its owning executor.
                 cx.background_executor().timer(EVENT_POLL_INTERVAL).await;
-                let first_event = match wakeup_rx.try_recv() {
-                    Ok(event) => event,
-                    Err(TryRecvError::Closed) => return,
-                    Err(TryRecvError::Empty) => continue,
-                };
-                let mut exit_status = Self::exit_status_from_event(&first_event);
-                let mut osc_title = Self::osc_title_from_event(&first_event);
-                let mut output_seen = matches!(first_event, TerminalEvent::Wakeup);
-                let mut pending = 1;
-                // Coalesce the burst: keep draining after scheduler-owned
-                // timer ticks until the channel is quiet or the cap is hit.
+                since_repaint = since_repaint.saturating_add(EVENT_POLL_INTERVAL);
+                let mut exit_status = None;
+                let mut osc_title = None;
+                let mut output_seen = false;
+                let mut pending = 0;
+                // Coalesce whatever is *already* queued -- never wait for
+                // more. Waiting is what used to cost a settle period per
+                // keystroke; a quiet channel now costs one poll tick.
                 while pending < EVENT_COALESCE_CAP {
-                    cx.background_executor().timer(OUTPUT_SETTLE_DEBOUNCE).await;
-                    let mut received = false;
-                    while let Ok(event) = wakeup_rx.try_recv() {
-                        if exit_status.is_none() {
-                            exit_status = Self::exit_status_from_event(&event);
+                    match wakeup_rx.try_recv() {
+                        Ok(event) => {
+                            if exit_status.is_none() {
+                                exit_status = Self::exit_status_from_event(&event);
+                            }
+                            if let Some(title) = Self::osc_title_from_event(&event) {
+                                osc_title = Some(title);
+                            }
+                            output_seen |= matches!(event, TerminalEvent::Wakeup);
+                            pending += 1;
                         }
-                        if let Some(title) = Self::osc_title_from_event(&event) {
-                            osc_title = Some(title);
-                        }
-                        output_seen |= matches!(event, TerminalEvent::Wakeup);
-                        pending += 1;
-                        received = true;
-                        if pending >= EVENT_COALESCE_CAP {
-                            break;
-                        }
-                    }
-                    if !received {
-                        break;
+                        Err(TryRecvError::Closed) => return,
+                        Err(TryRecvError::Empty) => break,
                     }
                 }
-                if this
-                    .update(cx, |view, cx| {
-                        if view.host.generation() != generation {
-                            // Superseded by a later respawn -- this batch is
-                            // from a PTY the view has already moved past.
-                            return;
-                        }
-                        if let Some(exit_status) = exit_status {
-                            view.exit_status = Some(exit_status);
-                            view.host.teardown();
-                            cx.emit(TerminalActivityEvent::ChildExited {
-                                status: exit_status,
-                            });
-                        }
-                        if let Some(title) = osc_title {
-                            cx.emit(TerminalActivityEvent::OscTitle(title));
-                        }
-                        if output_seen {
+
+                if pending > 0 {
+                    unsettled_output |= output_seen;
+                    awaiting_repaint |= output_seen;
+                    quiet_for = Duration::ZERO;
+                    // A child exiting or retitling changes what the pane says
+                    // about itself, is rare, and cannot wait behind a frame
+                    // floor meant for a torrent of ordinary output.
+                    let structural = exit_status.is_some() || osc_title.is_some();
+                    let repaint = structural || since_repaint >= REPAINT_FRAME_BUDGET;
+                    if this
+                        .update(cx, |view, cx| {
+                            if view.host.generation() != generation {
+                                // Superseded by a later respawn -- this batch
+                                // is from a PTY the view has already moved
+                                // past.
+                                return;
+                            }
+                            if let Some(exit_status) = exit_status {
+                                view.exit_status = Some(exit_status);
+                                view.host.teardown();
+                                cx.emit(TerminalActivityEvent::ChildExited {
+                                    status: exit_status,
+                                });
+                            }
+                            if let Some(title) = osc_title {
+                                cx.emit(TerminalActivityEvent::OscTitle(title));
+                            }
+                            if repaint {
+                                cx.notify();
+                            }
+                        })
+                        .is_err()
+                    {
+                        // The view is gone; stop pumping.
+                        return;
+                    }
+                    if repaint {
+                        awaiting_repaint = false;
+                        since_repaint = Duration::ZERO;
+                    }
+                    continue;
+                }
+
+                // Output that arrived inside the frame floor and was held
+                // back: the channel has gone quiet, so nothing later will
+                // redraw it. Flush it as soon as the floor allows.
+                if awaiting_repaint && since_repaint >= REPAINT_FRAME_BUDGET {
+                    if this
+                        .update(cx, |view, cx| {
+                            if view.host.generation() != generation {
+                                return;
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    awaiting_repaint = false;
+                    since_repaint = Duration::ZERO;
+                }
+
+                // Nothing queued. Once the channel has been quiet for a full
+                // settle period, hand the turn to the activity model. The
+                // scrollback capture lives here, and only here, so a flood
+                // costs one capture per turn instead of one per batch.
+                quiet_for += EVENT_POLL_INTERVAL;
+                if unsettled_output && quiet_for >= OUTPUT_SETTLE_DEBOUNCE {
+                    unsettled_output = false;
+                    if this
+                        .update(cx, |view, cx| {
+                            if view.host.generation() != generation {
+                                return;
+                            }
                             let scrollback = recent_content_window(&String::from_utf8_lossy(
                                 &terminal.capture_scrollback(),
                             ));
                             cx.emit(TerminalActivityEvent::OutputSettled { scrollback });
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    // The view is gone; stop pumping.
-                    return;
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
         })
@@ -8008,6 +8101,224 @@ mod view_tests {
         drop(events);
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
+    }
+
+    /// Regression: a keystroke must reach a repaint within one frame.
+    ///
+    /// Measures the simulated milliseconds between a keystroke reaching the
+    /// PTY and the view being notified -- i.e. the earliest moment the screen
+    /// is allowed to repaint with the echoed character. This went red at 208ms
+    /// when `OUTPUT_SETTLE_DEBOUNCE`, a 200ms quiet period the *activity
+    /// model* needs, was also gating the *renderer*; the two deadlines are
+    /// separate in `pump_terminal_events` precisely so this stays under a
+    /// frame.
+    ///
+    /// `cat` is the tightest possible echo path: no prompt, no shell start-up
+    /// output, and no timers of its own, so the only latency left in the
+    /// measurement belongs to Sirio.
+    #[gpui::test]
+    async fn perf_keystroke_echo_latency(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-perf-echo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/cat".to_string(),
+            args: Vec::new(),
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+
+        // Let the PTY finish coming up, so start-up churn is not mistaken for
+        // the echo we are about to time.
+        for _ in 0..100 {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(10));
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let notified = Rc::new(RefCell::new(false));
+        let flag = notified.clone();
+        let _subscription = cx.update(|_, app| {
+            app.observe(&terminal, move |_, _| {
+                *flag.borrow_mut() = true;
+            })
+        });
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.input(b"x".to_vec()));
+
+        // Step the simulated clock one millisecond at a time, interleaving a
+        // short real sleep so the byte has a chance to travel to `cat` and
+        // back on its real PTY thread. The number we report is the *simulated*
+        // time, which is the deterministic part.
+        let mut simulated_ms = 0u64;
+        while simulated_ms < 3000 && !*notified.borrow() {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(1));
+            cx.run_until_parked();
+            simulated_ms += 1;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let echoed = terminal.update(&mut cx.cx, |terminal, _| {
+            String::from_utf8_lossy(&terminal.snapshot().scrollback).contains('x')
+        });
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+
+        assert!(echoed, "`cat` never echoed the keystroke back; the harness is measuring the wrong thing");
+        assert!(
+            simulated_ms <= 16,
+            "a keystroke took {simulated_ms}ms of simulated time to reach a repaint; one frame is 16ms"
+        );
+    }
+
+    /// DIAGNOSTIC -- run by hand: `cargo test -p sirio_terminal
+    /// perf_idle_terminals_burn_cpu -- --ignored --nocapture`.
+    ///
+    /// Measures how much CPU the process burns over a fixed wall-clock window
+    /// with N terminals open and *producing no output at all*. An idle
+    /// terminal should cost approximately nothing.
+    ///
+    /// Last measured: eight idle terminals cost 19.7ms of CPU over a 2s window
+    /// against a 47µs baseline -- about 1% of one core. It was 36.4ms when the
+    /// owner thread ended every iteration in a flat
+    /// `thread::sleep(EVENT_POLL_INTERVAL)`; parking on the command channel
+    /// instead halved it. What remains is the 4ms timeout tick that drives the
+    /// PTY drain, one thread per terminal.
+    ///
+    /// Real, but far too small to have been the app-wide stutter on its own --
+    /// that was the per-frame main-thread stall measured by
+    /// `perf_grid_rebuild_per_frame`. Ignored because it sleeps for four
+    /// seconds and measures wall clock, which makes it a bad citizen in a
+    /// loaded workspace run.
+    #[test]
+    #[ignore = "diagnostic: sleeps 4s and measures wall-clock CPU"]
+    fn perf_idle_terminals_burn_cpu() {
+        fn process_cpu() -> Duration {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) },
+                0,
+                "getrusage failed"
+            );
+            let micros = (usage.ru_utime.tv_sec as u64) * 1_000_000
+                + usage.ru_utime.tv_usec as u64
+                + (usage.ru_stime.tv_sec as u64) * 1_000_000
+                + usage.ru_stime.tv_usec as u64;
+            Duration::from_micros(micros)
+        }
+
+        fn cpu_over_window(terminals: usize) -> Duration {
+            // `cat` sits on its PTY forever without writing a single byte, so
+            // every cycle measured below is Sirio's own, not the child's.
+            let mut handles = Vec::new();
+            for index in 0..terminals {
+                let working_directory = std::env::temp_dir().join(format!(
+                    "sirio-terminal-perf-idle-{}-{index}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+                let shell = TerminalShell::WithArguments {
+                    program: "/bin/cat".to_string(),
+                    args: Vec::new(),
+                };
+                handles.push(
+                    TerminalHandle::new(&working_directory, &shell).expect("spawn PTY"),
+                );
+            }
+            // Let the PTYs finish coming up so start-up cost is not counted.
+            std::thread::sleep(Duration::from_millis(300));
+            let before = process_cpu();
+            std::thread::sleep(Duration::from_secs(2));
+            let after = process_cpu();
+            drop(handles);
+            after - before
+        }
+
+        // Baseline first: a later measurement cannot be polluted by threads
+        // that an earlier one leaked.
+        let baseline = cpu_over_window(0);
+        let with_terminals = cpu_over_window(8);
+        let overhead = with_terminals.saturating_sub(baseline);
+        println!(
+            "idle CPU over 2s: baseline {baseline:?}, 8 terminals {with_terminals:?}, overhead {overhead:?}"
+        );
+        assert!(
+            overhead < Duration::from_millis(100),
+            "8 terminals with zero output burned {overhead:?} of CPU over a 2s wall-clock window (baseline {baseline:?})"
+        );
+    }
+
+    /// DIAGNOSTIC -- run by hand: `cargo test --release -p sirio_terminal
+    /// perf_grid_rebuild_per_frame -- --ignored --nocapture`.
+    ///
+    /// Times what `TerminalElement::prepaint` waits for on every single frame,
+    /// at a realistic maximised-window size. GPUI repaints at display refresh,
+    /// so this number has a hard budget: at 120Hz a frame is 8.3ms, and this
+    /// happens on the main thread, ahead of everything else the app draws.
+    ///
+    /// Measured at **5.93ms per frame for 10,000 cells in release**, which was
+    /// the app-wide stutter: with a terminal on screen the main thread gave up
+    /// most of every frame, per visible pane. Splitting that number was the
+    /// whole diagnosis -- only 0.6ms was the grid rebuild, and 5.3ms was the
+    /// blocking round-trip waiting on an owner thread that had just started a
+    /// flat 4ms nap. It is **354µs** now that the owner thread parks on its
+    /// command channel instead (see step 4 of its loop).
+    ///
+    /// What is left is the rebuild itself: ~35ns per cell, every frame, for
+    /// cells that overwhelmingly did not change. Making *that* go away means
+    /// the snapshot no longer being rebuilt from scratch -- dirty-region
+    /// tracking, or a retained grid the emulator mutates in place -- which is
+    /// a real architectural change and deliberately not bundled in here.
+    /// Ignored because it measures wall clock, which is exactly the kind of
+    /// test this repo already has trouble with under a loaded workspace run.
+    #[test]
+    #[ignore = "diagnostic: wall-clock measurement of the per-frame snapshot cost"]
+    fn perf_grid_rebuild_per_frame() {
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-perf-grid-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                // Fill the scrollback and the screen with real, attributed
+                // content rather than blanks -- a screen of spaces is not what
+                // an agent session looks like.
+                "for i in $(seq 1 4000); do printf 'line %s \\033[1;31mbold red\\033[0m plain text here\\n' \"$i\"; done; exec sleep 60".to_string(),
+            ],
+        };
+        let (handle, _events) = TerminalHandle::new(&working_directory, &shell).expect("spawn PTY");
+
+        // A maximised window on a 16" display, near enough.
+        handle.resize(200, 50, 8, 16);
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Warm once, so the measurement is steady-state and not first-touch.
+        let _ = handle.snapshot();
+
+        const FRAMES: u32 = 100;
+        let started = std::time::Instant::now();
+        let mut cells = 0usize;
+        for _ in 0..FRAMES {
+            let (rows, _) = handle.snapshot();
+            cells = rows.iter().map(|row| row.len()).sum();
+        }
+        let per_frame = started.elapsed() / FRAMES;
+        println!("grid rebuild: {per_frame:?} per frame over {cells} cells");
+        assert!(
+            per_frame < Duration::from_micros(2000),
+            "rebuilding the grid costs {per_frame:?} per frame ({cells} cells); an 8.3ms frame at 120Hz cannot absorb this plus the rest of the app"
+        );
     }
 
     #[gpui::test]
