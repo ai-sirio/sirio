@@ -61,11 +61,15 @@ end of the whole sub-project, not each family.
    tab context menu in `sirio/src/main.rs`. Behavioral contract is
    invariant: same items, same actions, dismissal on outside-click/Esc; the
    existing tests over these menus are the net.
-3. **input** — settings provider/cookie fields, `project_forms.rs` fields and
-   the browser address bar (`AddressEditor`) adopt `input::TextField`
-   (placeholder, undo, selection included). Requires wiring
-   `input::init(cx)` into app bootstrap (`sirio`'s `main.rs`) and into every
-   `TestAppContext` setup that exercises these fields.
+3. **input** — `project_forms.rs` fields and the browser address bar
+   (`AddressEditor`) adopt `input::TextField` (placeholder, undo, selection
+   included). Requires wiring `input::init(cx)` into app bootstrap and into
+   every `TestAppContext` setup that exercises these fields.
+   **Settings credential fields excluded (execution revision):** bezel 0.1.4's
+   `TextField` has no secure/password display mode — it always paints the
+   real shaped text. The OpenCode/Ollama credential fields render mask dots
+   and must never paint the secret, so they keep the existing masked caret
+   editor until bezel ships a secure input mode (worth an upstream issue).
 
 ## Constraints
 
