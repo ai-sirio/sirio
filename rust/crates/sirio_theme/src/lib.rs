@@ -10,7 +10,7 @@
 //! has a role — see [`ThemeColors::brand_coral`].
 //!
 //! Where each value comes from is recorded in
-//! `docs/linux-rewrite/THEME-PROVENANCE.md`. The re-runnable
+//! `docs/THEME-PROVENANCE.md`. The re-runnable
 //! `./Scripts/measure-theme.py` script reproduces the **historical**
 //! Waku measurements only. Current shell values are audited there through the
 //! IntelliJ screenshot fingerprint, dimensions, sampling method, and pixel
@@ -114,7 +114,7 @@ impl ThemeMode {
 ///
 /// Where each value comes from — measured off a reference frame, or chosen by
 /// us because no frame could settle it — is in
-/// `docs/linux-rewrite/THEME-PROVENANCE.md`.
+/// `docs/THEME-PROVENANCE.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColors {
     /// Translucent window-frame material. Its RGB value is paired with
@@ -261,7 +261,7 @@ impl ThemeColors {
             Appearance::Light => bezel::theme::Theme::light(),
         };
         // Sirio's brand coral. Part measured, part chosen, and the seam between
-        // the two is the whole point — see `THEME-PROVENANCE.md`.
+        // the two is the whole point — see `docs/THEME-PROVENANCE.md`.
         //
         // Measured: the hue, 24.3°, taken from the warm family the reference
         // frames actually render (their inline-code tone, `#E0A882`, agreeing
@@ -1532,14 +1532,17 @@ fn hairline(alpha: f32, appearance: Appearance) -> Rgba {
     }
 }
 
-/// The alpha ladder every wash and soft fill is drawn from. Four rungs,
-/// each half again the one below it (0.05 · 0.08 · 0.12 · 0.18), which is the
-/// smallest step that stays visible when two of them meet along an edge. Held
-/// by `the_veil_ladder_is_geometric`.
+/// The two alphas Sirio still chooses for itself.
+///
+/// This was a four-rung ladder (0.05 · 0.08 · 0.12 · 0.18), each rung half
+/// again the one below, because every wash token in the theme was `veil(rung)`
+/// and the ladder was the only free parameter in the lot. bezel now supplies
+/// the borders, hovers, selection and code wash, so two rungs have no consumer
+/// and the "ladder" no longer describes anything: what is left is the faint
+/// wash and the mid wash, quoted in dark-mode terms the way bezel quotes its
+/// own.
 const VEIL_FAINT: f32 = 0.05;
-const VEIL_LOW: f32 = 0.08;
 const VEIL_MID: f32 = 0.12;
-const VEIL_HIGH: f32 = 0.18;
 
 /// The former dark page, retained solely to preserve the terminal's established
 /// dark well while the shell moves to its new panel surface.
@@ -1559,6 +1562,7 @@ fn softened(color: Rgba, alpha: f32) -> Rgba {
 ///
 /// The inverse of [`hsla`], and only used to state one token as a
 /// transformation of another rather than as a fresh number.
+#[cfg(test)]
 fn hue_and_lightness(c: Rgba) -> (f32, f32) {
     let max = c.r.max(c.g).max(c.b);
     let min = c.r.min(c.g).min(c.b);
@@ -1581,6 +1585,7 @@ fn hue_and_lightness(c: Rgba) -> (f32, f32) {
 /// 0..1) to sRGB. Washes and overlays are written this way because they are
 /// specified as "N% neutral at M% opacity", which hsl states directly and hex
 /// cannot state at all.
+#[cfg(test)]
 fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
     let h = (h.rem_euclid(360.0)) / 360.0;
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
@@ -1610,6 +1615,66 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dark palette is bezel's.
+    ///
+    /// Sirio's dark palette used to be sampled off reference frames and pinned
+    /// hex by hex against a provenance document that has since been deleted.
+    /// It is now
+    /// bezel's, so what is worth pinning is the *link*, not the values: this
+    /// test fails the moment a `bezel` bump restyles the app, which is spec
+    /// risk R1 and the reason the dependency is pinned `=0.1.3`. The record of
+    /// where the values come from now lives in `docs/THEME-PROVENANCE.md`.
+    #[test]
+    fn dark_palette_comes_from_bezel() {
+        assert_palette_comes_from_bezel(Appearance::Dark, bezel::theme::Theme::dark());
+    }
+
+    /// The light palette is bezel's, for the same reason.
+    #[test]
+    fn light_palette_comes_from_bezel() {
+        assert_palette_comes_from_bezel(Appearance::Light, bezel::theme::Theme::light());
+    }
+
+    /// Every token Sirio takes from bezel, checked against bezel itself.
+    ///
+    /// Group C — the coral, the window-frame material and the terminal surface
+    /// — is deliberately absent: those are Sirio's own and have no bezel
+    /// counterpart to compare against.
+    fn assert_palette_comes_from_bezel(appearance: Appearance, bezel: bezel::theme::Theme) {
+        let sirio = ThemeColors::for_appearance(appearance);
+        for (name, ours, theirs) in [
+            ("bg", sirio.bg, bezel.bg),
+            ("surface", sirio.surface, bezel.surface),
+            ("surface_raised", sirio.surface_raised, bezel.surface_raised),
+            ("input_bg", sirio.input_bg, bezel.input_bg),
+            ("element_active", sirio.element_active, bezel.element_active),
+            ("element_hover", sirio.element_hover, bezel.element_hover),
+            ("text", sirio.text, bezel.text),
+            ("text_muted", sirio.text_muted, bezel.text_muted),
+            ("text_faint", sirio.text_faint, bezel.text_faint),
+            ("text_dim", sirio.text_dim, bezel.text_dim),
+            ("border", sirio.border, bezel.border),
+            ("border_strong", sirio.border_strong, bezel.border_strong),
+            ("selection", sirio.selection, bezel.selection),
+            ("code_wash", sirio.code_wash, bezel.code_wash),
+            ("solid", sirio.solid, bezel.solid),
+            ("on_solid", sirio.on_solid, bezel.on_solid),
+            ("accent", sirio.accent, bezel.accent),
+            ("success", sirio.success, bezel.success),
+            ("warning", sirio.warning, bezel.warning),
+            ("danger", sirio.danger, bezel.danger),
+            ("danger_muted", sirio.danger_muted, bezel.danger_muted),
+            ("diff_add", sirio.diff_add, bezel.diff_add),
+            ("diff_del", sirio.diff_del, bezel.diff_del),
+        ] {
+            assert_eq!(
+                ours,
+                Rgba::from(theirs),
+                "{appearance:?} {name} is not bezel's any more"
+            );
+        }
+    }
 
     #[test]
     fn radii_are_ratios_of_bezel_base_radius() {
@@ -1725,69 +1790,6 @@ mod tests {
     }
 
     #[test]
-    fn intellij_shell_palette_matches_the_approved_reference() {
-        let dark = Theme::dark();
-        let light = Theme::light();
-        assert_eq!(dark.bg, rgb_hex(0x222427));
-        assert_eq!(
-            dark.frame_surface,
-            Rgba {
-                r: 0x22 as f32 / 255.0,
-                g: 0x24 as f32 / 255.0,
-                b: 0x27 as f32 / 255.0,
-                a: 0.88,
-            }
-        );
-        assert_eq!(dark.surface, rgb_hex(0x18191A));
-        assert_eq!(dark.element_active, rgb_hex(0x2D2F34));
-        assert_eq!(dark.border_opaque, rgb_hex(0x27292D));
-        assert_eq!(dark.surface_raised, rgb_hex(0x1D1E21));
-        assert_eq!(dark.input_bg, scaled(dark.surface, 0.72));
-        assert_eq!(dark.text, rgb_hex(0xCBCDD4));
-        assert_eq!(dark.text_muted, rgb_hex(0x85888F));
-        assert_eq!(dark.text_faint, rgb_hex(0x686B71));
-
-        assert_eq!(light.bg, rgb_hex(0xDCE5E9));
-        assert_eq!(
-            light.frame_surface,
-            Rgba {
-                r: 0xDC as f32 / 255.0,
-                g: 0xE5 as f32 / 255.0,
-                b: 0xE9 as f32 / 255.0,
-                a: 0.82,
-            }
-        );
-        assert_eq!(light.surface, rgb_hex(0xF4F7F8));
-        assert_eq!(light.element_active, rgb_hex(0xD7E2E7));
-        assert_eq!(light.border_opaque, rgb_hex(0xCCD8DD));
-        assert_eq!(light.surface_raised, rgb_hex(0xFBFCFC));
-        assert_eq!(light.input_bg, scaled(light.surface, 0.93));
-        assert_eq!(light.text, rgb_hex(0x313A40));
-        assert_eq!(light.text_muted, rgb_hex(0x667379));
-        assert_eq!(light.text_faint, rgb_hex(0x68757B));
-
-        for theme in [dark, light] {
-            // The surface ladder's aliases are now one field each, so the
-            // compiler holds the identities these assertions used to hold.
-            // What is left is the separation the type system cannot say: a
-            // control the user clicks must stay tellable from a raised card.
-            assert_ne!(theme.element_active, theme.surface_raised);
-            // Active chrome, the caret and inline code used to be separate
-            // fields aliased onto the text neutral; they are now that one
-            // field, so the compiler holds what these assertions held. What is
-            // left is the part the type system cannot say: the pane's focus
-            // ring sits one step below the text neutral, so a focused pane is
-            // findable without shouting.
-            assert_ne!(theme.text_muted, theme.text);
-            assert_ne!(theme.text_muted, theme.border_opaque);
-            // The coral is still a value the theme hands out — the agent-colour
-            // picker offers it — but no role paints it any more. This is the
-            // assertion that catches the coral creeping back into the chrome.
-            assert_ne!(theme.text, theme.brand_coral);
-        }
-    }
-
-    #[test]
     fn shell_body_text_meets_wcag_aa_on_its_panel() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for (role, text) in [("primary", theme.text), ("secondary", theme.text_muted)] {
@@ -1821,24 +1823,17 @@ mod tests {
         }
     }
 
-    /// Every rung of the veil ladder is half again the rung below it.
+    /// The mid wash is still half again the faint one.
     ///
-    /// The ladder is the *only* free parameter left in the wash tokens — each
-    /// of the ten is `veil(rung)` and nothing else — so this is where the
-    /// arbitrariness is concentrated, deliberately, in four numbers with a
-    /// stated relationship instead of twenty without one.
+    /// Two rungs is what is left of the four-rung ladder; the relationship
+    /// between them is the whole of the arbitrariness Sirio still owns.
     #[test]
-    fn the_veil_ladder_is_geometric() {
-        let ladder = [VEIL_FAINT, VEIL_LOW, VEIL_MID, VEIL_HIGH];
-        for pair in ladder.windows(2) {
-            let ratio = pair[1] / pair[0];
-            assert!(
-                (1.4..=1.65).contains(&ratio),
-                "{} -> {} is a {ratio:.2}x step, not the declared ~1.5x",
-                pair[0],
-                pair[1]
-            );
-        }
+    fn the_two_remaining_rungs_keep_their_step() {
+        let ratio = VEIL_MID / VEIL_FAINT;
+        assert!(
+            (2.2..=2.6).contains(&ratio),
+            "{VEIL_FAINT} -> {VEIL_MID} is a {ratio:.2}x step"
+        );
     }
 
     /// Veil-backed structural washes remain neutral.
@@ -1987,51 +1982,6 @@ mod tests {
         }
     }
 
-    /// The four state hues are still the ones the original macOS app shipped.
-    ///
-    /// They are not measurable — neither reference frame contains an error, a
-    /// progress bar, a starred row or a terminal — so their provenance is that Sirio
-    /// already had them, for the same four meanings on the same tab strip.
-    ///
-    /// This used to read `App/AppTheme.swift` at compile time (`include_str!`)
-    /// so drift between two *live* files would fail the build. The Swift app
-    /// was removed once the Rust port covered the inventory; `App/AppTheme.swift`
-    /// can no longer drift because it no longer exists in the tree. The four
-    /// triples below are copied byte-for-byte from `static let tab* = dynamic(...)`
-    /// in `App/AppTheme.swift` at commit 5430d7bf, the last commit containing the
-    /// Swift tree (`git show 5430d7bf:App/AppTheme.swift`) — this is now a frozen
-    /// provenance record, not a live cross-check, and that is a deliberate
-    /// narrowing of what the test proves, not an oversight.
-    #[test]
-    fn the_state_hues_are_the_ones_the_swift_app_shipped() {
-        // (light r, light g, light b, dark r, dark g, dark b)
-        let declared: [(&str, (f32, f32, f32), (f32, f32, f32)); 4] = [
-            ("tabNeedsInput", (0.67, 0.42, 0.02), (0.95, 0.72, 0.28)),
-            ("tabDone", (0.10, 0.45, 0.22), (0.48, 0.78, 0.57)),
-            ("tabError", (0.68, 0.12, 0.17), (0.94, 0.43, 0.47)),
-            ("tabFocusAccent", (0.24, 0.38, 0.78), (0.55, 0.64, 1.00)),
-        ];
-        let declared_for = |token: &str, dark: bool| -> (f32, f32, f32) {
-            let (_, light, dark_rgb) = declared
-                .iter()
-                .find(|(name, _, _)| *name == token)
-                .unwrap_or_else(|| panic!("{token} is missing from the frozen Swift record"));
-            if dark { *dark_rgb } else { *light }
-        };
-
-        for (dark_mode, theme) in [(true, Theme::dark()), (false, Theme::light())] {
-            for (token, ours) in [
-                ("tabNeedsInput", theme.warning),
-                ("tabDone", theme.success),
-                ("tabError", theme.danger),
-                ("tabFocusAccent", theme.accent),
-            ] {
-                let (r, g, b) = declared_for(token, dark_mode);
-                expect_color(ours, (r, g, b, 1.0));
-            }
-        }
-    }
-
     /// The coral must stay legible on the surface it is painted on, in both
     /// appearances.
     ///
@@ -2093,295 +2043,6 @@ mod tests {
                 "{name}: {actual} != {expected}"
             );
         }
-    }
-
-    /// The dark palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
-    ///
-    /// The assertions cover the current shell values recorded in provenance.
-    /// `./Scripts/measure-theme.py` reproduces historical Waku values
-    /// only; the current shell is audited via the IntelliJ screenshot
-    /// fingerprint, dimensions, method, and sampling rectangles documented
-    /// there.
-    #[test]
-    fn dark_palette_matches_recorded_provenance() {
-        let theme = Theme::dark();
-        let f = |r, g, b| (r, g, b, 1.0);
-
-        expect_color(
-            theme.bg,
-            f(
-                0x22 as f32 / 255.0,
-                0x24 as f32 / 255.0,
-                0x27 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.surface,
-            f(
-                0x18 as f32 / 255.0,
-                0x19 as f32 / 255.0,
-                0x1A as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.surface,
-            f(
-                0x18 as f32 / 255.0,
-                0x19 as f32 / 255.0,
-                0x1A as f32 / 255.0,
-            ),
-        );
-        // The well: the measured 0x1A surface stepped down by the declared
-        // 0.72, spelled out here rather than restated as a hex so the test
-        // fails if either half of the derivation moves.
-        let well = 0x1A as f32 * 0.72 / 255.0;
-        expect_color(theme.terminal_surface, f(well, well, well));
-        expect_color(
-            theme.surface_raised,
-            f(
-                0x1D as f32 / 255.0,
-                0x1E as f32 / 255.0,
-                0x21 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.surface_raised,
-            f(
-                0x1D as f32 / 255.0,
-                0x1E as f32 / 255.0,
-                0x21 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.input_bg,
-            f(
-                0x18 as f32 * 0.72 / 255.0,
-                0x19 as f32 * 0.72 / 255.0,
-                0x1A as f32 * 0.72 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.brand_coral,
-            f(
-                0xE0 as f32 / 255.0,
-                0x8B as f32 / 255.0,
-                0x52 as f32 / 255.0,
-            ),
-        );
-        // Active chrome is the text neutral, not the coral.
-        expect_color(
-            theme.text,
-            f(
-                0xCB as f32 / 255.0,
-                0xCD as f32 / 255.0,
-                0xD4 as f32 / 255.0,
-            ),
-        );
-        // Swift `AppTheme.tabFocusAccent`, dark.
-        expect_color(theme.accent, f(0.55, 0.64, 1.00));
-        expect_color(
-            theme.text,
-            f(
-                0xCB as f32 / 255.0,
-                0xCD as f32 / 255.0,
-                0xD4 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.text_muted,
-            f(
-                0x85 as f32 / 255.0,
-                0x88 as f32 / 255.0,
-                0x8F as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.text_faint,
-            f(
-                0x68 as f32 / 255.0,
-                0x6B as f32 / 255.0,
-                0x71 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.text_dim,
-            f(
-                0x57 as f32 / 255.0,
-                0x57 as f32 / 255.0,
-                0x57 as f32 / 255.0,
-            ),
-        );
-        // The three state hues, digit for digit from `App/AppTheme.swift`'s
-        // `tabNeedsInput` / `tabDone` / `tabError`, dark variants.
-        expect_color(theme.warning, f(0.95, 0.72, 0.28));
-        expect_color(theme.success, f(0.48, 0.78, 0.57));
-        expect_color(theme.danger, f(0.94, 0.43, 0.47));
-        // `tab_needs_input`'s hue (39.4°) and lightness (0.615) at s = 1.
-        expect_color(theme.favorite, f(1.0, 0.7357, 0.23));
-        expect_color(
-            theme.text,
-            f(
-                0xCB as f32 / 255.0,
-                0xCD as f32 / 255.0,
-                0xD4 as f32 / 255.0,
-            ),
-        );
-        // An inverted chip in dark is the *light* page and the light page's
-        // text — the measured pair, swapped.
-        expect_color(
-            theme.solid,
-            f(
-                0xF4 as f32 / 255.0,
-                0xF7 as f32 / 255.0,
-                0xF8 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.on_solid,
-            f(
-                0x31 as f32 / 255.0,
-                0x3A as f32 / 255.0,
-                0x40 as f32 / 255.0,
-            ),
-        );
-
-        // Hairlines, hover, and overlay remain neutral veils; panel seams use
-        // the separate opaque shell role.
-        expect_color(theme.element_hover, (1.0, 1.0, 1.0, VEIL_LOW));
-        expect_color(theme.overlay, (1.0, 1.0, 1.0, VEIL_FAINT));
-        expect_color(theme.border, (1.0, 1.0, 1.0, VEIL_LOW));
-        expect_color(
-            theme.border_opaque,
-            f(
-                0x27 as f32 / 255.0,
-                0x29 as f32 / 255.0,
-                0x2D as f32 / 255.0,
-            ),
-        );
-        // Selection is the top rung of the veil ladder, neither a turned-down
-        // coral nor a borrowed browser blue.
-        expect_color(theme.selection, (1.0, 1.0, 1.0, VEIL_HIGH));
-    }
-
-    /// The light palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
-    #[test]
-    fn light_palette_matches_recorded_provenance() {
-        let theme = Theme::light();
-        let f = |r, g, b| (r, g, b, 1.0);
-
-        expect_color(
-            theme.bg,
-            f(
-                0xDC as f32 / 255.0,
-                0xE5 as f32 / 255.0,
-                0xE9 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.surface,
-            f(
-                0xF4 as f32 / 255.0,
-                0xF7 as f32 / 255.0,
-                0xF8 as f32 / 255.0,
-            ),
-        );
-        expect_color(theme.terminal_surface, f(1.0, 1.0, 1.0));
-        expect_color(
-            theme.surface_raised,
-            f(
-                0xFB as f32 / 255.0,
-                0xFC as f32 / 255.0,
-                0xFC as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.brand_coral,
-            f(
-                0xAD as f32 / 255.0,
-                0x58 as f32 / 255.0,
-                0x1F as f32 / 255.0,
-            ),
-        );
-        // Swift `AppTheme.tabFocusAccent`, light.
-        expect_color(theme.accent, f(0.24, 0.38, 0.78));
-        expect_color(
-            theme.text,
-            f(
-                0x31 as f32 / 255.0,
-                0x3A as f32 / 255.0,
-                0x40 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.text_muted,
-            f(
-                0x66 as f32 / 255.0,
-                0x73 as f32 / 255.0,
-                0x79 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.text_faint,
-            f(
-                0x68 as f32 / 255.0,
-                0x75 as f32 / 255.0,
-                0x7B as f32 / 255.0,
-            ),
-        );
-        // `App/AppTheme.swift`'s three state hues, light variants.
-        expect_color(theme.warning, f(0.67, 0.42, 0.02));
-        expect_color(theme.success, f(0.10, 0.45, 0.22));
-        expect_color(theme.danger, f(0.68, 0.12, 0.17));
-        // `tab_needs_input`'s hue (36.9°) and lightness (0.345) at s = 1.
-        expect_color(theme.favorite, f(0.69, 0.4246, 0.0));
-        // Light veils are pure black, same ladder.
-        expect_color(theme.element_hover, (0.0, 0.0, 0.0, VEIL_LOW));
-        expect_color(theme.overlay, (0.0, 0.0, 0.0, VEIL_FAINT));
-        expect_color(theme.border, (0.0, 0.0, 0.0, VEIL_LOW));
-        expect_color(
-            theme.border_opaque,
-            f(
-                0xCC as f32 / 255.0,
-                0xD8 as f32 / 255.0,
-                0xDD as f32 / 255.0,
-            ),
-        );
-        expect_color(theme.selection, (0.0, 0.0, 0.0, VEIL_HIGH));
-        // The well, mirrored: the light page has far less room below it, so
-        // the step is 0.93 rather than dark's 0.72.
-        expect_color(
-            theme.input_bg,
-            f(
-                0xF4 as f32 * 0.93 / 255.0,
-                0xF7 as f32 * 0.93 / 255.0,
-                0xF8 as f32 * 0.93 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.text,
-            f(
-                0x31 as f32 / 255.0,
-                0x3A as f32 / 255.0,
-                0x40 as f32 / 255.0,
-            ),
-        );
-        // And in light, an inverted chip is the *dark* page and its text.
-        expect_color(
-            theme.solid,
-            f(
-                0x18 as f32 / 255.0,
-                0x19 as f32 / 255.0,
-                0x1A as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.on_solid,
-            f(
-                0xCB as f32 / 255.0,
-                0xCD as f32 / 255.0,
-                0xD4 as f32 / 255.0,
-            ),
-        );
     }
 
     #[test]
