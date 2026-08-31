@@ -55,7 +55,7 @@ pub use db::AppDatabase;
 pub use error::PersistenceError;
 pub use migrations::{CURRENT_SCHEMA_VERSION, migrate_up_to};
 pub use model::{
-    AgentAccountRecord, AppSettings, AppearanceMode, ChatEntry, ChatPermissionOption,
+    AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChatEntry, ChatPermissionOption,
     ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatToolLocation, ChatTranscript,
     ChatTurn, FileIconTheme, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, TabRecord, TabStateRecord, WorktreeRecord, settings_keys, settings_ranges,

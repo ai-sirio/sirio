@@ -20,7 +20,7 @@ use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     AgentAccountRecord, AppSettings, AppearanceMode, ChatSessionSummary, ChatTranscript, ChatTurn,
-    FileIconTheme, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord, SidebarState,
+    BaseColor, FileIconTheme, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord, SidebarState,
     TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
 
@@ -926,6 +926,9 @@ impl AppDatabase {
                 13,
             );
         }
+        if let Some(value) = self.setting_value(settings_keys::BASE_COLOR)? {
+            defaults.base_color = BaseColor::parse(&value).unwrap_or(BaseColor::Neutral);
+        }
         if let Some(value) = self.setting_value(settings_keys::FILE_ICON_THEME)? {
             defaults.file_icon_theme =
                 FileIconTheme::parse(&value).unwrap_or(FileIconTheme::SfSymbols);
@@ -1028,6 +1031,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::TERMINAL_FONT_SIZE,
             &settings.terminal_font_size.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::BASE_COLOR,
+            settings.base_color.raw(),
         )?;
         set_setting(
             &transaction,
