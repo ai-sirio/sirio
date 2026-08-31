@@ -40,8 +40,8 @@
 //! human surface is the honest one.
 
 use gpui::{
-    AnyElement, App, AppContext, Context, EventEmitter, FontWeight, InteractiveElement,
-    PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
+    InteractiveElement, KeyDownEvent, PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -448,6 +448,13 @@ pub struct ChangesTab {
     /// and asks it to focus a path in the same tick always races it).
     /// Replayed once the next snapshot lands, then cleared either way.
     pending_focus: Option<PathBuf>,
+    /// #325: the keyboard-selected file row, keyed like `expanded_changes`
+    /// because one path can appear in two sections and Enter has to act on
+    /// the one the user is actually on.
+    selected_change: Option<(ChangeSection, PathBuf)>,
+    /// Focus for the list, so `on_key_down` reaches it. Built lazily at
+    /// first render, the way the Files tree's is.
+    list_focus: Option<FocusHandle>,
 }
 
 impl ChangesTab {
@@ -494,6 +501,8 @@ impl ChangesTab {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            selected_change: None,
+            list_focus: None,
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -800,6 +809,64 @@ impl ChangesTab {
         .detach();
     }
 
+    /// #325: every file row currently drawn, in draw order, as the pair the
+    /// selection is keyed by. Section headers and diff bands are skipped —
+    /// only rows Enter can act on are navigable.
+    fn selectable_rows(&self, mode: DiffViewMode) -> Vec<(ChangeSection, PathBuf)> {
+        self.section_rows(mode)
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .filter_map(|row| match row {
+                ChangeRow::File { section, entry, .. } => Some((section, entry.path)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn select_change(&mut self, row: (ChangeSection, PathBuf), cx: &mut Context<Self>) {
+        if self.selected_change.as_ref() != Some(&row) {
+            self.selected_change = Some(row);
+            cx.notify();
+        }
+    }
+
+    /// #325: up/down move the selection, Enter promotes it — the keyboard
+    /// path to what "Open diff" does with the mouse. Inside the Changes tab
+    /// there is nothing to promote *to* (the tab is already the destination),
+    /// so Enter expands the row there instead, matching what a click does.
+    fn on_change_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.selectable_rows(DiffViewMode::get(cx));
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_change
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| row == selected));
+        match event.keystroke.key.as_str() {
+            "down" => {
+                let index = current.map_or(0, |index| (index + 1).min(rows.len() - 1));
+                self.select_change(rows[index].clone(), cx);
+            }
+            "up" => {
+                let index = current.unwrap_or(0).saturating_sub(1);
+                self.select_change(rows[index].clone(), cx);
+            }
+            "enter" | "return" => {
+                let Some(index) = current else {
+                    return;
+                };
+                let (section, path) = rows[index].clone();
+                if self.embedded_in_panel {
+                    cx.emit(ChangesTabActionEvent::OpenDiff(path));
+                } else {
+                    self.toggle_change(section, &path, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_change(&mut self, section: ChangeSection, path: &Path, cx: &mut Context<Self>) {
         let key = (section, path.to_path_buf());
         if self.expanded_changes.contains(&key) {
@@ -1076,6 +1143,7 @@ impl ChangesTab {
         row: ChangeRow,
         allows_staging: bool,
         draws_open_diff: bool,
+        selected: Option<&(ChangeSection, PathBuf)>,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> AnyElement {
@@ -1086,7 +1154,9 @@ impl ChangesTab {
                 stat,
                 drag_payload,
                 expanded,
-            } => Self::render_change_file(
+            } => {
+                let is_selected = selected == Some(&(section, entry.path.clone()));
+                Self::render_change_file(
                 section,
                 entry,
                 stat,
@@ -1094,10 +1164,12 @@ impl ChangesTab {
                 expanded,
                 allows_staging,
                 draws_open_diff,
+                is_selected,
                 entity,
                 theme,
             )
-            .into_any_element(),
+            .into_any_element()
+            }
             ChangeRow::Hunk {
                 section,
                 path,
@@ -1306,6 +1378,7 @@ impl ChangesTab {
         expanded: bool,
         allows_staging: bool,
         draws_open_diff: bool,
+        is_selected: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -1352,6 +1425,9 @@ impl ChangesTab {
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.text)
             .hover(|style| style.bg(theme.element_hover))
+            // #325: the keyboard selection has to be visible, or up/down
+            // move something the user cannot see.
+            .when(is_selected, |this| this.bg(theme.element_hover))
             .when_some(drag_payload, |this, payload| {
                 this.on_drag(payload, move |_, _, _, cx| {
                     cx.new(|_| DiffDragPreview { theme })
@@ -1359,6 +1435,10 @@ impl ChangesTab {
             })
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| {
+                    // Clicking a row is also how it becomes the row Enter
+                    // acts on -- otherwise mouse and keyboard would track
+                    // two different "current" rows.
+                    tab.select_change((section, path_for_toggle.clone()), cx);
                     tab.toggle_change(section, &path_for_toggle, cx)
                 });
             })
@@ -2002,6 +2082,12 @@ impl ChangesTab {
         let row_entity = entity;
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
+        let selected = self.selected_change.clone();
+        let list_focus = self
+            .list_focus
+            .as_ref()
+            .expect("the changes list focus is initialized in render")
+            .clone();
         // Both modes render into exactly the width the surface was given —
         // see `SPLIT_DIVIDER_WIDTH` for the two attempts at doing otherwise
         // and what each one cost. `min_w(px(0.0))` stays because a scroll
@@ -2011,6 +2097,8 @@ impl ChangesTab {
         div()
             .id("changes-list")
             .debug_selector(|| "changes-list".into())
+            .track_focus(&list_focus)
+            .on_key_down(cx.listener(Self::on_change_key))
             .flex_1()
             .min_h(px(0.0))
             .min_w(px(0.0))
@@ -2035,6 +2123,7 @@ impl ChangesTab {
                         row,
                         allows_staging,
                         draws_open_diff,
+                        selected.as_ref(),
                         row_entity.clone(),
                         theme,
                     ));
@@ -2091,6 +2180,9 @@ impl Render for ChangesTab {
         if self.refresh_suspended {
             self.refresh_suspended = false;
             self.refresh(cx);
+        }
+        if self.list_focus.is_none() {
+            self.list_focus = Some(cx.focus_handle().tab_stop(true));
         }
         let entity = cx.entity();
         let mode = DiffViewMode::get(cx);
@@ -2653,6 +2745,118 @@ mod tests {
         let git_error = tab.read_with(&cx.cx, |tab, _| tab.git_error.clone());
         panic!(
             "changes tab condition never became true within the pump budget: report={report:?}, git_error={git_error:?}"
+        );
+    }
+
+    /// #325: the keyboard path to what "Open diff" does with the mouse. In
+    /// the panel Enter promotes; in the tab there is nothing to promote to,
+    /// so it expands the row the way a click does.
+    #[gpui::test]
+    async fn return_promotes_the_selected_change_row_only_from_the_panel(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| ChangesTab::in_right_panel(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.cx.update(|app| {
+            app.subscribe(&tab, move |_, event: &ChangesTabActionEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+
+        // Down selects the first row; nothing was selected before it.
+        assert_eq!(
+            tab.read_with(&cx.cx, |tab, _| tab.selected_change.clone()),
+            None,
+            "no row is selected until the keyboard picks one"
+        );
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed-file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            tab.read_with(&cx.cx, |tab, _| tab
+                .selected_change
+                .as_ref()
+                .map(|(_, path)| path.clone())),
+            Some(PathBuf::from("tracked.txt")),
+            "clicking a row makes it the row Enter acts on"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                ChangesTabActionEvent::OpenDiff(path) if path == &PathBuf::from("tracked.txt")
+            )),
+            "Return promotes the selected row through the real event path"
+        );
+    }
+
+    /// #325: the same key inside the Changes tab expands rather than
+    /// promoting -- the tab is already the destination `OpenDiff` reveals.
+    #[gpui::test]
+    async fn return_expands_the_selected_row_inside_the_changes_tab(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.cx.update(|app| {
+            app.subscribe(&tab, move |_, event: &ChangesTabActionEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+
+        // The click both selects and expands, which is also what focuses the
+        // list -- Enter cannot reach a surface nothing put focus on.
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed-file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let expanded = |cx: &VisualTestContext| {
+            tab.read_with(&cx.cx, |tab, _| {
+                tab.is_expanded(ChangeSection::Changed, Path::new("tracked.txt"))
+            })
+        };
+        assert!(expanded(&cx), "the click expanded the row");
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            !expanded(&cx),
+            "Return toggles the selected row where there is nothing to promote to"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(expanded(&cx), "and toggles it back");
+        assert!(
+            events.borrow().is_empty(),
+            "the tab must not emit OpenDiff at itself"
         );
     }
 
@@ -3779,6 +3983,8 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            selected_change: None,
+            list_focus: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -3840,6 +4046,8 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            selected_change: None,
+            list_focus: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -4123,6 +4331,8 @@ mod tests {
             refresh_suspended: false,
             suspended_ticks: 0,
             pending_focus: None,
+            selected_change: None,
+            list_focus: None,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {

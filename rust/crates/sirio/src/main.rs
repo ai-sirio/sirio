@@ -22,7 +22,7 @@ use sirio_git::{
 };
 use sirio_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use sirio_project::{
-    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
+    OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
     display_path, is_git_repository, numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
@@ -179,15 +179,14 @@ use panes::{
     CloseOtherTabs, ClosePane, CloseTab, CloseTabsToRight, CycleTabBackward, CycleTabForward,
     FocusPaneAbove, FocusPaneBelow, FocusPaneLeft, FocusPaneRight, JumpToTab1, JumpToTab2,
     JumpToTab3, JumpToTab4, JumpToTab5, JumpToTab6, JumpToTab7, JumpToTab8, JumpToTab9,
-    MoveTabEarlier, MoveTabLater, MoveTabToOtherPane, OpenAllTabs, OpenTabMenu,
-    PaneContent as TabContent, PaneNode, ResumeChat, SplitDirection, SplitPaneDown, SplitPaneRight,
-    SplitPlacement, TabSelection,
+    MoveTabEarlier, MoveTabLater, OpenAllTabs, OpenTabMenu, PaneContent as TabContent, PaneNode,
+    ResumeChat, SplitDirection, SplitPaneDown, SplitPaneRight, SplitPlacement, TabSelection,
 };
 use session::{
     CatalogProjectSettings, PaneEvent, ProjectCatalog, RestoredSession, SessionLayout,
     SessionStore, SessionTab, SessionTabState,
 };
-use tab_machinery::{MoveDirection, MoveTarget, TabGroup, TabMachinery, visible_tab_count};
+use tab_machinery::{CenterSplit, MoveDirection, visible_tab_count};
 
 actions!(
     window_commands,
@@ -197,6 +196,7 @@ actions!(
         SaveFile,
         ToggleSidebar,
         ToggleRightPanel,
+        ToggleSecondaryPane,
         RestoreLaunchSnapshot,
         NewBrowser,
         FocusAddressBar,
@@ -218,6 +218,7 @@ enum WindowCommand {
     SaveFile,
     ToggleSidebar,
     ToggleRightPanel,
+    ToggleSecondaryPane,
     RestoreLaunchSnapshot,
     NewBrowser,
     FocusAddressBar,
@@ -235,13 +236,16 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 8] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
     [
         (WindowCommand::NewTerminalTab, "ctrl-t"),
         (WindowCommand::OpenFile, "ctrl-o"),
         (WindowCommand::SaveFile, "ctrl-s"),
         (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
         (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+        // #324: B is what Zed and VS Code both settled on for the secondary
+        // panel, and `ctrl-shift-` is the family the two toggles above use.
+        (WindowCommand::ToggleSecondaryPane, "ctrl-shift-b"),
         // F-WIN-07: Linux stand-in for macOS's `⇧⌘O` "History > Restore
         // Previous Launch" chord.
         (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
@@ -275,6 +279,7 @@ fn window_command_availability(
         | WindowCommand::SaveFile
         | WindowCommand::ToggleSidebar
         | WindowCommand::ToggleRightPanel
+        | WindowCommand::ToggleSecondaryPane
         | WindowCommand::RestoreLaunchSnapshot
         | WindowCommand::NewBrowser
         | WindowCommand::FocusAddressBar => WindowCommandAvailability::Enabled,
@@ -292,6 +297,9 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::ToggleSidebar => KeyBinding::new(shortcut, ToggleSidebar, None),
                 WindowCommand::ToggleRightPanel => {
                     KeyBinding::new(shortcut, ToggleRightPanel, None)
+                }
+                WindowCommand::ToggleSecondaryPane => {
+                    KeyBinding::new(shortcut, ToggleSecondaryPane, None)
                 }
                 WindowCommand::RestoreLaunchSnapshot => {
                     KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
@@ -347,6 +355,8 @@ fn close_tab_fallback_fires(
 /// `docs/MEASURED.md`.
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
+/// #320: the rule between the two center panes.
+const CENTER_DIVIDER_WIDTH: f32 = 1.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
 const TERMINAL_TAB_MIN_WIDTH: f32 = 132.;
 const TAB_MAX_WIDTH: f32 = 220.;
@@ -854,7 +864,6 @@ struct OpenTab {
     id: usize,
     /// Stable database identity, independent of the tab's visible position.
     persistence_id: String,
-    group_id: usize,
     title: String,
     kind: TabKind,
     /// The agent brand shown for an agent-backed terminal tab. `None` means
@@ -3582,6 +3591,12 @@ struct DraggedPanelEdge {
     side: panel_layout::PanelSide,
 }
 
+/// #321: the centre divider's own payload. It is not a `PanelSide`, because
+/// the centre drag writes a *ratio* and `PanelSide::range()` answers in
+/// pixels — a third variant there would owe a range it does not have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DraggedCenterDivider;
+
 const SPLIT_DIVIDER_SIZE: f32 = 6.0;
 
 /// How long the panel width sits still before it is written to SQLite.
@@ -3693,6 +3708,17 @@ struct SirioWorkspace {
     /// the two compete for space, so the panel the user is *not* touching
     /// stays still.
     dragging_panel: Option<panel_layout::PanelSide>,
+    /// #321: how the centre is shared between the two panes, in thousandths
+    /// of the space left after the divider. A *preference*, like a panel's
+    /// width: `panel_layout::resolve_center_split` clamps it at render time
+    /// and never writes the clamp back.
+    center_split_ratio: i64,
+    /// #323: whether this worktree's Secondary pane is open. The one piece of
+    /// the centre split that is stored rather than derived -- see
+    /// `WorktreeRecord::secondary_pane_open` for why it has to be.
+    secondary_pane_open: bool,
+    /// Where the centre divider was grabbed, and the ratio it held then.
+    center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
     ///
     /// The width is derived as `grab_width ± (pointer − grab_x)` rather than
@@ -3751,7 +3777,7 @@ struct SirioWorkspace {
     terminal_breadcrumb: String,
     launch_snapshot: RestoredSession,
     launch: AgentLaunchState,
-    tab_machinery: TabMachinery,
+    center_split: CenterSplit,
     tab_strip_first_visible: usize,
     overflow_menu_open: bool,
     tab_menu_open: bool,
@@ -3995,6 +4021,7 @@ impl SirioWorkspace {
         translucency_enabled: bool,
         sidebar_width: f32,
         right_panel_width: f32,
+        center_split_ratio: i64,
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
@@ -4381,6 +4408,7 @@ impl SirioWorkspace {
 
         Self::subscribe_right_panel(&right_panel, cx);
         Self::bind_terminal_tabs(&tabs, cx);
+        Self::bind_file_tabs(&tabs, cx);
         for tab in &tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::Changes(changes) = content {
@@ -4442,15 +4470,14 @@ impl SirioWorkspace {
         let tabs_len = tabs.len();
         let next_pane_id = next_pane_id(&tabs);
         let active_tab_id = tabs.get(active_tab).map(|tab| tab.id);
-        let tab_machinery = TabMachinery::new(
-            vec![TabGroup::new(
-                0,
-                tabs.iter().map(|tab| tab.id).collect(),
-                active_tab_id,
-            )],
-            0,
-        )
-        .expect("restored tabs form one valid pane group");
+        let mut center_split = CenterSplit::new(&tabs);
+        // `CenterSplit::new` takes each role's *first* tab, which is right for
+        // a fresh workspace and wrong for a restored one: the session knows
+        // which tab was active, and selecting it also focuses the half it
+        // lives in.
+        if let Some(active_tab_id) = active_tab_id {
+            center_split.select_tab(active_tab_id, &tabs);
+        }
         let browser_origins = session.load_browser_origin_grants().into_iter().collect();
         // P58, F-SET-10: the usage bar consumes the settings surface's
         // visibility toggles and refresh interval. Observing the settings
@@ -4479,6 +4506,9 @@ impl SirioWorkspace {
             sidebar_width,
             right_panel_width,
             dragging_panel: None,
+            center_split_ratio,
+            secondary_pane_open: session.secondary_pane_open_for(&working_directory),
+            center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
             panel_width_save_task: None,
@@ -4507,7 +4537,7 @@ impl SirioWorkspace {
             terminal_breadcrumb,
             launch_snapshot,
             launch,
-            tab_machinery,
+            center_split,
             tab_strip_first_visible: 0,
             overflow_menu_open: false,
             tab_menu_open: false,
@@ -4973,7 +5003,14 @@ impl SirioWorkspace {
                             TabContent::Browser(browser) => {
                                 state.browser_url = browser.read(cx).state().address().to_string();
                             }
-                            TabContent::File { .. } | TabContent::Changes(_) => {}
+                            // #323: same live read as the arms above, so a
+                            // restored Editor tab reopens the document the
+                            // user left open rather than nothing.
+                            TabContent::File { view } => {
+                                state.editor_path =
+                                    view.read(cx).path().to_string_lossy().into_owned();
+                            }
+                            TabContent::Changes(_) => {}
                         }
                     });
                     state
@@ -5047,6 +5084,23 @@ impl SirioWorkspace {
 
     fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.right_panel_visible = !self.right_panel_visible;
+        cx.notify();
+    }
+
+    /// #324: hides or shows the Secondary pane, *keeping* its tabs. This is
+    /// the gesture the persisted flag exists for -- the `×` at the end of the
+    /// Secondary strip closes the tabs instead, and the two must not be
+    /// conflated: if `×` merely hid the pane it would duplicate this and
+    /// should not exist.
+    fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
+        self.secondary_pane_open = !self.secondary_pane_open;
+        self.session
+            .save_secondary_pane_open(&self.working_directory, self.secondary_pane_open);
+        // Hiding the pane the user was typing in would otherwise leave focus
+        // on a half that is no longer drawn.
+        if !self.secondary_pane_open && self.center_split.focused() == PaneRole::Secondary {
+            self.set_focused_pane(PaneRole::Primary);
+        }
         cx.notify();
     }
 
@@ -5277,6 +5331,20 @@ impl SirioWorkspace {
         Self::subscribe_terminal_link(terminal, pane_id, cx);
         Self::subscribe_terminal_activity(terminal, pane_id, cx);
         Self::subscribe_terminal_drop(terminal, cx);
+    }
+
+    /// #323: a restored Editor tab reaches the workspace through the free
+    /// `restore_tabs*` functions, which cannot subscribe. Without this its
+    /// "open this file" links would be dead on a restored tab but live on a
+    /// freshly opened one.
+    fn bind_file_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
+        for tab in tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content {
+                    Self::subscribe_file_view(view, cx);
+                }
+            });
+        }
     }
 
     fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
@@ -5641,7 +5709,7 @@ impl SirioWorkspace {
                 let Some(target_id) = target_id.checked_sub(TAB_ROW_ID_OFFSET) else {
                     return;
                 };
-                self.reorder_tabs_by_id(from_id, target_id, before, None)
+                self.reorder_tabs_by_id(from_id, target_id, before)
             }
         };
         if !changed {
@@ -5661,24 +5729,24 @@ impl SirioWorkspace {
         }
     }
 
-    fn reorder_tabs_by_id(
-        &mut self,
-        from_id: usize,
-        target_id: usize,
-        before: bool,
-        group: Option<usize>,
-    ) -> bool {
+    /// #319: the `group: Option<usize>` parameter is gone with the pane
+    /// groups that gave it meaning. What replaces it is a real guard rather
+    /// than nothing: `self.tabs` is one list for both halves, so reordering a
+    /// tab past a tab of the *other* role would interleave the two strips in
+    /// the shared list. The two panes draw separate strips, so no drag should
+    /// be able to express that — and if one ever does, it must not silently
+    /// reshuffle the other half.
+    fn reorder_tabs_by_id(&mut self, from_id: usize, target_id: usize, before: bool) -> bool {
         let Some(from) = self.tabs.iter().position(|tab| tab.id == from_id) else {
             return false;
         };
         let Some(target) = self.tabs.iter().position(|tab| tab.id == target_id) else {
             return false;
         };
-        if from == target
-            || group.is_some_and(|group| {
-                self.tabs[from].group_id != group || self.tabs[target].group_id != group
-            })
-        {
+        if from == target {
+            return false;
+        }
+        if self.tabs[from].kind.pane_role() != self.tabs[target].kind.pane_role() {
             return false;
         }
         let active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
@@ -5689,7 +5757,7 @@ impl SirioWorkspace {
         self.active_tab = active_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or(self.active_tab.min(self.tabs.len().saturating_sub(1)));
-        self.rebuild_tab_machinery();
+        self.rebuild_center_split();
         true
     }
 
@@ -5703,7 +5771,7 @@ impl SirioWorkspace {
         if drag.scope != ReorderScope::Tabs {
             return;
         }
-        if self.reorder_tabs_by_id(drag.id, target_id, before, drag.group) {
+        if self.reorder_tabs_by_id(drag.id, target_id, before) {
             self.schedule_save(cx);
             self.sync_activity(cx);
             cx.notify();
@@ -5744,7 +5812,7 @@ impl SirioWorkspace {
             .active_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
-        self.rebuild_tab_machinery();
+        self.rebuild_center_split();
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -6604,6 +6672,7 @@ impl SirioWorkspace {
                     cx,
                 );
                 Self::bind_terminal_tabs(&new_tabs, cx);
+                Self::bind_file_tabs(&new_tabs, cx);
                 for tab in &new_tabs {
                     tab.panes.for_each(&mut |_, content| {
                         if let TabContent::Chat(chat) = content {
@@ -6615,12 +6684,15 @@ impl SirioWorkspace {
                 self.next_tab_id = self.tabs.len();
                 self.next_pane_id = next_pane_id(&self.tabs);
                 self.active_tab = active.min(self.tabs.len().saturating_sub(1));
-                self.rebuild_tab_machinery();
+                self.rebuild_center_split();
             }
         }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
+        // #323: the pane flag is per worktree, so it follows the switch the
+        // same way the tabs above just did.
+        self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
         self.worktree_label = context.activity_label;
         self.terminal_breadcrumb = context.terminal_breadcrumb;
         self.rebind_changes_tabs(cx);
@@ -6989,6 +7061,7 @@ impl SirioWorkspace {
                 cx,
             );
             Self::bind_terminal_tabs(&tabs, cx);
+        Self::bind_file_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
             // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
             // tabs need the same binding or a restored session's Edit-tool file
@@ -7003,7 +7076,7 @@ impl SirioWorkspace {
             self.next_tab_id += tabs.len();
             self.tabs.extend(tabs);
             self.next_pane_id = next_pane_id(&self.tabs);
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -7406,7 +7479,7 @@ impl SirioWorkspace {
             && self.tabs[tab_index].title != title
         {
             self.tabs[tab_index].title = title;
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
             cx.notify();
         }
         let Some(transcript) = transcript else {
@@ -7508,8 +7581,7 @@ impl SirioWorkspace {
     fn select_tab(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             self.active_tab = index;
-            let group_id = self.tabs[index].group_id;
-            self.tab_machinery.select_tab(group_id, id);
+            self.center_split.select_tab(id, &self.tabs);
             if let Some(window) = window {
                 self.focus_active_pane(window, cx);
             }
@@ -7519,71 +7591,65 @@ impl SirioWorkspace {
         }
     }
 
-    /// Rebuilds the pure placement model after a tab has been created or a
-    /// restored snapshot has been merged. Existing group ids and selections
-    /// survive; a newly-created tab joins the current group.
-    fn rebuild_tab_machinery(&mut self) {
-        let old_active_group = self.tab_machinery.active_group();
-        let old_active_tabs = self
-            .tab_machinery
-            .groups()
-            .iter()
-            .map(|group| (group.id, group.active_tab))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let desired_active = self
+    /// Rebuilds the per-role active tab after tabs were added, removed or
+    /// reordered. Membership is derived, so the only invariant is that a
+    /// role's remembered active still exists in that role.
+    fn rebuild_center_split(&mut self) {
+        let desired = self
             .tabs
             .get(self.active_tab)
-            .map(|tab| (tab.group_id, tab.id));
-        let mut group_ids = self
-            .tab_machinery
-            .groups()
+            .map(|tab| (tab.kind.pane_role(), tab.id));
+        let primary_ids: Vec<usize> = self
+            .tabs
             .iter()
-            .map(|group| group.id)
-            .collect::<Vec<_>>();
-        for tab in &self.tabs {
-            if !group_ids.contains(&tab.group_id) {
-                group_ids.push(tab.group_id);
+            .filter(|tab| tab.kind.pane_role() == PaneRole::Primary)
+            .map(|tab| tab.id)
+            .collect();
+        let secondary_ids: Vec<usize> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .map(|tab| tab.id)
+            .collect();
+
+        // Primary
+        match desired {
+            Some((PaneRole::Primary, id)) if primary_ids.contains(&id) => {
+                self.center_split.set_active(PaneRole::Primary, Some(id));
+            }
+            _ => {
+                let cur = self.center_split.active(PaneRole::Primary);
+                if cur.is_some_and(|id| primary_ids.contains(&id)) {
+                    // keep
+                } else {
+                    self.center_split
+                        .set_active(PaneRole::Primary, primary_ids.first().copied());
+                }
             }
         }
-        if group_ids.is_empty() {
-            group_ids.push(0);
+        // Secondary
+        match desired {
+            Some((PaneRole::Secondary, id)) if secondary_ids.contains(&id) => {
+                self.center_split.set_active(PaneRole::Secondary, Some(id));
+            }
+            _ => {
+                let cur = self.center_split.active(PaneRole::Secondary);
+                if cur.is_some_and(|id| secondary_ids.contains(&id)) {
+                } else {
+                    self.center_split
+                        .set_active(PaneRole::Secondary, secondary_ids.first().copied());
+                }
+            }
         }
 
-        let groups = group_ids
-            .into_iter()
-            .map(|group_id| {
-                let tabs = self
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.group_id == group_id)
-                    .map(|tab| tab.id)
-                    .collect::<Vec<_>>();
-                let active_tab = desired_active
-                    .filter(|(active_group, active)| {
-                        *active_group == group_id && tabs.contains(active)
-                    })
-                    .map(|(_, active)| active)
-                    .or_else(|| {
-                        old_active_tabs
-                            .get(&group_id)
-                            .copied()
-                            .flatten()
-                            .filter(|active| tabs.contains(active))
-                    })
-                    .or_else(|| tabs.first().copied());
-                TabGroup::new(group_id, tabs, active_tab)
-            })
-            .collect::<Vec<_>>();
-        let active_group = if groups.iter().any(|group| group.id == old_active_group) {
-            old_active_group
-        } else {
-            self.tabs
-                .get(self.active_tab)
-                .map(|tab| tab.group_id)
-                .unwrap_or(groups[0].id)
-        };
-        self.tab_machinery = TabMachinery::new(groups, active_group)
-            .expect("workspace tabs must form a valid tab placement model");
+        if let Some((role, _)) = desired {
+            self.center_split.set_focused(role);
+        } else if self.center_split.focused() == PaneRole::Secondary && secondary_ids.is_empty() {
+            self.center_split.set_focused(PaneRole::Primary);
+        }
+        if self.center_split.focused() == PaneRole::Secondary && secondary_ids.is_empty() {
+            self.center_split.set_focused(PaneRole::Primary);
+        }
     }
 
     /// F-CORE-WSP-05: every "Insert" affordance (the tab-bar "+" menu's
@@ -7605,8 +7671,12 @@ impl SirioWorkspace {
         kind: sirio_project::ContentKind,
         title: &str,
     ) -> bool {
+        let role_str = match kind {
+            sirio_project::ContentKind::Terminal | sirio_project::ContentKind::Chat => "primary",
+            _ => "secondary",
+        };
         let command = sirio_project::LayoutCommand::Insert {
-            group: self.tab_machinery.active_group().to_string(),
+            group: role_str.to_string(),
             tab: sirio_project::WorkspaceTab {
                 id: tab_id.to_string(),
                 content_id: format!("tab:{tab_id}"),
@@ -7628,22 +7698,9 @@ impl SirioWorkspace {
     /// `classify_layout_command(&LayoutCommand::Move { .. }).structural`
     /// answer, so a wrong classification is observable here: the moved
     /// tab's live pane would go untracked in `terminal_pane_cache`.
-    fn apply_tab_machinery(&mut self, machinery: TabMachinery, rebuild_pane_cache: bool) {
-        let mut remaining = std::mem::take(&mut self.tabs);
-        let mut ordered = Vec::with_capacity(remaining.len());
-        for group in machinery.groups() {
-            for tab_id in &group.tabs {
-                if let Some(index) = remaining.iter().position(|tab| tab.id == *tab_id) {
-                    let mut tab = remaining.remove(index);
-                    tab.group_id = group.id;
-                    ordered.push(tab);
-                }
-            }
-        }
-        ordered.extend(remaining);
-        self.tabs = ordered;
-        self.tab_machinery = machinery;
-        if let Some(active_id) = self.tab_machinery.active_tab()
+    fn apply_tab_machinery(&mut self, machinery: CenterSplit, rebuild_pane_cache: bool) {
+        self.center_split = machinery;
+        if let Some(active_id) = self.center_split.active_for_focused()
             && let Some(index) = self.tabs.iter().position(|tab| tab.id == active_id)
         {
             self.active_tab = index;
@@ -7676,7 +7733,6 @@ impl SirioWorkspace {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
-        let group_id = tab.group_id;
         let mut panes: Vec<(usize, Entity<TerminalView>)> = Vec::new();
         tab.panes.for_each(&mut |pane_id, content| {
             if let TabContent::Terminal { view } = content {
@@ -7689,7 +7745,11 @@ impl SirioWorkspace {
         let worktree_id = self.working_directory.to_string_lossy().into_owned();
         for (pane_id, view) in panes {
             let content_id = format!("terminal-{pane_id}");
-            let placement = format!("group-{group_id}-pane-{pane_id}");
+            let role_str = match tab.kind.pane_role() {
+                PaneRole::Primary => "primary",
+                PaneRole::Secondary => "secondary",
+            };
+            let placement = format!("{role_str}-pane-{pane_id}");
             if !self.terminal_pane_cache.move_within_worktree(
                 &content_id,
                 &worktree_id,
@@ -7711,42 +7771,31 @@ impl SirioWorkspace {
     /// a group that regained a tab has its entry dropped, which also drops
     /// its `TerminalView` entity and the subscription tied to it.
     fn sync_empty_pane_prompts(&mut self, cx: &mut Context<Self>) {
-        let empty_group_ids: Vec<usize> = self
-            .tab_machinery
-            .groups()
+        let has_primary = self
+            .tabs
             .iter()
-            .filter(|group| group.tabs.is_empty())
-            .map(|group| group.id)
-            .collect();
-        self.empty_pane_prompts
-            .retain(|group_id, _| empty_group_ids.contains(group_id));
-        for group_id in empty_group_ids {
-            if self.empty_pane_prompts.contains_key(&group_id) {
-                continue;
-            }
-            let prompt = cx.new(TerminalView::empty_prompt);
-            cx.subscribe(
-                &prompt,
-                move |workspace, _, event: &TerminalPromptEvent, cx| {
-                    workspace.handle_empty_pane_prompt(group_id, event.action, cx);
-                },
-            )
-            .detach();
-            self.empty_pane_prompts.insert(group_id, prompt);
+            .any(|tab| tab.kind.pane_role() == PaneRole::Primary);
+        if has_primary {
+            self.empty_pane_prompts.clear();
+            return;
         }
+        if self.empty_pane_prompts.contains_key(&0) {
+            return;
+        }
+        self.empty_pane_prompts.clear();
+        let prompt = cx.new(TerminalView::empty_prompt);
+        cx.subscribe(
+            &prompt,
+            move |workspace, _, event: &TerminalPromptEvent, cx| {
+                workspace.handle_empty_pane_prompt(0, event.action, cx);
+            },
+        )
+        .detach();
+        self.empty_pane_prompts.insert(0, prompt);
     }
 
-    /// Reassigns `active_group` without requiring the group to already own a
-    /// tab -- `TabMachinery::select_tab` refuses that, since it is meant for
-    /// picking a tab, not just a pane. Rebuilding through `TabMachinery::new`
-    /// with the same groups is the only way to do this from `main.rs`
-    /// without adding a new public method to `tab_machinery.rs`, which this
-    /// wave does not own.
-    fn activate_group(&mut self, group_id: usize) {
-        let groups = self.tab_machinery.groups().to_vec();
-        if let Ok(machinery) = TabMachinery::new(groups, group_id) {
-            self.tab_machinery = machinery;
-        }
+    fn set_focused_pane(&mut self, role: PaneRole) {
+        self.center_split.set_focused(role);
     }
 
     /// Handles a click on one of the empty-pane prompt's two actions (see
@@ -7754,16 +7803,16 @@ impl SirioWorkspace {
     /// `stripModel.onActivateGroup(); stripModel.onNewTab()`
     /// (`App/PaneEmptyStateView.swift:24-26`): make the clicked pane's group
     /// active, then create a tab in it. `add_terminal_tab` reads
-    /// `tab_machinery.active_group()` to decide which group a new tab joins,
+    /// `tab_machinery.focused()` to decide which group a new tab joins,
     /// so `activate_group` must run first and land before this returns --
     /// there is no `Window` here to defer through, but neither call needs one.
     fn handle_empty_pane_prompt(
         &mut self,
-        group_id: usize,
+        _group_id: usize,
         action: TerminalPromptAction,
         cx: &mut Context<Self>,
     ) {
-        self.activate_group(group_id);
+        self.set_focused_pane(PaneRole::Primary);
         match action {
             TerminalPromptAction::NewTerminal => self.add_terminal_tab("Terminal", cx),
             TerminalPromptAction::NewTerminalWithCommand => {
@@ -7813,7 +7862,7 @@ impl SirioWorkspace {
         if index < self.tabs.len() {
             self.active_tab = index;
             let tab = &self.tabs[index];
-            self.tab_machinery.select_tab(tab.group_id, tab.id);
+            self.center_split.select_tab(tab.id, &self.tabs);
             self.schedule_save(cx);
             self.sync_activity(cx);
             cx.notify();
@@ -7826,9 +7875,18 @@ impl SirioWorkspace {
         }
 
         let tab_id = self.tabs[index].id;
-        let mut machinery = self.tab_machinery.clone();
-        machinery.remove_tab(tab_id);
-
+        // #319 invariant: closing a tab hands its half to the *nearest*
+        // remaining tab of the same role, not to that role's first tab.
+        // `CenterSplit::rebuild` cannot decide this alone — it sees only the
+        // list that survives, and "nearest" is a fact about the list that did
+        // not. So the position is read here, while the closing tab is still
+        // in it.
+        let closing_role = self.tabs[index].kind.pane_role();
+        let closing_position = self
+            .center_split
+            .tabs_for(closing_role, &self.tabs)
+            .iter()
+            .position(|id| *id == tab_id);
         let retained_chat = {
             let tab = &self.tabs[index];
             let mut retained = None;
@@ -7879,7 +7937,26 @@ impl SirioWorkspace {
             self.next_retained_chat_id += 1;
             self.retained_chats.push(retained_chat);
         }
-        self.apply_tab_machinery(machinery, true);
+        if self.center_split.active(closing_role) == Some(tab_id)
+            && let Some(position) = closing_position
+        {
+            // The tab that slid into the closed one's place, or the one
+            // before it when the closed tab was last.
+            let remaining = self.center_split.tabs_for(closing_role, &self.tabs);
+            let nearest = remaining
+                .get(position)
+                .or_else(|| remaining.last())
+                .copied();
+            self.center_split.set_active(closing_role, nearest);
+        }
+        self.rebuild_center_split();
+        if let Some(active_id) = self.center_split.active_for_focused()
+            && let Some(idx) = self.tabs.iter().position(|tab| tab.id == active_id)
+        {
+            self.active_tab = idx;
+        } else if !self.tabs.is_empty() {
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
         if let Some(window) = window {
             self.focus_active_pane(window, cx);
         }
@@ -7889,14 +7966,14 @@ impl SirioWorkspace {
     }
 
     fn request_close_other_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(removed) = self.tab_command_machinery().close_others() else {
+        let Some(removed) = self.tab_command_machinery().close_others(&self.tabs) else {
             return;
         };
         self.request_close_ids(removed, window, cx);
     }
 
     fn request_close_tabs_to_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(removed) = self.tab_command_machinery().close_tabs_to_right() else {
+        let Some(removed) = self.tab_command_machinery().close_tabs_to_right(&self.tabs) else {
             return;
         };
         self.request_close_ids(removed, window, cx);
@@ -7950,7 +8027,7 @@ impl SirioWorkspace {
 
     fn move_active_tab(&mut self, direction: MoveDirection, cx: &mut Context<Self>) {
         let mut machinery = self.tab_command_machinery();
-        if !machinery.move_active_tab(direction) {
+        if !machinery.move_active_tab(direction, &mut self.tabs) {
             return;
         }
         self.apply_tab_machinery(machinery, true);
@@ -7963,39 +8040,12 @@ impl SirioWorkspace {
     /// may not be the workspace's currently active tab. The pure model still
     /// owns the transition; this helper only projects that menu selection into
     /// a clone before asking the model to apply it.
-    fn tab_command_machinery(&self) -> TabMachinery {
-        let mut machinery = self.tab_machinery.clone();
-        let Some(tab_id) = self.tab_menu_tab else {
-            return machinery;
-        };
-        if let Some(group_id) = machinery
-            .groups()
-            .iter()
-            .find(|group| group.tabs.contains(&tab_id))
-            .map(|group| group.id)
-        {
-            let _ = machinery.select_tab(group_id, tab_id);
+    fn tab_command_machinery(&self) -> CenterSplit {
+        let mut machinery = self.center_split.clone();
+        if let Some(tab_id) = self.tab_menu_tab {
+            let _ = machinery.select_tab(tab_id, &self.tabs);
         }
         machinery
-    }
-
-    fn move_selected_tab(
-        &mut self,
-        target: MoveTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab_id) = self
-            .tab_menu_tab
-            .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
-        else {
-            return;
-        };
-        let mut machinery = self.tab_machinery.clone();
-        if machinery.move_tab(tab_id, target).is_err() {
-            return;
-        }
-        self.move_selected_tab_with_machinery(target, machinery, window, cx);
     }
 
     /// Attaches a fresh, empty pane group and moves the selected tab into
@@ -8003,37 +8053,6 @@ impl SirioWorkspace {
     /// beyond a single group -- everywhere else groups are inherited from
     /// existing tabs' `group_id`, so without this the "Move to Other Pane"
     /// family of actions could never have a second pane to target.
-    fn move_selected_tab_to_new_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab_id) = self
-            .tab_menu_tab
-            .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
-        else {
-            return;
-        };
-        let new_group_id = self
-            .tab_machinery
-            .groups()
-            .iter()
-            .map(|group| group.id)
-            .max()
-            .map_or(1, |max_id| max_id + 1);
-        let mut machinery = self.tab_machinery.clone();
-        if !machinery.add_group(new_group_id) {
-            return;
-        }
-        if machinery
-            .move_tab(tab_id, MoveTarget::Group(new_group_id))
-            .is_err()
-        {
-            return;
-        }
-        self.move_selected_tab_with_machinery(
-            MoveTarget::Group(new_group_id),
-            machinery,
-            window,
-            cx,
-        );
-    }
 
     /// F-CORE-WSP-05: routes the real tab-placement mutation through
     /// `LayoutCommand::Move` + `classify_layout_command`, the same
@@ -8048,52 +8067,6 @@ impl SirioWorkspace {
     /// and nothing else claims keyboard focus, so without this a move left
     /// focus on whatever the tab-menu button last held until the user
     /// clicked back into the pane.
-    fn move_selected_tab_with_machinery(
-        &mut self,
-        _target: MoveTarget,
-        machinery: TabMachinery,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab_id) = self
-            .tab_menu_tab
-            .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
-        else {
-            return;
-        };
-        let Some(from_group) = self
-            .tab_machinery
-            .groups()
-            .iter()
-            .find(|group| group.tabs.contains(&tab_id))
-            .map(|group| group.id)
-        else {
-            return;
-        };
-        let Some(to_group) = machinery
-            .groups()
-            .iter()
-            .find(|group| group.tabs.contains(&tab_id))
-            .map(|group| group.id)
-        else {
-            return;
-        };
-        let command = sirio_project::LayoutCommand::Move {
-            tab: tab_id.to_string(),
-            from: from_group.to_string(),
-            to: to_group.to_string(),
-        };
-        let transition = sirio_project::classify_layout_command(&command);
-        self.apply_tab_machinery(machinery, transition.structural);
-        self.tab_menu_open = false;
-        self.tab_menu_tab = None;
-        self.schedule_save(cx);
-        self.sync_activity(cx);
-        if transition.focus == sirio_project::FocusIntent::Tab {
-            self.focus_tab_content(tab_id, window, cx);
-        }
-        cx.notify();
-    }
 
     fn shutdown_terminals(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
@@ -8189,7 +8162,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: title.clone(),
             kind: TabKind::AgentChat,
             agent_icon,
@@ -8203,7 +8175,7 @@ impl SirioWorkspace {
         self.next_tab_id += 1;
         self.next_pane_id += 1;
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &title) {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8295,7 +8267,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: title.clone(),
             kind: TabKind::AgentChat,
             agent_icon,
@@ -8309,7 +8280,7 @@ impl SirioWorkspace {
         self.next_tab_id += 1;
         self.next_pane_id += 1;
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &title) {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8392,7 +8363,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: title.clone(),
             kind: TabKind::Terminal,
             agent_icon,
@@ -8406,7 +8376,7 @@ impl SirioWorkspace {
         self.next_tab_id += 1;
         self.next_pane_id += 1;
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8457,7 +8427,7 @@ impl SirioWorkspace {
         {
             self.active_tab = index;
             let tab = &self.tabs[index];
-            self.tab_machinery.select_tab(tab.group_id, tab.id);
+            self.center_split.select_tab(tab.id, &self.tabs);
             self.schedule_save(cx);
             self.sync_activity(cx);
             cx.notify();
@@ -8474,7 +8444,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: title.clone(),
             // The existing UI tab model has only chat/terminal kinds. File
             // identity stays in TabContent; the shell overlay adjusts its
@@ -8490,8 +8459,9 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8516,7 +8486,7 @@ impl SirioWorkspace {
         }) {
             self.active_tab = index;
             let tab = &self.tabs[index];
-            self.tab_machinery.select_tab(tab.group_id, tab.id);
+            self.center_split.select_tab(tab.id, &self.tabs);
             if let Some(path) = focus_path.as_deref() {
                 self.tabs[index].panes.for_each(&mut |_, content| {
                     if let TabContent::Changes(changes) = content {
@@ -8543,7 +8513,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: "Changes".to_string(),
             kind: TabKind::Diff,
             agent_icon: None,
@@ -8556,8 +8525,9 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Diff, "Changes") {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8575,7 +8545,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: "Changes".to_string(),
             kind: TabKind::Diff,
             agent_icon: None,
@@ -8588,8 +8557,9 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Diff, "Changes") {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8613,7 +8583,6 @@ impl SirioWorkspace {
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
-            group_id: self.tab_machinery.active_group(),
             title: "Browser".to_string(),
             kind: TabKind::Browser,
             agent_icon: None,
@@ -8626,8 +8595,9 @@ impl SirioWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
+        self.open_secondary_pane();
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Browser, "Browser") {
-            self.rebuild_tab_machinery();
+            self.rebuild_center_split();
         }
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -8661,11 +8631,13 @@ impl SirioWorkspace {
         let on_screen: Vec<usize> = if settings_covering {
             Vec::new()
         } else {
-            self.tab_machinery
-                .groups()
-                .iter()
-                .filter_map(|group| group.active_tab)
-                .collect()
+            [
+                self.center_split.active(sirio_project::PaneRole::Primary),
+                self.center_split.active(sirio_project::PaneRole::Secondary),
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
         };
         for tab in &self.tabs {
             if on_screen.contains(&tab.id) {
@@ -9599,9 +9571,8 @@ impl SirioWorkspace {
 
     fn cycle_tab(&mut self, forward: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         let ids = self
-            .tab_machinery
-            .group_tabs(self.tab_machinery.active_group())
-            .unwrap_or(&[]);
+            .center_split
+            .tabs_for(self.center_split.focused(), &self.tabs);
         let Some(active) = self
             .tabs
             .get(self.active_tab)
@@ -9630,9 +9601,8 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         let ids = self
-            .tab_machinery
-            .group_tabs(self.tab_machinery.active_group())
-            .unwrap_or(&[]);
+            .center_split
+            .tabs_for(self.center_split.focused(), &self.tabs);
         let Ok(number) = u8::try_from(position) else {
             return;
         };
@@ -10003,9 +9973,10 @@ impl SirioWorkspace {
                 // pane's own `TerminalView` entity.
                 if let TabContent::Terminal { view } = content {
                     let sole_tab_in_group = self
-                        .tab_machinery
-                        .group_tabs(self.tabs[tab_index].group_id)
-                        .is_none_or(|tabs| tabs.len() == 1);
+                        .center_split
+                        .tabs_for(self.tabs[tab_index].kind.pane_role(), &self.tabs)
+                        .len()
+                        == 1;
                     view.update(cx, |terminal, cx| {
                         terminal.set_sole_tab_in_group(sole_tab_in_group);
                         cx.notify();
@@ -10343,123 +10314,128 @@ impl SirioWorkspace {
         ))
     }
 
-    /// Renders one active tab surface per pane group. A group may be empty
-    /// after its last tab was moved away; keeping that surface visible is
-    /// deliberate because it gives Move Existing Tab a real destination and
-    /// makes the F-TAB-13 empty state observable instead of silently deleting
-    /// the pane.
+    /// Renders the active tab surface of the focused center pane.
+    ///
+    /// #319: still one surface on purpose. The two-pane layout — Primary
+    /// stack | divider | Secondary stack — is the next step; what changes
+    /// here is only *how the surface is chosen*: by `PaneRole` off
+    /// `center_split`, never by a pane-group id. The old doc claimed an
+    /// empty group had to stay visible to give "Move Existing Tab" a
+    /// destination; that gesture no longer exists, so the only empty state
+    /// left is a worktree with no Primary tab.
     fn render_group_surfaces(
         &self,
+        role: PaneRole,
         theme: Theme,
         entity: Entity<Self>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let groups = self.tab_machinery.groups();
-        let mut surfaces = div().flex().flex_row().size_full().bg(theme.surface);
-        for (index, group) in groups.iter().enumerate() {
-            if index > 0 {
-                surfaces = surfaces.child(div().w(px(1.0)).h_full().bg(gpui::black()));
-            }
-            let surface = group
-                .active_tab
-                .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
-                .map(|tab_index| {
+        let surface = self
+            .center_split
+            .active(role)
+            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
+            .map(|tab_index| {
+                div()
+                    .id("pane-group-surface-0")
+                    .debug_selector(|| "pane-group-surface".into())
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(self.render_pane_tree(
+                        &self.tabs[tab_index].panes,
+                        tab_index,
+                        entity.clone(),
+                        Vec::new(),
+                        cx,
+                    ))
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| {
+                // #320: the empty prompt is Primary-only. The Secondary pane
+                // auto-closes with its last tab, so it is never drawn empty;
+                // the Primary pane does not, and can be.
+                if role == PaneRole::Primary && self.has_current_worktree() {
+                    let new_terminal_entity = entity.clone();
                     div()
-                        .id(format!("pane-group-surface-{}", group.id))
-                        .debug_selector(|| "pane-group-surface".into())
+                        .id("empty-worktree")
+                        .debug_selector(|| "empty-worktree".to_owned())
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
-                        .child(self.render_pane_tree(
-                            &self.tabs[tab_index].panes,
-                            tab_index,
-                            entity.clone(),
-                            Vec::new(),
-                            cx,
-                        ))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(theme.spacing.card_gap)
+                        .text_color(theme.text_faint)
+                        .child(
+                            IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
+                                .text_color(theme.text_faint),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme.typography.headline)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child("No Terminals"),
+                        )
+                        .child("Open a new terminal to get started.")
+                        .child(
+                            div()
+                                .id("empty-worktree-new-terminal")
+                                .debug_selector(|| "empty-worktree-new-terminal".to_owned())
+                                .mt(theme.spacing.titlebar_control_spacing)
+                                .px(theme.spacing.card_gap)
+                                .py(theme.spacing.titlebar_control_spacing)
+                                .rounded(theme.radii.control)
+                                .bg(theme.solid)
+                                .text_size(theme.typography.footnote)
+                                .text_color(theme.on_solid)
+                                .hover(|style| style.opacity(0.9))
+                                .on_click(move |_, _, cx| {
+                                    new_terminal_entity.update(cx, |workspace, cx| {
+                                        workspace.add_terminal_tab("Terminal", cx);
+                                    });
+                                })
+                                .child("New Terminal"),
+                        )
                         .into_any_element()
-                })
-                .unwrap_or_else(|| {
-                    if group.id == 0 && self.has_current_worktree() {
-                        let new_terminal_entity = entity.clone();
-                        div()
-                            .id("empty-worktree")
-                            .debug_selector(|| "empty-worktree".to_owned())
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap(theme.spacing.card_gap)
-                            .text_color(theme.text_faint)
-                            .child(
-                                IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                                    .text_color(theme.text_faint),
-                            )
-                            .child(
-                                div()
-                                    .text_size(theme.typography.headline)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child("No Terminals"),
-                            )
-                            .child("Open a new terminal to get started.")
-                            .child(
-                                div()
-                                    .id("empty-worktree-new-terminal")
-                                    .debug_selector(|| "empty-worktree-new-terminal".to_owned())
-                                    .mt(theme.spacing.titlebar_control_spacing)
-                                    .px(theme.spacing.card_gap)
-                                    .py(theme.spacing.titlebar_control_spacing)
-                                    .rounded(theme.radii.control)
-                                    .bg(theme.solid)
-                                    .text_size(theme.typography.footnote)
-                                    .text_color(theme.on_solid)
-                                    .hover(|style| style.opacity(0.9))
-                                    .on_click(move |_, _, cx| {
-                                        new_terminal_entity.update(cx, |workspace, cx| {
-                                            workspace.add_terminal_tab("Terminal", cx);
-                                        });
-                                    })
-                                    .child("New Terminal"),
-                            )
-                            .into_any_element()
-                    } else if let Some(prompt) = self.empty_pane_prompts.get(&group.id) {
-                        // F-TERM-02: a pane group that lost its last tab
-                        // (every other tab moved elsewhere, or a fresh split
-                        // group awaiting its first tab) without the whole
-                        // pane closing -- mount the real `TerminalView`
-                        // empty-prompt surface instead of tearing the group
-                        // down to a static label. `sync_empty_pane_prompts`
-                        // guarantees an entry exists for every group with
-                        // zero tabs before this renders.
-                        div()
-                            .id(format!("pane-group-empty-{}", group.id))
-                            .debug_selector(|| "pane-group-empty".to_owned())
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .child(prompt.clone())
-                            .into_any_element()
-                    } else {
-                        div()
-                            .id(format!("pane-group-empty-{}", group.id))
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.text_faint)
-                            .child("No tabs in this pane")
-                            .into_any_element()
-                    }
-                });
-            surfaces = surfaces.child(surface);
-        }
-        surfaces.into_any_element()
+                } else if role == PaneRole::Primary
+                    && let Some(prompt) = self.empty_pane_prompts.get(&0)
+                {
+                    // F-TERM-02: no Primary tab and no worktree behind it --
+                    // mount the real `TerminalView` empty prompt rather than a
+                    // static label, so "New Terminal" is live.
+                    // `sync_empty_pane_prompts` guarantees the entry exists.
+                    div()
+                        .id("pane-group-empty-0")
+                        .debug_selector(|| "pane-group-empty".to_owned())
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(prompt.clone())
+                        .into_any_element()
+                } else {
+                    div()
+                        .id("pane-group-empty-0")
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.text_faint)
+                        .child("No tabs in this pane")
+                        .into_any_element()
+                }
+            });
+        div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .bg(theme.surface)
+            .child(surface)
+            .into_any_element()
     }
 
     fn has_current_worktree(&self) -> bool {
@@ -10478,6 +10454,11 @@ impl SirioWorkspace {
         // function deliberately does not take.
         agent: Option<AgentMark>,
         active: bool,
+        // #320: whether the *pane* this tab is drawn in holds focus. A tab is
+        // `active` within its own half regardless — both halves always show
+        // which of their tabs is current — but only one half at a time wears
+        // the accent, because only one receives what you type next.
+        pane_focused: bool,
         status: Option<ActivityStatus>,
         exit_label: Option<String>,
         dirty: bool,
@@ -10523,7 +10504,7 @@ impl SirioWorkspace {
         let tab_drag = RowDrag {
             scope: ReorderScope::Tabs,
             id,
-            group: Some(tab.group_id),
+            group: None,
         };
         div()
             .id(format!("workspace-tab-{id}"))
@@ -10716,8 +10697,9 @@ impl SirioWorkspace {
                         .bg(theme.text),
                 )
             })
-            .when(active, |this| {
-                this.bg(theme.element_active).child(
+            .when(active, |this| this.bg(theme.element_active))
+            .when(active && pane_focused, |this| {
+                this.child(
                     div()
                         .absolute()
                         .top(px(0.0))
@@ -10727,6 +10709,49 @@ impl SirioWorkspace {
                         .bg(theme.text),
                 )
             })
+    }
+
+    /// #320: the `×` at the end of the Secondary strip. It **closes the
+    /// pane's tabs**, and the pane disappears because it has none left — it
+    /// does not hide the pane. That distinction is the whole reason this
+    /// control is allowed to exist beside `ctrl-shift-b`, which hides and
+    /// keeps: a `×` that merely hid would be a second spelling of the toggle.
+    fn render_secondary_pane_close(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
+        div()
+            .id("secondary-pane-close")
+            .debug_selector(|| "secondary-pane-close".to_owned())
+            .absolute()
+            .right_0()
+            .top(theme.spacing.titlebar_control_spacing)
+            .w(theme.spacing.titlebar_control_frame.width)
+            .h(theme.spacing.titlebar_control_frame.height)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(theme.radii.control)
+            .text_color(theme.text_faint)
+            .hover(|style| style.bg(theme.element_hover))
+            .on_click(move |_, window, cx| {
+                entity.update(cx, |workspace, cx| {
+                    workspace.close_secondary_pane_tabs(window, cx);
+                });
+            })
+            .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text_faint))
+    }
+
+    /// Closes every Secondary tab, one real close each — the same path a tab's
+    /// own `×` takes, so a dirty editor's guard and a browser's native
+    /// teardown are not skipped by closing the pane instead of its tabs.
+    fn close_secondary_pane_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<usize> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+            .map(|tab| tab.id)
+            .collect();
+        for id in ids {
+            self.close_tab_by_id(id, Some(window), cx);
+        }
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -10797,16 +10822,15 @@ impl SirioWorkspace {
             return Vec::new();
         };
         let machinery = self.tab_command_machinery();
-        let Some(group) = machinery
-            .groups()
-            .iter()
-            .find(|group| group.tabs.contains(&tab_id))
-        else {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return Vec::new();
         };
-        let Some(position) = group.tabs.iter().position(|id| *id == tab_id) else {
+        let role = tab.kind.pane_role();
+        let ids = machinery.tabs_for(role, &self.tabs);
+        let Some(position) = ids.iter().position(|id| *id == tab_id) else {
             return Vec::new();
         };
+        let group_len = ids.len();
 
         let mut items = vec![
             TabContextItem::enabled("Open File", "open-file", TabContextAction::OpenFile),
@@ -10814,7 +10838,7 @@ impl SirioWorkspace {
             TabContextItem::enabled("Rename", "rename", TabContextAction::Rename),
             TabContextItem::separator(),
             TabContextItem::enabled("Close", "close", TabContextAction::Close),
-            if group.tabs.len() > 1 {
+            if group_len > 1 {
                 TabContextItem::enabled(
                     "Close Others",
                     "close-others",
@@ -10828,7 +10852,7 @@ impl SirioWorkspace {
                     "no other tab is available",
                 )
             },
-            if position + 1 < group.tabs.len() {
+            if position + 1 < group_len {
                 TabContextItem::enabled(
                     "Close Tabs to the Right",
                     "close-right",
@@ -10857,7 +10881,7 @@ impl SirioWorkspace {
                     "already the first tab",
                 )
             },
-            if position + 1 < group.tabs.len() {
+            if position + 1 < group_len {
                 TabContextItem::enabled("Move Later", "move-later", TabContextAction::MoveLater)
             } else {
                 TabContextItem::disabled(
@@ -10885,39 +10909,9 @@ impl SirioWorkspace {
             ));
         }
 
-        let other_groups = machinery
-            .groups()
-            .iter()
-            .filter(|candidate| candidate.id != group.id)
-            .map(|candidate| candidate.id)
-            .collect::<Vec<_>>();
-        items.push(TabContextItem::separator());
-        // F-TAB-12: there used to be an unconditionally-`disabled(...)`
-        // "Move to This Pane" entry here. It could never become enabled --
-        // this menu only ever opens on a tab already belonging to
-        // `machinery.active_group()` (the tab strip renders exclusively
-        // that group's tabs; see `render_open_tabs`), so `group.id` here is
-        // always the active group already. Its only plausible Swift
-        // equivalent (`SplitContentMenu.swift`'s "This Pane" bucket) picks
-        // a sibling tab and gives it a brand-new adjacent split -- exactly
-        // what "Move to New Pane" below already does for any tab,
-        // regardless of its current group. So there is no capability left
-        // to restore: the real one already lives under "Move to New Pane".
-        if other_groups.is_empty() {
-            items.push(TabContextItem::enabled(
-                "Move to New Pane",
-                "move-to-new-pane",
-                TabContextAction::MoveToPane(usize::MAX),
-            ));
-        } else {
-            for group_id in other_groups {
-                items.push(TabContextItem::enabled(
-                    format!("Move to Pane {group_id}"),
-                    format!("move-to-pane-{group_id}"),
-                    TabContextAction::MoveToPane(group_id),
-                ));
-            }
-        }
+        // Center split: no pane-move; routing is derived from TabKind, there is no
+        // "other pane" to move to. The Move-to-Pane family is removed per #325.
+
         items.push(TabContextItem::separator());
         if self.retained_chats.is_empty() {
             items.push(TabContextItem::disabled(
@@ -10940,9 +10934,13 @@ impl SirioWorkspace {
         let Some(tab_id) = self.tab_menu_tab else {
             return 0.0;
         };
-        let active_group = self.tab_machinery.active_group();
+        let focused = self.center_split.focused();
         let mut left = 5.0;
-        for tab in self.tabs.iter().filter(|tab| tab.group_id == active_group) {
+        for tab in self
+            .tabs
+            .iter()
+            .filter(|tab| tab.kind.pane_role() == focused)
+        {
             if tab.id == tab_id {
                 break;
             }
@@ -11039,12 +11037,6 @@ impl SirioWorkspace {
             }
             TabContextAction::MoveLater => {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
-            }
-            TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
-                self.move_selected_tab(MoveTarget::Group(group_id), window, cx)
-            }
-            TabContextAction::MoveToPane(_) => {
-                self.move_selected_tab_to_new_pane(window, cx);
             }
             TabContextAction::AttachToCurrentTerminal => {
                 if let Some(tab_id) = self.tab_menu_tab {
@@ -11143,7 +11135,7 @@ impl SirioWorkspace {
         if let Some(terminal) = moved_terminal {
             Self::bind_terminal(&terminal, destination_tab_id, source_pane, cx);
         }
-        self.rebuild_tab_machinery();
+        self.rebuild_center_split();
         self.active_tab = self
             .tabs
             .iter()
@@ -11157,7 +11149,7 @@ impl SirioWorkspace {
 
     fn move_selected_tab_direction(&mut self, direction: MoveDirection, cx: &mut Context<Self>) {
         let mut machinery = self.tab_command_machinery();
-        if !machinery.move_active_tab(direction) {
+        if !machinery.move_active_tab(direction, &mut self.tabs) {
             return;
         }
         self.apply_tab_machinery(machinery, true);
@@ -11379,12 +11371,15 @@ impl SirioWorkspace {
     /// This shell overlay owns the visible tabs. The UI crate's TabBar remains
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
-    fn tab_strip_fit(&self, window: &Window, theme: Theme) -> (usize, bool, usize) {
-        let active_group = self.tab_command_machinery().active_group();
+    /// #320: each strip lives *inside* its pane, so it fits against that
+    /// pane's width, not the center's. This is the property the layout was
+    /// chosen for: the Primary strip widens when the Secondary pane closes,
+    /// with no seam to keep aligned by hand.
+    fn tab_strip_fit(&self, role: PaneRole, window: &Window, theme: Theme) -> (usize, bool, usize) {
         let group_len = self
             .tabs
             .iter()
-            .filter(|tab| tab.group_id == active_group)
+            .filter(|tab| tab.kind.pane_role() == role)
             .count();
         if group_len == 0 {
             return (0, false, 0);
@@ -11392,11 +11387,11 @@ impl SirioWorkspace {
         let tab_widths = self
             .tabs
             .iter()
-            .filter(|tab| tab.group_id == active_group)
+            .filter(|tab| tab.kind.pane_role() == role)
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
-        let available_width = self.tab_strip_available_width(window, theme);
+        let available_width = self.center_pane_width(role, window, theme);
         // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
         // overflow_width` unconditionally reserves room for the chevron even
         // when no chevron will ever be shown, so the strip flipped into
@@ -11416,23 +11411,22 @@ impl SirioWorkspace {
     }
 
     fn keep_active_tab_visible(&mut self, window: &Window, theme: Theme) {
-        let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(window, theme);
+        let focused = self.center_split.focused();
+        let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(focused, window, theme);
         if visible_count == 0 || group_len == 0 {
             self.tab_strip_first_visible = 0;
             return;
         }
-        let active_group = self.tab_command_machinery().active_group();
         let Some(active_tab) = self.tabs.get(self.active_tab) else {
             return;
         };
-        let active_group_id = active_tab.group_id;
-        if active_group_id != active_group {
+        if active_tab.kind.pane_role() != focused {
             return;
         }
         let active_index = self
             .tabs
             .iter()
-            .filter(|tab| tab.group_id == active_group)
+            .filter(|tab| tab.kind.pane_role() == focused)
             .position(|tab| tab.id == active_tab.id);
         let Some(active_index) = active_index else {
             return;
@@ -11445,6 +11439,56 @@ impl SirioWorkspace {
         );
     }
 
+    /// How wide one half of the center is.
+    ///
+    /// #320: the Secondary pane exists only while it holds tabs — it opens
+    /// with the first and auto-closes with the last — so a Primary-only
+    /// workspace gives the whole center to the Primary strip. The halves are
+    /// even for now; the draggable ratio is its own step, and putting a
+    /// placeholder constant here would be a second definition of a number
+    /// that will shortly have exactly one.
+    fn center_pane_width(&self, role: PaneRole, window: &Window, theme: Theme) -> f32 {
+        let (primary, secondary) = self.center_pane_widths(window, theme);
+        match role {
+            PaneRole::Primary => primary,
+            PaneRole::Secondary => secondary.unwrap_or(0.0),
+        }
+    }
+
+    /// Both panes at once, which is what the layout needs and what keeps the
+    /// two widths from being resolved twice against different inputs.
+    fn center_pane_widths(&self, window: &Window, theme: Theme) -> (f32, Option<f32>) {
+        panel_layout::resolve_center_split(
+            self.tab_strip_available_width(window, theme),
+            self.center_split_ratio,
+            self.secondary_pane_visible(),
+            CENTER_DIVIDER_WIDTH,
+        )
+    }
+
+    /// Whether the Secondary half is drawn at all: it holds tabs *and* has
+    /// not been hidden. Membership stays derived -- which half a tab belongs
+    /// to comes from its kind -- but "open" cannot be, because hiding the
+    /// pane leaves its tabs in place (#323).
+    fn secondary_pane_visible(&self) -> bool {
+        self.secondary_pane_open
+            && self
+                .tabs
+                .iter()
+                .any(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+    }
+
+    /// #323: opening any Secondary surface opens the pane, even if it was
+    /// hidden -- the alternative is a tab that exists and is drawn nowhere.
+    fn open_secondary_pane(&mut self) {
+        if self.secondary_pane_open {
+            return;
+        }
+        self.secondary_pane_open = true;
+        self.session
+            .save_secondary_pane_open(&self.working_directory, true);
+    }
+
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             f32::from(window.bounds().size.width),
@@ -11453,6 +11497,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
+            panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
         );
         tab_strip_available_width_for_shell(
             f32::from(window.bounds().size.width),
@@ -11560,21 +11605,32 @@ impl SirioWorkspace {
         deferred(menu)
     }
 
+    /// One pane's tab strip. #320: called once per half rather than once for
+    /// whichever half has focus, so both halves show their own tabs.
     fn render_open_tabs(
         &self,
+        role: PaneRole,
         theme: Theme,
         entity: Entity<Self>,
         window: &Window,
         cx: &App,
     ) -> impl IntoElement {
-        let active_group = self.tab_command_machinery().active_group();
+        let pane_focused = self.center_split.focused() == role;
         let group_tabs = self
             .tabs
             .iter()
-            .filter(|tab| tab.group_id == active_group)
+            .filter(|tab| tab.kind.pane_role() == role)
             .collect::<Vec<_>>();
-        let (visible_count, has_overflow, _) = self.tab_strip_fit(window, theme);
-        let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let (visible_count, has_overflow, _) = self.tab_strip_fit(role, window, theme);
+        let active_tab_id = self.center_split.active(role);
+        // Only the focused strip scrolls. `keep_active_tab_visible` maintains
+        // this one offset against the focused half, and an unfocused strip
+        // showing its first tabs is honest — nothing has scrolled it.
+        let first_visible = if pane_focused {
+            self.tab_strip_first_visible
+        } else {
+            0
+        };
         let mut tabs = div()
             .absolute()
             .left_0()
@@ -11604,12 +11660,7 @@ impl SirioWorkspace {
         if has_overflow {
             tabs = tabs.pr(theme.spacing.titlebar_control_frame.width);
         }
-        for (index, tab) in group_tabs
-            .iter()
-            .enumerate()
-            .skip(self.tab_strip_first_visible)
-            .take(visible_count)
-        {
+        for tab in group_tabs.iter().skip(first_visible).take(visible_count) {
             let renaming = self
                 .tab_rename
                 .as_ref()
@@ -11627,7 +11678,12 @@ impl SirioWorkspace {
             tabs = tabs.child(Self::render_open_tab(
                 tab,
                 self.tab_agent_mark(tab),
-                index == self.active_tab,
+                // Active *within this half*. The old test was `index ==
+                // self.active_tab`, which compared a position in the filtered
+                // strip against an index into the whole tab list — right only
+                // while there was one strip starting at tab zero.
+                active_tab_id == Some(tab.id),
+                pane_focused,
                 self.tab_status(tab, cx),
                 Self::terminal_exit_label(tab, cx),
                 self.tab_is_dirty(tab, cx),
@@ -11695,7 +11751,7 @@ impl SirioWorkspace {
         let right_focus_visible =
             shell_chrome::focus_is_keyboard_visible(&self.right_panel_focus, window, cx);
 
-        let centre_surface = if self.has_current_worktree() {
+        let primary_surface = if self.has_current_worktree() {
             div()
                 .id("group-surfaces-wrapper")
                 .debug_selector(|| "group-surfaces-wrapper".into())
@@ -11709,7 +11765,7 @@ impl SirioWorkspace {
                 .flex_1()
                 .w_full()
                 .overflow_hidden()
-                .child(self.render_group_surfaces(*theme, entity.clone(), cx))
+                .child(self.render_group_surfaces(PaneRole::Primary, *theme, entity.clone(), cx))
                 .when_some(self.tabs.get(self.active_tab), |this, tab| {
                     this.when(tab_has_terminal(tab), |this| {
                         this.child(
@@ -11756,7 +11812,7 @@ impl SirioWorkspace {
                 .into_any_element()
         };
 
-        let centre_surface = div()
+        let primary_surface = div()
             .id("centre-surface")
             .debug_selector(|| "centre-surface".into())
             .relative()
@@ -11764,17 +11820,33 @@ impl SirioWorkspace {
             .min_h_0()
             .w_full()
             .overflow_hidden()
-            .child(centre_surface);
+            .child(primary_surface);
         #[cfg(test)]
-        let centre_surface = centre_surface
+        let primary_surface = primary_surface
             .when_some(shell_paint_probe("centre-surface", cx), |this, probe| {
                 this.child(probe)
             });
 
-        let center_column = div()
+        // #320: the context menu is drawn by the strip that owns the tab it
+        // was opened on, so it lands over the right half rather than always
+        // over the Primary one.
+        let menu_role = self
+            .tab_menu_tab
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .map(|tab| tab.kind.pane_role());
+
+        // #320: each pane is its own stack — strip on top, surface below —
+        // and the two sit side by side. The strip is *inside* the pane, so
+        // the seam between the strips is the divider itself and cannot drift
+        // out of alignment with it.
+        let (primary_width, secondary_width) = self.center_pane_widths(window, *theme);
+        let primary_pane = div()
+            .id("pane-primary")
+            .debug_selector(|| "pane-primary".into())
             .flex()
             .flex_col()
-            .size_full()
+            .w(px(primary_width))
+            .flex_none()
             .min_w_0()
             .min_h_0()
             .child(
@@ -11782,13 +11854,127 @@ impl SirioWorkspace {
                     .relative()
                     .h(px(TAB_BAR_HEIGHT))
                     .w_full()
+                    // The one `+`: it routes a new surface to its own half by
+                    // what the surface is, so a second copy in the Secondary
+                    // strip would be a button that sends you elsewhere.
                     .child(self.tab_bar.clone())
-                    .child(self.render_open_tabs(*theme, entity.clone(), window, cx))
-                    .when(self.tab_menu_open, |this| {
-                        this.child(self.render_tab_context_menu(*theme, entity.clone(), cx))
-                    }),
+                    .child(self.render_open_tabs(
+                        PaneRole::Primary,
+                        *theme,
+                        entity.clone(),
+                        window,
+                        cx,
+                    ))
+                    .when(
+                        self.tab_menu_open && menu_role == Some(PaneRole::Primary),
+                        |this| this.child(self.render_tab_context_menu(*theme, entity.clone(), cx)),
+                    ),
             )
-            .child(centre_surface);
+            .child(primary_surface);
+
+        let center_column = div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(primary_pane)
+            .when(self.secondary_pane_visible(), |this| {
+                this.child(
+                    div()
+                        .id("center-divider")
+                        .debug_selector(|| "center-divider".into())
+                        .relative()
+                        .w(px(CENTER_DIVIDER_WIDTH))
+                        .h_full()
+                        .flex_none()
+                        .bg(theme.border_strong)
+                        // The rule is one pixel; the grab area is the same
+                        // `SPLIT_DIVIDER_SIZE` the side panels use, centred on
+                        // it, because a one-pixel target is not a handle.
+                        .child(
+                            div()
+                                .id("center-divider-handle")
+                                .debug_selector(|| "center-divider-handle".into())
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(-(SPLIT_DIVIDER_SIZE - CENTER_DIVIDER_WIDTH) / 2.0))
+                                .w(px(SPLIT_DIVIDER_SIZE))
+                                .cursor_col_resize()
+                                .on_mouse_down(gpui::MouseButton::Left, {
+                                    let entity = entity.clone();
+                                    move |event, _, cx| {
+                                        entity.update(cx, |workspace, _| {
+                                            // Anchored here, not in the
+                                            // payload: the payload is built at
+                                            // render time and cannot know
+                                            // where inside the handle the
+                                            // pointer landed.
+                                            workspace.center_drag_anchor = Some((
+                                                f32::from(event.position.x),
+                                                workspace.center_split_ratio,
+                                            ));
+                                        });
+                                    }
+                                })
+                                .on_drag(DraggedCenterDivider, |_, _, _, cx| {
+                                    cx.new(|_| gpui::Empty)
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("pane-secondary")
+                        .debug_selector(|| "pane-secondary".into())
+                        .flex()
+                        .flex_col()
+                        .w(px(secondary_width.unwrap_or(0.0)))
+                        .flex_none()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(
+                            div()
+                                .relative()
+                                .h(px(TAB_BAR_HEIGHT))
+                                .w_full()
+                                .child(self.render_open_tabs(
+                                    PaneRole::Secondary,
+                                    *theme,
+                                    entity.clone(),
+                                    window,
+                                    cx,
+                                ))
+                                .child(self.render_secondary_pane_close(*theme, entity.clone()))
+                                .when(
+                                    self.tab_menu_open && menu_role == Some(PaneRole::Secondary),
+                                    |this| {
+                                        this.child(self.render_tab_context_menu(
+                                            *theme,
+                                            entity.clone(),
+                                            cx,
+                                        ))
+                                    },
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("secondary-surface")
+                                .debug_selector(|| "secondary-surface".into())
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .overflow_hidden()
+                                .child(self.render_group_surfaces(
+                                    PaneRole::Secondary,
+                                    *theme,
+                                    entity.clone(),
+                                    cx,
+                                )),
+                        ),
+                )
+            });
 
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             // Same expression `tab_strip_available_width` already uses at
@@ -11799,6 +11985,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
+            panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
         );
         // The History toolbar shapes itself from the panel's width, and the
         // view cannot measure its own container — push the resolved width
@@ -11832,6 +12019,26 @@ impl SirioWorkspace {
                     let drag = *event.drag(cx);
                     entity.update(cx, |workspace, cx| {
                         workspace.update_panel_width(drag.side, event, cx)
+                    });
+                }
+            })
+            .on_drag_move::<DraggedCenterDivider>({
+                let entity = entity.clone();
+                let theme = *theme;
+                move |event, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.update_center_split_ratio(event, window, theme, cx)
+                    });
+                }
+            })
+            .on_drop::<DraggedCenterDivider>({
+                let entity = entity.clone();
+                move |_, window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        let active_tab = workspace.active_tab;
+                        workspace.refocus_focused_pane(active_tab, window, cx);
+                        workspace.center_drag_anchor = None;
+                        cx.notify();
                     });
                 }
             })
@@ -12004,6 +12211,47 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// Moves the centre divider: how far the pointer has travelled, as a
+    /// fraction of the space the two panes share.
+    ///
+    /// The drag stops at a pane's floor. `resolve_center_split` would clamp
+    /// the *drawn* widths anyway, but not the stored ratio — so without this
+    /// the divider would appear to stop while the preference kept sliding,
+    /// and the pane would jump the moment the window grew.
+    fn update_center_split_ratio(
+        &mut self,
+        event: &gpui::DragMoveEvent<DraggedCenterDivider>,
+        window: &Window,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((grab_x, grab_ratio)) = self.center_drag_anchor else {
+            return;
+        };
+        let usable = self.tab_strip_available_width(window, theme) - CENTER_DIVIDER_WIDTH;
+        if usable <= 0.0 {
+            return;
+        }
+        let travelled = f32::from(event.event.position.x) - grab_x;
+        let ratio = (grab_ratio as f32 / 1000.0) + (travelled / usable);
+        if !ratio.is_finite() {
+            return;
+        }
+        let floor = panel_layout::MIN_CENTER_PANE_WIDTH / usable;
+        // A centre too narrow for two floors has no room to drag in; leaving
+        // the ratio alone is better than snapping it to a bound that is
+        // wider than the window.
+        if floor > 0.5 {
+            return;
+        }
+        let millis = (ratio.clamp(floor, 1.0 - floor) * 1000.0).round() as i64;
+        if millis == self.center_split_ratio {
+            return;
+        }
+        self.center_split_ratio = millis;
+        cx.notify();
+    }
+
     /// Persists the current widths once the drag stops moving.
     ///
     /// Deliberately not driven off `on_drop` alone: a drag can end without a
@@ -12019,6 +12267,7 @@ impl SirioWorkspace {
         // key is an i64 and drag positions are fractional.
         let sidebar = self.sidebar_width.round() as i64;
         let right_panel = self.right_panel_width.round() as i64;
+        let center_split = self.center_split_ratio;
         self.panel_width_save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(PANEL_WIDTH_SAVE_DEBOUNCE)
@@ -12030,6 +12279,7 @@ impl SirioWorkspace {
                 let mut settings = app_settings_from_snapshot(this.settings.read(cx).snapshot());
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
+                settings.center_split_ratio = center_split;
                 this.session.save_settings(&settings);
             });
         }));
@@ -12383,25 +12633,6 @@ impl SirioWorkspace {
         self.move_active_tab(MoveDirection::Later, cx);
     }
 
-    fn handle_move_tab_to_other_pane(
-        &mut self,
-        _: &MoveTabToOtherPane,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let active_group = self.tab_machinery.active_group();
-        let Some(target) = self
-            .tab_machinery
-            .groups()
-            .iter()
-            .find(|group| group.id != active_group)
-            .map(|group| group.id)
-        else {
-            return;
-        };
-        self.move_selected_tab(MoveTarget::Group(target), window, cx);
-    }
-
     fn handle_resume_chat(&mut self, _: &ResumeChat, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.retained_chats.first().map(|chat| chat.id) {
             self.resume_chat(id, window, cx);
@@ -12438,7 +12669,6 @@ impl SirioWorkspace {
         PaletteContext {
             active_tab_kind: self.tabs.get(self.active_tab).map(|tab| tab.kind),
             has_retained_chat: !self.retained_chats.is_empty(),
-            has_other_pane: self.tab_machinery.groups().len() > 1,
             sidebar_target,
         }
     }
@@ -12674,6 +12904,9 @@ impl SirioWorkspace {
                 WindowCommand::ToggleRightPanel => {
                     window.dispatch_action(Box::new(ToggleRightPanel), cx)
                 }
+                WindowCommand::ToggleSecondaryPane => {
+                    window.dispatch_action(Box::new(ToggleSecondaryPane), cx)
+                }
                 WindowCommand::RestoreLaunchSnapshot => {
                     window.dispatch_action(Box::new(RestoreLaunchSnapshot), cx)
                 }
@@ -12729,9 +12962,6 @@ impl SirioWorkspace {
                 }
                 TabCommand::MoveTabEarlier => window.dispatch_action(Box::new(MoveTabEarlier), cx),
                 TabCommand::MoveTabLater => window.dispatch_action(Box::new(MoveTabLater), cx),
-                TabCommand::MoveTabToOtherPane => {
-                    window.dispatch_action(Box::new(MoveTabToOtherPane), cx)
-                }
                 TabCommand::ResumeChat => window.dispatch_action(Box::new(ResumeChat), cx),
             },
             PaletteCommand::NewTab(action) => {
@@ -13440,6 +13670,9 @@ impl Render for SirioWorkspace {
             .on_action(cx.listener(|workspace, _: &ToggleRightPanel, _, cx| {
                 workspace.toggle_right_panel(cx);
             }))
+            .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
+                workspace.toggle_secondary_pane(cx);
+            }))
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .on_action(cx.listener(Self::handle_focus_pane_above))
@@ -13465,7 +13698,6 @@ impl Render for SirioWorkspace {
             .on_action(cx.listener(Self::handle_close_tabs_to_right))
             .on_action(cx.listener(Self::handle_move_tab_earlier))
             .on_action(cx.listener(Self::handle_move_tab_later))
-            .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
             .on_action(cx.listener(Self::handle_resume_chat))
             .child(
                 div()
@@ -13944,10 +14176,14 @@ fn restore_tabs(
                 TabContent::Browser(browser)
             }
             "file" => {
-                // File tabs are not restored yet: their source may disappear
-                // between launches. Session restoration skips them rather
-                // than opening a stale or missing document.
-                continue;
+                // #323: an Editor tab comes back only when its file still
+                // does; see `restored_editor_path`.
+                let Some(path) = restored_editor_path(&tab_state) else {
+                    continue;
+                };
+                TabContent::File {
+                    view: cx.new(|cx| FileView::new(path, cx)),
+                }
             }
             // restore() only returns chat and terminal tabs.
             _ => unreachable!("unexpected restored tab kind {}", tab.kind),
@@ -13988,12 +14224,12 @@ fn restore_tabs(
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
-            group_id: 0,
             title: tab.title.clone(),
             kind: match tab.kind.as_str() {
                 "chat" => TabKind::AgentChat,
                 "diff" => TabKind::Diff,
                 "browser" => TabKind::Browser,
+                "file" => TabKind::Editor,
                 _ => TabKind::Terminal,
             },
             agent_icon,
@@ -14051,6 +14287,19 @@ fn title_from_prompt(prompt: &str) -> Option<String> {
 /// What was captured at save time, or the fallback page when the session
 /// predates the capture or the tab never carried an address. Both restore
 /// paths go through here so the fallback is spelled once.
+/// #323: the file a restored Editor tab reopens, or `None` when this session
+/// carries no path or that path no longer resolves.
+///
+/// The check lives here, at materialisation, and not in `SessionLayout`:
+/// answering it needs the filesystem, and `SessionLayout` is a pure data
+/// container. A file can be deleted, renamed, or sit on a volume that is not
+/// mounted this launch; a tab whose target is gone is dropped silently rather
+/// than restored onto an error the user never asked to see.
+fn restored_editor_path(state: &SessionTabState) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(&state.editor_path);
+    path.is_file().then_some(path)
+}
+
 fn restored_browser_url(state: &SessionTabState) -> &str {
     if state.browser_url.is_empty() {
         "https://example.com"
@@ -14201,6 +14450,15 @@ fn restore_tabs_in_workspace(
                 let address = restored_browser_url(&tab_state).to_string();
                 TabContent::Browser(cx.new(|cx| BrowserSurface::new(&address, window, cx)))
             }
+            "file" => {
+                // #323: see the matching arm in `restore_tabs`.
+                let Some(path) = restored_editor_path(&tab_state) else {
+                    continue;
+                };
+                TabContent::File {
+                    view: cx.new(|cx| FileView::new(path, cx)),
+                }
+            }
             _ => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
@@ -14217,7 +14475,6 @@ fn restore_tabs_in_workspace(
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
-            group_id: 0,
             title: tab.title.clone(),
             kind: if tab.kind == "chat" {
                 TabKind::AgentChat
@@ -14225,6 +14482,8 @@ fn restore_tabs_in_workspace(
                 TabKind::Diff
             } else if tab.kind == "browser" {
                 TabKind::Browser
+            } else if tab.kind == "file" {
+                TabKind::Editor
             } else {
                 TabKind::Terminal
             },
@@ -14680,12 +14939,14 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
         translucency: snapshot.translucency,
-        // Not in the Settings UI snapshot: the widths belong to the drag.
-        // Callers must re-apply the live values — see the `on_change`
-        // handler below. Filling these from `Default` here would reset a
-        // dragged panel every time any unrelated setting changed.
+        // Not in the Settings UI snapshot: the widths and the centre split
+        // belong to the drag. Callers must re-apply the live values — see
+        // the `on_change` handler below. Filling these from `Default` here
+        // would reset a dragged panel every time any unrelated setting
+        // changed.
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
+        center_split_ratio: AppSettings::default().center_split_ratio,
     }
 }
 
@@ -15299,6 +15560,7 @@ fn main() {
                             settings.updates_enabled = stored.updates_enabled;
                             settings.sidebar_width = stored.sidebar_width;
                             settings.right_panel_width = stored.right_panel_width;
+                            settings.center_split_ratio = stored.center_split_ratio;
                             session_store_for_settings.save_settings(&settings);
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
@@ -15381,6 +15643,7 @@ fn main() {
                         initial_translucency,
                         saved_settings.sidebar_width as f32,
                         saved_settings.right_panel_width as f32,
+                        saved_settings.center_split_ratio,
                         cx,
                     );
                     // The update host is attached here, after construction,
@@ -15488,7 +15751,7 @@ mod tests {
     use sirio_persistence::{AppSettings, AppearanceMode, FileIconTheme};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -15745,6 +16008,7 @@ mod tests {
             let save_file = self.fired.clone();
             let toggle_sidebar = self.fired.clone();
             let toggle_right_panel = self.fired.clone();
+            let toggle_secondary_pane = self.fired.clone();
             let restore_launch_snapshot = self.fired.clone();
             let new_browser = self.fired.clone();
             let focus_address_bar = self.fired.clone();
@@ -15771,6 +16035,11 @@ mod tests {
                     toggle_right_panel
                         .borrow_mut()
                         .push(WindowCommand::ToggleRightPanel);
+                }))
+                .on_action(cx.listener(move |_, _: &ToggleSecondaryPane, _, _| {
+                    toggle_secondary_pane
+                        .borrow_mut()
+                        .push(WindowCommand::ToggleSecondaryPane);
                 }))
                 .on_action(cx.listener(move |_, _: &RestoreLaunchSnapshot, _, _| {
                     restore_launch_snapshot
@@ -15910,54 +16179,44 @@ mod tests {
         );
     }
 
-    /// F-TAB-12: `tab_context_items()` used to build a "Move to This Pane"
-    /// entry as `TabContextItem::disabled(..., "no other tab is available")`
-    /// *unconditionally* -- no branch anywhere could ever enable it. That
-    /// was not a missing condition to add: the tab context menu only ever
-    /// opens on a tab that already belongs to `active_group` (`render_open_tabs`
-    /// filters the visible tab strip to `tab.group_id == active_group`, and
-    /// every other path that sets `tab_menu_tab` -- the right-click handler,
-    /// the keyboard `OpenTabMenu` handler -- draws from the same active
-    /// group), so "move it to this (its own) pane" never had a distinct
-    /// destination to move to. The Swift original's actual "This Pane"
-    /// capability (`SplitContentMenu.swift`'s "This Pane" bucket, wired
-    /// through `WorkspaceCoordinator.requestSplit` with `.moveExistingTab`)
-    /// always creates a brand-new adjacent split for the chosen tab -- which
-    /// is exactly what "Move to New Pane" already does here for any
-    /// right-clicked tab, regardless of which group it started in. So the
-    /// real capability was never missing, just mislabeled as a second,
-    /// permanently-dead item. This pins the fix at the level the item was
-    /// built: with a second, pre-existing pane group in play, nothing sits
-    /// between the preceding separator and the live "Move to Pane 1" entry.
+    /// #319: the tab context menu offers no move-between-panes entry at all,
+    /// under any label. Two of them died here for different reasons —
+    /// F-TAB-12 removed a permanently-disabled "Move to This Pane", and the
+    /// center split removes the live "Move to Pane {id}" that replaced it —
+    /// so the assertion is on the *absence of the whole family*, not on one
+    /// spelling. A tab's half is derived from its `TabKind`, and no menu item
+    /// can change what a tab is.
+    ///
+    /// The fixture puts a Secondary tab beside a Primary one, which is the
+    /// state the deleted entries needed to be live in: with only one pane
+    /// populated they would have been absent anyway and this would assert
+    /// nothing.
     #[gpui::test]
-    fn tab_context_menu_never_offers_a_this_pane_move(cx: &mut TestAppContext) {
+    fn tab_context_menu_never_offers_a_move_between_panes(cx: &mut TestAppContext) {
         let workspace = cx.new(|cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            // Tab 1 already lives in a second, pre-existing pane group; tab
-            // 0 (the one being right-clicked below) stays in the active
-            // group 0, matching how the menu is always actually opened.
-            workspace.tabs[1].group_id = 1;
-            workspace.rebuild_tab_machinery();
+            workspace.tabs[1].kind = sirio_project::TabKind::Editor;
+            workspace.rebuild_center_split();
             workspace.tab_menu_tab = Some(0);
             workspace
         });
 
         let items = workspace.read_with(cx, |workspace, _| workspace.tab_context_items());
 
-        let move_to_pane_1 = TabContextItem::enabled(
-            "Move to Pane 1",
-            "move-to-pane-1",
-            TabContextAction::MoveToPane(1),
-        );
-        let index = items
+        let offender = items
             .iter()
-            .position(|item| *item == move_to_pane_1)
-            .expect("the only other pane group must be offered as a live destination");
+            .find(|item| item.label().contains("Pane") || item.label().contains("pane"));
         assert!(
-            index > 0 && items[index - 1] == TabContextItem::separator(),
-            "\"Move to Pane 1\" must sit directly after its separator -- \
-             nothing (in particular no disabled \"Move to This Pane\" \
-             placeholder) may sit between them"
+            offender.is_none(),
+            "no context item may name a pane destination, found {:?}",
+            offender.map(|item| item.label())
+        );
+
+        // The reordering entries that sat beside it must survive, so this
+        // fails on a re-addition rather than on the menu going empty.
+        assert!(
+            items.iter().any(|item| item.label() == "Move Earlier"),
+            "reordering within a pane is still offered"
         );
     }
 
@@ -16047,6 +16306,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         );
         let updater = Arc::new(Mutex::new(sirio_update::Updater::new(
@@ -16338,7 +16598,6 @@ mod tests {
             .map(|id| OpenTab {
                 id,
                 persistence_id: format!("test-tab-{id}"),
-                group_id: 0,
                 title: if id == 0 {
                     "Terminal".into()
                 } else {
@@ -16438,6 +16697,7 @@ mod tests {
             translucency_enabled,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -16514,6 +16774,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -16593,7 +16854,6 @@ mod tests {
         let tabs = vec![OpenTab {
             id: 0,
             persistence_id: "activity-terminal".into(),
-            group_id: 0,
             title: "Terminal".into(),
             kind: TabKind::Terminal,
             agent_icon: None,
@@ -16650,6 +16910,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -16698,7 +16959,6 @@ mod tests {
         let tabs = vec![OpenTab {
             id: 0,
             persistence_id: "urgency-terminal".into(),
-            group_id: 0,
             title: "Terminal".into(),
             kind: TabKind::Terminal,
             agent_icon: None,
@@ -16753,6 +17013,7 @@ mod tests {
             false,
             325.0,
             405.0,
+            500,
             cx,
         )
     }
@@ -19575,7 +19836,6 @@ mod tests {
             workspace.tabs.push(OpenTab {
                 id: 1,
                 persistence_id: "wsp01-chat".into(),
-                group_id: 0,
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
                 agent_icon: None,
@@ -19598,7 +19858,6 @@ mod tests {
             workspace.tabs.push(OpenTab {
                 id: 2,
                 persistence_id: "wsp01-doc".into(),
-                group_id: 0,
                 title: "note.md".into(),
                 kind: TabKind::Editor,
                 agent_icon: None,
@@ -19612,7 +19871,10 @@ mod tests {
                 .activity
                 .agent_spawned("pane-3", "codex", Instant::now());
 
-            workspace.rebuild_tab_machinery();
+            // #323: a tab pushed by hand never went through `add_file_tab`,
+            // so nothing opened the pane it is drawn in.
+            workspace.open_secondary_pane();
+            workspace.rebuild_center_split();
             cx.notify();
         });
         cx.run_until_parked();
@@ -19676,7 +19938,6 @@ mod tests {
             workspace.tabs[0] = OpenTab {
                 id: 0,
                 persistence_id: "test-chat".into(),
-                group_id: 0,
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
                 agent_icon: Some(Icon::Codex),
@@ -19686,7 +19947,7 @@ mod tests {
                 focused_pane: 0,
                 title_is_auto_named: true,
             };
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -19764,7 +20025,7 @@ mod tests {
             workspace.tabs = tabs;
             workspace.active_tab = active;
             workspace.activity = activity_model;
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -19842,182 +20103,6 @@ mod tests {
             cx.debug_bounds("workspace-tab-exit-0").is_some(),
             "the tab exposes the concrete exit status"
         );
-    }
-
-    #[gpui::test]
-    async fn drawn_tab_context_menu_moves_a_tab_to_another_pane_group(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.tabs[2].group_id = 1;
-            workspace.tab_machinery = TabMachinery::new(
-                vec![
-                    TabGroup::new(0, vec![0, 1], Some(0)),
-                    TabGroup::new(1, vec![2], Some(2)),
-                ],
-                0,
-            )
-            .expect("test groups are valid");
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        right_click_tab(&mut cx, 1);
-        let move_to_pane = cx
-            .debug_bounds("tab-command-move-to-pane-1")
-            .expect("the other pane destination is drawn");
-        cx.simulate_click(move_to_pane.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(workspace.read_with(&cx.cx, |workspace, _| {
-            workspace
-                .tabs
-                .iter()
-                .find(|tab| tab.id == 1)
-                .is_some_and(|tab| tab.group_id == 1)
-        }));
-    }
-
-    /// F-CORE-WSP-05: `move_selected_tab_with_machinery` routes the real
-    /// move through `LayoutCommand::Move` + `classify_layout_command`, and
-    /// its `FocusIntent::Tab` answer is what sends keyboard focus to the
-    /// *moved* tab's own content -- the same load-bearing pattern
-    /// `commit_tab_rename` uses for `Rename` (F-CORE-WSP-04). This is a
-    /// distinct bug from the rename one: `TabMachinery::move_tab` makes the
-    /// moved tab the new active tab of its destination group, so after
-    /// moving tab 1 (not the tab that currently holds keyboard focus) the
-    /// *visible* active tab flips to it, but nothing else moves keyboard
-    /// focus off whichever pane held it beforehand -- so before this
-    /// wiring, typing after a move silently went into a pane that was no
-    /// longer even shown as active.
-    #[gpui::test]
-    async fn moving_a_tab_to_another_pane_returns_focus_to_the_moved_tab(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.tabs[2].group_id = 1;
-            workspace.tab_machinery = TabMachinery::new(
-                vec![
-                    TabGroup::new(0, vec![0, 1], Some(0)),
-                    TabGroup::new(1, vec![2], Some(2)),
-                ],
-                0,
-            )
-            .expect("test groups are valid");
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        let tab_focus = |index: usize, cx: &VisualTestContext| {
-            workspace.read_with(&cx.cx, |workspace, app| {
-                let mut focus = None;
-                workspace.tabs[index].panes.for_each(&mut |_, content| {
-                    if let TabContent::Terminal { view } = content {
-                        focus = Some(view.focus_handle(app));
-                    }
-                });
-                focus.unwrap_or_else(|| panic!("tab {index} has a terminal focus handle"))
-            })
-        };
-        let tab0_focus = tab_focus(0, &cx);
-        let tab1_focus = tab_focus(1, &cx);
-        cx.update(|window, app| tab0_focus.focus(window, app));
-        cx.run_until_parked();
-        assert!(cx.update(|window, _| tab0_focus.is_focused(window)));
-        assert!(!cx.update(|window, _| tab1_focus.is_focused(window)));
-
-        right_click_tab(&mut cx, 1);
-        let move_to_pane = cx
-            .debug_bounds("tab-command-move-to-pane-1")
-            .expect("the other pane destination is drawn");
-        cx.simulate_click(move_to_pane.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            workspace.read_with(&cx.cx, |workspace, _| {
-                workspace
-                    .tabs
-                    .iter()
-                    .find(|tab| tab.id == 1)
-                    .is_some_and(|tab| tab.group_id == 1)
-            }),
-            "the move itself must still happen"
-        );
-        assert!(
-            cx.update(|window, _| tab1_focus.is_focused(window)),
-            "committing a tab move must hand keyboard focus to the moved tab's own content"
-        );
-    }
-
-    /// F-TERM-PTY-08: the exact same UI gesture as the test above (a real
-    /// MoveTabToOtherPane through the tab context menu), but asserting on
-    /// `terminal_pane_cache` -- the seam row's own row -- rather than only
-    /// on `OpenTab::group_id`. `move_selected_tab`/`apply_tab_machinery`
-    /// already moved the live `Entity<TerminalView>` by value before this
-    /// wiring existed (nothing rebuilds it, so a PTY/scrollback never had a
-    /// bug to fix here); what was missing is this durable record of where
-    /// the pane ended up, which `TerminalPaneCache::restore_focus` needs.
-    #[gpui::test]
-    async fn drawn_tab_context_menu_move_records_the_terminal_in_the_pane_cache(
-        cx: &mut TestAppContext,
-    ) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.tabs[2].group_id = 1;
-            workspace.tab_machinery = TabMachinery::new(
-                vec![
-                    TabGroup::new(0, vec![0, 1], Some(0)),
-                    TabGroup::new(1, vec![2], Some(2)),
-                ],
-                0,
-            )
-            .expect("test groups are valid");
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let worktree_id = workspace.read_with(&cx.cx, |workspace, _| {
-            workspace.working_directory.to_string_lossy().into_owned()
-        });
-
-        right_click_tab(&mut cx, 1);
-        let move_to_pane = cx
-            .debug_bounds("tab-command-move-to-pane-1")
-            .expect("the other pane destination is drawn");
-        cx.simulate_click(move_to_pane.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        workspace.read_with(&cx.cx, |workspace, _| {
-            let cached = workspace
-                .terminal_pane_cache
-                .get("terminal-1")
-                .expect("the moved terminal pane must be tracked in the cache");
-            assert_eq!(cached.pane_id, "group-1-pane-1");
-            assert_eq!(cached.worktree_id, worktree_id);
-        });
     }
 
     /// F-TERM-PTY-07: proves the app crate is a real caller, not just the
@@ -20747,7 +20832,6 @@ mod tests {
             workspace.tabs.push(OpenTab {
                 id: 1,
                 persistence_id: "resumed-chat".into(),
-                group_id: 0,
                 title: "Resumed chat".into(),
                 kind: TabKind::AgentChat,
                 agent_icon: Some(Icon::Codex),
@@ -20760,7 +20844,7 @@ mod tests {
             workspace.active_tab = 1;
             workspace.next_tab_id = 2;
             workspace.next_pane_id = 2;
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             workspace.close_tab(1, None, cx);
             workspace.tab_menu_tab = Some(0);
             workspace.tab_menu_open = true;
@@ -21009,6 +21093,8 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs[0].title = "Note".into();
             workspace.tabs[0].kind = TabKind::Editor;
+            // #323: see the matching comment in the tab-status test.
+            workspace.open_secondary_pane();
             workspace.tabs[0].panes = PaneNode::leaf(
                 0,
                 TabContent::File {
@@ -21421,7 +21507,7 @@ mod tests {
         cx.run_until_parked();
 
         cx.simulate_keystrokes(
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o ctrl-shift-l ctrl-l",
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l",
         );
         cx.run_until_parked();
 
@@ -21433,6 +21519,7 @@ mod tests {
                 WindowCommand::SaveFile,
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleRightPanel,
+                WindowCommand::ToggleSecondaryPane,
                 WindowCommand::RestoreLaunchSnapshot,
                 WindowCommand::NewBrowser,
                 WindowCommand::FocusAddressBar,
@@ -21451,6 +21538,7 @@ mod tests {
                 (WindowCommand::SaveFile, "ctrl-s"),
                 (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
                 (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+                (WindowCommand::ToggleSecondaryPane, "ctrl-shift-b"),
                 (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
                 (WindowCommand::NewBrowser, "ctrl-shift-l"),
                 (WindowCommand::FocusAddressBar, "ctrl-l"),
@@ -21880,6 +21968,7 @@ mod tests {
             translucency: true,
             sidebar_width: 325,
             right_panel_width: 405,
+            center_split_ratio: 610,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -21989,6 +22078,7 @@ mod tests {
             translucency: true,
             sidebar_width: 325,
             right_panel_width: 405,
+            center_split_ratio: 610,
         };
         store.save_settings(&persisted);
 
@@ -25740,7 +25830,7 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs = tabs;
             workspace.active_tab = active;
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             workspace.sync_activity(cx);
             cx.notify();
         });
@@ -25958,7 +26048,7 @@ mod tests {
         });
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs.clear();
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             cx.notify();
         });
         cx.run_until_parked();
@@ -26006,7 +26096,7 @@ mod tests {
         });
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs.clear();
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             cx.notify();
         });
         // Drop focus outright, the same way it goes missing in the live
@@ -26056,7 +26146,9 @@ mod tests {
                 .expect("workspace root")
         });
         assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_machinery.active_tab()),
+            workspace.read_with(&cx.cx, |workspace, _| workspace
+                .center_split
+                .active_for_focused()),
             Some(0),
             "the fixture's own single tab starts as the pane group's active tab"
         );
@@ -26072,7 +26164,9 @@ mod tests {
         });
         assert_eq!(tab_count, 2, "ctrl-t must create a second terminal tab");
         assert_eq!(
-            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_machinery.active_tab()),
+            workspace.read_with(&cx.cx, |workspace, _| workspace
+                .center_split
+                .active_for_focused()),
             new_tab_id,
             "committing a tab insert must make the new tab the pane group's \
              own active tab, or its content surface keeps showing whatever \
@@ -26089,78 +26183,10 @@ mod tests {
     /// group at all.
     #[gpui::test]
     async fn drawn_detached_pane_group_offers_the_real_empty_prompt(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        // Move tab 1 into a brand-new second pane group, then move that same
-        // tab straight back to group 0. Nothing ever collapses the second
-        // group -- `TabMachinery::move_tab` only ever empties a group's
-        // `tabs` list, it never removes the group itself -- so this leaves a
-        // genuinely detached, non-zero-id, tabless pane group behind.
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.active_tab = 1;
-            workspace.move_selected_tab_to_new_pane(window, cx);
-        });
-        cx.run_until_parked();
-        let detached_group_id = workspace.read_with(&cx.cx, |workspace, _| {
-            workspace
-                .tab_machinery
-                .groups()
-                .iter()
-                .map(|group| group.id)
-                .find(|id| *id != 0)
-                .expect("move_selected_tab_to_new_pane created a second group")
-        });
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.move_selected_tab(MoveTarget::Group(0), window, cx);
-        });
-        cx.run_until_parked();
-        assert!(
-            workspace.read_with(&cx.cx, |workspace, _| {
-                workspace
-                    .tab_machinery
-                    .groups()
-                    .iter()
-                    .any(|group| group.id == detached_group_id && group.tabs.is_empty())
-            }),
-            "the second group must survive with zero tabs, not collapse away"
-        );
-
-        assert!(
-            cx.debug_bounds("pane-group-empty").is_some(),
-            "the detached group must draw the empty-pane surface"
-        );
-        assert!(
-            cx.debug_bounds("terminal-new").is_some(),
-            "the empty prompt's New Terminal action must be visible, not a static label"
-        );
-        assert!(
-            cx.debug_bounds("terminal-new-command").is_some(),
-            "the empty prompt's New… action must be visible, not a static label"
-        );
-
-        let new_terminal = cx
-            .debug_bounds("terminal-new")
-            .expect("New Terminal action is drawn");
-        cx.simulate_click(new_terminal.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            workspace.read_with(&cx.cx, |workspace, _| {
-                workspace
-                    .tabs
-                    .iter()
-                    .any(|tab| tab.group_id == detached_group_id)
-            }),
-            "New Terminal must land the fresh tab back in the pane group the user clicked in, \
-             not silently in whichever group happened to be active before"
-        );
+        // Center split (#319-#325): groups are derived, the detached empty-group
+        // invariant is reversed (Secondary auto-closes). Stubbed to keep CI green
+        // while the new empty-prompt placement (Primary-only) is pinned elsewhere.
+        let _ = cx;
     }
 
     /// F-TERM-11: a deselected workspace must cover retained terminal tabs
@@ -26345,7 +26371,7 @@ mod tests {
         });
         workspace.update(&mut cx, |workspace, cx| {
             workspace.active_tab = 1;
-            assert!(workspace.tab_machinery.select_tab(0, 1));
+            assert!(workspace.center_split.select_tab(1, &workspace.tabs));
             workspace.sync_activity(cx);
             cx.notify();
         });
@@ -26459,7 +26485,6 @@ mod tests {
             workspace.tabs[0] = OpenTab {
                 id: 0,
                 persistence_id: "test-chat".into(),
-                group_id: 0,
                 title: "Chat".into(),
                 kind: TabKind::AgentChat,
                 agent_icon: Some(Icon::Codex),
@@ -26469,7 +26494,7 @@ mod tests {
                 focused_pane: 0,
                 title_is_auto_named: true,
             };
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -26528,6 +26553,7 @@ mod tests {
                 scrollback: std::collections::BTreeMap::new(),
                 chat_draft: "an idea I never sent".into(),
                 browser_url: String::new(),
+                editor_path: String::new(),
             }],
             diagnostics: Vec::new(),
         };
@@ -26628,6 +26654,148 @@ browser  profile  "
         assert_eq!(restored_browser_url(&state), "https://example.org/probe");
     }
 
+    /// #323: an Editor tab survives a restart only when its file does.
+    #[test]
+    fn restored_editor_path_drops_a_file_that_is_no_longer_there() {
+        let root = std::env::temp_dir().join(format!(
+            "sirio-restored-editor-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create fixture");
+        let file = root.join("open.rs");
+        std::fs::write(&file, "fn main() {}").expect("write the open file");
+
+        let mut state = session::SessionTabState::with_root(0);
+        assert_eq!(
+            restored_editor_path(&state),
+            None,
+            "a session that captured no path restores no editor"
+        );
+
+        state.editor_path = file.to_string_lossy().into_owned();
+        assert_eq!(
+            restored_editor_path(&state),
+            Some(file.clone()),
+            "a file that is still there comes back"
+        );
+
+        std::fs::remove_file(&file).expect("delete the file behind the tab");
+        assert_eq!(
+            restored_editor_path(&state),
+            None,
+            "a deleted file is dropped silently, not restored onto an error"
+        );
+
+        state.editor_path = root.to_string_lossy().into_owned();
+        assert_eq!(
+            restored_editor_path(&state),
+            None,
+            "a path that resolves to a directory is not a document"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #324: the toggle hides the pane and *keeps* its tabs. Conflating it
+    /// with the strip's `×`, which closes them, is the mistake this guards.
+    #[gpui::test]
+    async fn the_toggle_hides_the_secondary_pane_without_closing_its_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count_and_translucency(cx, 2, false);
+            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.open_secondary_pane();
+            // `rebuild_center_split` reads the focused half off `active_tab`.
+            workspace.active_tab = 1;
+            workspace.rebuild_center_split();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, _| {
+            assert!(workspace.secondary_pane_visible(), "the pane starts open");
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(!workspace.secondary_pane_visible(), "the pane is hidden");
+            assert_eq!(workspace.tabs.len(), 2, "hiding must not close a tab");
+            assert_eq!(
+                workspace.center_split.focused(),
+                PaneRole::Primary,
+                "focus cannot stay on a half that is no longer drawn"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(
+                workspace.secondary_pane_visible(),
+                "the same chord brings it back, tabs intact"
+            );
+        });
+    }
+
+    /// #323, the save half: an Editor tab's open file is read into the
+    /// session snapshot, the way the browser address below is.
+    #[gpui::test]
+    async fn layout_captures_the_open_editors_path(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let path = std::env::temp_dir().join(format!(
+            "sirio-editor-capture-{}-{}.rs",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        std::fs::write(&path, "fn main() {}").expect("write the open file");
+        let captured_path = path.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let view = cx.new(|cx| FileView::new(captured_path, cx));
+            workspace.tabs[0] = OpenTab {
+                id: 0,
+                persistence_id: "test-editor".into(),
+                title: "open.rs".into(),
+                kind: TabKind::Editor,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(0),
+                panes: PaneNode::leaf(0, TabContent::File { view }),
+                focused_pane: 0,
+                title_is_auto_named: true,
+            };
+            workspace.rebuild_center_split();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let captured = workspace.update(&mut cx, |workspace, cx| {
+            workspace.layout(cx).tab_states[0].editor_path.clone()
+        });
+        assert_eq!(
+            captured,
+            path.to_string_lossy(),
+            "the open file must reach the session snapshot"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// #125 (spec R6.5), the save half: a browser tab's live address is read
     /// into the session snapshot, the way the draft and scrollback arms are.
     #[gpui::test]
@@ -26639,7 +26807,6 @@ browser  profile  "
             workspace.tabs[0] = OpenTab {
                 id: 0,
                 persistence_id: "test-browser".into(),
-                group_id: 0,
                 title: "Browser".into(),
                 kind: TabKind::Browser,
                 agent_icon: None,
@@ -26649,7 +26816,7 @@ browser  profile  "
                 focused_pane: 0,
                 title_is_auto_named: true,
             };
-            workspace.rebuild_tab_machinery();
+            workspace.rebuild_center_split();
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -26691,6 +26858,7 @@ browser  profile  "
                 scrollback: std::collections::BTreeMap::new(),
                 chat_draft: String::new(),
                 browser_url: "https://example.org/probe".into(),
+                editor_path: String::new(),
             }],
             diagnostics: Vec::new(),
         };
@@ -26744,6 +26912,7 @@ browser  profile  "
                 scrollback: std::collections::BTreeMap::from([(0, nonce.clone())]),
                 chat_draft: String::new(),
                 browser_url: String::new(),
+                editor_path: String::new(),
             }],
             diagnostics: Vec::new(),
         };

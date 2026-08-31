@@ -280,6 +280,21 @@ fn migrate_v15(db: &Transaction) -> Result<(), rusqlite::Error> {
     db.execute_batch("UPDATE tab SET agent_id = 'adapter:' || agent_id WHERE agent_id IS NOT NULL;")
 }
 
+/// v16 — the Secondary centre pane's open/closed flag (#323).
+///
+/// This is the one piece of the centre split that is *stored* rather than
+/// derived, and it is deliberate: which half a tab is drawn in comes from its
+/// kind, and whether the pane exists normally comes from whether it holds
+/// tabs. What cannot be derived is "closed, but still holding tabs" — the
+/// state the keyboard toggle produces. Without that toggle this column would
+/// have no reason to exist.
+fn migrate_v16(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE worktree
+         ADD COLUMN secondary_pane_open INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -298,6 +313,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v13,
     migrate_v14,
     migrate_v15,
+    migrate_v16,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
