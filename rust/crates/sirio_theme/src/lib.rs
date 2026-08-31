@@ -1335,7 +1335,9 @@ impl Theme {
     /// remember what the unfaded surfaces were. The frame material
     /// (`frame_surface`) is already translucent by design and is not faded
     /// again; washes, borders, selection, and text keep full opacity so a
-    /// translucent panel keeps its contrast.
+    /// translucent panel keeps its contrast. A surface that already carries an
+    /// alpha is *scaled*, not overwritten — see
+    /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
     pub fn with_translucency(self, enabled: bool) -> Self {
         let mut theme = Self::for_appearance(self.mode, self.appearance);
         theme.translucency_enabled = enabled;
@@ -1343,7 +1345,13 @@ impl Theme {
             return theme;
         }
         let opacity = Self::surface_opacity(true);
-        let fade = |surface: Rgba| softened(surface, opacity);
+        // Scale the alpha, do not overwrite it. These were all opaque once, so
+        // the two were the same thing; bezel's dark `input_bg` is a 3% white
+        // veil, and overwriting turned it into an 85% white fill.
+        let fade = |surface: Rgba| Rgba {
+            a: surface.a * opacity,
+            ..surface
+        };
         theme.colors.surface = fade(theme.colors.surface);
         theme.colors.surface_raised = fade(theme.colors.surface_raised);
         theme.colors.input_bg = fade(theme.colors.input_bg);
@@ -2270,6 +2278,32 @@ mod tests {
         assert_eq!(Theme::surface_opacity(false), 1.0);
     }
 
+    /// Fading a surface that is *already* translucent must not make it more
+    /// opaque than it was.
+    ///
+    /// The regression this pins: `fade` used to overwrite alpha rather than
+    /// scale it, which was invisible while every faded surface was opaque
+    /// (1.0 -> 0.85). bezel's dark `input_bg` is a 3% white veil, so
+    /// overwriting turned the filter field into an 85% *white* fill on a
+    /// near-black sidebar.
+    #[test]
+    fn fading_an_already_translucent_surface_does_not_make_it_more_opaque() {
+        let base = Theme::dark();
+        assert!(
+            base.input_bg.a < 0.5,
+            "precondition: dark input_bg is a veil, not a fill (got {})",
+            base.input_bg.a
+        );
+
+        let translucent = base.with_translucency(true);
+        assert!(
+            translucent.input_bg.a <= base.input_bg.a,
+            "fading made the veil more opaque: {} -> {}",
+            base.input_bg.a,
+            translucent.input_bg.a
+        );
+    }
+
     #[test]
     fn with_translucency_fades_structural_surfaces_and_is_reversible() {
         for base in [Theme::dark(), Theme::light()] {
@@ -2277,21 +2311,11 @@ mod tests {
             let translucent = base.with_translucency(true);
 
             assert!(translucent.translucency_enabled);
-            assert_eq!(translucent.surface, softened(base.surface, opacity));
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(translucent.surface, translucent.surface);
-            assert_eq!(
-                translucent.surface_raised,
-                softened(base.surface_raised, opacity)
-            );
-            assert_eq!(translucent.surface_raised, translucent.surface_raised);
-            assert_eq!(translucent.input_bg, softened(base.input_bg, opacity));
-            assert_eq!(
-                translucent.terminal_surface,
-                softened(base.terminal_surface, opacity)
-            );
+            let faded = |s: Rgba| Rgba { a: s.a * opacity, ..s };
+            assert_eq!(translucent.surface, faded(base.surface));
+            assert_eq!(translucent.surface_raised, faded(base.surface_raised));
+            assert_eq!(translucent.input_bg, faded(base.input_bg));
+            assert_eq!(translucent.terminal_surface, faded(base.terminal_surface));
 
             assert_eq!(
                 translucent.frame_surface, base.frame_surface,
