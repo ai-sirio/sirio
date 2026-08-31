@@ -1173,6 +1173,21 @@ impl Theme {
     /// Installs a theme, resolving `System` against the current window
     /// appearance. On Linux the resolution is dark-biased until the portal
     /// is heard from (see [`ThemeMode::resolve_system`]).
+    /// Pushes this theme's appearance into bezel's process-wide mirror.
+    ///
+    /// bezel's `ink`, `wash` and `hairline` are free functions with no `cx`,
+    /// so they cannot read the theme they are painting for; they read a
+    /// mirror that defaults to Dark. It has to be pushed from every place
+    /// that *installs* a theme, which is not the same set as the public
+    /// entry points — `set_mode` delegates to `install`, but `follow_portal`
+    /// swaps the global on its own.
+    pub fn sync_appearance(&self) {
+        bezel::theme::set_current_appearance(match self.appearance {
+            Appearance::Light => bezel::theme::Appearance::Light,
+            Appearance::Dark => bezel::theme::Appearance::Dark,
+        });
+    }
+
     pub fn install(mode: ThemeMode, cx: &mut App) {
         Self::resolve_font_families(cx);
         #[cfg(target_os = "linux")]
@@ -1182,7 +1197,9 @@ impl Theme {
         let translucency = cx
             .try_global::<Self>()
             .is_some_and(|theme| theme.translucency_enabled);
-        cx.set_global(theme.with_translucency(translucency));
+        let theme = theme.with_translucency(translucency);
+        theme.sync_appearance();
+        cx.set_global(theme);
     }
 
     /// Resolves and remembers the UI, code and terminal families from the
@@ -1259,6 +1276,7 @@ impl Theme {
                 if cx.global::<Theme>().mode == ThemeMode::System {
                     let next = Theme::for_appearance(ThemeMode::System, preference)
                         .with_translucency(cx.global::<Theme>().translucency_enabled);
+                    next.sync_appearance();
                     cx.set_global(next);
                 }
             });
@@ -1615,6 +1633,34 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Installing a theme pushes its appearance into bezel's mirror.
+    ///
+    /// bezel's `ink`, `wash` and `hairline` are free functions with no `cx`:
+    /// they read a process-wide mirror that defaults to Dark, not the theme
+    /// they are painting for. Nothing else in the suite would notice a stale
+    /// mirror, because every token this crate builds resolves its own
+    /// appearance explicitly — the damage is confined to the bezel primitives
+    /// `sirio_ui` renders, and it looks like a light window with dark
+    /// hairlines.
+    #[test]
+    fn installing_a_theme_syncs_bezels_appearance_mirror() {
+        // The mirror is process-wide, so two tests touching it concurrently
+        // would flake. This is bezel's own guard for exactly that.
+        let _guard = bezel::theme::lock_appearance();
+
+        Theme::light().sync_appearance();
+        assert_eq!(
+            bezel::theme::current_appearance(),
+            bezel::theme::Appearance::Light
+        );
+
+        Theme::dark().sync_appearance();
+        assert_eq!(
+            bezel::theme::current_appearance(),
+            bezel::theme::Appearance::Dark
+        );
+    }
 
     /// The dark palette is bezel's.
     ///
