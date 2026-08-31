@@ -26191,7 +26191,7 @@ mod tests {
         // Drop focus outright, the same way it goes missing in the live
         // app: the terminal that used to hold it is gone from this frame,
         // and nothing else has claimed it yet.
-        cx.update(|window, _| window.blur());
+        cx.update(|window, cx| window.blur(cx));
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("empty-worktree").is_some(),

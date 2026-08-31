@@ -19,9 +19,14 @@ Written 2026-08-31, when the theme was rebased onto
 `light()` and takes its neutrals, status hues, accent and diff colours
 directly. Nothing is sampled, measured or transcribed any more.
 
-The dependency is pinned `=0.1.3` in `rust/Cargo.toml`. **After this work that
+The dependency is pinned `=0.1.4` in `rust/Cargo.toml`. **After this work that
 pin protects appearance, not just API**: bumping bezel restyles the app. Treat
 any bump as a visual change to review, not a dependency chore.
+
+Bezel 0.1.4 also gives frost and glass one surface vocabulary: `SurfaceStyle`
+selects the material and `SurfaceSpec` carries the resolved gain, saturation,
+edge and shadow parameters. Any surface review must therefore consider both
+the frost and glass paths, rather than treating them as unrelated paint APIs.
 
 `dark_palette_comes_from_bezel` and `light_palette_comes_from_bezel` compare
 the taken tokens against bezel itself, so a bump that moves a value fails the
@@ -116,6 +121,9 @@ Recorded because no test covers any of it:
 - **Panel borders went translucent.** `border_opaque` collapsed onto `border`:
   bezel draws every seam as a hairline veil, so the opaque separator has no
   source any more.
+- **Frost and glass now share a surface model.** bezel 0.1.4 resolves both
+  through `SurfaceStyle` / `SurfaceSpec`; the facade's surface behavior is one
+  material contract instead of separate frost and glass paint paths.
 - **Hairlines are scaled up on light** by `INK_HAIRLINE_SCALE` (1.35), where
   Sirio scaled fills and edges the same.
 - **The depth ladder inverted.** Sirio cut a well by darkening the page; bezel
