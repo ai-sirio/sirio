@@ -39,6 +39,7 @@
 //! numbers, and the report's `error` field covers the git-broken case. The
 //! human surface is the honest one.
 
+use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
@@ -2318,7 +2319,7 @@ fn action_icon_button(
         .text_size(theme.typography.caption2)
         .text_color(theme.text)
         .hover(|style| style.bg(theme.element_hover))
-        .tooltip(controls::text_tooltip(tooltip, theme))
+        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -2344,7 +2345,7 @@ fn section_action_button(
         .text_size(theme.typography.caption2)
         .text_color(theme.text_muted)
         .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
-        .tooltip(controls::text_tooltip(label, theme))
+        .tooltip(move |window, cx| Tooltip::text(label, window, cx))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -2372,7 +2373,7 @@ where
         .text_size(px(12.5))
         .text_color(theme.text_muted)
         .hover(|style| style.text_color(theme.danger))
-        .tooltip(controls::text_tooltip(tooltip, theme))
+        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx);
