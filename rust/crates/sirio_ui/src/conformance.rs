@@ -142,31 +142,31 @@ fn expect_hex(actual: Rgba, hex: u32, label: &str) {
     assert_eq!(actual.a, 1.0, "{label}.a must be opaque");
 }
 
-/// The accent is still Sirio's coral — `#E08B52` dark / `#AD581F` light — and
-/// the active chrome is deliberately *not* it.
+/// The coral is still Sirio's — `#E08B52` dark / `#AD581F` light — and the
+/// active chrome is deliberately *not* it.
 ///
-/// `tab_focus_accent` used to be an alias of `accent`, and this test existed to
-/// stop the two drifting apart. They are now different on purpose: colour is
-/// spent on data and on attention, so focus and active chrome are spelled with
-/// contrast and resolve to the text neutral instead. The coral's own value
-/// stays pinned because the agent-colour picker still offers it. What this test
-/// guards is therefore the separation rather than the alias — it is what
-/// catches a coral creeping back into the shell.
+/// The chrome used to be an alias of the coral, and this test existed to stop
+/// the two drifting apart. They are different on purpose now: colour is spent
+/// on data and on attention, so focus and active chrome are spelled with
+/// contrast and resolve to the text neutral instead. What this test guards is
+/// therefore the separation — it is what catches a coral creeping back into
+/// the shell.
 ///
-/// Where the values come from is `docs/linux-rewrite/THEME-PROVENANCE.md`, and
-/// the rules they satisfy are tested next to them in `sirio_theme`.
+/// The text neutral itself is no longer pinned here. It is bezel's, and
+/// `sirio_theme`'s `dark_palette_comes_from_bezel` compares it against bezel
+/// directly; a hex copy in a second crate would only be a place for the two to
+/// disagree. The coral stays pinned because it is Sirio's own — see
+/// `docs/THEME-PROVENANCE.md`.
 #[test]
 fn the_accent_is_the_pickers_coral_and_no_longer_the_chrome() {
     let dark = Theme::dark();
     assert_eq!(dark.appearance, Appearance::Dark);
-    expect_hex(dark.brand_coral, 0xE0_8B_52, "dark accent");
-    expect_hex(dark.text, 0xCB_CD_D4, "dark tab_focus_accent");
+    expect_hex(dark.brand_coral, 0xE0_8B_52, "dark coral");
     assert_ne!(dark.text, dark.brand_coral);
 
     let light = Theme::light();
     assert_eq!(light.appearance, Appearance::Light);
-    expect_hex(light.brand_coral, 0xAD_58_1F, "light accent");
-    expect_hex(light.text, 0x31_3A_40, "light tab_focus_accent");
+    expect_hex(light.brand_coral, 0xAD_58_1F, "light coral");
     assert_ne!(light.text, light.brand_coral);
 }
 
