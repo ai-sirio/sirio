@@ -245,7 +245,7 @@ impl ThemeColors {
         }
     }
 
-    fn for_appearance(appearance: Appearance) -> Self {
+    fn for_appearance(appearance: Appearance, base: BaseColor) -> Self {
         // Every neutral, status and diff token below is bezel's. What stays
         // Sirio's is listed in `Group C` of the design doc: the coral, the
         // window-frame material, the terminal surface, and the washes that sit
@@ -254,10 +254,18 @@ impl ThemeColors {
         // The palette is read here rather than through bezel's `wash`/`ink`
         // helpers because those resolve against a process-global appearance,
         // and this function is called for both appearances in one process.
-        let bezel = match appearance {
-            Appearance::Dark => bezel::theme::Theme::dark(),
-            Appearance::Light => bezel::theme::Theme::light(),
-        };
+        // `branded` is the same reason the tint arrives as a parameter: a
+        // brand global would put back exactly the problem those helpers have.
+        let bezel = bezel::theme::Theme::branded(
+            &bezel::theme::Brand {
+                tint: base.tint(),
+                ..Default::default()
+            },
+            match appearance {
+                Appearance::Dark => bezel::theme::Appearance::Dark,
+                Appearance::Light => bezel::theme::Appearance::Light,
+            },
+        );
         // Sirio's brand coral. Part measured, part chosen, and the seam between
         // the two is the whole point — see `docs/THEME-PROVENANCE.md`.
         //
@@ -1108,6 +1116,11 @@ pub struct Theme {
     pub mode: ThemeMode,
     /// The active resolved appearance.
     pub appearance: Appearance,
+    /// The neutral family the greys are tinted with. Carried on the theme so
+    /// every reinstall (`install`, `set_mode`, `with_translucency`, the
+    /// portal follower) preserves it by construction — the same reason
+    /// `translucency_enabled` lives here.
+    pub base_color: BaseColor,
     /// Adaptive color tokens.
     pub colors: ThemeColors,
     /// Spacing and geometry tokens.
@@ -1192,9 +1205,9 @@ impl Theme {
     pub fn install(mode: ThemeMode, cx: &mut App) {
         Self::resolve_font_families(cx);
         #[cfg(target_os = "linux")]
-        let theme = Self::for_mode_linux(mode, cx.window_appearance());
+        let theme = Self::for_mode_linux(mode, cx.window_appearance(), BaseColor::Neutral);
         #[cfg(not(target_os = "linux"))]
-        let theme = Self::for_mode(mode, cx.window_appearance());
+        let theme = Self::for_mode(mode, cx.window_appearance(), BaseColor::Neutral);
         let translucency = cx
             .try_global::<Self>()
             .is_some_and(|theme| theme.translucency_enabled);
@@ -1275,8 +1288,12 @@ impl Theme {
             cx.update(|cx| {
                 let Some(preference) = preference else { return };
                 if cx.global::<Theme>().mode == ThemeMode::System {
-                    let next = Theme::for_appearance(ThemeMode::System, preference)
-                        .with_translucency(cx.global::<Theme>().translucency_enabled);
+                    let next = Theme::for_appearance(
+                        ThemeMode::System,
+                        preference,
+                        cx.global::<Theme>().base_color,
+                    )
+                    .with_translucency(cx.global::<Theme>().translucency_enabled);
                     next.sync_appearance();
                     cx.set_global(next);
                 }
@@ -1286,37 +1303,45 @@ impl Theme {
     }
 
     /// Returns a theme resolved for a requested mode and system appearance.
-    pub fn for_mode(mode: ThemeMode, system_appearance: WindowAppearance) -> Self {
+    pub fn for_mode(
+        mode: ThemeMode,
+        system_appearance: WindowAppearance,
+        base: BaseColor,
+    ) -> Self {
         let appearance = resolve_mode(mode, system_appearance);
-        Self::for_appearance(mode, appearance)
+        Self::for_appearance(mode, appearance, base)
     }
 
     /// Linux resolution of `System`: dark until the portal speaks.
     #[cfg(target_os = "linux")]
-    fn for_mode_linux(mode: ThemeMode, system_appearance: WindowAppearance) -> Self {
+    fn for_mode_linux(
+        mode: ThemeMode,
+        system_appearance: WindowAppearance,
+        base: BaseColor,
+    ) -> Self {
         let appearance = resolve_mode_linux(mode, system_appearance);
-        Self::for_appearance(mode, appearance)
+        Self::for_appearance(mode, appearance, base)
     }
 
     /// Returns a light theme without requiring a GPUI application context.
     pub fn light() -> Self {
-        Self::for_appearance(ThemeMode::Light, Appearance::Light)
+        Self::for_appearance(ThemeMode::Light, Appearance::Light, BaseColor::Neutral)
     }
 
     /// Returns a dark theme without requiring a GPUI application context.
     pub fn dark() -> Self {
-        Self::for_appearance(ThemeMode::Dark, Appearance::Dark)
+        Self::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Neutral)
     }
 
     /// Returns a system-mode theme resolved against the supplied appearance.
     ///
     /// On Linux this is the dark-biased resolution: a light appearance is
     /// the unresolved default until the portal is heard from.
-    pub fn system(system_appearance: WindowAppearance) -> Self {
+    pub fn system(system_appearance: WindowAppearance, base: BaseColor) -> Self {
         #[cfg(target_os = "linux")]
-        return Self::for_mode_linux(ThemeMode::System, system_appearance);
+        return Self::for_mode_linux(ThemeMode::System, system_appearance, base);
         #[cfg(not(target_os = "linux"))]
-        Self::for_mode(ThemeMode::System, system_appearance)
+        Self::for_mode(ThemeMode::System, system_appearance, base)
     }
 
     /// Returns the surface opacity used when translucency is enabled.
@@ -1343,7 +1368,7 @@ impl Theme {
     /// alpha is *scaled*, not overwritten — see
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
     pub fn with_translucency(self, enabled: bool) -> Self {
-        let mut theme = Self::for_appearance(self.mode, self.appearance);
+        let mut theme = Self::for_appearance(self.mode, self.appearance, self.base_color);
         theme.translucency_enabled = enabled;
         if !enabled {
             return theme;
@@ -1363,11 +1388,12 @@ impl Theme {
         theme
     }
 
-    fn for_appearance(mode: ThemeMode, appearance: Appearance) -> Self {
-        let colors = ThemeColors::for_appearance(appearance);
+    fn for_appearance(mode: ThemeMode, appearance: Appearance, base: BaseColor) -> Self {
+        let colors = ThemeColors::for_appearance(appearance, base);
         Self {
             mode,
             appearance,
+            base_color: base,
             colors,
             spacing: Spacing::default(),
             radii: Radii::default(),
@@ -1715,7 +1741,7 @@ mod tests {
     /// — is deliberately absent: those are Sirio's own and have no bezel
     /// counterpart to compare against.
     fn assert_palette_comes_from_bezel(appearance: Appearance, bezel: bezel::theme::Theme) {
-        let sirio = ThemeColors::for_appearance(appearance);
+        let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
         for (name, ours, theirs) in [
             ("bg", sirio.bg, bezel.bg),
             ("surface", sirio.surface, bezel.surface),
@@ -1751,6 +1777,89 @@ mod tests {
         }
     }
 
+    #[test]
+    fn neutral_reproduces_the_palette_shipped_before_base_colours() {
+        // The upgrade guard. `Tint::NONE` is bezel's shipped grey, so an
+        // install that has never touched the new setting must paint exactly
+        // what it painted yesterday — every token, both appearances.
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
+            let bezel = match appearance {
+                Appearance::Dark => bezel::theme::Theme::dark(),
+                Appearance::Light => bezel::theme::Theme::light(),
+            };
+            assert_eq!(
+                neutral.bg,
+                Rgba::from(bezel.bg),
+                "{appearance:?} bg is bezel's untinted page"
+            );
+            assert_eq!(neutral.surface, Rgba::from(bezel.surface));
+            assert_eq!(neutral.border, Rgba::from(bezel.border));
+        }
+    }
+
+    #[test]
+    fn a_tinted_base_moves_the_greys_and_leaves_sirios_own_colours_alone() {
+        // Decision B4: the coral is Sirio's identity, anchored by two
+        // measured constraints, and the terminal well is deliberately
+        // independent of the shell's panel hierarchy. Neither rotates.
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
+            let slate = ThemeColors::for_appearance(appearance, BaseColor::Slate);
+
+            assert_ne!(slate.bg, neutral.bg, "{appearance:?} page takes the tint");
+            assert_ne!(slate.surface, neutral.surface);
+            // The borders stay verbatim, on purpose: bezel 0.1.3 tints only
+            // opaque achromatic ink — `Brand::apply`: "Translucent ink is
+            // skipped because it paints over whatever is beneath it, which is
+            // tinted already" — and both borders are 8–10% veils. They read
+            // the page's tint through compositing, which is also exactly what
+            // keeps `assert_palette_comes_from_bezel` true under every base.
+            assert_eq!(slate.border, neutral.border);
+
+            assert_eq!(
+                slate.brand_coral, neutral.brand_coral,
+                "{appearance:?} coral is Sirio's, not bezel's to rotate"
+            );
+            assert_eq!(
+                slate.terminal_surface, neutral.terminal_surface,
+                "{appearance:?} terminal well stays out of the panel hierarchy"
+            );
+        }
+    }
+
+    #[test]
+    fn the_semantic_hues_hold_under_every_base_colour() {
+        // `Brand::apply` keeps danger, warning and success where they are
+        // because they mean something. Asserted from Sirio's side too, so a
+        // bezel bump that changed the rule fails here rather than shipping a
+        // status colour nobody chose.
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
+            for base in BaseColor::ALL {
+                let tinted = ThemeColors::for_appearance(appearance, base);
+                assert_eq!(tinted.danger, neutral.danger, "{base:?} danger");
+                assert_eq!(tinted.warning, neutral.warning, "{base:?} warning");
+                assert_eq!(tinted.success, neutral.success, "{base:?} success");
+            }
+        }
+    }
+
+    #[test]
+    fn translucency_preserves_the_chosen_base_colour() {
+        // `with_translucency` rebuilds the palette from the theme's own
+        // fields; the base colour has to be one of them or the toggle
+        // silently resets the user's choice.
+        let theme = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Slate);
+        let translucent = theme.with_translucency(true);
+        assert_eq!(translucent.base_color, BaseColor::Slate);
+        assert_eq!(
+            translucent.colors.border,
+            theme.colors.border,
+            "a non-faded token keeps the tinted value"
+        );
+    }
+
     /// The primary text rung is bezel's, softened — not bezel's as-is, and not
     /// a hand-picked hex either.
     ///
@@ -1766,7 +1875,7 @@ mod tests {
             (Appearance::Dark, bezel::theme::Theme::dark()),
             (Appearance::Light, bezel::theme::Theme::light()),
         ] {
-            let sirio = ThemeColors::for_appearance(appearance);
+            let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             let full = Rgba::from(bezel.text);
 
             assert_ne!(
@@ -1845,7 +1954,7 @@ mod tests {
             (Appearance::Dark, bezel::theme::Theme::dark()),
             (Appearance::Light, bezel::theme::Theme::light()),
         ] {
-            let sirio = ThemeColors::for_appearance(appearance);
+            let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             assert_eq!(sirio.surface, Rgba::from(bezel.surface));
             assert_eq!(sirio.text_muted, Rgba::from(bezel.text_muted));
             assert_eq!(sirio.border, Rgba::from(bezel.border));
@@ -1858,7 +1967,7 @@ mod tests {
         // staged / modified / conflict states, so it reads as "not yet tracked"
         // rather than as a status.
         for appearance in [Appearance::Dark, Appearance::Light] {
-            let c = ThemeColors::for_appearance(appearance);
+            let c = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             assert_eq!(c.git_untracked, c.text_faint);
             assert_ne!(c.git_untracked, c.accent);
         }
@@ -2223,11 +2332,11 @@ mod tests {
     #[test]
     fn system_mode_follows_window_appearance() {
         assert_eq!(
-            Theme::system(WindowAppearance::Dark).appearance,
+            Theme::system(WindowAppearance::Dark, BaseColor::Neutral).appearance,
             Appearance::Dark
         );
         assert_eq!(
-            Theme::system(WindowAppearance::VibrantDark).appearance,
+            Theme::system(WindowAppearance::VibrantDark, BaseColor::Neutral).appearance,
             Appearance::Dark
         );
         // A light appearance is the unresolved default on Linux (the portal
@@ -2235,13 +2344,13 @@ mod tests {
         // macOS `NSAppearance` is synchronous and authoritative.
         #[cfg(target_os = "linux")]
         assert_eq!(
-            Theme::system(WindowAppearance::Light).appearance,
+            Theme::system(WindowAppearance::Light, BaseColor::Neutral).appearance,
             Appearance::Dark,
             "Linux must start dark until the portal is heard from"
         );
         #[cfg(not(target_os = "linux"))]
         assert_eq!(
-            Theme::system(WindowAppearance::Light).appearance,
+            Theme::system(WindowAppearance::Light, BaseColor::Neutral).appearance,
             Appearance::Light
         );
     }
@@ -2560,10 +2669,10 @@ mod tests {
     /// assert.
     #[test]
     fn theme_for_mode_resolves_for_the_appearance_it_was_asked_for() {
-        let theme = Theme::for_mode(ThemeMode::Light, WindowAppearance::Light);
+        let theme = Theme::for_mode(ThemeMode::Light, WindowAppearance::Light, BaseColor::Neutral);
         assert_eq!(theme.appearance, Appearance::Light);
 
-        let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark);
+        let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark, BaseColor::Neutral);
         assert_eq!(theme.appearance, Appearance::Dark);
     }
 
