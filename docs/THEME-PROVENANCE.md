@@ -27,6 +27,27 @@ any bump as a visual change to review, not a dependency chore.
 the taken tokens against bezel itself, so a bump that moves a value fails the
 suite rather than shipping quietly.
 
+**The greys carry a chosen hue.** Settings → Appearance offers bezel's five base
+colours (`BASE_COLORS` in bezel's `brand.rs`: Neutral, Stone, Zinc, Gray,
+Slate), and `ThemeColors::for_appearance` builds its bezel palette through
+`Theme::branded` rather than `Theme::dark()` / `light()`. Only hue moves —
+lightness is never a knob, so every family holds the contrast the shipped
+palette was verified at, and the semantic hues (danger, warning, success) keep
+their own. `Neutral` is `Tint::NONE`, which reproduces the shipped palette
+exactly; it is the default, and it is why the two tests above still compare
+against bare `bezel::theme::Theme::dark()` / `light()`.
+
+Three things do not rotate. `brand_coral` is Sirio's identity and is anchored by
+its own two measured constraints. `terminal_surface` stays out of it because the
+terminal is deliberately independent of the shell's panel hierarchy and the
+sixteen ANSI colours read against it. And **the borders do not either** — that
+one is bezel's rule, not an omission: `Brand::apply` tints a token only `if
+slot.a == 1.0 && slot.s <= f32::EPSILON`, and Sirio's seams have been
+translucent veils since `border_opaque` collapsed onto `border`, so a border
+reads the tint through compositing instead of carrying it.
+`a_tinted_base_moves_the_greys_and_leaves_sirios_own_colours_alone` pins all
+three.
+
 **One exception: `text`.** bezel paints body text at full contrast against its
 page — `#E5E5E5` on `#0D0D0D` is 15.4:1, `#222222` on `#F4F4F4` is 14.5:1.
 Sirio pulls it back by `TEXT_SOFTENING` (10%) toward the surface it sits on,
@@ -70,7 +91,7 @@ path, which is why the values are restated in the trailing comments in
 
 | Token | Why it is not bezel's |
 |---|---|
-| `brand_coral` | Sirio's brand coral: hue 24.3° measured off the reference frames' inline-code tone, saturation and lightness chosen against two constraints — it clears WCAG AA on its own surface, and it is not any agent's brand (Claude's `#D97757` is the near one, 22 units away). The Coral entry of the agent-colour picker reads it, and `sirio_ui`'s `loading::bezel_theme` puts it on bezel's `accent` so the loaders keep painting Sirio's colour rather than bezel's grey. Held by `brand_coral_clears_contrast_on_its_own_surface` and `brand_coral_is_not_any_agent_brand`. |
+| `brand_coral` | Sirio's brand coral: hue 24.3° measured off the reference frames' inline-code tone, saturation and lightness chosen against two constraints — it clears WCAG AA on its own surface, and it is not any agent's brand (Claude's `#D97757` is the near one, 22 units away). `sirio_ui`'s `loading::bezel_theme` puts it on bezel's `accent` so the loaders keep painting Sirio's colour rather than bezel's grey. Held by `brand_coral_clears_contrast_on_its_own_surface` and `brand_coral_is_not_any_agent_brand`. |
 | `frame_surface` | The translucent window-frame material, `frame_fallback` softened to 0.88 (dark) / 0.82 (light). bezel's `band` is a recessed palette header or footer strip, not a window frame. |
 | `text` | bezel's, softened 10% toward the surface — see the exception above. Not a hand-picked hex: the rule is one line and follows a bezel bump. |
 | `terminal_surface` | Paper-white in light, the pre-shell dark well in dark. bezel has no terminal-surface concept, and the terminal is deliberately independent of the shell's panel hierarchy. |
