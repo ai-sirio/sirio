@@ -159,13 +159,13 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
             div()
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(spec.title),
         )
         .child(
             div()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(spec.body),
         );
 
@@ -186,9 +186,9 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 .rounded(theme.radii.control)
                 .bg(theme.filter_field_bg)
                 .border_1()
-                .border_color(theme.selection_ring)
+                .border_color(theme.text)
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .cursor(gpui::CursorStyle::IBeam)
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     focus_for_click.focus(window, cx);
@@ -211,7 +211,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                 // so the bar never shifts the value while blinking.
                 .child(crate::caret::bar(
                     px(14.0),
-                    theme.caret,
+                    theme.text,
                     field.caret_visible,
                 )),
         );
@@ -226,7 +226,7 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
         // element type quietly pick whichever arm the compiler saw first.
         let white: gpui::Rgba = gpui::white().into();
         let (bg, text_color) = match button.tone {
-            ModalButtonTone::Plain => (theme.primary_pill_bg, theme.title),
+            ModalButtonTone::Plain => (theme.primary_pill_bg, theme.text),
             ModalButtonTone::Accent => (theme.inverse, theme.on_inverse),
             ModalButtonTone::Destructive => (theme.tab_error, white),
         };

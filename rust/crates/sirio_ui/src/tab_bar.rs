@@ -156,7 +156,7 @@ pub fn render_tab_context_menu(
             .gap(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(if enabled { theme.title } else { theme.meta })
+            .text_color(if enabled { theme.text } else { theme.text_faint })
             .when(enabled, |this| {
                 this.hover(|style| style.bg(theme.row_hover))
             })
@@ -168,7 +168,7 @@ pub fn render_tab_context_menu(
                     .id(format!("tab-command-disabled-{selector}"))
                     .debug_selector(move || format!("tab-command-disabled-{selector}"))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(reason),
             );
         }
@@ -347,8 +347,8 @@ impl TabBar {
         hint: Option<&'static str>,
     ) -> impl IntoElement {
         let (icon, glyph_color) = match label {
-            "New Terminal" => (Icon::SquareTerminal, theme.meta),
-            "Changes" => (Icon::File, theme.meta),
+            "New Terminal" => (Icon::SquareTerminal, theme.text_faint),
+            "Changes" => (Icon::File, theme.text_faint),
             // Agent marks wear their published brand colour, not a theme
             // token: Claude its orange, the monochrome trio the foreground
             // they are authored in. omp's tint is ignored by its
@@ -356,16 +356,16 @@ impl TabBar {
             "Claude Code" | "Split Claude Code" => (
                 Icon::ClaudeCode,
                 Icon::ClaudeCode
-                    .agent_mark_color(theme.title)
-                    .unwrap_or(theme.title),
+                    .agent_mark_color(theme.text)
+                    .unwrap_or(theme.text),
             ),
-            "Codex" => (Icon::Codex, theme.title),
-            "OpenCode" => (Icon::OpenCode, theme.title),
-            "Pi" => (Icon::Pi, theme.title),
-            "Oh-My-Pi" => (Icon::OhMyPi, theme.title),
-            "New Browser" => (Icon::Globe, theme.meta),
-            "New Chat" => (Icon::MessageSquare, theme.meta),
-            _ => (Icon::File, theme.meta),
+            "Codex" => (Icon::Codex, theme.text),
+            "OpenCode" => (Icon::OpenCode, theme.text),
+            "Pi" => (Icon::Pi, theme.text),
+            "Oh-My-Pi" => (Icon::OhMyPi, theme.text),
+            "New Browser" => (Icon::Globe, theme.text_faint),
+            "New Chat" => (Icon::MessageSquare, theme.text_faint),
+            _ => (Icon::File, theme.text_faint),
         };
 
         div()
@@ -379,7 +379,7 @@ impl TabBar {
             .justify_between()
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit(action, cx)))
             .child(
@@ -401,8 +401,8 @@ impl TabBar {
                     .child(text!(id = format!("new-tab-label-{label}"), label)),
             )
             .when(chevron, |this| {
-                this.child(div().text_color(theme.meta).child(
-                    IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.meta),
+                this.child(div().text_color(theme.text_faint).child(
+                    IconElement::new(Icon::ChevronRight, IconSize::XSmall).text_color(theme.text_faint),
                 ))
             })
             // #205: annotate, never disable. The row stays clickable because
@@ -416,7 +416,7 @@ impl TabBar {
                         .flex_shrink_0()
                         .ml(px(8.0))
                         .text_size(theme.typography.caption2)
-                        .text_color(theme.meta)
+                        .text_color(theme.text_faint)
                         .child(hint),
                 )
             })
@@ -465,7 +465,7 @@ impl TabBar {
             .justify_between()
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.toggle_chat_picker(cx)))
             .child(
@@ -481,12 +481,12 @@ impl TabBar {
                             .justify_center()
                             .child(
                                 IconElement::new(Icon::MessageSquare, IconSize::Small)
-                                    .text_color(theme.title),
+                                    .text_color(theme.text),
                             ),
                     )
                     .child(text!(id = "new-tab-label-New Chat", "New Chat")),
             )
-            .child(div().text_color(theme.meta).child(IconElement::new(
+            .child(div().text_color(theme.text_faint).child(IconElement::new(
                 if expanded {
                     Icon::ChevronDown
                 } else {
@@ -507,7 +507,7 @@ impl TabBar {
         let display_name = agent.display_name;
         let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
         let mut mark = IconElement::new(icon, IconSize::Small);
-        if let Some(tint) = icon.agent_mark_color(theme.title) {
+        if let Some(tint) = icon.agent_mark_color(theme.text) {
             mark = mark.text_color(tint);
         }
         let mark_element = mark;
@@ -523,7 +523,7 @@ impl TabBar {
             .gap(px(7.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
             .child(mark_element)
@@ -547,7 +547,7 @@ impl TabBar {
             .flex_col()
             .gap(theme.spacing.titlebar_control_spacing)
             .text_size(theme.typography.footnote)
-            .text_color(theme.meta)
+            .text_color(theme.text_faint)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
@@ -556,7 +556,7 @@ impl TabBar {
             .child(
                 div()
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("No supported agent found on PATH"),
             )
     }
@@ -585,7 +585,7 @@ impl TabBar {
             .items_center()
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(theme.meta)
+            .text_color(theme.text_faint)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
@@ -757,7 +757,7 @@ impl Render for TabBar {
             .justify_center()
             .rounded(theme.radii.control)
             .text_size(px(14.0))
-            .text_color(theme.meta)
+            .text_color(theme.text_faint)
             .hover(|style| style.bg(theme.row_hover))
             // Swallowing mouse-down here would stop GPUI ever pairing it
             // with the mouse-up into a click, so the menu never opened.
@@ -800,7 +800,7 @@ impl Render for TabBar {
                 .absolute()
                 .size_full(),
             )
-            .child(IconElement::new(Icon::Plus, IconSize::Small).text_color(theme.title));
+            .child(IconElement::new(Icon::Plus, IconSize::Small).text_color(theme.text));
 
         if menu_open {
             new_tab_button = new_tab_button.child(

@@ -10397,16 +10397,16 @@ impl SirioWorkspace {
                             .items_center()
                             .justify_center()
                             .gap(theme.spacing.card_gap)
-                            .text_color(theme.meta)
+                            .text_color(theme.text_faint)
                             .child(
                                 IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                                    .text_color(theme.meta),
+                                    .text_color(theme.text_faint),
                             )
                             .child(
                                 div()
                                     .text_size(theme.typography.headline)
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.title)
+                                    .text_color(theme.text)
                                     .child("No Terminals"),
                             )
                             .child("Open a new terminal to get started.")
@@ -10456,7 +10456,7 @@ impl SirioWorkspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_color(theme.meta)
+                            .text_color(theme.text_faint)
                             .child("No tabs in this pane")
                             .into_any_element()
                     }
@@ -10500,7 +10500,7 @@ impl SirioWorkspace {
         // `AgentIcon` view that every one of those three places draws, so a
         // mark looks the same wherever it appears. This port had drifted
         // into three different tints for the same mark, and the badge's was
-        // `theme.tab_focus_accent` — a coral close enough to Claude's brand to
+        // `theme.text` — a coral close enough to Claude's brand to
         // read as it — so a Codex mark was painted in Claude's colour.
         //
         // This is a deliberate, narrow divergence from a literal port:
@@ -10512,15 +10512,15 @@ impl SirioWorkspace {
         // it — `Icon::is_chromatic`, omp's gradient — exactly as `OmpShape`
         // ignores any inherited tint.
         let glyph_color = if icon.is_agent_mark() {
-            agent.map_or(theme.title, |agent| agent.brand.color())
+            agent.map_or(theme.text, |agent| agent.brand.color())
         } else if tab.kind == TabKind::AgentChat {
             if is_file {
                 theme.file_link
             } else {
-                theme.tab_focus_accent
+                theme.text
             }
         } else {
-            theme.meta
+            theme.text_faint
         };
         let width = Self::tab_render_width(tab);
         let close_entity = entity.clone();
@@ -10549,9 +10549,9 @@ impl SirioWorkspace {
             .rounded_t(px(6.0))
             .text_size(px(13.0))
             .text_color(if active {
-                theme.title_selected
+                theme.text
             } else {
-                theme.subtitle
+                theme.text_muted
             })
             .hover(|style| style.bg(theme.row_hover))
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
@@ -10634,7 +10634,7 @@ impl SirioWorkspace {
                         .px(theme.spacing.titlebar_control_spacing)
                         .rounded(theme.radii.control)
                         .bg(theme.filter_field_bg)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             focus_for_click.focus(window, cx);
                         })
@@ -10652,7 +10652,7 @@ impl SirioWorkspace {
                                 .debug_selector(|| "tab-rename-caret".to_owned())
                                 .child(sirio_ui::caret::bar(
                                     px(14.0),
-                                    theme.caret,
+                                    theme.text,
                                     rename_caret_visible,
                                 )),
                         ),
@@ -10685,7 +10685,7 @@ impl SirioWorkspace {
                                 .id(format!("workspace-tab-exit-{id}"))
                                 .debug_selector(move || format!("workspace-tab-exit-{id}"))
                                 .text_size(px(10.0))
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .child(label),
                         )
                     }),
@@ -10702,7 +10702,7 @@ impl SirioWorkspace {
                         .items_center()
                         .justify_center()
                         .text_size(px(14.0))
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
@@ -10712,7 +10712,7 @@ impl SirioWorkspace {
                         })
                         .child(
                             IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.subtitle),
+                                .text_color(theme.text_muted),
                         ),
                 )
             })
@@ -10725,7 +10725,7 @@ impl SirioWorkspace {
                         .h(theme.spacing.titlebar_control_spacing)
                         .flex_none()
                         .rounded(theme.radii.control)
-                        .bg(theme.tab_focus_accent),
+                        .bg(theme.text),
                 )
             })
             .when(active, |this| {
@@ -10736,7 +10736,7 @@ impl SirioWorkspace {
                         .left_0()
                         .right_0()
                         .h(px(2.0))
-                        .bg(theme.tab_focus_accent),
+                        .bg(theme.text),
                 )
             })
     }
@@ -11529,7 +11529,7 @@ impl SirioWorkspace {
                 .gap(theme.spacing.titlebar_control_spacing)
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
-                .text_color(if active { theme.title } else { theme.subtitle })
+                .text_color(if active { theme.text } else { theme.text_muted })
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, window, cx| {
                     select_entity.update(cx, |workspace, cx| {
@@ -11550,7 +11550,7 @@ impl SirioWorkspace {
                         div()
                             .id(selected_selector.clone())
                             .debug_selector(move || selected_selector.clone())
-                            .text_color(theme.tab_focus_accent)
+                            .text_color(theme.text)
                             .child("✓"),
                     )
                 });
@@ -11666,7 +11666,7 @@ impl SirioWorkspace {
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| {
                     overflow_entity.update(cx, |workspace, cx| {
@@ -11676,7 +11676,7 @@ impl SirioWorkspace {
                     });
                 })
                 .child(
-                    IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.meta),
+                    IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.text_faint),
                 );
             tabs = tabs.child(overflow_button);
             if self.overflow_menu_open {
@@ -11734,7 +11734,7 @@ impl SirioWorkspace {
                                 .items_center()
                                 .bg(theme.background)
                                 .text_size(px(14.0))
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .child(self.terminal_breadcrumb.clone()),
                         )
                     })
@@ -11751,16 +11751,16 @@ impl SirioWorkspace {
                 .items_center()
                 .justify_center()
                 .gap(theme.spacing.card_gap)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(
                     IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                        .text_color(theme.meta),
+                        .text_color(theme.text_faint),
                 )
                 .child(
                     div()
                         .text_size(theme.typography.headline)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .child("No worktree selected"),
                 )
                 .child("Add a project, then select a worktree.")
@@ -12859,12 +12859,12 @@ impl SirioWorkspace {
                     .text_size(theme.typography.footnote)
                     .text_color(if entry.is_enabled() {
                         if active {
-                            theme.title_selected
+                            theme.text
                         } else {
-                            theme.title
+                            theme.text
                         }
                     } else {
-                        theme.meta
+                        theme.text_faint
                     })
                     .when(active && entry.is_enabled(), |this| {
                         this.bg(theme.selected_fill)
@@ -12884,7 +12884,7 @@ impl SirioWorkspace {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_color(theme.meta)
+                            .text_color(theme.text_faint)
                             .child(entry.shortcut.unwrap_or(""))
                             .when_some(entry.disabled_reason, |this, reason| {
                                 this.child(
@@ -12915,7 +12915,7 @@ impl SirioWorkspace {
                 .flex()
                 .items_center()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(EMPTY_RESULT_LABEL)
                 .into_any_element()
         } else {
@@ -12963,12 +12963,12 @@ impl SirioWorkspace {
                     .rounded(theme.radii.control)
                     .bg(theme.filter_field_bg)
                     .border_1()
-                    .border_color(theme.selection_ring)
+                    .border_color(theme.text)
                     .text_size(theme.typography.headline)
                     .text_color(if query.is_empty() {
-                        theme.meta
+                        theme.text_faint
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .child(if query.is_empty() {
                         "Type to filter commands".to_owned()
@@ -12982,7 +12982,7 @@ impl SirioWorkspace {
                             .debug_selector(|| "command-palette-caret".to_owned())
                             .child(sirio_ui::caret::bar(
                                 px(18.0),
-                                theme.caret,
+                                theme.text,
                                 self.palette_caret_visible,
                             )),
                     ),
@@ -12993,7 +12993,7 @@ impl SirioWorkspace {
                     .mb(px(5.0))
                     .px(px(10.0))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("Commands · substring filter"),
             )
             .child(div().flex_1().child(body))
@@ -13024,7 +13024,7 @@ impl SirioWorkspace {
                 .bg(theme.card_fill)
                 .shadow_lg()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     dismiss_entity.update(cx, |workspace, cx| workspace.dismiss_toast(cx));
                 })
@@ -13047,7 +13047,7 @@ impl SirioWorkspace {
             match &self.update_state {
                 UpdateState::Idle => return None,
                 UpdateState::Checking => {
-                    ("Checking for updates…".to_string(), None, theme.subtitle)
+                    ("Checking for updates…".to_string(), None, theme.text_muted)
                 }
                 // An available update is the one state waiting on the reader,
                 // so it is the one state that spends a colour. Checking,
@@ -13060,9 +13060,9 @@ impl SirioWorkspace {
                 UpdateState::Downloading { progress_percent } => (
                     format!("Downloading Sirio… {progress_percent}%"),
                     None,
-                    theme.subtitle,
+                    theme.text_muted,
                 ),
-                UpdateState::Installing => ("Installing update…".to_string(), None, theme.subtitle),
+                UpdateState::Installing => ("Installing update…".to_string(), None, theme.text_muted),
                 UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.tab_done),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
@@ -13113,7 +13113,7 @@ impl SirioWorkspace {
                                 .id("update-toast-dismiss")
                                 .debug_selector(|| "update-toast-dismiss".to_owned())
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .cursor_pointer()
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     dismiss_entity.update(cx, |workspace, cx| {
@@ -13148,7 +13148,7 @@ impl SirioWorkspace {
                             .id("update-toast-action")
                             .debug_selector(|| "update-toast-action".to_owned())
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                             .child(label),
                     )
                 })
@@ -18885,7 +18885,7 @@ mod tests {
             assert_eq!(mark.icon, Icon::for_agent_id(id).expect("catalog icon"));
             assert_ne!(
                 mark.brand.color(),
-                theme.tab_focus_accent,
+                theme.text,
                 "{id}'s mark used to be tinted tab_focus_accent -- Claude's own coral"
             );
         }

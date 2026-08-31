@@ -61,7 +61,7 @@ impl Render for TextTooltip {
             .border_1()
             .border_color(self.theme.hairline)
             .text_size(self.theme.typography.caption2)
-            .text_color(self.theme.title)
+            .text_color(self.theme.text)
             .child(self.text.clone())
     }
 }
@@ -78,7 +78,7 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
                 .mb(px(spacing.xxs as f32))
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(text!(id = format!("settings-section-title-{title}"), title)),
         )
         .child(card)
@@ -110,7 +110,7 @@ pub fn row(
         .justify_center()
         .flex_1()
         .text_size(theme.typography.headline)
-        .text_color(theme.title)
+        .text_color(theme.text)
         .child(text!(id = format!("settings-row-label-{label}"), label));
 
     if let Some(description) = description {
@@ -118,7 +118,7 @@ pub fn row(
             div()
                 .mt(px(theme.cosmic.spacing.xxxs as f32))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(description),
         );
     }
@@ -199,7 +199,7 @@ where
                 .bg(if on {
                     theme.on_inverse
                 } else {
-                    theme.title_selected
+                    theme.text
                 }),
         )
 }
@@ -246,9 +246,9 @@ pub fn segmented(
                     FontWeight::NORMAL
                 })
                 .text_color(if active {
-                    theme.title_selected
+                    theme.text
                 } else {
-                    theme.subtitle
+                    theme.text_muted
                 })
                 .when(active, |this| this.bg(theme.selected_fill))
                 .hover(|style| style.bg(theme.row_hover))
@@ -299,9 +299,9 @@ pub fn segmented_icons(
                     FontWeight::NORMAL
                 })
                 .text_color(if active {
-                    theme.title_selected
+                    theme.text
                 } else {
-                    theme.subtitle
+                    theme.text_muted
                 })
                 .when(active, |this| this.bg(theme.selected_fill))
                 .hover(|style| style.bg(theme.row_hover))
@@ -350,7 +350,7 @@ where
                 .items_center()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| decrement(value - 1, cx))
                 .child("⌄"),
@@ -362,7 +362,7 @@ where
                 .flex()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(if unit.is_empty() {
                     value.to_string()
                 } else {
@@ -379,7 +379,7 @@ where
                 .items_center()
                 .justify_center()
                 .text_size(theme.typography.callout)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
                 .child("⌃"),
@@ -425,7 +425,7 @@ pub fn subsection_header(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(theme.typography.headline)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .child(text!(
                             id = format!("settings-subsection-title-{title}"),
                             title
@@ -434,7 +434,7 @@ pub fn subsection_header(
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(
                             id = format!("settings-subsection-description-{title}"),
                             description
@@ -485,7 +485,7 @@ where
             theme,
             "This device",
             theme.primary_pill_bg,
-            theme.title,
+            theme.text,
         ));
     if active {
         badges = badges.child(badge(theme, "Active", theme.inverse, theme.on_inverse));
@@ -512,7 +512,7 @@ where
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(theme.typography.headline)
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .child(text!(
                                     id = format!("settings-account-label-{row_id}"),
                                     label.clone()
@@ -523,7 +523,7 @@ where
                 .child(
                     div()
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(
                             id = format!("settings-account-subtitle-{row_id}"),
                             subtitle
@@ -555,7 +555,7 @@ where
         .py(px(spacing.xxxs as f32))
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
-        .text_color(theme.title)
+        .text_color(theme.text)
         .bg(theme.primary_pill_bg)
         .hover(|style| style.bg(theme.row_hover))
         .on_click(callback)
@@ -585,7 +585,7 @@ where
         .py(px(spacing.xxxs as f32))
         .rounded(theme.radii.control)
         .text_size(theme.typography.callout)
-        .text_color(if enabled { theme.title } else { theme.meta })
+        .text_color(if enabled { theme.text } else { theme.text_faint })
         .bg(theme.primary_pill_bg)
         .child(text!(id = format!("settings-button-{id}"), label));
     if let Some(callback) = callback {
@@ -600,7 +600,7 @@ where
 /// (F-SET-22). It replaces what used to be a single 44×22 display-only
 /// swatch pill with no `on_click`, so no colour choice existed to
 /// exercise. Each option here is its own clickable swatch; the selected
-/// one draws a highlight ring in `theme.selection_ring` instead of a
+/// one draws a highlight ring in `theme.text` instead of a
 /// checkmark glyph, so the choice stays legible without adding new
 /// iconography.
 pub fn color_picker(
@@ -633,7 +633,7 @@ pub fn color_picker(
                 .bg(color)
                 .border_2()
                 .border_color(if active {
-                    theme.selection_ring
+                    theme.text
                 } else {
                     theme.hairline
                 })

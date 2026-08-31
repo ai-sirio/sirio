@@ -130,9 +130,9 @@ pub(super) fn render_search_row(
                 .border_color(theme.hairline)
                 .text_size(theme.typography.footnote)
                 .text_color(if draft.is_empty() {
-                    theme.meta
+                    theme.text_faint
                 } else {
-                    theme.title
+                    theme.text
                 })
                 .flex()
                 .items_center()
@@ -144,7 +144,7 @@ pub(super) fn render_search_row(
                 // `caret::bar` and not a `|` appended to the string: the bar
                 // always occupies layout, so text does not shift as it
                 // blinks. It is this repo's one way to draw a caret.
-                .child(crate::caret::bar(px(14.0), theme.title, caret_visible)),
+                .child(crate::caret::bar(px(14.0), theme.text, caret_visible)),
         )
         .child(toggle(
             ".*",
@@ -192,7 +192,7 @@ fn toggle(
         .justify_center()
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if on { theme.title } else { theme.meta })
+        .text_color(if on { theme.text } else { theme.text_faint })
         .bg(if on {
             theme.row_hover
         } else {
@@ -230,7 +230,7 @@ pub(super) fn render_filter_chip(
         .py(px(3.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if active > 0 { theme.title } else { theme.meta })
+        .text_color(if active > 0 { theme.text } else { theme.text_faint })
         .bg(if open {
             theme.row_hover
         } else {
@@ -278,7 +278,7 @@ pub(super) fn render_chip_popup(
                 .px(px(6.0))
                 .py(px(3.0))
                 .text_size(theme.typography.caption2)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child("Authors in the loaded history"),
         );
     }
@@ -299,7 +299,7 @@ pub(super) fn render_chip_popup(
                     .items_center()
                     .gap(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, cx| {
                         row_entity.update(cx, |history, cx| {
@@ -321,7 +321,7 @@ pub(super) fn render_chip_popup(
                 .px(px(6.0))
                 .py(px(4.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child("Nothing to choose from"),
         );
     }
@@ -343,7 +343,7 @@ pub(super) fn render_chip_popup(
                 .items_center()
                 .gap(px(6.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| {
                     row_entity.update(cx, |history, cx| {
@@ -396,9 +396,9 @@ pub(super) fn render_paths_popup(
                 .border_color(theme.hairline)
                 .text_size(theme.typography.footnote)
                 .text_color(if draft.is_empty() {
-                    theme.meta
+                    theme.text_faint
                 } else {
-                    theme.title
+                    theme.text
                 })
                 .flex()
                 .items_center()
@@ -413,7 +413,7 @@ pub(super) fn render_paths_popup(
                 .child(
                     div()
                         .debug_selector(|| "history-path-caret".to_owned())
-                        .child(crate::caret::bar(px(14.0), theme.title, caret_visible)),
+                        .child(crate::caret::bar(px(14.0), theme.text, caret_visible)),
                 ),
         )
 }
@@ -452,7 +452,7 @@ pub(super) fn render_collapsed_chips(
         .py(px(3.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if active > 0 { theme.title } else { theme.meta })
+        .text_color(if active > 0 { theme.text } else { theme.text_faint })
         .bg(if open {
             theme.row_hover
         } else {

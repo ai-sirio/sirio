@@ -41,7 +41,7 @@ pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
 /// The colour a single file's row or marker takes, resolved through
 /// [`DirectoryGitStatus::for_file`] so every view agrees on precedence.
 ///
-/// Returns `theme.title` — the neutral, unmarked colour — for an entry
+/// Returns `theme.text` — the neutral, unmarked colour — for an entry
 /// carrying no status at all. That fallback is deliberate and is *not* what
 /// `for_file` would give: `for_file` ends in `Changed`, so delegating to it
 /// unconditionally would paint an unmarked row amber. The Changes list is not
@@ -54,7 +54,7 @@ pub fn entry_color(entry: &StatusEntry, theme: Theme) -> Rgba {
         && !entry.is_staged()
         && !entry.has_worktree_changes()
     {
-        return theme.title;
+        return theme.text;
     }
     status_color(DirectoryGitStatus::for_file(entry), theme)
 }
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn an_entry_with_no_status_stays_neutral() {
         let theme = Theme::dark();
-        assert_eq!(entry_color(&entry(None, None), theme), theme.title);
+        assert_eq!(entry_color(&entry(None, None), theme), theme.text);
     }
 
     /// The drift guard. Both doors into this module must agree for the same
@@ -164,7 +164,7 @@ mod tests {
         for index in states {
             for worktree in states {
                 let e = entry(index, worktree);
-                if entry_color(&e, theme) == theme.title {
+                if entry_color(&e, theme) == theme.text {
                     continue; // the deliberate no-status carve-out
                 }
                 assert_eq!(

@@ -450,9 +450,9 @@ impl Render for StatusBar {
                 .justify_center()
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .hover(|style| style.bg(theme.row_hover))
-                .child(IconElement::new(icon, IconSize::Medium).text_color(theme.title))
+                .child(IconElement::new(icon, IconSize::Medium).text_color(theme.text))
         };
 
         // The four provider segments, in the reference order: Claude,
@@ -463,24 +463,24 @@ impl Render for StatusBar {
         let opencode_go_dimmed = Self::segment_dimmed(&self.opencode_go);
         let ollama_cloud_dimmed = Self::segment_dimmed(&self.ollama_cloud);
         let claude_color = if claude_dimmed {
-            dim(theme.meta)
+            dim(theme.text_faint)
         } else {
-            theme.meta
+            theme.text_faint
         };
         let codex_color = if codex_dimmed {
-            dim(theme.title)
+            dim(theme.text)
         } else {
-            theme.title
+            theme.text
         };
         let opencode_go_color = if opencode_go_dimmed {
-            dim(theme.title)
+            dim(theme.text)
         } else {
-            theme.title
+            theme.text
         };
         let ollama_cloud_color = if ollama_cloud_dimmed {
-            dim(theme.title)
+            dim(theme.text)
         } else {
-            theme.title
+            theme.text
         };
 
         let provider_segment =
@@ -528,7 +528,7 @@ impl Render for StatusBar {
             .justify_center()
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| {
                 refresh_entity.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
@@ -537,7 +537,7 @@ impl Render for StatusBar {
                 loading::compact("status-refresh-spinner", window, cx)
             } else {
                 IconElement::new(Icon::RefreshCw, IconSize::Medium)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .into_any_element()
             });
 
@@ -597,7 +597,7 @@ impl Render for StatusBar {
                     .items_center()
                     .gap(px(5.0))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.tab_focus_accent)
+                    .text_color(theme.text)
                     .hover(|style| style.opacity(0.9))
                     .on_click(move |_, _, _| {
                         if let Some(callback) = &update_settings {
@@ -619,7 +619,7 @@ impl Render for StatusBar {
             .items_center()
             .bg(gpui::transparent_black())
             .text_size(theme.typography.caption2)
-            .text_color(theme.meta)
+            .text_color(theme.text_faint)
             .child(left)
             .child(div().flex_1())
             .child(text!(format!("{} · {}", self.data.branch, self.data.path)))
@@ -645,7 +645,7 @@ impl Render for StatusBarTooltip {
             .border_1()
             .border_color(self.theme.hairline)
             .text_size(self.theme.typography.caption2)
-            .text_color(self.theme.title)
+            .text_color(self.theme.text)
             .child(self.text.clone())
     }
 }

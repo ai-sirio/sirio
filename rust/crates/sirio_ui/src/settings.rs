@@ -61,7 +61,7 @@ fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl 
                 .mb(px(9.0))
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(text!(id = format!("settings-section-title-{title}"), title)),
         )
         .child(card)
@@ -631,9 +631,9 @@ fn provider_icon(id: &str) -> Icon {
 fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
     match Icon::for_agent_id(id) {
         Some(icon) => icon
-            .agent_mark_color(theme.title)
-            .unwrap_or_else(|| theme.meta),
-        None => theme.meta,
+            .agent_mark_color(theme.text)
+            .unwrap_or_else(|| theme.text_faint),
+        None => theme.text_faint,
     }
 }
 
@@ -2378,7 +2378,7 @@ impl Settings {
                     .items_center()
                     .justify_center()
                     .rounded(theme.radii.chip_active)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, _, _| {
                         if let Some(callback) = &back {
@@ -2390,14 +2390,14 @@ impl Settings {
                             Icon::ChevronLeft,
                             IconSize::Custom(theme.typography.large_title),
                         )
-                        .text_color(theme.title),
+                        .text_color(theme.text),
                     ),
             )
             .child(
                 div()
                     .text_size(theme.typography.title3)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(text!("Settings")),
             )
     }
@@ -2433,9 +2433,9 @@ impl Settings {
                         FontWeight::NORMAL
                     })
                     .text_color(if selected {
-                        theme.title
+                        theme.text
                     } else {
-                        theme.subtitle
+                        theme.text_muted
                     })
                     .when(selected, |this| this.bg(theme.selected_fill))
                     .hover(|style| style.bg(theme.row_hover))
@@ -2451,9 +2451,9 @@ impl Settings {
                             .child(
                                 IconElement::new(category.glyph(), IconSize::Small).text_color(
                                     if selected {
-                                        theme.title
+                                        theme.text
                                     } else {
-                                        theme.subtitle
+                                        theme.text_muted
                                     },
                                 ),
                             ),
@@ -2593,7 +2593,7 @@ impl Settings {
             }
             let selected = self.agent_colors[index];
             let mut mark_element = IconElement::new(mark, IconSize::XSmall);
-            if let Some(tint) = mark.agent_mark_color(theme.title) {
+            if let Some(tint) = mark.agent_mark_color(theme.text) {
                 mark_element = mark_element.text_color(tint);
             }
             let label = div()
@@ -2601,7 +2601,7 @@ impl Settings {
                 .items_center()
                 .gap(px(9.0))
                 .text_size(theme.typography.headline)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(
                     div()
                         .w(px(14.0))
@@ -2660,7 +2660,7 @@ impl Settings {
             .items_center()
             .gap(px(8.0))
             .text_size(theme.typography.headline)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(
                 div()
                     .w(px(18.0))
@@ -2687,7 +2687,7 @@ impl Settings {
             .items_center()
             .gap(px(6.0))
             .text_size(theme.typography.callout)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(
                 div()
                     .w(px(8.0))
@@ -2696,7 +2696,7 @@ impl Settings {
                     .bg(if status.signed_in {
                         theme.tab_done
                     } else {
-                        theme.meta
+                        theme.text_faint
                     }),
             )
             .child(text!(status.label));
@@ -2706,7 +2706,7 @@ impl Settings {
                     .id(format!("settings-provider-account-identity-{title}"))
                     .debug_selector(move || format!("settings-provider-account-identity-{title}"))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(identity)),
             );
         }
@@ -2848,7 +2848,7 @@ impl Settings {
                         .id(format!("account-login-pending-{title}"))
                         .debug_selector(move || format!("account-login-pending-{title}"))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!("Signing in…")),
                 )
                 .child(controls::button(
@@ -2979,7 +2979,7 @@ impl Settings {
             .bg(theme.filter_field_bg)
             .border_1()
             .border_color(if is_focused {
-                theme.selection_ring
+                theme.text
             } else {
                 theme.hairline
             })
@@ -2991,7 +2991,7 @@ impl Settings {
                 key_entity.update(cx, |this, cx| on_key(this, event, window, cx));
             })
             .text_size(theme.typography.callout)
-            .text_color(if is_empty { theme.meta } else { theme.title })
+            .text_color(if is_empty { theme.text_faint } else { theme.text })
             // #212: shrink and ellipsise inside the field rather than
             // drawing past its border. Must shrink without growing:
             // `flex_1` would push the end-of-text caret to the far right.
@@ -3012,7 +3012,7 @@ impl Settings {
             // single-line fields always append. Invisible (but still laid
             // out) while unfocused so the bar never shifts the text.
             .when(is_focused, |this| {
-                this.child(caret::bar(px(16.0), theme.caret, caret_visible))
+                this.child(caret::bar(px(16.0), theme.text, caret_visible))
             })
     }
 
@@ -3029,7 +3029,7 @@ impl Settings {
             .px(px(theme.cosmic.spacing.xs as f32))
             .pb(px(theme.cosmic.spacing.xxxs as f32))
             .text_size(theme.typography.footnote)
-            .text_color(theme.subtitle)
+            .text_color(theme.text_muted)
             .child(text!(caption))
     }
 
@@ -3280,9 +3280,9 @@ impl Settings {
     ) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
         let claude_mark = Icon::ClaudeCode
-            .agent_mark_color(theme.title)
-            .unwrap_or_else(|| theme.title);
-        let monochrome_mark = theme.title;
+            .agent_mark_color(theme.text)
+            .unwrap_or_else(|| theme.text);
+        let monochrome_mark = theme.text;
         let cards = [
             ProviderCardView::new(
                 ProviderKind::Claude,
@@ -3308,7 +3308,7 @@ impl Settings {
             ProviderCardView::new(
                 ProviderKind::OllamaCloud,
                 "Ollama Cloud",
-                theme.subtitle,
+                theme.text_muted,
                 accounts.ollama_cloud,
             ),
         ];
@@ -3340,7 +3340,7 @@ impl Settings {
                 .py(px(3.0))
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .bg(theme.primary_pill_bg)
                 .child(text!(sirio_project::display_path(path))),
             None => div()
@@ -3395,7 +3395,7 @@ impl Settings {
                 .py(px(3.0))
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .bg(theme.primary_pill_bg)
                 .child(text!(label))
         } else {
@@ -3469,7 +3469,7 @@ impl Settings {
                             div()
                                 .debug_selector(move || format!("settings-agent-name-{index}"))
                                 .text_size(theme.typography.headline)
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(text!(id = ("settings-agent-name", index), row.name)),
@@ -3480,7 +3480,7 @@ impl Settings {
                                     format!("settings-agent-description-{index}")
                                 })
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(text!(
@@ -3547,7 +3547,7 @@ impl Settings {
                         .rounded(theme.radii.row_card)
                         .text_size(theme.typography.caption2)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .bg(theme.primary_action_bg)
                         .hover(|style| style.bg(theme.row_hover))
                         .on_click(move |_, _, cx| {
@@ -3574,7 +3574,7 @@ impl Settings {
                             div()
                                 .px(px(6.0))
                                 .text_size(theme.typography.caption2)
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .child(text!(
                                     id = ("settings-agent-version", index),
                                     // #197: name the subject. This is the
@@ -3605,7 +3605,7 @@ impl Settings {
                         .debug_selector(move || format!("settings-agent-integrity-{index}"))
                         .px(px(theme.cosmic.spacing.xs as f32))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(note)),
                 );
             }
@@ -3629,7 +3629,7 @@ impl Settings {
                         } else {
                             FontWeight::NORMAL
                         })
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(label)),
                 );
             }
@@ -3669,7 +3669,7 @@ impl Settings {
                             .bg(theme.filter_field_bg)
                             .border_1()
                             .border_color(if search_is_focused {
-                                theme.selection_ring
+                                theme.text
                             } else {
                                 theme.hairline
                             })
@@ -3686,9 +3686,9 @@ impl Settings {
                             })
                             .text_size(theme.typography.callout)
                             .text_color(if search_text.is_empty() {
-                                theme.meta
+                                theme.text_faint
                             } else {
-                                theme.title
+                                theme.text
                             })
                             // #212: see the field above.
                             .overflow_hidden()
@@ -3707,7 +3707,7 @@ impl Settings {
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
                                     px(16.0),
-                                    theme.caret,
+                                    theme.text,
                                     self.field_caret_visible,
                                 ))
                             }),
@@ -3725,7 +3725,7 @@ impl Settings {
                                     .id("agents-last-refreshed")
                                     .debug_selector(|| "agents-last-refreshed".to_string())
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.subtitle)
+                                    .text_color(theme.text_muted)
                                     .child(text!(format!("Refreshed {stamp}"))),
                             );
                         }
@@ -3772,7 +3772,7 @@ impl Settings {
                     .justify_center()
                     .gap(theme.spacing.card_gap)
                     .text_size(theme.typography.headline)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(loading::indeterminate(
                         "settings-agents-loading-orb",
                         loading::GENERIC_ORB,
@@ -3808,7 +3808,7 @@ impl Settings {
             .gap(px(6.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
-            .text_color(if enabled { theme.title } else { theme.meta })
+            .text_color(if enabled { theme.text } else { theme.text_faint })
             .bg(theme.primary_pill_bg)
             .when(enabled, |this| {
                 this.hover(|style| style.bg(theme.row_hover))
@@ -3819,7 +3819,7 @@ impl Settings {
             .child(text!(selected.title()))
             .child(
                 IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(if enabled {
-                    theme.title
+                    theme.text
                 } else {
                     theme.hairline
                 }),
@@ -3872,9 +3872,9 @@ impl Settings {
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.callout)
                     .text_color(if is_selected {
-                        theme.title_selected
+                        theme.text
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .when(is_selected, |this| this.bg(theme.selected_fill))
                     .hover(|style| style.bg(theme.row_hover))
@@ -3888,7 +3888,7 @@ impl Settings {
                         this.child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(theme.tab_focus_accent)
+                                .text_color(theme.text)
                                 .child(text!("✓")),
                         )
                     }),
@@ -4037,7 +4037,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-version".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(self.version.clone())),
                 theme,
             ))
@@ -4047,7 +4047,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-channel".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(self.channel.clone())),
                 theme,
             ));
@@ -4058,7 +4058,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-update-last-checked".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(
                         div()
                             .debug_selector(|| "settings-update-status".into())
@@ -4150,7 +4150,7 @@ impl Settings {
             .justify_center()
             .flex_1()
             .text_size(theme.typography.headline)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(text!(
                 id = "settings-control-socket-title",
                 "Control socket"
@@ -4160,7 +4160,7 @@ impl Settings {
                     .debug_selector(|| "settings-control-socket-path".into())
                     .mt(px(2.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(format!("{socket_kind}: {}", self.socket_path))),
             );
         // The sirioctl card shows the bundled binary's name. "Copy install
@@ -4180,7 +4180,7 @@ impl Settings {
                 None,
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!("sirioctl")),
                 theme,
             ));
@@ -4215,7 +4215,7 @@ impl Settings {
                     .px(px(theme.cosmic.spacing.xs as f32))
                     .py(px(theme.cosmic.spacing.xxxs as f32))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!("Installing… running in a new terminal tab.")),
             );
         }
@@ -4248,7 +4248,7 @@ impl Settings {
                             div()
                                 .debug_selector(|| "settings-update-version".into())
                                 .text_size(theme.typography.callout)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(text!(version.clone())),
                             theme,
                         ),
@@ -4261,7 +4261,7 @@ impl Settings {
                                 .px(px(theme.cosmic.spacing.xs as f32))
                                 .py(px(theme.cosmic.spacing.xxs as f32))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(text!("Nightly builds track main")),
                         );
                     } else if !notes.trim().is_empty() {
@@ -4272,7 +4272,7 @@ impl Settings {
                                 .px(px(theme.cosmic.spacing.xs as f32))
                                 .py(px(theme.cosmic.spacing.xxs as f32))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(text!(notes.clone())),
                         );
                     }
@@ -4322,7 +4322,7 @@ impl Settings {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(div().w(px(20.0)).text_color(theme.meta).child(text!(
+            .child(div().w(px(20.0)).text_color(theme.text_faint).child(text!(
                 id = format!("settings-permission-glyph-{title}"),
                 glyph
             )))
@@ -4330,7 +4330,7 @@ impl Settings {
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(text!(
                         id = format!("settings-permission-title-{title}"),
                         title
@@ -4344,7 +4344,7 @@ impl Settings {
             ));
         let description = div()
             .text_size(theme.typography.footnote)
-            .text_color(theme.subtitle)
+            .text_color(theme.text_muted)
             .child(text!(
                 id = format!("settings-permission-description-{title}"),
                 description
@@ -4386,9 +4386,9 @@ impl Settings {
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
             .text_color(if origins.is_empty() {
-                theme.meta
+                theme.text_faint
             } else {
-                theme.title
+                theme.text
             })
             .bg(theme.primary_pill_bg)
             .child(text!("Revoke all"));
@@ -4418,7 +4418,7 @@ impl Settings {
                     .flex()
                     .items_center()
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!("No browser origins have been granted.")),
             );
         }
@@ -4436,7 +4436,7 @@ impl Settings {
                 .py(px(theme.cosmic.spacing.xxxs as f32))
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.callout)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .bg(theme.primary_pill_bg)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| {
@@ -4460,7 +4460,7 @@ impl Settings {
                         div()
                             .flex_1()
                             .text_size(theme.typography.callout)
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child(text!(
                                 id = ("settings-browser-origin", index),
                                 display_origin
@@ -4527,7 +4527,7 @@ impl Settings {
                 PermissionBadge {
                     label: "CHECK MANUALLY",
                     background: neutral,
-                    foreground: theme.subtitle,
+                    foreground: theme.text_muted,
                 },
                 "Open Settings",
                 theme,
@@ -4553,7 +4553,7 @@ impl Settings {
                 PermissionBadge {
                     label: "CHECK MANUALLY",
                     background: neutral,
-                    foreground: theme.subtitle,
+                    foreground: theme.text_muted,
                 },
                 "Trigger Prompt",
                 theme,

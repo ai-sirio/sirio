@@ -3545,8 +3545,8 @@ impl TerminalPalette {
     fn from_theme(theme: &Theme) -> Self {
         Self {
             background: theme.terminal_surface.into(),
-            foreground: theme.primary_text_color.into(),
-            cursor: theme.primary_text_color.into(),
+            foreground: theme.text.into(),
+            cursor: theme.text.into(),
             selection: theme.selection.into(),
         }
     }
@@ -3946,10 +3946,10 @@ impl gpui::Render for TerminalView {
                         .gap(px(2.0))
                         .text_size(theme.typography.footnote)
                         .when(is_disabled, |this| {
-                            this.text_color(theme.meta).cursor_not_allowed()
+                            this.text_color(theme.text_faint).cursor_not_allowed()
                         })
                         .when(!is_disabled, |this| {
-                            this.text_color(theme.title)
+                            this.text_color(theme.text)
                                 .hover(|style| style.bg(theme.row_hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |terminal, cx| {
@@ -3965,7 +3965,7 @@ impl gpui::Render for TerminalView {
                                         format!("terminal-context-item-{index}-reason")
                                     })
                                     .text_size(px(12.0))
-                                    .text_color(theme.meta)
+                                    .text_color(theme.text_faint)
                                     .child(reason),
                             )
                         }),
@@ -4007,7 +4007,7 @@ impl gpui::Render for TerminalView {
                     .child(
                         div()
                             .text_size(px(15.0))
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child("No terminal in this pane"),
                     )
                     .child(
@@ -4022,7 +4022,7 @@ impl gpui::Render for TerminalView {
                                     .py(px(6.0))
                                     .rounded(px(6.0))
                                     .bg(theme.primary_pill_bg)
-                                    .text_color(theme.title)
+                                    .text_color(theme.text)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(TerminalPromptAction::NewTerminal, cx);
                                     }))
@@ -4036,7 +4036,7 @@ impl gpui::Render for TerminalView {
                                     .py(px(6.0))
                                     .rounded(px(6.0))
                                     .bg(theme.card_fill)
-                                    .text_color(theme.title)
+                                    .text_color(theme.text)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.emit_prompt(
                                             TerminalPromptAction::NewTerminalWithCommand,
@@ -4102,7 +4102,7 @@ impl gpui::Render for TerminalView {
                             .rounded(theme.radii.control)
                             .bg(theme.primary_pill_bg)
                             .text_size(theme.typography.caption2)
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child(format!("Dropped diff: {path}")),
                     )
                 })
@@ -4138,7 +4138,7 @@ impl gpui::Render for TerminalView {
                                 .py(px(4.0))
                                 .bg(theme.primary_pill_bg)
                                 .text_size(px(12.0))
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(label),
                         )
                     } else {
@@ -4161,7 +4161,7 @@ impl gpui::Render for TerminalView {
                                     .border_color(theme.hairline)
                                     .font_family(sirio_theme::terminal_family())
                                     .text_size(theme.typography.caption2)
-                                    .text_color(theme.title)
+                                    .text_color(theme.text)
                                     .child(hover.uri),
                             ),
                         )
@@ -4194,7 +4194,7 @@ impl gpui::Render for TerminalView {
                         div()
                             .w_full()
                             .text_size(px(13.0))
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                             .child(message.clone()),
                     )
                     .child(
@@ -4206,7 +4206,7 @@ impl gpui::Render for TerminalView {
                             .rounded(px(6.0))
                             .bg(theme.primary_pill_bg)
                             .text_size(px(13.0))
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .hover(|style| style.bg(theme.row_hover))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .on_click(move |_, _, cx| {
