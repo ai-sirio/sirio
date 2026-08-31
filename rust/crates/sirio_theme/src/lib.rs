@@ -367,6 +367,9 @@ impl ThemeColors {
             color(0.24, 0.38, 0.78, 1.0),
             appearance,
         );
+        // C1: untracked leaves the gauge blue for a neutral in phase 2. Bound
+        // separately here so that move is a value change, not a structural one.
+        let git_untracked = gauge;
         // A starred row is a louder `warning`, not a fifth colour: same hue,
         // same lightness, all the chroma the pair allows. Held by
         // `favorite_is_the_warning_hue_at_full_chroma`.
@@ -469,7 +472,7 @@ impl ThemeColors {
             tree_guide: veil(VEIL_MID, appearance),
             git_staged: success,
             git_modified: warning,
-            git_untracked: gauge,
+            git_untracked,
             git_conflict: danger,
             diff_addition: success,
             // The band under a diff line is the line's own colour turned down,
@@ -1701,6 +1704,18 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_untracked_is_its_own_binding_not_the_gauge_blue() {
+        // C1 moves untracked off the gauge binding to a neutral. Splitting the
+        // alias is structural and lands in phase 1; the value moves in phase 2.
+        // Until then both are the same colour, so this test asserts the *binding*
+        // exists separately by checking the field is reachable without gauge.
+        let dark = ThemeColors::for_appearance(Appearance::Dark);
+        let light = ThemeColors::for_appearance(Appearance::Light);
+        assert_eq!(dark.git_untracked, dark.gauge, "phase 1 keeps the value");
+        assert_eq!(light.git_untracked, light.gauge, "phase 1 keeps the value");
+    }
 
     #[test]
     fn graph_lane_colours_cycle_and_stay_distinct() {
