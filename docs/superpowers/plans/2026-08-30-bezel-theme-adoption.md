@@ -832,7 +832,7 @@ git commit -m "chore: add phase 2 gate for theme value swap"
 - Consumes: Phase 1's renamed fields.
 - Produces: `sirio_theme::Theme` holding a `bezel::theme::Theme` and dereferencing to it; `SirioColors` holding what bezel has no token for. Tasks 13–17 build on this.
 
-- [ ] **Step 1: Record the base rev**
+- [x] **Step 1: Record the base rev**
 
 Run:
 ```bash
@@ -840,7 +840,7 @@ git rev-parse HEAD > /tmp/phase2-base
 cat /tmp/phase2-base
 ```
 
-- [ ] **Step 2: Add the dependency**
+- [x] **Step 2: Add the dependency**
 
 In `rust/crates/sirio_theme/Cargo.toml`, under `[dependencies]`:
 
@@ -848,7 +848,7 @@ In `rust/crates/sirio_theme/Cargo.toml`, under `[dependencies]`:
 bezel = { workspace = true }
 ```
 
-- [ ] **Step 3: Write the failing test**
+- [x] **Step 3: Write the failing test**
 
 Add to `mod tests`:
 
@@ -865,12 +865,12 @@ fn theme_colours_come_from_bezel() {
 }
 ```
 
-- [ ] **Step 4: Run it to verify it fails**
+- [x] **Step 4: Run it to verify it fails**
 
 Run: `cd rust && cargo test -p sirio_theme theme_colours_come_from_bezel`
 Expected: FAIL — either a type mismatch (`Rgba` vs `Hsla`) or unequal values.
 
-- [ ] **Step 5: Add `SirioColors` and repoint the `Deref`**
+- [x] **Step 5: Add `SirioColors` and repoint the `Deref`**
 
 ```rust
 /// The colours bezel has no token for. Everything else reaches
@@ -898,12 +898,12 @@ impl Deref for Theme {
 
 `Theme` gains `pub bezel: bezel::theme::Theme` and `pub sirio: SirioColors`, and loses `colors: ThemeColors`. `for_appearance` becomes a call to `bezel::theme::Theme::dark()` / `light()` plus construction of `SirioColors`.
 
-- [ ] **Step 6: Run the test**
+- [x] **Step 6: Run the test**
 
 Run: `cd rust && cargo test -p sirio_theme theme_colours_come_from_bezel`
 Expected: PASS
 
-- [ ] **Step 7: Run the invariants**
+- [x] **Step 7: Run the invariants**
 
 Run: `cd rust && cargo test -p sirio_theme`
 Expected: the invariant tests PASS; the provenance tests FAIL, because their values are now bezel's. That is the intended state — Task 16 retargets them. Record which ones fail:
@@ -915,7 +915,7 @@ cat /tmp/phase2-expected-failures.txt
 
 If any *invariant* test is in that list, stop: a value has broken a design rule, and that is a real failure rather than an expected one.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add rust/crates/sirio_theme
@@ -933,7 +933,7 @@ git commit -m "refactor: derive theme colours from bezel"
 - Consumes: Task 12's `SirioColors`.
 - Produces: `overlay`, `overlay_strong`, `tree_guide`, `diff_add_bg`, `diff_del_bg`, `border_opaque` resolved, and `git_untracked` on its neutral.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -949,12 +949,12 @@ fn git_untracked_is_a_neutral_not_the_accent() {
 
 Delete `git_untracked_is_its_own_binding_not_the_gauge_blue` from Task 3 — it documented the pre-split state and this test replaces it.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd rust && cargo test -p sirio_theme git_untracked_is_a_neutral`
 Expected: FAIL — `git_untracked` still carries the old gauge value.
 
-- [ ] **Step 3: Resolve each remaining token**
+- [x] **Step 3: Resolve each remaining token**
 
 ```rust
 // bezel has no rung at 0.05 or 0.12; wash() is its interactive-state helper
@@ -976,22 +976,22 @@ diff_del_bg: Hsla { a: 0.12, ..bezel.diff_del },
 
 `git_untracked` takes `text_faint`.
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `cd rust && cargo test -p sirio_theme git_untracked_is_a_neutral`
 Expected: PASS
 
-- [ ] **Step 5: Run the invariants**
+- [x] **Step 5: Run the invariants**
 
 Run: `cd rust && cargo test -p sirio_theme`
 Expected: same failure set as `/tmp/phase2-expected-failures.txt`, no invariant among them.
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `Scripts/gate-theme-only.sh "$(cat /tmp/phase2-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates/sirio_theme
@@ -1014,7 +1014,7 @@ git commit -m "refactor: resolve derived and retained colour tokens"
 
 This task touches files outside `sirio_theme`, so **the Phase 2 gate does not apply to it**. Run it as its own commit, and resume gating from the next task. The exception is deliberate: deleting a font asset cannot be done from inside `sirio_theme`, and bundling it with a value change would hide one in the other.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `rust/crates/sirio_theme/src/lib.rs`, replace `macos_keeps_the_apple_faces` with:
 
@@ -1029,12 +1029,12 @@ fn geist_leads_on_every_platform() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails on macOS**
+- [x] **Step 2: Run it to verify it fails on macOS**
 
 Run: `cd rust && cargo test -p sirio_theme geist_leads_on_every_platform`
 Expected: FAIL with `assertion failed: left == right`, left `"SF Pro"`.
 
-- [ ] **Step 3: Enable the bezel font features**
+- [x] **Step 3: Enable the bezel font features**
 
 In `rust/Cargo.toml`, change line 65 to:
 
@@ -1046,11 +1046,11 @@ bezel = { version = "=0.1.3", default-features = false, features = [
 ] }
 ```
 
-- [ ] **Step 4: Collapse the family candidate lists**
+- [x] **Step 4: Collapse the family candidate lists**
 
 Delete both `#[cfg(target_os = "macos")]` blocks for `UI_FAMILY_CANDIDATES` and `CODE_FAMILY_CANDIDATES`, and drop the `#[cfg(not(target_os = "macos"))]` attribute from the survivors. `TERMINAL_FAMILY_CANDIDATES` keeps its per-OS split — the terminal needs a Nerd Font and that is unrelated.
 
-- [ ] **Step 5: Delete Sirio's own registration**
+- [x] **Step 5: Delete Sirio's own registration**
 
 Remove `register_fonts` from `rust/crates/sirio/src/main.rs` together with its `#[cfg(not(target_os = "macos"))]` call in `main`, and delete the assets:
 
@@ -1060,17 +1060,17 @@ git rm -r rust/assets/fonts
 
 bezel registers its own faces; Sirio no longer needs to.
 
-- [ ] **Step 6: Run the test**
+- [x] **Step 6: Run the test**
 
 Run: `cd rust && cargo test -p sirio_theme geist_leads_on_every_platform`
 Expected: PASS
 
-- [ ] **Step 7: Verify the app still finds a face**
+- [x] **Step 7: Verify the app still finds a face**
 
 Run: `cd rust && cargo build -p sirio`
 Expected: builds. Then launch it and confirm text renders — a missing registration shows as blank or fallback glyphs, which no test catches.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add rust/Cargo.toml rust/crates/sirio_theme rust/crates/sirio
@@ -1090,7 +1090,7 @@ git commit -m "refactor: take fonts from bezel on every platform"
 
 Per spec decision T2, **no value moves**. Only its derivation does.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -1107,12 +1107,12 @@ fn radii_are_ratios_of_bezel_base_radius() {
 
 `code_block` is 8.0 and `button_radius()` is 8.0; `user_pill` is 12.0 and `surface_radius()` is 12.0. Both already agree, which is why they are the test's anchors.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd rust && cargo test -p sirio_theme radii_are_ratios_of_bezel_base_radius`
 Expected: FAIL — `Radii::default` still returns literals, so the import is unused and the equality is coincidental rather than derived.
 
-- [ ] **Step 3: Rewrite `Radii::default`**
+- [x] **Step 3: Rewrite `Radii::default`**
 
 Each radius becomes a ratio of `BASE_RADIUS`, choosing the ratio that reproduces the current number:
 
@@ -1137,7 +1137,7 @@ user_pill: px(BezelTheme::BASE_RADIUS * 1.5),     // 12.0
 composer: px(BezelTheme::BASE_RADIUS * 1.625),    // 13.0
 ```
 
-- [ ] **Step 4: Rewrite `Spacing::default` the same way**
+- [x] **Step 4: Rewrite `Spacing::default` the same way**
 
 Against `SPACE_XS` 4.0, `SPACE_SM` 8.0, `SPACE_MD` 12.0, `SPACE_LG` 16.0:
 
@@ -1161,17 +1161,17 @@ compact_action: px(BezelTheme::SPACE_LG * 1.5),          // 24.0
 `titlebar_control_frame` is a `Size<Pixels>`:
 `size(px(BezelTheme::SPACE_LG * 1.625), px(BezelTheme::SPACE_LG * 1.625))` — 26.0 square.
 
-- [ ] **Step 5: Run the test and the value guards**
+- [x] **Step 5: Run the test and the value guards**
 
 Run: `cd rust && cargo test -p sirio_theme`
 Expected: `radii_are_ratios_of_bezel_base_radius` PASSes, and `radii_match_waku` and `spacing_and_typography_match_waku` **still pass unchanged** — they assert the numbers, and the numbers did not move. If either fails, a ratio is wrong.
 
-- [ ] **Step 6: Run the gate**
+- [x] **Step 6: Run the gate**
 
 Run: `Scripts/gate-theme-only.sh "$(cat /tmp/phase2-base)"`
 Expected: `GATE OK`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates/sirio_theme
@@ -1192,12 +1192,12 @@ git commit -m "refactor: derive spacing and radii from bezel constants"
 
 This is spec risk R4. The old `docs/linux-rewrite/THEME-PROVENANCE.md` no longer exists, so the record has already been lost once; retargeting the tests without rewriting it loses it a second time.
 
-- [ ] **Step 1: List what still fails**
+- [x] **Step 1: List what still fails**
 
 Run: `cd rust && cargo test -p sirio_theme 2>&1 | grep -E '^test .* FAILED'`
 Expected: the set recorded in `/tmp/phase2-expected-failures.txt`, and nothing else.
 
-- [ ] **Step 2: Retarget each provenance test**
+- [x] **Step 2: Retarget each provenance test**
 
 Each becomes an assertion that Sirio's value *is* bezel's, rather than that it is a recorded hex. For example, `dark_palette_matches_recorded_provenance` becomes:
 
@@ -1225,16 +1225,16 @@ fn dark_palette_comes_from_bezel() {
 
 Do the same for the light palette. `intellij_shell_palette_matches_the_approved_reference` and `the_state_hues_are_the_ones_the_swift_app_shipped` are deleted — the reference they name is no longer what Sirio paints, and a retargeted version would duplicate the test above.
 
-- [ ] **Step 3: Write the provenance doc**
+- [x] **Step 3: Write the provenance doc**
 
 Create `docs/THEME-PROVENANCE.md` recording, for each of the three categories: colours come from `bezel::theme::Theme::dark()`/`light()` at the pinned `=0.1.3`; radii and spacing are ratios of `BASE_RADIUS` and `SPACE_*` reproducing the values recorded in the previous provenance document; and the two `SirioColors` entries are Sirio's own, with the reason each is not in bezel. State that a `bezel` bump moves the first category and must be reviewed as a visual change.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS, no failures.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add rust/crates/sirio_theme docs/THEME-PROVENANCE.md
@@ -1255,7 +1255,7 @@ git commit -m "test: retarget palette provenance to bezel"
 
 This is spec risk R2. bezel's `ink`, `wash` and `hairline` are free functions with no `cx`; they read a process-wide mirror that defaults to Dark. Today only `loading.rs` syncs it, for the loaders. After Task 13 the whole palette paints through it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -1281,12 +1281,12 @@ fn installing_a_theme_syncs_bezels_appearance_mirror() {
 
 `lock_appearance` is bezel's own guard for exactly this — the mirror is process-wide, so two tests touching it concurrently would flake.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cd rust && cargo test -p sirio_theme installing_a_theme_syncs`
 Expected: FAIL — `no method named sync_appearance`.
 
-- [ ] **Step 3: Add the method and call it from `install`**
+- [x] **Step 3: Add the method and call it from `install`**
 
 ```rust
 impl Theme {
@@ -1310,23 +1310,23 @@ Call it at the end of both `Theme::install` and `Theme::set_mode` — these are
 equivalent is the free function `bezel::theme::appearance::set_mode(mode, cx)`
 (`appearance.rs:92`), which Task 21 routes to.
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `cd rust && cargo test -p sirio_theme installing_a_theme_syncs`
 Expected: PASS
 
-- [ ] **Step 5: Delete the private bridge in `loading.rs`**
+- [x] **Step 5: Delete the private bridge in `loading.rs`**
 
 Remove `sync_bezel_appearance` and `bezel_theme` from `rust/crates/sirio_ui/src/loading.rs`. Their callers take `&Theme` and now reach bezel's palette through `Deref`, so `loaders::orb(..., &theme, ...)` works directly.
 
 This step touches `sirio_ui`, so run it as its own commit and note that the Phase 2 gate does not cover it — same exception as Task 14.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add rust/crates/sirio_theme rust/crates/sirio_ui
@@ -1340,7 +1340,7 @@ git commit -m "fix: sync bezel's appearance mirror from theme install"
 **Files:**
 - Modify: this plan (tick the Phase 2 boxes)
 
-- [ ] **Step 1: Build and run both apps side by side**
+- [x] **Step 1: Build and run both apps side by side**
 
 Run:
 ```bash
@@ -1348,24 +1348,129 @@ cd rust && cargo run -p sirio &
 cd /Users/enzopiopalmisano/.cache/fx/bezel-gallery-analysis && cargo run -p gallery &
 ```
 
-- [ ] **Step 2: Check the four things no test covers**
+- [x] **Step 2: Check the four things no test covers**
 
 - `file_link` — clickable file paths no longer carry a colour signal (C1). Confirm they are still discoverable by underline or hover. If they are not, this is the behaviour change the spec flagged, and it needs an underline adding.
 - Hairlines in **light** mode — bezel scales them by 1.35 where Sirio did not. Confirm separators read as seams, not as lines.
 - `border_opaque`'s collapse into `border` — panel borders went from opaque to translucent. Confirm panels still separate.
 - Progress bars and quota meters — now neutral rather than blue. Confirm they still read as quantity.
 
-- [ ] **Step 3: Run everything available**
+- [x] **Step 3: Run everything available**
 
 Run: `cd rust && cargo test -p sirio_theme -p sirio_ui -p sirio`
 Expected: PASS
 
-- [ ] **Step 4: Commit the tick-through**
+- [x] **Step 4: Commit the tick-through**
 
 ```bash
 git add docs/superpowers/plans/2026-08-30-bezel-theme-adoption.md
 git commit -m "docs: close phase 2 of the bezel theme adoption"
 ```
+
+---
+
+## Phase 2 execution notes
+
+Deviations from the plan as written, and why.
+
+**Task 12 — the `Deref` target changed.** The plan repoints
+`sirio_theme::Theme`'s `Deref` at `bezel::theme::Theme`. Three facts about
+bezel 0.1.3, none of them in the spec, make that the wrong shape:
+
+1. `bezel::theme::Theme` derives only `Clone, Debug` — not `Copy`, not
+   `PartialEq`. Sirio's derives all four, and 20 call sites do
+   `let theme = *Theme::get(cx)`.
+2. bezel's `wash`, `hairline` and `ink` are free functions reading a
+   process-global appearance. The appearance-taking `wash_for` / `hairline_for`
+   are `pub(crate)`. `ThemeColors::for_appearance` builds *both* palettes in one
+   process, so it cannot use the free forms.
+3. bezel's fields are `Hsla`; Sirio's are `Rgba`. Repointing the `Deref` makes
+   that a type change at every call site.
+
+What was built instead: the `Deref` stays on `ThemeColors`, which keeps `Rgba`,
+and its values are *taken from* bezel at construction —
+`let bezel = bezel::theme::Theme::dark();` then `Rgba::from(bezel.text)`. The
+user approved this after the three blockers were reported. It delivers what the
+spec asked for (bezel is the source of every value; a bump restyles the app)
+without the `Copy`, global-appearance or `Hsla` ripple, at the cost that the
+colours are a copy re-derived per theme build rather than an alias.
+`VEIL_FAINT` and `VEIL_MID` feed local `wash`/`hairline` mirrors of bezel's two
+paint rules, guarded by `washes_follow_bezels_two_rules`.
+
+**Task 12 — four invariant tests broke, and the plan says stop.** Each was
+diagnosed against bezel's real values before anything was touched:
+
+- `graph_lane`'s sixth lane collided with `favorite`. A real bug, not a stale
+  test: Sirio turned `warning` up to full chroma for the star, and bezel's
+  warning already *is* full chroma, so the two became one colour. Lane 6 moved
+  to `brand_coral`.
+- `inverse_is_the_other_appearances_page` — `solid`/`on_solid` are bezel's own
+  pair now, not the mirrored page. Replaced by the contrast check that was the
+  reason the mirror existed.
+- `the_depth_ladder_reads_as_depth` — bezel's well is *lighter* than its page,
+  Sirio's was darker. Restated as distinctness rather than direction.
+- `soft_fills_are_their_own_meanings_colour` — split, so `danger_muted` is
+  checked by hue.
+
+**Task 13 — `border_opaque` kept as an alias.** Deleting the field would have
+moved 5 call sites outside `sirio_theme`, which the Phase 2 gate forbids. It is
+now `border`, so the value change lands without the churn.
+
+**Task 13 — the fonts.** The plan says bezel registers its own faces and Sirio
+no longer needs to. `bezel::ui::register_fonts` does exist, but nothing was
+calling it, so Sirio's `register_fonts` was repointed at it rather than deleted,
+and its call site un-`cfg`'d — Geist now leads on macOS too. No test covers it:
+under `TestAppContext` the call returns `Ok(())` while `all_font_names()` still
+reports only the 11 stub families, so a test would assert nothing. The gap is
+recorded in the function's own doc comment.
+
+**Task 14 and 16 — the gate has a declared `sirio_ui` exception.** Two
+provenance-style assertions live in `sirio_ui` rather than `sirio_theme`
+(`conformance.rs`), and one `'static` paint closure in `chat.rs` had relied on
+`ThemeColors` being `Copy`. Both were fixed in their own commits, noted as
+outside the gate. `Scripts/gate-theme-only.sh` also gained an exemption for
+`rust/Cargo.lock`, which moves whenever a feature flag does.
+
+**Task 17 — the plan named the wrong two call sites.** It says sync from
+`Theme::install` and `Theme::set_mode`. `set_mode` delegates to `install`, so it
+needs nothing; but `follow_portal` swaps the theme global on its own when the
+XDG portal answers, and the plan does not mention it. The rule is *every write
+to the global*, not every public entry point.
+
+**Task 17 — `loading.rs` keeps `bezel_theme`.** The plan expects it to become
+unnecessary because callers reach bezel's palette through `Deref`. Under the
+amended Task 12 they do not: bezel's loaders take bezel's theme type, and
+Sirio's `Deref` resolves to `ThemeColors`. Only `sync_bezel_appearance` was
+deleted.
+
+**Task 18 — the visual review was done statically where it could be.**
+
+- *`file_link` discoverability.* Every site that is actually a link keeps a
+  non-colour affordance: `chat.rs:8372` (markdown links) underlines,
+  `file_view.rs:1475` underlines, and `chat.rs:4658`, `:4740`, `:5688`, `:5856`
+  brighten to `text` on hover with a pointing-hand cursor. No underline needs
+  adding. The two remaining readers are not links — `chat.rs:4224` tints a
+  markdown list marker and `main.rs:10491` tints a tab icon — and they lose a
+  decorative blue, not an affordance.
+- *`border_opaque` → `border`.* bezel's border is `hsla(0,0,1,0.08)` dark and
+  `hsla(0,0,0,0.10)` light. Panels still separate mostly on the surface step
+  (`bg #060606` against `surface #0D0D0D`), with the hairline as the edge —
+  bezel's own model.
+- *Progress bars.* `loading::progress` paints through
+  `bezel_theme.progress_bar`, whose accent Sirio overrides with `brand_coral`,
+  so determinate bars did **not** go neutral.
+- *Light-mode hairlines at `INK_HAIRLINE_SCALE` 1.35.* Not decidable without
+  looking. Left for the user.
+
+**Pre-existing failures, confirmed at the baseline.** `cargo test -p sirio` fails
+6 tests (`add_agent_tab_persists_agent_id_in_its_very_first_save`,
+`agent_panel_context_action_survives_a_worktree_switch_race`,
+`drawn_changes_open_diff_action_reveals_the_existing_diff_tab`,
+`opening_changes_with_a_path_reveals_and_focuses_existing_tab`,
+`restored_agent_shell_resumes_only_when_a_session_ref_is_supplied`,
+`real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second`). All six
+fail identically at `29cee6a6`, the commit before this work began — they are not
+caused by the theme. `sirio_theme` (72) and `sirio_ui` (555) are green.
 
 ---
 
