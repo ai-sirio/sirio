@@ -38,16 +38,13 @@ use std::ops::Deref;
 use std::sync::OnceLock;
 
 /// The appearance selected by Sirio's appearance setting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ThemeMode {
-    /// Follow the current system/window appearance.
-    #[default]
-    System,
-    /// Always use the light palette.
-    Light,
-    /// Always use the dark palette.
-    Dark,
-}
+///
+/// This is bezel's enum under Sirio's name. It used to be a third
+/// `System`/`Light`/`Dark` declaration beside bezel's and the persisted one;
+/// the name is kept because it reads better next to `Appearance` (the
+/// *resolved* one) and because it keeps `sirio_persistence::AppearanceMode`
+/// unambiguous at the one place both are in scope, `sirio`'s `main.rs`.
+pub use bezel::theme::appearance::AppearanceMode as ThemeMode;
 
 /// The resolved light/dark appearance of an active [`Theme`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,36 +64,37 @@ impl From<WindowAppearance> for Appearance {
     }
 }
 
-impl ThemeMode {
-    fn resolve(self, system_appearance: WindowAppearance) -> Appearance {
-        match self {
-            Self::System => system_appearance.into(),
-            Self::Light => Appearance::Light,
-            Self::Dark => Appearance::Dark,
-        }
+/// Resolves a selected mode against the window appearance.
+///
+/// A free function rather than an inherent method: [`ThemeMode`] is bezel's
+/// type now, so this crate cannot add methods to it.
+fn resolve_mode(mode: ThemeMode, system_appearance: WindowAppearance) -> Appearance {
+    match mode {
+        ThemeMode::System => system_appearance.into(),
+        ThemeMode::Light => Appearance::Light,
+        ThemeMode::Dark => Appearance::Dark,
     }
+}
 
-    /// Linux-specific resolution for `System`.
-    ///
-    /// GPUI's `WindowAppearance` starts at `Light` and only becomes
-    /// meaningful once the XDG portal answers — or never, when no portal is
-    /// running. A light appearance at startup is therefore *not evidence of
-    /// a light desktop*: it is the unresolved default. Resolve it to dark,
-    /// and let the portal query in [`Theme::init`] correct to light when the
-    /// portal actually says so.
-    #[cfg(target_os = "linux")]
-    fn resolve_system(self, system_appearance: WindowAppearance) -> Appearance {
-        match self {
-            Self::System => match system_appearance {
-                // The portal (or another platform channel) has spoken.
-                WindowAppearance::Dark | WindowAppearance::VibrantDark => Appearance::Dark,
-                // Light here means "not heard from yet" or "no portal".
-                // Dark wins either way.
-                _ => Appearance::Dark,
-            },
-            Self::Light => Appearance::Light,
-            Self::Dark => Appearance::Dark,
-        }
+/// Linux-specific resolution for `System`.
+///
+/// GPUI's `WindowAppearance` starts at `Light` and only becomes meaningful
+/// once the XDG portal answers — or never, when no portal is running. A light
+/// appearance at startup is therefore *not evidence of a light desktop*: it is
+/// the unresolved default. Resolve it to dark, and let the portal query in
+/// [`Theme::init`] correct to light when the portal actually says so.
+#[cfg(target_os = "linux")]
+fn resolve_mode_linux(mode: ThemeMode, system_appearance: WindowAppearance) -> Appearance {
+    match mode {
+        ThemeMode::System => match system_appearance {
+            // The portal (or another platform channel) has spoken.
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Appearance::Dark,
+            // Light here means "not heard from yet" or "no portal".
+            // Dark wins either way.
+            _ => Appearance::Dark,
+        },
+        ThemeMode::Light => Appearance::Light,
+        ThemeMode::Dark => Appearance::Dark,
     }
 }
 
@@ -1274,14 +1272,14 @@ impl Theme {
 
     /// Returns a theme resolved for a requested mode and system appearance.
     pub fn for_mode(mode: ThemeMode, system_appearance: WindowAppearance) -> Self {
-        let appearance = mode.resolve(system_appearance);
+        let appearance = resolve_mode(mode, system_appearance);
         Self::for_appearance(mode, appearance)
     }
 
     /// Linux resolution of `System`: dark until the portal speaks.
     #[cfg(target_os = "linux")]
     fn for_mode_linux(mode: ThemeMode, system_appearance: WindowAppearance) -> Self {
-        let appearance = mode.resolve_system(system_appearance);
+        let appearance = resolve_mode_linux(mode, system_appearance);
         Self::for_appearance(mode, appearance)
     }
 
