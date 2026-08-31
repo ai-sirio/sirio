@@ -9,6 +9,8 @@ name = "sirio"
 path = "src/main.rs"
 
 [dependencies]
+# Only for `bezel::ui::register_fonts`: the Geist faces the theme names.
+bezel.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true

@@ -14858,25 +14858,24 @@ fn app_icon() -> Arc<image::RgbaImage> {
     Arc::new(image)
 }
 
-/// Registers the bundled Geist and Geist Mono faces with the text system.
-/// Windows and Linux only — macOS is the reference release platform and
-/// keeps SF Pro / SF Mono, so this never runs there.
+/// Registers bezel's bundled Geist faces with the text system, on every
+/// platform. Sirio used to carry its own copies in `assets/fonts` and skip
+/// macOS, which kept SF Pro there; B3 makes one face the face everywhere, and
+/// bezel's copies include the 500/600/700 statics Sirio's never had.
 ///
 /// Must run before [`Theme::init`]: `Theme::install` resolves and caches
 /// `UI_FAMILY`/`CODE_FAMILY` from `TextSystem::all_font_names()` on its
 /// first call, so a font registered afterwards would never be seen and the
 /// resolution would fall through to the JetBrains chain for the rest of the
 /// process's life.
-#[cfg(not(target_os = "macos"))]
+///
+/// Not covered by a test, and not for want of trying: under `TestAppContext`
+/// gpui installs a stub text system that answers `add_fonts` with `Ok(())`
+/// and then omits the added families from `all_font_names()`, so a test can
+/// neither see this succeed nor see it fail. A missing registration shows up
+/// as fallback or blank glyphs at runtime and nowhere earlier.
 fn register_fonts(cx: &App) {
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
-        std::borrow::Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Regular.ttf")),
-        std::borrow::Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Medium.ttf")),
-        std::borrow::Cow::Borrowed(include_bytes!(
-            "../../../assets/fonts/GeistMono-Regular.ttf"
-        )),
-    ];
-    if let Err(error) = cx.text_system().add_fonts(fonts) {
+    if let Err(error) = bezel::ui::register_fonts(cx) {
         eprintln!("[fonts] failed to register Geist: {error}");
     }
 }
@@ -14923,7 +14922,6 @@ fn main() {
     application().run(|cx: &mut App| {
         // Must land before `Theme::init` — see `register_fonts`'s own doc
         // comment for why the order is load-bearing.
-        #[cfg(not(target_os = "macos"))]
         register_fonts(cx);
         Theme::init(cx);
 

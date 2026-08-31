@@ -891,22 +891,23 @@ impl Default for Typography {
 // "SF Symbols" file-icon entry in Settings: a macOS assumption that is
 // invisible until you look for it.
 //
-// Platform split: on macOS the Apple/Xcode faces (SF Mono, SF Pro) lead —
-// macOS is the reference release platform and keeps them unchanged.
-// Elsewhere, Geist and Geist Mono (SIL OFL 1.1) lead: bundled in
-// `assets/fonts` and registered with the text system before the first
-// window opens, so they are always present. The JetBrains faces (JetBrains
-// Mono — SIL OFL 1.1; JetBrains Sans — Apache 2.0 — both open source) follow
-// as the fontconfig-detected fallback. Each list was verified against
+// One list per role, no platform split: Geist and Geist Mono (SIL OFL 1.1)
+// lead everywhere, registered by `bezel::ui::register_fonts` before the first
+// window opens, so they are always present. A theme that changes face per
+// platform cannot be reviewed as one design, which is why the Apple faces sit
+// at the tail as a last resort rather than leading on macOS. The JetBrains
+// faces (JetBrains Mono — SIL OFL 1.1; JetBrains Sans — Apache 2.0 — both open
+// source) follow as the fontconfig-detected fallback. Each list was verified
+// against
 // `fc-list : family` on the Linux build machine rather than assumed.
 
 /// The sans-serif families to prefer, in order, when resolving the UI font.
 ///
-/// "Geist" leads: it is bundled in `assets/fonts` and registered with the
-/// text system before the first window opens (see `sirio`'s `main.rs`), so
-/// it is always present here — the JetBrains chain behind it only matters
-/// if that registration is ever skipped.
-#[cfg(not(target_os = "macos"))]
+/// "Geist" leads on every platform, macOS included: bezel registers it, with
+/// real 500/600/700 statics, so it is always present here — the chain behind
+/// it only matters if that registration is ever skipped. Apple's SF faces are
+/// kept at the tail as a last resort rather than led with, because a theme
+/// that changes face per platform cannot be reviewed as one design.
 pub const UI_FAMILY_CANDIDATES: &[&str] = &[
     "Geist",
     "JetBrains Sans",
@@ -915,30 +916,19 @@ pub const UI_FAMILY_CANDIDATES: &[&str] = &[
     "Noto Sans",
     "Cantarell",
     "DejaVu Sans",
-];
-
-/// The sans-serif families to prefer, in order, when resolving the UI font
-/// on macOS — Apple's own SF Pro (Xcode's UI face) first.
-#[cfg(target_os = "macos")]
-pub const UI_FAMILY_CANDIDATES: &[&str] = &[
     "SF Pro",
-    "SF Pro Text",
-    "SF Pro Display",
-    "JetBrains Sans",
-    "Inter",
     "Helvetica Neue",
 ];
 
 /// Monospace families to prefer, in order, when resolving the code font.
 ///
 /// "Geist Mono" leads for the same reason "Geist" leads
-/// [`UI_FAMILY_CANDIDATES`]: bundled and registered before the first window
+/// [`UI_FAMILY_CANDIDATES`]: bezel registers it before the first window
 /// opens. Behind it, the family the visual bar is set in (waku's JetBrains
 /// Mono), then common good monospaced faces, then whatever the system's
 /// generic "monospace" resolves to (fontconfig's alias on Linux, always
 /// present). A candidate that is not installed is skipped — never guessed
 /// at.
-#[cfg(not(target_os = "macos"))]
 pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
     "Geist Mono",
     "JetBrains Mono",
@@ -948,20 +938,7 @@ pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
     "DejaVu Sans Mono",
     "Liberation Mono",
     "Noto Sans Mono",
-];
-
-/// Monospace families to prefer, in order, when resolving the code font on
-/// macOS — Apple's own SF Mono (Xcode's editor face) first.
-#[cfg(target_os = "macos")]
-pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
     "SF Mono",
-    "JetBrains Mono",
-    "Fira Mono",
-    "Hack",
-    "Ubuntu Mono",
-    "DejaVu Sans Mono",
-    "Liberation Mono",
-    "Noto Sans Mono",
 ];
 
 /// Monospace families to prefer, in order, when resolving the terminal
@@ -2596,23 +2573,14 @@ mod tests {
         );
     }
 
-    /// Geist and Geist Mono are bundled and registered before the first
-    /// frame on Windows and Linux, so they lead the non-macOS candidate
-    /// lists ahead of the fontconfig-detected JetBrains faces.
+    /// B3 makes the bundled face the face everywhere: bezel ships Geist with
+    /// real 500/600/700 statics, which the cosmic-text path needs because it
+    /// rasterizes a variable font at its default instance only and never
+    /// applies `wght` coordinates.
     #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn geist_leads_the_non_macos_families() {
+    fn geist_leads_on_every_platform() {
         assert_eq!(UI_FAMILY_CANDIDATES[0], "Geist");
         assert_eq!(CODE_FAMILY_CANDIDATES[0], "Geist Mono");
-    }
-
-    /// macOS is the reference release platform and keeps its own Apple
-    /// faces — bundling Geist there would be a regression, not bundling it.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn macos_keeps_the_apple_faces() {
-        assert_eq!(UI_FAMILY_CANDIDATES[0], "SF Pro");
-        assert_eq!(CODE_FAMILY_CANDIDATES[0], "SF Mono");
     }
 
     /// The code family picks the first installed candidate in preference
