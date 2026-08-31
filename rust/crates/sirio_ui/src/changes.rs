@@ -39,7 +39,10 @@
 //! numbers, and the report's `error` field covers the git-broken case. The
 //! human surface is the honest one.
 
-use bezel::ui::tooltip::Tooltip;
+use bezel::{
+    theme::ink,
+    ui::{icons as bezel_icons, tooltip::Tooltip},
+};
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
     InteractiveElement, KeyDownEvent, PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
@@ -71,12 +74,20 @@ const CHANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// every ten reloads from a tab nobody is looking at.
 pub(crate) const SUSPENDED_TICK_BUDGET: u32 = 10;
 const TOOLBAR_HEIGHT: f32 = 34.0;
-/// File rows: 12.5px text at 30px, the app's single-line row rhythm.
+/// File headers: gallery 12px mono text at the app's 30px row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 30.0;
 pub(crate) const HUNK_ROW_HEIGHT: f32 = 24.0;
-/// Diff code lines: 11.5px mono at 20px.
+/// Diff code lines: gallery 12px mono on an 18px line at 20px overall.
 pub(crate) const DIFF_LINE_HEIGHT: f32 = 20.0;
 const BAND_ROW_HEIGHT: f32 = 24.0;
+/// Gallery diff rows reserve five monospace figures for each line number.
+const DIFF_NUMBER_WIDTH: f32 = 30.0;
+/// Width of the gallery diff's `+` / `-` marker column.
+const DIFF_SIGN_WIDTH: f32 = 12.0;
+const DIFF_ROW_GAP: f32 = 8.0;
+const DIFF_ROW_PADDING: f32 = 10.0;
+const DIFF_WASH_ALPHA: f32 = 0.10;
+const DIFF_HUNK_GUTTER_WIDTH: f32 = DIFF_NUMBER_WIDTH * 2.0 + DIFF_SIGN_WIDTH + 16.0;
 /// A run of unchanged context lines this long collapses into one labelled
 /// band (orca's "18 hidden lines").
 const CONTEXT_BAND_MIN: usize = 4;
@@ -1189,13 +1200,28 @@ impl ChangesTab {
                 .h(px(HUNK_ROW_HEIGHT))
                 .w_full()
                 .flex_none()
-                .px(px(10.0))
                 .flex()
-                .items_center()
-                .text_size(px(12.5))
-                .text_color(theme.text_muted)
-                .bg(theme.code_wash)
-                .child(header)
+                .items_start()
+                .gap(px(DIFF_ROW_GAP))
+                .px(px(DIFF_ROW_PADDING))
+                .py(px(1.0))
+                .bg(ink(0.02))
+                .font_family(theme.typography.code_family)
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .child(
+                    div()
+                        .w(px(DIFF_HUNK_GUTTER_WIDTH))
+                        .flex_none()
+                        .text_color(theme.text_faint)
+                        .child("⋯"),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .text_color(theme.text_faint)
+                        .child(header),
+                )
                 .into_any_element(),
             ChangeRow::ContextBand {
                 section,
@@ -1229,17 +1255,23 @@ impl ChangesTab {
                 .h(px(DIFF_LINE_HEIGHT))
                 .w_full()
                 .flex_none()
-                .px(px(6.0))
                 .flex()
-                .items_center()
-                .text_size(px(12.5))
+                .items_start()
+                .gap(px(DIFF_ROW_GAP))
+                .px(px(DIFF_ROW_PADDING))
+                .py(px(1.0))
+                .font_family(theme.typography.code_family)
+                .text_size(px(12.0))
+                .line_height(px(18.0))
                 .text_color(theme.text_faint)
                 .child(
                     div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(message),
+                        .w(px(DIFF_HUNK_GUTTER_WIDTH))
+                        .flex_none()
+                        .child("⋯"),
+                )
+                .child(
+                    div().min_w(px(0.0)).overflow_hidden().text_ellipsis().child(message),
                 )
                 .into_any_element(),
         }
@@ -1275,9 +1307,10 @@ impl ChangesTab {
             .items_center()
             .justify_center()
             .gap(px(8.0))
-            .text_size(theme.typography.footnote)
+            .font_family(theme.typography.code_family)
+            .text_size(px(12.0))
             .text_color(theme.text_faint)
-            .bg(theme.code_wash)
+            .bg(ink(0.02))
             .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 band_entity.update(cx, |tab, cx| {
@@ -1323,9 +1356,10 @@ impl ChangesTab {
             .px(px(10.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .text_size(px(12.5))
-            .bg(theme.code_wash)
+            .gap(px(DIFF_ROW_GAP))
+            .font_family(theme.typography.code_family)
+            .text_size(px(12.0))
+            .bg(ink(0.02))
             .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| tab.toggle_section(section, cx));
@@ -1393,7 +1427,6 @@ impl ChangesTab {
         let unstages = section == ChangeSection::Staged;
         let stage_label = section.action_label();
         let color = status_color(&entry, theme);
-        let glyph = file_glyph(&path);
         // Unknown counts render `·` (the same glyph as binary), never a
         // confident +0 −0.
         let (additions, deletions) = match stat {
@@ -1418,11 +1451,14 @@ impl ChangesTab {
             .h(px(ROW_HEIGHT))
             .w_full()
             .flex_none()
-            .px(px(8.0))
+            .px(px(DIFF_ROW_PADDING))
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .text_size(px(13.5))
+            .gap(px(DIFF_ROW_GAP))
+            .border_b_1()
+            .border_color(theme.border)
+            .font_family(theme.typography.code_family)
+            .text_size(px(12.0))
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.text)
             .hover(|style| style.bg(theme.element_hover))
@@ -1463,14 +1499,11 @@ impl ChangesTab {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(glyph.map_or_else(
-                        || {
-                            IconElement::new(Icon::File, IconSize::Small)
-                                .text_color(color)
-                                .into_any_element()
-                        },
-                        |glyph| div().text_color(color).child(glyph).into_any_element(),
-                    )),
+                    .child(
+                        bezel_icons::icon(bezel_icons::DOCUMENT)
+                            .size(px(14.0))
+                            .text_color(color),
+                    ),
             )
             .child(
                 div()
@@ -1479,8 +1512,18 @@ impl ChangesTab {
                     .text_ellipsis()
                     .child(path.to_string_lossy().to_string()),
             )
-            .child(div().text_color(theme.diff_del).child(deletions))
-            .child(div().text_color(theme.diff_add).child(additions))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.diff_add)
+                    .child(additions),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.diff_del)
+                    .child(deletions),
+            )
             .when(expanded, |this| {
                 this.child(
                     div()
@@ -1609,7 +1652,7 @@ impl ChangesTab {
             .flex()
             .items_stretch()
             .font_family(theme.typography.code_family)
-            .text_size(px(12.5))
+            .text_size(px(12.0))
             .child(split_cell(row.left, true, theme).debug_selector(|| "changes-split-left".into()))
             .child(
                 div()
@@ -1628,10 +1671,20 @@ impl ChangesTab {
         line: DiffLine,
         theme: Theme,
     ) -> impl IntoElement {
-        let (background, marker_color, marker) = match line.origin {
-            DiffOrigin::Context => (theme.surface, theme.text_faint, " "),
-            DiffOrigin::Addition => (theme.diff_add_bg, theme.diff_add, "+"),
-            DiffOrigin::Deletion => (theme.diff_del_bg, theme.diff_del, "−"),
+        let (background, marker_color, marker, text_color) = match line.origin {
+            DiffOrigin::Context => (theme.surface, theme.text_faint, " ", theme.text_muted),
+            DiffOrigin::Addition => (
+                diff_wash(theme.diff_add),
+                theme.diff_add,
+                "+",
+                theme.text,
+            ),
+            DiffOrigin::Deletion => (
+                diff_wash(theme.diff_del),
+                theme.diff_del,
+                "-",
+                theme.text,
+            ),
         };
         div()
             .id(format!(
@@ -1645,31 +1698,54 @@ impl ChangesTab {
             .h(px(DIFF_LINE_HEIGHT))
             .w_full()
             .flex_none()
-            .px(px(6.0))
             .flex()
-            .items_center()
+            .items_start()
+            .gap(px(DIFF_ROW_GAP))
+            .px(px(DIFF_ROW_PADDING))
+            .py(px(1.0))
             .font_family(theme.typography.code_family)
-            .text_size(px(12.5))
-            .text_color(theme.text)
+            .text_size(px(12.0))
+            .line_height(px(18.0))
             .bg(background)
             .child(
-                div().w(px(22.0)).text_color(theme.text_faint).child(
-                    line.old_line_number
-                        .map_or(String::new(), |n| n.to_string()),
-                ),
+                div()
+                    .debug_selector(|| "changes-diff-old-number".into())
+                    .w(px(DIFF_NUMBER_WIDTH))
+                    .flex_none()
+                    .text_align(gpui::TextAlign::Right)
+                    .text_color(theme.text_faint)
+                    .child(
+                        line.old_line_number
+                            .map_or(String::new(), |n| n.to_string()),
+                    ),
             )
             .child(
-                div().w(px(22.0)).text_color(theme.text_faint).child(
-                    line.new_line_number
-                        .map_or(String::new(), |n| n.to_string()),
-                ),
+                div()
+                    .debug_selector(|| "changes-diff-new-number".into())
+                    .w(px(DIFF_NUMBER_WIDTH))
+                    .flex_none()
+                    .text_align(gpui::TextAlign::Right)
+                    .text_color(theme.text_faint)
+                    .child(
+                        line.new_line_number
+                            .map_or(String::new(), |n| n.to_string()),
+                    ),
             )
-            .child(div().w(px(14.0)).text_color(marker_color).child(marker))
+            .child(
+                div()
+                    .debug_selector(|| "changes-diff-marker".into())
+                    .w(px(DIFF_SIGN_WIDTH))
+                    .flex_none()
+                    .text_color(marker_color)
+                    .child(marker),
+            )
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.0))
                     .overflow_hidden()
                     .text_ellipsis()
+                    .text_color(text_color)
                     .child(line.content),
             )
     }
@@ -1939,10 +2015,10 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
         // renderer to show — invisible in a photograph.
         return cell.bg(theme.input_bg);
     };
-    let background = match line.origin {
-        DiffOrigin::Context => theme.surface,
-        DiffOrigin::Addition => theme.diff_add_bg,
-        DiffOrigin::Deletion => theme.diff_del_bg,
+    let (background, marker_color, marker) = match line.origin {
+        DiffOrigin::Context => (theme.surface, theme.text_faint, " "),
+        DiffOrigin::Addition => (diff_wash(theme.diff_add), theme.diff_add, "+"),
+        DiffOrigin::Deletion => (diff_wash(theme.diff_del), theme.diff_del, "-"),
     };
     let number = if old {
         line.old_line_number
@@ -1954,22 +2030,25 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
             .absolute()
             .inset_0()
             .flex()
-            .items_center()
-            .px(px(6.0))
+            .items_start()
+            .gap(px(DIFF_ROW_GAP))
+            .px(px(DIFF_ROW_PADDING))
+            .py(px(1.0))
+            .line_height(px(18.0))
             .child(
                 div()
-                    .w(px(28.0))
+                    .w(px(DIFF_NUMBER_WIDTH))
                     .flex_none()
-                    .flex()
-                    // Right-aligned, like every diff gutter and like the macOS
-                    // original's own `.frame(width: 40, alignment: .trailing)`.
-                    // Left-aligned numbers make the ones and the hundreds start
-                    // in different places, and the eye then reads the gutter as
-                    // ragged text rather than as a column.
-                    .justify_end()
-                    .pr(px(4.0))
+                    .text_align(gpui::TextAlign::Right)
                     .text_color(theme.text_faint)
                     .child(number.map_or(String::new(), |number| number.to_string())),
+            )
+            .child(
+                div()
+                    .w(px(DIFF_SIGN_WIDTH))
+                    .flex_none()
+                    .text_color(marker_color)
+                    .child(marker),
             )
             .child(
                 div()
@@ -2212,16 +2291,12 @@ fn status_color(entry: &StatusEntry, theme: Theme) -> Rgba {
     crate::git_status_style::entry_color(entry, theme)
 }
 
-/// A per-type glyph for known file kinds; the generic fallback is the file
-/// icon.
-fn file_glyph(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("rs") => Some("🦀"),
-        Some("swift") => Some("🕊"),
-        Some("md") => Some("📝"),
-        Some("toml") | Some("yaml") | Some("yml") | Some("json") => Some("⚙"),
-        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") => Some("🖼"),
-        _ => None,
+/// The gallery derives row washes from the semantic ink rather than keeping
+/// a second palette entry for the same meaning.
+fn diff_wash(color: Rgba) -> Rgba {
+    Rgba {
+        a: DIFF_WASH_ALPHA,
+        ..color
     }
 }
 
@@ -4474,6 +4549,39 @@ mod tests {
             cx.debug_bounds("changes-view-mode-0").is_some(),
             "the Unified segment is still on screen to switch back with"
         );
+    }
+
+    /// The copied bezel diff pattern is a visual contract too: the two
+    /// five-digit gutters plus the change marker keep fixed widths so code
+    /// never shifts as line numbers grow.
+    #[gpui::test]
+    async fn drawn_diff_rows_follow_the_gallery_gutter_rhythm(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        side_by_side_fixture(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("changes-hunk-row").is_some());
+        assert!(cx.debug_bounds("changes-diff-line").is_some());
+
+        let old = cx
+            .debug_bounds("changes-diff-old-number")
+            .expect("the old line-number gutter is drawn");
+        let new = cx
+            .debug_bounds("changes-diff-new-number")
+            .expect("the new line-number gutter is drawn");
+        let marker = cx
+            .debug_bounds("changes-diff-marker")
+            .expect("the change marker column is drawn");
+        assert_eq!(f32::from(old.size.width), 30.0);
+        assert_eq!(f32::from(new.size.width), 30.0);
+        assert_eq!(f32::from(marker.size.width), 12.0);
     }
 
     /// F-GIT-DIFF-03. The whole clause, in one drawn frame reached by real
