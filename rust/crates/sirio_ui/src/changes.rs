@@ -1121,7 +1121,7 @@ impl ChangesTab {
                 .items_center()
                 .text_size(px(12.5))
                 .text_color(theme.text_muted)
-                .bg(theme.diff_hunk_background)
+                .bg(theme.code_wash)
                 .child(header)
                 .into_any_element(),
             ChangeRow::ContextBand {
@@ -1204,16 +1204,16 @@ impl ChangesTab {
             .gap(px(8.0))
             .text_size(theme.typography.footnote)
             .text_color(theme.text_faint)
-            .bg(theme.diff_hunk_background)
-            .hover(|style| style.bg(theme.row_hover))
+            .bg(theme.code_wash)
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 band_entity.update(cx, |tab, cx| {
                     tab.toggle_band(section, band_path.clone(), key, cx);
                 });
             })
-            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.hairline))
+            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.border))
             .child(div().text_color(theme.text_faint).child(label))
-            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.hairline))
+            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.border))
             .child(
                 div()
                     .text_color(theme.text_faint)
@@ -1252,8 +1252,8 @@ impl ChangesTab {
             .items_center()
             .gap(px(6.0))
             .text_size(px(12.5))
-            .bg(theme.diff_hunk_background)
-            .hover(|style| style.bg(theme.row_hover))
+            .bg(theme.code_wash)
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| tab.toggle_section(section, cx));
             })
@@ -1347,7 +1347,7 @@ impl ChangesTab {
             .text_size(px(13.5))
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .when_some(drag_payload, |this, payload| {
                 this.on_drag(payload, move |_, _, _, cx| {
                     cx.new(|_| DiffDragPreview { theme })
@@ -1530,7 +1530,7 @@ impl ChangesTab {
                 div()
                     .w(px(SPLIT_DIVIDER_WIDTH))
                     .flex_none()
-                    .bg(theme.hairline),
+                    .bg(theme.border),
             )
             .child(
                 split_cell(row.right, false, theme).debug_selector(|| "changes-split-right".into()),
@@ -1630,7 +1630,7 @@ impl ChangesTab {
             .items_center()
             .gap(px(7.0))
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .child(
                 div()
                     .flex_1()
@@ -2197,7 +2197,7 @@ fn action_text_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
         .text_color(theme.text)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -2221,7 +2221,7 @@ fn action_icon_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
         .text_color(theme.text)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .tooltip(controls::text_tooltip(tooltip, theme))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -2247,7 +2247,7 @@ fn section_action_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
         .text_color(theme.text_muted)
-        .hover(|style| style.bg(theme.row_hover).text_color(theme.text))
+        .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
         .tooltip(controls::text_tooltip(label, theme))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();

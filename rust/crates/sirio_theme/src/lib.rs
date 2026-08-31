@@ -129,8 +129,10 @@ pub struct ThemeColors {
     /// transcript, which reads directly on the central panel rather than on a
     /// floating card.
     pub surface: Rgba,
-    /// Opaque separator between shell panels.
-    pub panel_border: Rgba,
+    /// Opaque separator between shell panels, and the seam the tab chip's
+    /// underline and the sidebar draw. Opaque rather than a veil, which is
+    /// what keeps it a separate token from [`ThemeColors::border`].
+    pub border_opaque: Rgba,
     /// Terminal surface — paper-white in light and the pre-shell dark well in
     /// dark mode, retained independently of the shell panel hierarchy. Kept
     /// under its own name because bezel has no terminal-surface concept.
@@ -141,17 +143,11 @@ pub struct ThemeColors {
     pub tab_done: Rgba,
     /// Errored status.
     pub tab_error: Rgba,
-    /// Tab-chip underline, aliased to [`ThemeColors::panel_border`].
-    pub tab_chip_underline: Rgba,
     /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
     /// so it reads as a seam rather than a line.
-    pub hairline: Rgba,
+    pub border: Rgba,
     /// Hover fill for sidebar rows — a 6% neutral layer, not a colour.
-    pub row_hover: Rgba,
-    /// Hover fill for transcript rows — 5% neutral, a step lighter than
-    /// `row_hover` because transcript rows are wider and a 6% wash over that
-    /// area reads as a block.
-    pub chat_row_hover: Rgba,
+    pub element_hover: Rgba,
     /// Primary text neutral, and the shell's whole "this is active" channel:
     /// row titles selected or not, the tab strip's underline and dirty dot, a
     /// menu's checkmark, a running worktree's badge, focused-field borders,
@@ -186,21 +182,15 @@ pub struct ThemeColors {
     pub diff_deletion: Rgba,
     /// Deletion diff background — translucent danger wash.
     pub diff_deletion_background: Rgba,
-    /// Hunk diff background — the same wash inline code sits on.
-    pub diff_hunk_background: Rgba,
     /// Clickable file-link color — the gauge blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
-    /// Task-card rail — neutral. A card's kind is already spelled by its icon
-    /// and title; the rail only has to separate the card from the transcript.
-    pub rail_task: Rgba,
     /// Question-card rail — the warning hue. The one card kind that is waiting
-    /// on the reader, and so the one that keeps its colour.
+    /// on the reader, and so the one that keeps its colour. Every other card
+    /// kind draws [`ThemeColors::border_strong`]: a card's kind is already
+    /// spelled by its icon and title, so the rail only has to separate the
+    /// card from the transcript.
     pub rail_question: Rgba,
-    /// Edit-card rail — neutral, like [`ThemeColors::rail_task`].
-    pub rail_edit: Rgba,
-    /// Tool-card rail — neutral, like [`ThemeColors::rail_task`].
-    pub rail_tool: Rgba,
 
     // ── Role tokens: what a value does, rather than who consumes it ───────
     /// Floating cards, popovers, tooltips, the composer and primary pills: a
@@ -209,14 +199,15 @@ pub struct ThemeColors {
     /// Recessed wells — filter fields, code and diff insets: a step *below*
     /// the surface. Code sits *in* the card, the inverse of a raised move.
     pub input_bg: Rgba,
-    /// Generic hover wash — 5% neutral.
+    /// Generic hover wash — 5% neutral. Also the transcript row hover: a step
+    /// lighter than [`ThemeColors::element_hover`], because transcript rows
+    /// are wider and a 6% wash over that area reads as a block.
     pub overlay: Rgba,
     /// Pressed wash — 9% neutral, so press reads as more than hover.
     pub overlay_strong: Rgba,
-    /// Stronger divider, for seams that separate rather than merely delimit.
+    /// Stronger divider, for seams that separate rather than merely delimit,
+    /// and the neutral rail down a task, edit or tool card.
     pub border_strong: Rgba,
-    /// Legacy sidebar seam, aliased to [`ThemeColors::panel_border`].
-    pub sidebar_border: Rgba,
     /// Faintest text step — placeholder copy and disabled labels, below
     /// [`ThemeColors::text_faint`].
     pub text_dim: Rgba,
@@ -244,7 +235,8 @@ pub struct ThemeColors {
     /// ladder, neutral in both appearances. Never used for row chrome — that
     /// is [`ThemeColors::element_active`].
     pub selection: Rgba,
-    /// Inline `code` rounded wash.
+    /// Inline `code` rounded wash, and the band under a diff hunk — the same
+    /// wash, because a hunk is code too.
     pub code_wash: Rgba,
     /// Light fill for primary buttons, dark glyph on top.
     pub solid: Rgba,
@@ -380,7 +372,6 @@ impl ThemeColors {
         // Measured off the seam itself, which is two frame pixels wide — one
         // logical pixel at 2x — and flat at 200/200 in both variants, so these
         // are solid values and not a blend of the surfaces either side.
-        let sidebar_border = panel_border;
         let row_hover = veil(VEIL_LOW, appearance);
         // A chat row is most of the width of the pane. The same veil a sidebar
         // row uses would read as a change of surface at that size, so the
@@ -405,15 +396,13 @@ impl ThemeColors {
             frame_surface,
             bg: frame_fallback,
             surface: panel_surface,
-            panel_border,
+            border_opaque: panel_border,
             terminal_surface,
             tab_needs_input: warning,
             tab_done: success,
             tab_error: danger,
-            tab_chip_underline: panel_border,
-            hairline: border,
-            row_hover,
-            chat_row_hover: overlay,
+            border,
+            element_hover: row_hover,
             text,
             text_muted,
             text_faint,
@@ -428,18 +417,13 @@ impl ThemeColors {
             diff_addition_background: softened(success, VEIL_MID),
             diff_deletion: danger,
             diff_deletion_background: softened(danger, VEIL_MID),
-            diff_hunk_background: code_wash,
             file_link: gauge,
-            rail_task: border_strong,
             rail_question: warning,
-            rail_edit: border_strong,
-            rail_tool: border_strong,
             surface_raised: raised,
             input_bg: inset,
             overlay,
             overlay_strong,
             border_strong,
-            sidebar_border,
             text_dim,
             accent,
             gauge,
@@ -1714,7 +1698,7 @@ mod tests {
         );
         assert_eq!(dark.surface, rgb_hex(0x18191A));
         assert_eq!(dark.element_active, rgb_hex(0x2D2F34));
-        assert_eq!(dark.panel_border, rgb_hex(0x27292D));
+        assert_eq!(dark.border_opaque, rgb_hex(0x27292D));
         assert_eq!(dark.surface_raised, rgb_hex(0x1D1E21));
         assert_eq!(dark.input_bg, scaled(dark.surface, 0.72));
         assert_eq!(dark.text, rgb_hex(0xCBCDD4));
@@ -1733,7 +1717,7 @@ mod tests {
         );
         assert_eq!(light.surface, rgb_hex(0xF4F7F8));
         assert_eq!(light.element_active, rgb_hex(0xD7E2E7));
-        assert_eq!(light.panel_border, rgb_hex(0xCCD8DD));
+        assert_eq!(light.border_opaque, rgb_hex(0xCCD8DD));
         assert_eq!(light.surface_raised, rgb_hex(0xFBFCFC));
         assert_eq!(light.input_bg, scaled(light.surface, 0.93));
         assert_eq!(light.text, rgb_hex(0x313A40));
@@ -1741,9 +1725,6 @@ mod tests {
         assert_eq!(light.text_faint, rgb_hex(0x68757B));
 
         for theme in [dark, light] {
-            assert_eq!(theme.surface, theme.surface);
-            assert_eq!(theme.sidebar_border, theme.panel_border);
-            assert_eq!(theme.tab_chip_underline, theme.panel_border);
             // The surface ladder's aliases are now one field each, so the
             // compiler holds the identities these assertions used to hold.
             // What is left is the separation the type system cannot say: a
@@ -1756,7 +1737,7 @@ mod tests {
             // ring sits one step below the text neutral, so a focused pane is
             // findable without shouting.
             assert_ne!(theme.text_muted, theme.text);
-            assert_ne!(theme.text_muted, theme.panel_border);
+            assert_ne!(theme.text_muted, theme.border_opaque);
             // The coral is still a value the theme hands out — the agent-colour
             // picker offers it — but no role paints it any more. This is the
             // assertion that catches an accent creeping back into the chrome.
@@ -1828,13 +1809,12 @@ mod tests {
     fn veil_backed_structural_washes_are_neutral() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for (name, c) in [
-                ("hairline", theme.hairline),
-                ("row_hover", theme.row_hover),
-                ("chat_row_hover", theme.chat_row_hover),
+                ("border", theme.border),
+                ("element_hover", theme.element_hover),
                 ("overlay", theme.overlay),
                 ("overlay_strong", theme.overlay_strong),
                 ("tree_guide", theme.tree_guide),
-                ("diff_hunk_background", theme.diff_hunk_background),
+                ("code_wash", theme.code_wash),
             ] {
                 assert!(
                     (c.r - c.g).abs() < 0.01 && (c.g - c.b).abs() < 0.01,
@@ -2220,11 +2200,11 @@ mod tests {
 
         // Hairlines, hover, and overlay remain neutral veils; panel seams use
         // the separate opaque shell role.
-        expect_color(theme.row_hover, (1.0, 1.0, 1.0, VEIL_LOW));
+        expect_color(theme.element_hover, (1.0, 1.0, 1.0, VEIL_LOW));
         expect_color(theme.overlay, (1.0, 1.0, 1.0, VEIL_FAINT));
-        expect_color(theme.hairline, (1.0, 1.0, 1.0, VEIL_LOW));
+        expect_color(theme.border, (1.0, 1.0, 1.0, VEIL_LOW));
         expect_color(
-            theme.tab_chip_underline,
+            theme.border_opaque,
             f(
                 0x27 as f32 / 255.0,
                 0x29 as f32 / 255.0,
@@ -2308,11 +2288,11 @@ mod tests {
         // `tab_needs_input`'s hue (36.9°) and lightness (0.345) at s = 1.
         expect_color(theme.favorite, f(0.69, 0.4246, 0.0));
         // Light veils are pure black, same ladder.
-        expect_color(theme.row_hover, (0.0, 0.0, 0.0, VEIL_LOW));
+        expect_color(theme.element_hover, (0.0, 0.0, 0.0, VEIL_LOW));
         expect_color(theme.overlay, (0.0, 0.0, 0.0, VEIL_FAINT));
-        expect_color(theme.hairline, (0.0, 0.0, 0.0, VEIL_LOW));
+        expect_color(theme.border, (0.0, 0.0, 0.0, VEIL_LOW));
         expect_color(
-            theme.tab_chip_underline,
+            theme.border_opaque,
             f(
                 0xCC as f32 / 255.0,
                 0xD8 as f32 / 255.0,
@@ -2365,7 +2345,7 @@ mod tests {
             ("frame_surface", light.frame_surface, dark.frame_surface),
             ("bg", light.bg, dark.bg),
             ("surface", light.surface, dark.surface),
-            ("panel_border", light.panel_border, dark.panel_border),
+            ("border_opaque", light.border_opaque, dark.border_opaque),
             (
                 "terminal_surface",
                 light.terminal_surface,
@@ -2378,14 +2358,8 @@ mod tests {
             ),
             ("tab_done", light.tab_done, dark.tab_done),
             ("tab_error", light.tab_error, dark.tab_error),
-            (
-                "tab_chip_underline",
-                light.tab_chip_underline,
-                dark.tab_chip_underline,
-            ),
-            ("hairline", light.hairline, dark.hairline),
-            ("row_hover", light.row_hover, dark.row_hover),
-            ("chat_row_hover", light.chat_row_hover, dark.chat_row_hover),
+            ("border", light.border, dark.border),
+            ("element_hover", light.element_hover, dark.element_hover),
             ("element_active", light.element_active, dark.element_active),
             ("selection", light.selection, dark.selection),
             ("text", light.text, dark.text),
@@ -2408,22 +2382,13 @@ mod tests {
                 light.diff_deletion_background,
                 dark.diff_deletion_background,
             ),
-            (
-                "diff_hunk_background",
-                light.diff_hunk_background,
-                dark.diff_hunk_background,
-            ),
             ("file_link", light.file_link, dark.file_link),
-            ("rail_task", light.rail_task, dark.rail_task),
             ("rail_question", light.rail_question, dark.rail_question),
-            ("rail_edit", light.rail_edit, dark.rail_edit),
-            ("rail_tool", light.rail_tool, dark.rail_tool),
             ("surface_raised", light.surface_raised, dark.surface_raised),
             ("input_bg", light.input_bg, dark.input_bg),
             ("overlay", light.overlay, dark.overlay),
             ("overlay_strong", light.overlay_strong, dark.overlay_strong),
             ("border_strong", light.border_strong, dark.border_strong),
-            ("sidebar_border", light.sidebar_border, dark.sidebar_border),
             ("text_dim", light.text_dim, dark.text_dim),
             ("accent", light.accent, dark.accent),
             ("gauge", light.gauge, dark.gauge),
@@ -2534,7 +2499,7 @@ mod tests {
                 "the opaque fallback stays opaque"
             );
             assert_eq!(
-                translucent.panel_border, base.panel_border,
+                translucent.border_opaque, base.border_opaque,
                 "borders stay crisp on a translucent panel"
             );
             assert_eq!(translucent.text, base.text, "text is untouched");

@@ -123,7 +123,7 @@ pub fn render_tab_context_menu(
         .p(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.user_pill)
         .border_1()
-        .border_color(theme.hairline)
+        .border_color(theme.border)
         .bg(theme.surface_raised)
         .shadow_lg();
 
@@ -134,7 +134,7 @@ pub fn render_tab_context_menu(
                     .mx(theme.spacing.card_gap)
                     .my(theme.spacing.titlebar_control_spacing)
                     .h(theme.spacing.hairline_thickness)
-                    .bg(theme.hairline),
+                    .bg(theme.border),
             );
             continue;
         }
@@ -158,7 +158,7 @@ pub fn render_tab_context_menu(
             .text_size(theme.typography.footnote)
             .text_color(if enabled { theme.text } else { theme.text_faint })
             .when(enabled, |this| {
-                this.hover(|style| style.bg(theme.row_hover))
+                this.hover(|style| style.bg(theme.element_hover))
             })
             .child(item.label);
 
@@ -380,7 +380,7 @@ impl TabBar {
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit(action, cx)))
             .child(
                 div()
@@ -446,7 +446,7 @@ impl TabBar {
         div()
             .mx(px(8.0))
             .h(theme.spacing.hairline_thickness)
-            .bg(theme.hairline)
+            .bg(theme.border)
     }
 
     fn render_new_chat_item(
@@ -466,7 +466,7 @@ impl TabBar {
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.toggle_chat_picker(cx)))
             .child(
                 div()
@@ -524,7 +524,7 @@ impl TabBar {
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
             .child(mark_element)
             .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
@@ -548,7 +548,7 @@ impl TabBar {
             .gap(theme.spacing.titlebar_control_spacing)
             .text_size(theme.typography.footnote)
             .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
             })
@@ -580,13 +580,13 @@ impl TabBar {
             .pr(px(12.0))
             .mt(theme.spacing.titlebar_control_spacing)
             .border_t_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .flex()
             .items_center()
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
             .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
             })
@@ -663,7 +663,7 @@ impl Render for TabBar {
             .p(px(6.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg()
             .child(Self::render_menu_item(
@@ -758,7 +758,7 @@ impl Render for TabBar {
             .rounded(theme.radii.control)
             .text_size(px(14.0))
             .text_color(theme.text_faint)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             // Swallowing mouse-down here would stop GPUI ever pairing it
             // with the mouse-up into a click, so the menu never opened.
             // Stop propagation inside the click instead.

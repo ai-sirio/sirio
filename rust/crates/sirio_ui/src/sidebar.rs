@@ -2709,7 +2709,7 @@ impl Sidebar {
             .border_color(if focused {
                 theme.text
             } else {
-                theme.hairline
+                theme.border
             })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
@@ -2775,7 +2775,7 @@ impl Sidebar {
             .p(px(6.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg();
 
@@ -2802,7 +2802,7 @@ impl Sidebar {
                 .text_size(theme.typography.footnote)
                 .text_color(if enabled { theme.text } else { theme.text_faint })
                 .when(enabled, |this| {
-                    this.hover(|style| style.bg(theme.row_hover))
+                    this.hover(|style| style.bg(theme.element_hover))
                 });
             if enabled {
                 row = row.on_click(move |_, window, cx| {
@@ -2848,7 +2848,7 @@ impl Sidebar {
             .p(px(6.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg()
             .child(Self::render_add_project_item(
@@ -2897,7 +2897,7 @@ impl Sidebar {
             .rounded(theme.radii.control)
             .text_size(theme.typography.footnote)
             .text_color(theme.text)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
             .child(label)
     }
@@ -2932,7 +2932,7 @@ impl Sidebar {
                     .w(px(300.0))
                     .rounded(theme.radii.toast)
                     .border_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .bg(theme.surface)
                     .child(form_view)
                     .child(
@@ -2946,7 +2946,7 @@ impl Sidebar {
                             .py(px(6.0))
                             .rounded(theme.radii.control)
                             .text_color(theme.text)
-                            .hover(|style| style.bg(theme.row_hover))
+                            .hover(|style| style.bg(theme.element_hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |sidebar, cx| {
                                     sidebar.project_form = None;
@@ -3043,7 +3043,7 @@ impl Sidebar {
                     .rounded(theme.radii.control)
                     .bg(theme.input_bg)
                     .border_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .text_size(theme.typography.footnote)
                     .text_color(if display_name.trim().is_empty() {
                         theme.text_faint
@@ -3148,7 +3148,7 @@ impl Sidebar {
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
                     .text_color(theme.diff_deletion)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, window, cx| {
                         remove_entity.update(cx, |sidebar, cx| {
                             sidebar.request_remove_project(remove_project_id.clone(), window, cx);
@@ -3170,7 +3170,7 @@ impl Sidebar {
                     .py(px(6.0))
                     .rounded(theme.radii.control)
                     .text_color(theme.text)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         close_entity.update(cx, |sidebar, cx| {
                             sidebar.project_settings = None;
@@ -3279,7 +3279,7 @@ impl Sidebar {
                     .rounded(theme.radii.control)
                     .bg(theme.input_bg)
                     .border_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .text_size(theme.typography.footnote)
                     .text_color(if draft.trim().is_empty() {
                         theme.text_faint
@@ -3379,7 +3379,7 @@ impl Sidebar {
                             .rounded(theme.radii.control)
                             .bg(theme.input_bg)
                             .border_1()
-                            .border_color(theme.hairline)
+                            .border_color(theme.border)
                             .text_size(theme.typography.footnote)
                             .text_color(if has_override { theme.text } else { theme.text_faint })
                             .cursor(gpui::CursorStyle::IBeam)
@@ -3600,7 +3600,7 @@ impl Sidebar {
             .cursor_default()
             .text_size(px(14.5))
             .text_color(text_color)
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
                     if let Some(tab_id) = tab_id {
@@ -3839,7 +3839,7 @@ impl Sidebar {
                         .text_size(px(12.0))
                         .text_color(theme.text_faint)
                         .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .hover(|style| style.bg(theme.element_hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, window, cx| {
@@ -3863,7 +3863,7 @@ impl Sidebar {
                         .text_size(px(14.0))
                         .text_color(theme.text_muted)
                         .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .hover(|style| style.bg(theme.element_hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
@@ -4041,7 +4041,7 @@ impl Render for Sidebar {
             .overflow_hidden()
             .bg(theme.surface)
             .border_r_1()
-            .border_color(theme.sidebar_border)
+            .border_color(theme.border_opaque)
             .pt(px(8.0))
             .child(
                 div()
@@ -4066,7 +4066,7 @@ impl Render for Sidebar {
                             .justify_center()
                             .text_size(px(17.0))
                             .text_color(theme.text_faint)
-                            .hover(|style| style.bg(theme.row_hover).rounded(theme.radii.control))
+                            .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_add_project(cx);
                             }))
@@ -4093,7 +4093,7 @@ impl Render for Sidebar {
                     .border_color(if filter_is_focused {
                         theme.text
                     } else {
-                        theme.hairline
+                        theme.border
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(
@@ -4187,7 +4187,7 @@ impl Render for Sidebar {
                                 .rounded(theme.radii.toast)
                                 .bg(theme.surface)
                                 .border_1()
-                                .border_color(theme.hairline)
+                                .border_color(theme.border)
                                 .px(px(14.0))
                                 .py(px(12.0))
                                 .flex()

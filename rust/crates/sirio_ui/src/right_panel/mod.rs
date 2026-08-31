@@ -428,7 +428,7 @@ impl RightPanel {
             .justify_center()
             .gap(px(4.0))
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .children(PanelView::ORDER.map(|view| {
                 let is_active = view == active;
                 let badge_color = (view == PanelView::Activity)
@@ -448,8 +448,8 @@ impl RightPanel {
                     .items_center()
                     .justify_center()
                     .rounded(px(4.0))
-                    .when(is_active, |this| this.bg(theme.row_hover))
-                    .hover(|style| style.bg(theme.row_hover))
+                    .when(is_active, |this| this.bg(theme.element_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
                             theme.text

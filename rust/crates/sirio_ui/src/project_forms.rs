@@ -365,7 +365,7 @@ impl Render for CloneForm {
                     .bg(theme.input_bg)
                     .border_1()
                     .border_color(if url_is_empty {
-                        theme.hairline
+                        theme.border
                     } else {
                         theme.text
                     })
@@ -697,7 +697,7 @@ impl Render for CreateForm {
                     .bg(theme.input_bg)
                     .border_1()
                     .border_color(if name_is_empty {
-                        theme.hairline
+                        theme.border
                     } else {
                         theme.text
                     })

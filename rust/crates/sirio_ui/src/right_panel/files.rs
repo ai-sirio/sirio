@@ -310,7 +310,7 @@ impl RightPanel {
             .p(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .shadow_lg();
 
@@ -341,7 +341,7 @@ impl RightPanel {
                 .items_center()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text)
-                .hover(|style| style.bg(theme.row_hover));
+                .hover(|style| style.bg(theme.element_hover));
 
             row = match selector {
                 "file-context-open" => row.on_click(move |_, _, cx| {
@@ -479,7 +479,7 @@ impl RightPanel {
                 theme.text
             })
             .when(selected, |this| this.bg(theme.element_active))
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 file_focus.focus(window, cx);
                 entity.update(cx, |panel, cx| {
@@ -780,7 +780,7 @@ fn files_action_button(
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
         .text_color(theme.text)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);

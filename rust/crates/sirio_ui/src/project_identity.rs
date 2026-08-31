@@ -701,9 +701,9 @@ impl ProjectIconPicker {
                     .border_color(if active {
                         theme.text
                     } else {
-                        theme.hairline
+                        theme.border
                     })
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         glyph_entity.update(cx, |picker, cx| picker.select_glyph(glyph, cx));
                     })
@@ -760,7 +760,7 @@ impl ProjectIconPicker {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .text_size(theme.typography.headline)
             .flex()
             .items_center()
@@ -866,7 +866,7 @@ impl ProjectIconPicker {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.headline)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         pick_entity.update(cx, |picker, cx| picker.pick_emoji_from_grid(emoji, cx));
                     })
@@ -892,7 +892,7 @@ impl ProjectIconPicker {
             .gap(px(theme.cosmic.spacing.xs as f32))
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .bg(theme.surface_raised)
             .child(
                 div()
@@ -913,7 +913,7 @@ impl ProjectIconPicker {
                             .rounded(theme.radii.control)
                             .bg(theme.input_bg)
                             .border_1()
-                            .border_color(theme.hairline)
+                            .border_color(theme.border)
                             .text_size(theme.typography.footnote)
                             .text_color(if self.emoji_grid_query.is_empty() {
                                 theme.text_faint
@@ -954,7 +954,7 @@ impl ProjectIconPicker {
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_size(theme.typography.footnote)
                             .text_color(theme.text_faint)
-                            .hover(|style| style.bg(theme.row_hover))
+                            .hover(|style| style.bg(theme.element_hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |picker, cx| picker.close_emoji_grid(cx));
                             })
@@ -1109,7 +1109,7 @@ impl ProjectIconPicker {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .text_size(theme.typography.callout)
             .text_color(text_color)
             .flex()

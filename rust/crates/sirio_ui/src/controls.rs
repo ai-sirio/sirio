@@ -59,7 +59,7 @@ impl Render for TextTooltip {
             .rounded(self.theme.radii.control)
             .bg(self.theme.surface_raised)
             .border_1()
-            .border_color(self.theme.hairline)
+            .border_color(self.theme.border)
             .text_size(self.theme.typography.caption2)
             .text_color(self.theme.text)
             .child(self.text.clone())
@@ -162,7 +162,7 @@ pub fn separator(theme: Theme) -> Div {
     div()
         .mx(px(theme.cosmic.spacing.xs as f32))
         .h(theme.spacing.hairline_thickness)
-        .bg(theme.hairline)
+        .bg(theme.border)
 }
 
 /// A compact on/off switch.
@@ -185,7 +185,7 @@ where
         // rather than the active-chrome tint: `title` and `title_selected`
         // are the same value, which would have put the knob's colour on the
         // track's colour and made the knob vanish.
-        .bg(if on { theme.solid } else { theme.hairline })
+        .bg(if on { theme.solid } else { theme.border })
         .hover(|style| style.opacity(0.9))
         .on_click(callback)
         .child(
@@ -251,7 +251,7 @@ pub fn segmented(
                     theme.text_muted
                 })
                 .when(active, |this| this.bg(theme.element_active))
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(text!(id = ("segmented-option", index), *label)),
         );
@@ -304,7 +304,7 @@ pub fn segmented_icons(
                     theme.text_muted
                 })
                 .when(active, |this| this.bg(theme.element_active))
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .tooltip(text_tooltip(tooltip, theme))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(IconElement::new(icon, IconSize::Small)),
@@ -351,7 +351,7 @@ where
                 .justify_center()
                 .text_size(theme.typography.callout)
                 .text_color(theme.text_faint)
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| decrement(value - 1, cx))
                 .child("⌄"),
         )
@@ -380,7 +380,7 @@ where
                 .justify_center()
                 .text_size(theme.typography.callout)
                 .text_color(theme.text_faint)
-                .hover(|style| style.bg(theme.row_hover))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
                 .child("⌃"),
         )
@@ -533,7 +533,7 @@ where
         .id(row_id.clone())
         .debug_selector(move || row_id.clone())
         .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(on_select)
 }
 
@@ -557,7 +557,7 @@ where
         .text_size(theme.typography.callout)
         .text_color(theme.text)
         .bg(theme.surface_raised)
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(callback)
         .child(text!(id = format!("settings-button-{id}"), label))
 }
@@ -590,7 +590,7 @@ where
         .child(text!(id = format!("settings-button-{id}"), label));
     if let Some(callback) = callback {
         element = element
-            .hover(|style| style.bg(theme.row_hover))
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(callback);
     }
     element
@@ -635,7 +635,7 @@ pub fn color_picker(
                 .border_color(if active {
                     theme.text
                 } else {
-                    theme.hairline
+                    theme.border
                 })
                 .cursor(CursorStyle::PointingHand)
                 .on_click(move |_, _, cx| callback(key, cx)),

@@ -189,7 +189,7 @@ impl Render for BrowserSpike {
                     .px(px(20.0))
                     .bg(theme.bg)
                     .border_b_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .text_size(theme.typography.headline)
                     .child("P72 · Browser composition spike"),
             )
@@ -208,7 +208,7 @@ impl Render for BrowserSpike {
                             .p(px(20.0))
                             .bg(theme.bg)
                             .border_r_1()
-                            .border_color(theme.hairline)
+                            .border_color(theme.border)
                             .child(
                                 div()
                                     .text_size(theme.typography.title)
@@ -1586,7 +1586,7 @@ impl BrowserSurface {
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     // The rebuild must NOT run under this surface's GPUI
                     // lease: creating a WebView2 pumps the platform message
                     // loop (#255), and a task queued for this surface — the
@@ -1958,7 +1958,7 @@ impl BrowserSurface {
             .px(px(12.0))
             .bg(theme.bg)
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .child(browser_button(
                 "browser-back",
                 "‹",
@@ -2002,7 +2002,7 @@ impl BrowserSurface {
                     .rounded(theme.radii.control)
                     .bg(theme.surface)
                     .border_1()
-                    .border_color(theme.hairline)
+                    .border_color(theme.border)
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text)
                     .on_click(move |_, window, cx| window.focus(&address_focus, cx))
@@ -2083,7 +2083,7 @@ fn browser_button_element(
         .text_size(theme.typography.footnote)
         .text_color(if enabled { theme.text } else { theme.text_faint })
         .when(enabled, |this| {
-            this.hover(|style| style.bg(theme.row_hover))
+            this.hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| callback(cx))
         })
         .child(content)
