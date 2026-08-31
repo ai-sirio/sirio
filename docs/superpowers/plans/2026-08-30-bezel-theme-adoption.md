@@ -768,7 +768,7 @@ flake `CLAUDE.md` already documents.
 **Interfaces:**
 - Produces: `Scripts/gate-theme-only.sh <base-ref>` — exits 0 when no file outside `rust/crates/sirio_theme/` changed.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 ```bash
 #!/usr/bin/env bash
@@ -794,7 +794,7 @@ printf '%s\n' "$stray" >&2
 exit 1
 ```
 
-- [ ] **Step 2: Make it executable and verify it passes on a clean tree**
+- [x] **Step 2: Make it executable and verify it passes on a clean tree**
 
 Run:
 ```bash
@@ -803,7 +803,7 @@ Scripts/gate-theme-only.sh HEAD
 ```
 Expected: `GATE OK: only sirio_theme changed since HEAD`
 
-- [ ] **Step 3: Verify it fails when another crate moves**
+- [x] **Step 3: Verify it fails when another crate moves**
 
 Run:
 ```bash
@@ -813,7 +813,7 @@ git checkout rust/crates/sirio_ui/src/lib.rs
 ```
 Expected: `GATE FAILED` listing `rust/crates/sirio_ui/src/lib.rs`, and `exit=1`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Scripts/gate-theme-only.sh
