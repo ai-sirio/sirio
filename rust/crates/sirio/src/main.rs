@@ -10985,10 +10985,14 @@ impl SirioWorkspace {
         &self,
         theme: Theme,
         entity: Entity<Self>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        #[cfg(not(test))]
-        let _ = cx;
+        // The app installs this at startup; isolated shell render fixtures set
+        // only Sirio's global, so make the same registry invariant explicit
+        // before a bezel surface reaches its paint phase.
+        if cx.try_global::<bezel::theme::Theme>().is_none() {
+            theme.install_into_bezel(cx);
+        }
         let action_entity = entity.clone();
         let on_action = Rc::new(move |action, window: &mut Window, cx: &mut App| {
             action_entity.update(cx, |workspace, cx| {
@@ -11000,9 +11004,6 @@ impl SirioWorkspace {
         let menu = div()
             .id(format!("workspace-tab-menu-{menu_tab_id}"))
             .debug_selector(move || format!("workspace-tab-menu-{menu_tab_id}"))
-            .absolute()
-            .top(px(TAB_BAR_HEIGHT))
-            .left(px(self.tab_context_menu_left()))
             .on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |workspace, cx| workspace.dismiss_tab_menu(cx));
             })
@@ -11010,19 +11011,26 @@ impl SirioWorkspace {
                 self.tab_context_items(),
                 on_action,
                 theme,
+                cx,
             ));
         #[cfg(test)]
         let menu = menu.when_some(shell_paint_probe("tab-context-menu", cx), |this, probe| {
             this.child(probe)
         });
-        // Same shared defect as `render_overflow_menu` above: this popover is
-        // positioned `top(TAB_BAR_HEIGHT)`, which places it squarely over
-        // `#centre-surface`, a *later* sibling of the tab-bar row it is
-        // nested under. Undeferred, tree-order painting put the
-        // centre-surface on top of it every time, so the tab context menu
-        // never appeared to a live right-click no matter how correct its
-        // item logic was.
-        deferred(menu)
+        // F-SID-15: `anchored_menu_below` owns the deferred priority-1 layer,
+        // so the later centre-surface sibling cannot paint over the menu or
+        // intercept its rows. The zero-sized anchor preserves the tab-local
+        // x coordinate in both centre panes.
+        div()
+            .absolute()
+            .top(px(TAB_BAR_HEIGHT - 6.0))
+            .left(px(self.tab_context_menu_left()))
+            .size_0()
+            .child(bezel::ui::popover::anchored_menu_below(
+                format!("workspace-tab-menu-layer-{menu_tab_id}"),
+                menu.into_any_element(),
+                None,
+            ))
     }
 
     fn dismiss_tab_menu(&mut self, cx: &mut Context<Self>) {
