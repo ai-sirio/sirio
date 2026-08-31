@@ -15236,6 +15236,7 @@ fn main() {
         // comment for why the order is load-bearing.
         register_fonts(cx);
         Theme::init(cx);
+        bezel::ui::input::init(cx);
 
         // Restore the stored layout; a missing, corrupt or newer-schema
         // database logs and falls back to the default layout — the app must
@@ -16609,6 +16610,10 @@ mod tests {
         tab_count: usize,
         translucency_enabled: bool,
     ) -> SirioWorkspace {
+        bezel::ui::input::init(cx);
+        if let Some(theme) = cx.try_global::<Theme>().copied() {
+            theme.install_into_bezel(cx);
+        }
         let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
         let scratch_root = std::env::temp_dir()
             .canonicalize()
