@@ -699,7 +699,7 @@ impl ProjectIconPicker {
                     .justify_center()
                     .border_2()
                     .border_color(if active {
-                        theme.selection_ring
+                        theme.text
                     } else {
                         theme.hairline
                     })
@@ -777,7 +777,7 @@ impl ProjectIconPicker {
             .child(
                 div()
                     .debug_selector(|| "project-icon-emoji-caret".into())
-                    .child(caret::bar(px(18.0), theme.caret, self.emoji_caret_visible)),
+                    .child(caret::bar(px(18.0), theme.text, self.emoji_caret_visible)),
             );
 
         let commit_entity = entity.clone();
@@ -877,7 +877,7 @@ impl ProjectIconPicker {
             grid = grid.child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("No matching emoji."),
             );
         }
@@ -916,9 +916,9 @@ impl ProjectIconPicker {
                             .border_color(theme.hairline)
                             .text_size(theme.typography.footnote)
                             .text_color(if self.emoji_grid_query.is_empty() {
-                                theme.meta
+                                theme.text_faint
                             } else {
-                                theme.title
+                                theme.text
                             })
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 query_focus_entity.update(cx, |picker, cx| {
@@ -942,7 +942,7 @@ impl ProjectIconPicker {
                                     })
                                     .child(caret::bar(
                                         px(14.0),
-                                        theme.caret,
+                                        theme.text,
                                         self.emoji_grid_caret_visible,
                                     )),
                             ),
@@ -953,7 +953,7 @@ impl ProjectIconPicker {
                             .debug_selector(|| "project-icon-emoji-grid-close".into())
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
+                            .text_color(theme.text_faint)
                             .hover(|style| style.bg(theme.row_hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |picker, cx| picker.close_emoji_grid(cx));
@@ -1062,7 +1062,7 @@ impl ProjectIconPicker {
                     .id("project-icon-avatar-current")
                     .debug_selector(|| "project-icon-avatar-current".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(id = "project-icon-avatar-current-text", label)),
             );
         }
@@ -1094,9 +1094,9 @@ impl ProjectIconPicker {
             draft.to_string()
         };
         let text_color = if draft.is_empty() {
-            theme.subtitle
+            theme.text_muted
         } else {
-            theme.title
+            theme.text
         };
 
         let field = div()
@@ -1125,7 +1125,7 @@ impl ProjectIconPicker {
                 let caret_id = format!("project-icon-{id_prefix}-caret");
                 div()
                     .debug_selector(move || caret_id.clone())
-                    .child(caret::bar(px(16.0), theme.caret, caret_visible))
+                    .child(caret::bar(px(16.0), theme.text, caret_visible))
             });
 
         let mut row = div()

@@ -620,7 +620,7 @@ impl Render for GitHistory {
                         .px(px(10.0))
                         .py(px(5.0))
                         .rounded(theme.radii.control)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .bg(theme.row_hover)
                         .hover(|style| style.bg(theme.row_hover))
                         .on_click(move |_, _, cx| {
@@ -641,7 +641,7 @@ impl Render for GitHistory {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(loading::indeterminate(
                     "history-loading-orb",
                     loading::GENERIC_ORB,
@@ -672,7 +672,7 @@ impl Render for GitHistory {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(label)
                 .into_any_element()
         } else {
@@ -817,7 +817,7 @@ impl Render for GitHistory {
                                 .px(px(6.0))
                                 .py(px(3.0))
                                 .rounded(theme.radii.control)
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .bg(theme.row_hover)
                                 .on_click(move |_, _, cx| {
                                     retry_entity.update(cx, |history, cx| history.retry(cx));
@@ -859,9 +859,9 @@ fn render_history_row(
     // Built before anything is moved out of `commit` below.
     let (tooltip_subject, tooltip_meta) = commit_tooltip_text(&commit);
     let subject_color = if commit.parents.len() > 1 {
-        theme.meta
+        theme.text_faint
     } else {
-        theme.title
+        theme.text
     };
     let date = chrono::Local
         .timestamp_opt(commit.timestamp, 0)
@@ -923,7 +923,7 @@ fn render_history_row(
                         div()
                             .debug_selector(|| "history-body-match".to_owned())
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
+                            .text_color(theme.text_faint)
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(format!("└ {line}")),
@@ -939,7 +939,7 @@ fn render_history_row(
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(commit.author),
             )
         })
@@ -950,7 +950,7 @@ fn render_history_row(
                     .w(px(DATE_WIDTH))
                     .flex_none()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(date),
             )
         })
@@ -1081,13 +1081,13 @@ impl Render for CommitTooltip {
             .child(
                 div()
                     .text_size(self.theme.typography.footnote)
-                    .text_color(self.theme.title)
+                    .text_color(self.theme.text)
                     .child(self.subject.clone()),
             )
             .child(
                 div()
                     .text_size(self.theme.typography.caption2)
-                    .text_color(self.theme.meta)
+                    .text_color(self.theme.text_faint)
                     .child(self.meta.clone()),
             )
     }

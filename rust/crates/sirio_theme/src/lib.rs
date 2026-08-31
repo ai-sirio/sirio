@@ -127,10 +127,6 @@ pub struct ThemeColors {
     pub panel_surface: Rgba,
     /// Opaque separator between shell panels.
     pub panel_border: Rgba,
-    /// Focus ring for shell panels — a neutral one step brighter than
-    /// [`ThemeColors::panel_border`], not the accent. It is deliberately below
-    /// [`ThemeColors::title`]: a focused pane has to be findable, not loud.
-    pub panel_focus_ring: Rgba,
     /// Compatibility alias for [`ThemeColors::panel_surface`], used by the tab
     /// bar, workspace column, right panel, and settings.
     pub background: Rgba,
@@ -140,11 +136,6 @@ pub struct ThemeColors {
     /// Terminal surface — paper-white in light and the pre-shell dark well in
     /// dark mode, retained independently of the shell panel hierarchy.
     pub terminal_surface: Rgba,
-    /// Active-chrome tint: the tab strip's underline and dirty dot, a menu's
-    /// checkmark, a running worktree's badge. With colour reserved for data and
-    /// attention, contrast is the only channel left to say "this one is
-    /// active", so this is the full text neutral rather than a step below it.
-    pub tab_focus_accent: Rgba,
     /// Waiting-for-input status.
     pub tab_needs_input: Rgba,
     /// Completed status.
@@ -170,19 +161,22 @@ pub struct ThemeColors {
     /// Selected-row fill, aliased to [`ThemeColors::selected_fill`]. Text
     /// selection is a different concept: see [`ThemeColors::selection`].
     pub selection_fill: Rgba,
-    /// Focused-field border — the same neutral the rest of the active chrome
-    /// uses, and never a second blue.
-    pub selection_ring: Rgba,
-    /// Row title text.
-    pub title: Rgba,
-    /// Selected row title text, aliased to [`ThemeColors::title`].
-    pub title_selected: Rgba,
-    /// Secondary row text.
-    pub subtitle: Rgba,
+    /// Primary text neutral, and the shell's whole "this is active" channel:
+    /// row titles selected or not, the tab strip's underline and dirty dot, a
+    /// menu's checkmark, a running worktree's badge, focused-field borders,
+    /// composer body text, the insertion caret, and inline `code` glyphs. With
+    /// colour reserved for data and attention, contrast is the only channel
+    /// left to say "this one is active", so active chrome is the full text
+    /// neutral rather than a step below it, and never a second blue.
+    pub text: Rgba,
+    /// Secondary row text, and the focus ring for shell panels — one step
+    /// below [`ThemeColors::text`]: a focused pane has to be findable, not
+    /// loud. Clears WCAG AA on the panel surface at body size.
+    pub text_muted: Rgba,
     /// Raw sampled meta text, reserved for nonessential metadata and disabled
-    /// labels. Body-size secondary text uses [`ThemeColors::subtitle`], which
-    /// clears WCAG AA on the panel surface.
-    pub meta: Rgba,
+    /// labels. Body-size secondary text uses [`ThemeColors::text_muted`],
+    /// which clears WCAG AA on the panel surface.
+    pub text_faint: Rgba,
     /// Primary pill fill.
     pub primary_pill_bg: Rgba,
     /// Resting fill of a control the user clicks. Must stay distinguishable
@@ -214,8 +208,6 @@ pub struct ThemeColors {
     pub card_fill: Rgba,
     /// Recessed code/diff fill — the inverse move: code sits *in* the card.
     pub code_inset_fill: Rgba,
-    /// Composer primary text.
-    pub primary_text_color: Rgba,
     /// Clickable file-link color — the gauge blue, the one place blue means
     /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
@@ -249,8 +241,8 @@ pub struct ThemeColors {
     /// Legacy sidebar seam, aliased to [`ThemeColors::panel_border`].
     pub sidebar_border: Rgba,
     /// Faintest text step — placeholder copy and disabled labels, below
-    /// [`ThemeColors::meta`].
-    pub text_ghost: Rgba,
+    /// [`ThemeColors::text_faint`].
+    pub text_dim: Rgba,
     /// Brand coral. No role paints it any more: the shell's focus rings,
     /// caret, selection and active chrome are neutral, and every colour left in
     /// the UI is a status, a diff, a quantity or an agent's own brand.
@@ -273,15 +265,6 @@ pub struct ThemeColors {
     /// ladder, neutral in both appearances. Never used for row chrome — that
     /// is [`ThemeColors::selection_fill`].
     pub selection: Rgba,
-    /// The text-insertion caret, everywhere one blinks: composer, address bar,
-    /// command palette, every inline rename field. Its own role rather than a
-    /// reuse of [`ThemeColors::title`], so that fifteen call sites say what
-    /// they mean and the caret can be re-tinted in one place.
-    pub caret: Rgba,
-    /// Inline `code` foreground. The rounded [`ThemeColors::code_wash`] behind
-    /// it already separates code from prose, so the glyphs stay the ordinary
-    /// text neutral instead of spending a second signal on the same job.
-    pub code_text: Rgba,
     /// Inline `code` rounded wash.
     pub code_wash: Rgba,
     /// Light fill for primary buttons, dark glyph on top.
@@ -386,9 +369,9 @@ impl ThemeColors {
         let panel_border = Self::adaptive(rgb_hex(0x27292D), rgb_hex(0xCCD8DD), appearance);
         let selected_fill = Self::adaptive(rgb_hex(0x2D2F34), rgb_hex(0xD7E2E7), appearance);
         let text = Self::adaptive(rgb_hex(0xCBCDD4), rgb_hex(0x313A40), appearance);
-        let text_secondary = Self::adaptive(rgb_hex(0x85888F), rgb_hex(0x667379), appearance);
-        let text_tertiary = Self::adaptive(rgb_hex(0x686B71), rgb_hex(0x68757B), appearance);
-        let text_ghost = Self::adaptive(rgb_hex(0x575757), rgb_hex(0xA4A4A4), appearance);
+        let text_muted = Self::adaptive(rgb_hex(0x85888F), rgb_hex(0x667379), appearance);
+        let text_faint = Self::adaptive(rgb_hex(0x686B71), rgb_hex(0x68757B), appearance);
+        let text_dim = Self::adaptive(rgb_hex(0x575757), rgb_hex(0xA4A4A4), appearance);
         let raised = Self::adaptive(rgb_hex(0x1D1E21), rgb_hex(0xFBFCFC), appearance);
         // One step *into* the page, and derived from the measured surface for
         // the same reason `sidebar` is: a well is a relationship to the page
@@ -431,7 +414,6 @@ impl ThemeColors {
         // veil ladder is the strongest wash that still does both in either
         // appearance; `selection_stays_under_its_text` holds the second half.
         let selection = veil(VEIL_HIGH, appearance);
-        let code_text = text;
         let code_wash = veil(VEIL_LOW, appearance);
         // An inverted chip — a tooltip, a keycap — is literally the other
         // appearance's page, so it is the same measured pair, swapped. No new
@@ -446,11 +428,9 @@ impl ThemeColors {
             frame_fallback,
             panel_surface,
             panel_border,
-            panel_focus_ring: text_secondary,
             background: panel_surface,
             canvas: frame_fallback,
             terminal_surface,
-            tab_focus_accent: text,
             tab_needs_input: warning,
             tab_done: success,
             tab_error: danger,
@@ -461,11 +441,9 @@ impl ThemeColors {
             row_hover,
             chat_row_hover: overlay,
             selection_fill: selected_fill,
-            selection_ring: text,
-            title: text,
-            title_selected: text,
-            subtitle: text_secondary,
-            meta: text_tertiary,
+            text,
+            text_muted,
+            text_faint,
             primary_pill_bg: raised,
             primary_action_bg: selected_fill,
             filter_field_bg: inset,
@@ -483,7 +461,6 @@ impl ThemeColors {
             diff_hunk_background: code_wash,
             card_fill: raised,
             code_inset_fill: inset,
-            primary_text_color: text,
             file_link: gauge,
             rail_task: border_strong,
             rail_question: warning,
@@ -497,13 +474,11 @@ impl ThemeColors {
             overlay_strong,
             border_strong,
             sidebar_border,
-            text_ghost,
+            text_dim,
             accent,
             gauge,
             selection,
-            caret: text,
             selected_fill,
-            code_text,
             code_wash,
             inverse,
             on_inverse,
@@ -1264,7 +1239,7 @@ impl Theme {
     /// The graph only needs its lanes to be mutually distinguishable.
     pub fn graph_lane(&self, index: usize) -> Rgba {
         let lanes = [
-            self.tab_focus_accent,
+            self.text,
             self.git_untracked,
             self.tab_done,
             self.tab_needs_input,
@@ -1784,9 +1759,9 @@ mod tests {
         assert_eq!(dark.panel_border, rgb_hex(0x27292D));
         assert_eq!(dark.raised, rgb_hex(0x1D1E21));
         assert_eq!(dark.inset, scaled(dark.panel_surface, 0.72));
-        assert_eq!(dark.title, rgb_hex(0xCBCDD4));
-        assert_eq!(dark.subtitle, rgb_hex(0x85888F));
-        assert_eq!(dark.meta, rgb_hex(0x686B71));
+        assert_eq!(dark.text, rgb_hex(0xCBCDD4));
+        assert_eq!(dark.text_muted, rgb_hex(0x85888F));
+        assert_eq!(dark.text_faint, rgb_hex(0x686B71));
 
         assert_eq!(light.frame_fallback, rgb_hex(0xDCE5E9));
         assert_eq!(
@@ -1803,9 +1778,9 @@ mod tests {
         assert_eq!(light.panel_border, rgb_hex(0xCCD8DD));
         assert_eq!(light.raised, rgb_hex(0xFBFCFC));
         assert_eq!(light.inset, scaled(light.panel_surface, 0.93));
-        assert_eq!(light.title, rgb_hex(0x313A40));
-        assert_eq!(light.subtitle, rgb_hex(0x667379));
-        assert_eq!(light.meta, rgb_hex(0x68757B));
+        assert_eq!(light.text, rgb_hex(0x313A40));
+        assert_eq!(light.text_muted, rgb_hex(0x667379));
+        assert_eq!(light.text_faint, rgb_hex(0x68757B));
 
         for theme in [dark, light] {
             assert_eq!(theme.background, theme.panel_surface);
@@ -1814,7 +1789,6 @@ mod tests {
             assert_eq!(theme.chrome_tint, theme.panel_surface);
             assert_eq!(theme.canvas, theme.frame_fallback);
             assert_eq!(theme.selection_fill, theme.selected_fill);
-            assert_eq!(theme.title_selected, theme.title);
             assert_eq!(theme.sidebar_border, theme.panel_border);
             assert_eq!(theme.tab_chip_underline, theme.panel_border);
             assert_eq!(theme.composer, theme.raised);
@@ -1823,27 +1797,25 @@ mod tests {
             assert_ne!(theme.primary_action_bg, theme.raised);
             assert_eq!(theme.filter_field_bg, theme.inset);
             assert_eq!(theme.code_inset_fill, theme.inset);
-            // Active chrome, the caret and inline code all resolve to the
-            // text neutral; the pane's focus ring sits one step below it, so a
-            // focused pane is findable without shouting.
-            assert_eq!(theme.tab_focus_accent, theme.title);
-            assert_eq!(theme.selection_ring, theme.tab_focus_accent);
-            assert_eq!(theme.caret, theme.tab_focus_accent);
-            assert_eq!(theme.code_text, theme.title);
-            assert_eq!(theme.panel_focus_ring, theme.subtitle);
-            assert_ne!(theme.panel_focus_ring, theme.panel_border);
+            // Active chrome, the caret and inline code used to be separate
+            // fields aliased onto the text neutral; they are now that one
+            // field, so the compiler holds what these assertions held. What is
+            // left is the part the type system cannot say: the pane's focus
+            // ring sits one step below the text neutral, so a focused pane is
+            // findable without shouting.
+            assert_ne!(theme.text_muted, theme.text);
+            assert_ne!(theme.text_muted, theme.panel_border);
             // The coral is still a value the theme hands out — the agent-colour
             // picker offers it — but no role paints it any more. This is the
             // assertion that catches an accent creeping back into the chrome.
-            assert_ne!(theme.tab_focus_accent, theme.accent);
-            assert_eq!(theme.primary_text_color, theme.title);
+            assert_ne!(theme.text, theme.accent);
         }
     }
 
     #[test]
     fn shell_body_text_meets_wcag_aa_on_its_panel() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            for (role, text) in [("primary", theme.title), ("secondary", theme.subtitle)] {
+            for (role, text) in [("primary", theme.text), ("secondary", theme.text_muted)] {
                 let ratio = contrast_ratio(text, theme.panel_surface);
                 assert!(
                     ratio >= 4.5,
@@ -2010,11 +1982,11 @@ mod tests {
         );
         expect_color(
             dark.on_inverse,
-            (light.title.r, light.title.g, light.title.b, 1.0),
+            (light.text.r, light.text.g, light.text.b, 1.0),
         );
         expect_color(
             light.on_inverse,
-            (dark.title.r, dark.title.g, dark.title.b, 1.0),
+            (dark.text.r, dark.text.g, dark.text.b, 1.0),
         );
     }
 
@@ -2028,7 +2000,7 @@ mod tests {
     fn selection_stays_under_its_text() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             let seen = composite(theme.selection, theme.background);
-            let ratio = contrast_ratio(theme.title, seen);
+            let ratio = contrast_ratio(theme.text, seen);
             assert!(
                 ratio >= 4.5,
                 "{label}: selected text reads at {ratio:.2}:1 through its own wash"
@@ -2219,7 +2191,7 @@ mod tests {
         );
         // Active chrome is the text neutral, not the coral.
         expect_color(
-            theme.tab_focus_accent,
+            theme.text,
             f(
                 0xCB as f32 / 255.0,
                 0xCD as f32 / 255.0,
@@ -2229,7 +2201,7 @@ mod tests {
         // Swift `AppTheme.tabFocusAccent`, dark.
         expect_color(theme.gauge, f(0.55, 0.64, 1.00));
         expect_color(
-            theme.title,
+            theme.text,
             f(
                 0xCB as f32 / 255.0,
                 0xCD as f32 / 255.0,
@@ -2237,7 +2209,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.subtitle,
+            theme.text_muted,
             f(
                 0x85 as f32 / 255.0,
                 0x88 as f32 / 255.0,
@@ -2245,7 +2217,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.meta,
+            theme.text_faint,
             f(
                 0x68 as f32 / 255.0,
                 0x6B as f32 / 255.0,
@@ -2253,7 +2225,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.text_ghost,
+            theme.text_dim,
             f(
                 0x57 as f32 / 255.0,
                 0x57 as f32 / 255.0,
@@ -2268,7 +2240,7 @@ mod tests {
         // `tab_needs_input`'s hue (39.4°) and lightness (0.615) at s = 1.
         expect_color(theme.favorite, f(1.0, 0.7357, 0.23));
         expect_color(
-            theme.code_text,
+            theme.text,
             f(
                 0xCB as f32 / 255.0,
                 0xCD as f32 / 255.0,
@@ -2354,7 +2326,7 @@ mod tests {
         // Swift `AppTheme.tabFocusAccent`, light.
         expect_color(theme.gauge, f(0.24, 0.38, 0.78));
         expect_color(
-            theme.title,
+            theme.text,
             f(
                 0x31 as f32 / 255.0,
                 0x3A as f32 / 255.0,
@@ -2362,7 +2334,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.subtitle,
+            theme.text_muted,
             f(
                 0x66 as f32 / 255.0,
                 0x73 as f32 / 255.0,
@@ -2370,7 +2342,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.meta,
+            theme.text_faint,
             f(
                 0x68 as f32 / 255.0,
                 0x75 as f32 / 255.0,
@@ -2407,7 +2379,7 @@ mod tests {
             ),
         );
         expect_color(
-            theme.code_text,
+            theme.text,
             f(
                 0x31 as f32 / 255.0,
                 0x3A as f32 / 255.0,
@@ -2442,11 +2414,6 @@ mod tests {
             ("frame_fallback", light.frame_fallback, dark.frame_fallback),
             ("panel_surface", light.panel_surface, dark.panel_surface),
             ("panel_border", light.panel_border, dark.panel_border),
-            (
-                "panel_focus_ring",
-                light.panel_focus_ring,
-                dark.panel_focus_ring,
-            ),
             ("background", light.background, dark.background),
             ("canvas", light.canvas, dark.canvas),
             ("sidebar", light.sidebar, dark.sidebar),
@@ -2454,11 +2421,6 @@ mod tests {
                 "terminal_surface",
                 light.terminal_surface,
                 dark.terminal_surface,
-            ),
-            (
-                "tab_focus_accent",
-                light.tab_focus_accent,
-                dark.tab_focus_accent,
             ),
             (
                 "tab_needs_input",
@@ -2480,11 +2442,9 @@ mod tests {
             ("selection_fill", light.selection_fill, dark.selection_fill),
             ("selected_fill", light.selected_fill, dark.selected_fill),
             ("selection", light.selection, dark.selection),
-            ("selection_ring", light.selection_ring, dark.selection_ring),
-            ("title", light.title, dark.title),
-            ("title_selected", light.title_selected, dark.title_selected),
-            ("subtitle", light.subtitle, dark.subtitle),
-            ("meta", light.meta, dark.meta),
+            ("text", light.text, dark.text),
+            ("text_muted", light.text_muted, dark.text_muted),
+            ("text_faint", light.text_faint, dark.text_faint),
             (
                 "primary_pill_bg",
                 light.primary_pill_bg,
@@ -2528,11 +2488,6 @@ mod tests {
                 light.code_inset_fill,
                 dark.code_inset_fill,
             ),
-            (
-                "primary_text_color",
-                light.primary_text_color,
-                dark.primary_text_color,
-            ),
             ("file_link", light.file_link, dark.file_link),
             ("rail_task", light.rail_task, dark.rail_task),
             ("rail_question", light.rail_question, dark.rail_question),
@@ -2545,12 +2500,10 @@ mod tests {
             ("overlay_strong", light.overlay_strong, dark.overlay_strong),
             ("border_strong", light.border_strong, dark.border_strong),
             ("sidebar_border", light.sidebar_border, dark.sidebar_border),
-            ("text_ghost", light.text_ghost, dark.text_ghost),
+            ("text_dim", light.text_dim, dark.text_dim),
             ("accent", light.accent, dark.accent),
             ("gauge", light.gauge, dark.gauge),
             ("selection", light.selection, dark.selection),
-            ("caret", light.caret, dark.caret),
-            ("code_text", light.code_text, dark.code_text),
             ("code_wash", light.code_wash, dark.code_wash),
             ("inverse", light.inverse, dark.inverse),
             ("on_inverse", light.on_inverse, dark.on_inverse),
@@ -2660,7 +2613,7 @@ mod tests {
                 translucent.panel_border, base.panel_border,
                 "borders stay crisp on a translucent panel"
             );
-            assert_eq!(translucent.title, base.title, "text is untouched");
+            assert_eq!(translucent.text, base.text, "text is untouched");
 
             assert_eq!(
                 translucent.with_translucency(true),

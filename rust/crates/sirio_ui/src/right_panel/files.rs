@@ -340,7 +340,7 @@ impl RightPanel {
                 .flex()
                 .items_center()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .hover(|style| style.bg(theme.row_hover));
 
             row = match selector {
@@ -434,12 +434,12 @@ impl RightPanel {
             if row.node.expanded {
                 Some(
                     IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                        .text_color(theme.subtitle),
+                        .text_color(theme.text_muted),
                 )
             } else {
                 Some(
                     IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                        .text_color(theme.subtitle),
+                        .text_color(theme.text_muted),
                 )
             }
         } else {
@@ -474,9 +474,9 @@ impl RightPanel {
             // (three distinguishable colours, not one "modified" amber),
             // and unreadable directories dim rather than shout.
             .text_color(if read_error.is_some() {
-                theme.subtitle
+                theme.text_muted
             } else {
-                theme.title
+                theme.text
             })
             .when(selected, |this| this.bg(theme.selected_fill))
             .hover(|style| style.bg(theme.row_hover))
@@ -541,7 +541,7 @@ impl RightPanel {
                         .items_center()
                         .justify_center()
                         .child(
-                            IconElement::new(glyph, IconSize::Medium).text_color(theme.subtitle),
+                            IconElement::new(glyph, IconSize::Medium).text_color(theme.text_muted),
                         ),
                 )
             })
@@ -684,7 +684,7 @@ impl RightPanel {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(loading::indeterminate(
                     "files-loading-orb",
                     loading::GENERIC_ORB,
@@ -779,7 +779,7 @@ fn files_action_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.title)
+        .text_color(theme.text)
         .hover(|style| style.bg(theme.row_hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();

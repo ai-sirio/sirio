@@ -61,8 +61,8 @@ pub enum ActivityStatus {
 /// finished" and "this broke".
 pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
     match status {
-        ActivityStatus::Idle => theme.meta,
-        ActivityStatus::Running => theme.title,
+        ActivityStatus::Idle => theme.text_faint,
+        ActivityStatus::Running => theme.text,
         ActivityStatus::NeedsInput => theme.tab_needs_input,
         ActivityStatus::Done => theme.tab_done,
         ActivityStatus::Error => theme.tab_error,
@@ -452,9 +452,9 @@ impl RightPanel {
                     .hover(|style| style.bg(theme.row_hover))
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
-                            theme.title
+                            theme.text
                         } else {
-                            theme.subtitle
+                            theme.text_muted
                         },
                     ))
                     .when(
@@ -496,19 +496,19 @@ impl RightPanel {
             .gap(theme.spacing.card_gap)
             .p(theme.spacing.card_gap)
             .text_size(theme.typography.headline)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(
                 IconElement::new(
                     Icon::PanelRight,
                     IconSize::Custom(theme.typography.large_title),
                 )
-                .text_color(theme.title),
+                .text_color(theme.text),
             )
             .child("No worktree selected")
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("Select a worktree to inspect its files and changes."),
             )
     }
