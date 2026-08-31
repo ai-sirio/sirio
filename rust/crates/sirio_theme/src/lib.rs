@@ -307,9 +307,6 @@ impl ThemeColors {
         let accent = Rgba::from(bezel.accent);
         let diff_add = Rgba::from(bezel.diff_add);
         let diff_del = Rgba::from(bezel.diff_del);
-        // C1: untracked leaves the accent blue for a neutral in phase 2. Bound
-        // separately here so that move is a value change, not a structural one.
-        let git_untracked = accent;
         // A starred row is the warning hue, not a fifth colour. Sirio used to
         // turn its own warning up to full chroma to make the star the louder
         // of the two; bezel's warning already is at full chroma, so there is
@@ -321,9 +318,6 @@ impl ThemeColors {
             Appearance::Light => softened(frame_fallback, 0.82),
         };
         let panel_surface = Rgba::from(bezel.surface);
-        // Still opaque, still Sirio's: bezel's `border` is a veil. Task 13
-        // collapses this onto `border`, which is the value change phase 2 owes.
-        let panel_border = Self::adaptive(rgb_hex(0x27292D), rgb_hex(0xCCD8DD), appearance);
         let selected_fill = Rgba::from(bezel.element_active);
         let text = Rgba::from(bezel.text);
         let text_muted = Rgba::from(bezel.text_muted);
@@ -358,8 +352,11 @@ impl ThemeColors {
         // A chat row is most of the width of the pane. The same veil a sidebar
         // row uses would read as a change of surface at that size, so the
         // large-area hover sits one rung lower.
-        let overlay = veil(VEIL_FAINT, appearance);
-        let overlay_strong = veil(VEIL_MID, appearance);
+        // bezel has no rung at 0.05 or 0.12; `wash` is its interactive-state
+        // helper and takes the alpha directly, so Sirio's faint and mid rungs
+        // survive as calls rather than as tokens of their own.
+        let overlay = wash(VEIL_FAINT, appearance);
+        let overlay_strong = wash(VEIL_MID, appearance);
         // A selection wash sits under its own text, so it has two jobs at
         // once: be visible, and not swallow the glyphs. The top rung of the
         // veil ladder is the strongest wash that still does both in either
@@ -378,7 +375,11 @@ impl ThemeColors {
             frame_surface,
             bg: frame_fallback,
             surface: panel_surface,
-            border_opaque: panel_border,
+            // Collapsed onto `border`: bezel draws every seam as a hairline
+            // veil, so the opaque separator Sirio used to carry has no source
+            // any more. Kept as a name until phase 3 removes it, so this value
+            // change does not also move five call sites.
+            border_opaque: border,
             terminal_surface,
             warning,
             success,
@@ -388,8 +389,10 @@ impl ThemeColors {
             text,
             text_muted,
             text_faint,
-            tree_guide: veil(VEIL_MID, appearance),
-            git_untracked,
+            // A guide is an edge, so it scales with the surround like every
+            // other hairline rather than holding a fixed alpha.
+            tree_guide: hairline(VEIL_MID, appearance),
+            git_untracked: text_faint,
             // The band under a diff line is the line's own colour turned down,
             // never a second green or a second red — see [`softened`].
             diff_add,
@@ -1508,23 +1511,39 @@ fn scaled(color: Rgba, factor: f32) -> Rgba {
     }
 }
 
-/// A neutral veil at `alpha`: white over the dark palette, black over the
-/// light one.
+/// bezel's interactive-state wash at `alpha`, for a stated appearance.
 ///
-/// Generic hairlines, hovers, overlays, guides, and code/hunk washes use these
-/// neutral veils. The approved shell frame, panels, selected rows, and panel
-/// borders are separate cool-tinted roles and must not be folded into this
-/// helper. A veil is translucent while a screenshot is flat, so compositing
-/// cannot recover its source rgba; centralizing these generic washes in one
-/// rule avoids inventing independent structural colours.
-fn veil(alpha: f32, appearance: Appearance) -> Rgba {
+/// A mirror of `bezel::wash`, which exists only in the form that resolves
+/// against a process-global appearance (`bezel::paint::wash_for` is
+/// `pub(crate)`). `ThemeColors::for_appearance` builds both palettes in one
+/// process, so it cannot use the global form: dark and light would come out
+/// identical. The numbers are bezel's, copied — if bezel changes them this
+/// mirror has to follow, which is what `washes_follow_bezels_two_rules` holds.
+fn wash(alpha: f32, appearance: Appearance) -> Rgba {
     match appearance {
-        Appearance::Dark => color(1.0, 1.0, 1.0, alpha),
-        Appearance::Light => color(0.0, 0.0, 0.0, alpha),
+        Appearance::Dark => color(0.92, 0.92, 0.92, alpha),
+        Appearance::Light => color(0.10, 0.10, 0.10, alpha * bezel::theme::INK_FILL_SCALE),
     }
 }
 
-/// The alpha ladder every [`veil`] and soft fill is drawn from. Four rungs,
+/// bezel's hairline ink at `alpha`, for a stated appearance. Mirror of
+/// `bezel::hairline`, for the same reason [`wash`] is a mirror.
+///
+/// Edges scale opposite to fills: a 1px line needs *more* ink on a bright
+/// surround, which is what [`bezel::theme::INK_HAIRLINE_SCALE`] carries.
+fn hairline(alpha: f32, appearance: Appearance) -> Rgba {
+    match appearance {
+        Appearance::Dark => color(1.0, 1.0, 1.0, alpha),
+        Appearance::Light => color(
+            0.0,
+            0.0,
+            0.0,
+            (alpha * bezel::theme::INK_HAIRLINE_SCALE).min(0.5),
+        ),
+    }
+}
+
+/// The alpha ladder every wash and soft fill is drawn from. Four rungs,
 /// each half again the one below it (0.05 · 0.08 · 0.12 · 0.18), which is the
 /// smallest step that stays visible when two of them meet along an edge. Held
 /// by `the_veil_ladder_is_geometric`.
@@ -1604,6 +1623,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn washes_follow_bezels_two_rules() {
+        // `wash` and `hairline` are hand-copied from bezel because the
+        // appearance-taking forms there are `pub(crate)`. This is the guard on
+        // that copy: the alpha scaling comes from bezel's own constants, and
+        // the two rules stay opposite — a fill is not scaled up on light, an
+        // edge is.
+        let a = VEIL_MID;
+        assert_eq!(
+            wash(a, Appearance::Light).a,
+            a * bezel::theme::INK_FILL_SCALE
+        );
+        assert_eq!(
+            hairline(a, Appearance::Light).a,
+            (a * bezel::theme::INK_HAIRLINE_SCALE).min(0.5)
+        );
+        assert!(
+            hairline(a, Appearance::Light).a > wash(a, Appearance::Light).a,
+            "an edge must carry more ink than a fill on a bright surround"
+        );
+        // Dark quotes the alpha as given, in both rules.
+        assert_eq!(wash(a, Appearance::Dark).a, a);
+        assert_eq!(hairline(a, Appearance::Dark).a, a);
+    }
+
+    #[test]
     fn theme_colours_come_from_bezel() {
         // The swap's defining property: Sirio's neutrals are bezel's, not a
         // copy that happens to agree today. Read through `Deref`, which is what
@@ -1620,15 +1664,15 @@ mod tests {
     }
 
     #[test]
-    fn git_untracked_is_its_own_binding_not_the_gauge_blue() {
-        // C1 moves untracked off the accent binding to a neutral. Splitting the
-        // alias is structural and lands in phase 1; the value moves in phase 2.
-        // Until then both are the same colour, so this test asserts the *binding*
-        // exists separately by checking the field is reachable without accent.
-        let dark = ThemeColors::for_appearance(Appearance::Dark);
-        let light = ThemeColors::for_appearance(Appearance::Light);
-        assert_eq!(dark.git_untracked, dark.accent, "phase 1 keeps the value");
-        assert_eq!(light.git_untracked, light.accent, "phase 1 keeps the value");
+    fn git_untracked_is_a_neutral_not_the_accent() {
+        // C1: untracked leaves the blue. It is quieter than the chromatic
+        // staged / modified / conflict states, so it reads as "not yet tracked"
+        // rather than as a status.
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let c = ThemeColors::for_appearance(appearance);
+            assert_eq!(c.git_untracked, c.text_faint);
+            assert_ne!(c.git_untracked, c.accent);
+        }
     }
 
     #[test]
