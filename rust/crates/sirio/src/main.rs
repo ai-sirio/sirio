@@ -20,7 +20,7 @@ use sirio_control::{
 use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
-use sirio_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
+use sirio_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, FileIconTheme};
 use sirio_project::{
     OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
     display_path, is_git_repository, numeric_tab_selection, read_head_label,
@@ -3470,15 +3470,9 @@ struct WorktreeActivity {
     /// indicator — `WorktreeStatusGlyph(status:agentId:)` uses `agentId`
     /// for nothing else.
     ///
-    /// This used to be a `settings::AgentAccentColor`, i.e. one of the eight
-    /// *semantic theme tokens* the agent-colour picker offers, and Claude's
-    /// entry there is `Amber` — `theme.warning`. A running Claude
-    /// worktree therefore painted the byte-identical colour as one that
-    /// needed input. `sirio_theme::AgentBrandColor` is a separate table for
-    /// a separate job, which is also how the reference keeps them apart:
-    /// `App/AgentAccentColor.swift` says in as many words that it is
-    /// "unrelated to `AgentIcon.color(for:)`" — and it is `color(for:)`, not
-    /// the picker, that `WorktreeStatusGlyph` reads.
+    /// `sirio_theme::AgentBrandColor` is a separate table for a separate
+    /// job, and `WorktreeStatusGlyph` reads that published brand mapping
+    /// rather than inventing a status colour per agent.
     agent_brand: Option<AgentBrandColor>,
     /// F-CORE-ACT-18: `running_agent_ids`, as brand marks in catalog order.
     running: Vec<AgentMark>,
@@ -14921,9 +14915,6 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         ollama_show_in_bar: settings.ollama_show_in_bar,
         refresh_interval: settings.refresh_interval_min.clamp(1, 60) as i32,
         opencode_workspace_id_override: settings.opencode_workspace_id_override,
-        // F-SET-22 has no AppSettings field yet; do not pretend this UI-only
-        // picker is persisted until its schema follow-up lands.
-        agent_colors: SettingsSnapshot::default().agent_colors,
         translucency: settings.translucency,
     }
 }
@@ -14933,6 +14924,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         appearance: persisted_appearance(snapshot.theme),
         ui_font_size: i64::from(snapshot.interface_font_size.clamp(10, 20)),
         terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(9, 24)),
+        base_color: BaseColor::Neutral,
         file_icon_theme: match snapshot.file_icons {
             sirio_ui::settings::FileIconChoice::SfSymbols => FileIconTheme::SfSymbols,
             sirio_ui::settings::FileIconChoice::Material => FileIconTheme::Material,
@@ -15380,16 +15372,6 @@ fn main() {
         let settings_snapshot = {
             let mut snapshot = settings_snapshot_from_app_settings(saved_settings.clone());
             snapshot.socket_path = sirio_control::display_endpoint(socket_info.path.as_path());
-            // F-SET-22: AppSettings has no agent_colors column yet, so the
-            // persisted choices are overlaid from the session store's
-            // key-value table (see SessionStore::load_agent_color_ids)
-            // rather than round-tripping through settings_snapshot_from_app_settings.
-            let saved_colors = session_store.load_agent_color_ids();
-            for (index, slot) in snapshot.agent_colors.iter_mut().enumerate() {
-                if let Some(id) = saved_colors.get(&index) {
-                    *slot = sirio_ui::settings::AgentAccentColor::parse(id);
-                }
-            }
             snapshot
         };
         let initial_translucency = settings_snapshot.translucency;
@@ -15561,13 +15543,6 @@ fn main() {
                             let translucency = snapshot.translucency;
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
-                            // F-SET-22: persist the per-agent accent colours
-                            // alongside the rest of the settings snapshot;
-                            // app_settings_from_snapshot still drops them
-                            // (no AppSettings column yet).
-                            for (index, color) in snapshot.agent_colors.iter().enumerate() {
-                                session_store_for_settings.save_agent_color_id(index, color.id());
-                            }
                             let stored = session_store_for_settings.load_settings();
                             let mut settings = app_settings_from_snapshot(snapshot);
                             // Update opt-out is owned by the update callback,
@@ -15760,6 +15735,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_marks_still_have_their_brand_colours_without_the_picker() {
+        // The picker was a user override of a table that stands on its own.
+        // Removing the override must leave the table — the sidebar, the icons
+        // and the tab strip all resolve a mark's colour through it.
+        for (id, expected) in [
+            ("claude", AgentBrandColor::Claude),
+            ("codex", AgentBrandColor::Codex),
+            ("opencode", AgentBrandColor::OpenCode),
+            ("pi", AgentBrandColor::Pi),
+            ("omp", AgentBrandColor::Omp),
+        ] {
+            assert_eq!(AgentBrandColor::for_agent_id(id), expected);
+        }
+        assert_eq!(
+            AgentBrandColor::for_agent_id("something-new"),
+            AgentBrandColor::Unknown
+        );
+    }
     use gpui::{
         FocusHandle, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
         TestAppContext, VisualTestContext,
@@ -21965,6 +21960,7 @@ mod tests {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
             terminal_font_size: 19,
+            base_color: BaseColor::Neutral,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
             updates_enabled: true,
@@ -22075,6 +22071,7 @@ mod tests {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
             terminal_font_size: 19,
+            base_color: BaseColor::Neutral,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
             updates_enabled: true,
