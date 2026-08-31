@@ -106,7 +106,6 @@ actions!(
         CloseTabsToRight,
         MoveTabEarlier,
         MoveTabLater,
-        MoveTabToOtherPane,
         ResumeChat,
     ]
 );
