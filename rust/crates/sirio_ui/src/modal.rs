@@ -19,6 +19,7 @@
 //! events to the caller's `on_key_down`, so callers keep their own editing
 //! rules (trim-and-no-op-on-empty, in both current uses) in one place.
 
+use bezel::theme::Theme as BezelTheme;
 use gpui::{
     AnyElement, App, ClickEvent, FocusHandle, FontWeight, KeyDownEvent, MouseButton, Window, div,
     prelude::*, px,
@@ -149,12 +150,11 @@ pub struct ModalSpec {
 /// used before it was rebuilt on this primitive.
 pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
     let backdrop_id = spec.id.to_string();
-    let spacing = theme.cosmic.spacing;
 
     let mut sheet = div()
         .flex()
         .flex_col()
-        .gap(px(spacing.xs as f32))
+        .gap(px(BezelTheme::SPACE_MD))
         .child(
             div()
                 .text_size(theme.typography.headline)

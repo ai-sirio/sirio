@@ -70,17 +70,16 @@
 //! macOS AppKit reserve), [`sirio_theme::WindowsCaption`] (caption-button
 //! width and glyph size) and
 //! `Spacing::compact_action` (the 24px cluster-button frame). Colour comes
-//! from `Theme::get(cx).cosmic`: the bar sits on `containers.background`
-//! (not `primary` — a deliberate override of COSMIC's usual raised-bar
-//! placement, because the screenshot wants **one continuous surface**, no
-//! seam between chrome and content), the lights are COSMIC's own
-//! `destructive`/`warning`/`success` semantic colours (already red/amber/
-//! green — no new colour tokens needed), and the cluster buttons use
-//! `semantic.icon_button` like the surface's original two controls did. The
-//! caption buttons use `icon_button` too, except for the close button's
-//! red, which is a *system* constant and lives in
-//! [`sirio_theme::WindowsCaption`] — that type's docs explain why COSMIC's
-//! `destructive` cannot stand in for it.
+//! from `Theme::get(cx)` like every other surface: the row itself paints
+//! *no* fill and lets the window surface through (a deliberate choice,
+//! because the screenshot wants **one continuous surface**, no seam between
+//! chrome and content), its text is the theme's `text`, the
+//! lights are the theme's own `danger`/`warning`/`success` (already red/
+//! amber/green — no new colour tokens needed), and the cluster buttons read
+//! [`IconButtonColors`], which is `text` on `element_hover`/`element_active`.
+//! The caption buttons read it too, except for the close button's red, which
+//! is a *system* constant and lives in [`sirio_theme::WindowsCaption`] —
+//! that type's docs explain why a theme `danger` cannot stand in for it.
 //!
 //! Row layout, left to right: traffic lights (Linux CSD only) → cluster
 //! (sidebar toggle, back, forward, `+`) → accent dot + title → muted
@@ -99,9 +98,9 @@
 
 use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
-    SharedString, Window, WindowControlArea, div, prelude::*, px,
+    Rgba, SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
-use sirio_theme::cosmic::CosmicComponent;
+use bezel::theme::Theme as BezelTheme;
 use sirio_theme::{BrowserChrome, Theme, WindowsCaption};
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -508,15 +507,32 @@ fn maximize_glyph(is_maximized: bool) -> &'static str {
     }
 }
 
+/// The hover shade of a traffic light.
+///
+/// COSMIC shipped a hand-picked hover for each semantic colour, about 12%
+/// darker than its resting fill (`#FFA09A` -> `#E0948F`). The theme carries
+/// one value per meaning and no interaction states, so the relationship is
+/// stated here as the arithmetic COSMIC's own pairs describe rather than
+/// re-picked by eye.
+const LIGHT_HOVER_SHADE: f32 = 0.88;
+
+fn darkened(color: Rgba, factor: f32) -> Rgba {
+    Rgba {
+        r: color.r * factor,
+        g: color.g * factor,
+        b: color.b * factor,
+        a: color.a,
+    }
+}
+
 /// One traffic-light dot: a real, circular window control, not a decoration.
-/// `component` supplies COSMIC's own semantic colour for the action
-/// (`destructive`/`warning`/`success` — already red/amber/green, so this
-/// needs no new colour tokens).
+/// `fill` is the theme's semantic colour for the action (`danger`/`warning`/
+/// `success` — already red/amber/green, so this needs no new colour tokens).
 fn traffic_light(
     id: &'static str,
     area: WindowControlArea,
     diameter: gpui::Pixels,
-    component: CosmicComponent,
+    fill: Rgba,
     handler: Rc<dyn Fn(&mut Window)>,
 ) -> impl IntoElement {
     div()
@@ -526,10 +542,28 @@ fn traffic_light(
         .w(diameter)
         .h(diameter)
         .rounded(diameter * 0.5)
-        .bg(component.base)
-        .hover(|style| style.bg(component.hover))
+        .bg(fill)
+        .hover(|style| style.bg(darkened(fill, LIGHT_HOVER_SHADE)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, _| handler(window))
+}
+
+/// The three colours a chrome icon button draws with.
+///
+/// This replaces COSMIC's `Component`, which carried six fields where this
+/// file read three. It is local rather than a theme type because nothing
+/// outside the titlebar draws a control with its own resting/hover/pressed
+/// set — the rest of the app composes those from `element_hover` and
+/// `element_active` at the call site, which is what this does too.
+#[derive(Clone, Copy)]
+struct IconButtonColors {
+    /// The glyph colour, drawn on the bar itself — these buttons have no
+    /// resting fill.
+    on: Rgba,
+    /// Fill on hover.
+    hover: Rgba,
+    /// Fill while pressed.
+    pressed: Rgba,
 }
 
 /// One cluster-style icon button (sidebar toggle, back, forward, `+`, the
@@ -543,7 +577,7 @@ fn cluster_button(
     size: gpui::Pixels,
     icon_size: IconSize,
     radius: gpui::Pixels,
-    icon_button: CosmicComponent,
+    icon_button: IconButtonColors,
     handler: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 ) -> impl IntoElement {
     let enabled = handler.is_some();
@@ -608,7 +642,7 @@ fn caption_button(
     is_close: bool,
     caption: WindowsCaption,
     bar_height: Pixels,
-    icon_button: CosmicComponent,
+    icon_button: IconButtonColors,
 ) -> impl IntoElement {
     let (hover_bg, hover_on, pressed_bg, pressed_on) = if is_close {
         (
@@ -668,15 +702,18 @@ impl Render for Titlebar {
         });
 
         let theme = Theme::get(cx);
-        let cosmic = theme.cosmic;
         let chrome = theme.browser_chrome;
         let caption = theme.windows_caption;
-        let bar = cosmic.containers.background;
-        let icon_button = cosmic.semantic.icon_button;
-        let control_radius = px(cosmic.radii.radius_xs[0]);
+        let bar_on = theme.text;
+        let icon_button = IconButtonColors {
+            on: theme.text,
+            hover: theme.element_hover,
+            pressed: theme.element_active,
+        };
+        let control_radius = px(BezelTheme::BASE_RADIUS * 0.5); // 4.0
         let button_size = theme.spacing.compact_action;
         let icon_size = IconSize::Medium;
-        let trailing_inset = px(cosmic.spacing.xs as f32);
+        let trailing_inset = px(BezelTheme::SPACE_MD); // 12.0
         let caption_family = caption_font_family(cx);
         let entity = cx.entity();
 
@@ -719,21 +756,21 @@ impl Render for Titlebar {
                     "titlebar-close",
                     WindowControlArea::Close,
                     chrome.traffic_light_diameter,
-                    cosmic.semantic.destructive,
+                    theme.danger,
                     on_close,
                 ))
                 .child(traffic_light(
                     "titlebar-minimize",
                     WindowControlArea::Min,
                     chrome.traffic_light_diameter,
-                    cosmic.semantic.warning,
+                    theme.warning,
                     on_minimize,
                 ))
                 .child(traffic_light(
                     "titlebar-maximize",
                     WindowControlArea::Max,
                     chrome.traffic_light_diameter,
-                    cosmic.semantic.success,
+                    theme.success,
                     on_maximize,
                 ))
         });
@@ -848,12 +885,12 @@ impl Render for Titlebar {
                     // the same neutral the title text beside it already uses,
                     // which also keeps this surface inside one palette instead
                     // of mixing the COSMIC roles with the shell's.
-                    div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(bar.on),
+                    div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(bar_on),
                 )
-                .child(div().text_color(bar.on).text_size(px(13.5)).child(title))
+                .child(div().text_color(bar_on).text_size(px(13.5)).child(title))
                 .children(subtitle.map(|subtitle| {
                     div()
-                        .text_color(bar.on.opacity(0.55))
+                        .text_color(bar_on.opacity(0.55))
                         .text_size(px(13.5))
                         .child(subtitle)
                 }))
@@ -1516,13 +1553,13 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let resolved = cx.update(|_, cx| Theme::get(cx).cosmic);
-        assert!(resolved.is_dark, "installed Dark must resolve to is_dark");
+        let appearance = cx.update(|_, cx| Theme::get(cx).appearance);
+        assert_eq!(appearance, sirio_theme::Appearance::Dark);
 
         let bar_height = cx.update(|_, cx| Theme::get(cx).browser_chrome.bar_height);
         let close = cx
             .debug_bounds("titlebar-close")
-            .expect("close control is drawn under the dark cosmic theme");
+            .expect("close control is drawn under the dark theme");
         assert_eq!(
             close.size.height,
             cx.update(|_, cx| Theme::get(cx).browser_chrome.traffic_light_diameter)
@@ -1543,20 +1580,20 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let resolved = cx.update(|_, cx| Theme::get(cx).cosmic);
-        assert!(
-            !resolved.is_dark,
-            "installed Light must resolve to is_dark == false"
+        let bar = cx.update(|_, cx| Theme::get(cx).surface);
+        assert_eq!(
+            cx.update(|_, cx| Theme::get(cx).appearance),
+            sirio_theme::Appearance::Light
         );
         assert_ne!(
-            resolved.containers.background.base,
-            Theme::dark().cosmic.containers.background.base,
-            "light and dark background containers must not collapse to the same fill"
+            bar,
+            Theme::dark().surface,
+            "light and dark bar surfaces must not collapse to the same fill"
         );
 
         let close = cx
             .debug_bounds("titlebar-close")
-            .expect("close control is drawn under the light cosmic theme");
+            .expect("close control is drawn under the light theme");
         assert_eq!(
             close.size.height,
             cx.update(|_, cx| Theme::get(cx).browser_chrome.traffic_light_diameter)
