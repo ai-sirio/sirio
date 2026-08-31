@@ -20,24 +20,50 @@ pub enum TabKind {
     Diff,
 }
 
+/// Which half of the [center split] a surface belongs to.
+///
+/// The two halves have fixed roles: which pane a tab is drawn in is
+/// *derived* from what the tab is ([`TabKind::pane_role`]), never chosen
+/// and never stored. Primary holds what the user talks to — terminals and
+/// agent chats; Secondary holds what the user looks at — a browser, an
+/// editor, a diff. Despite the name neither is a [pane](crate) in the
+/// glossary's reserved sense (the split tree inside one tab); see
+/// `CONTEXT.md`, "Primary pane role" / "Secondary pane role".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneRole {
+    /// Always shown; takes the whole work area when Secondary is not.
+    Primary,
+    /// Absent by default; opens with the first Secondary tab and auto-
+    /// closes with the last.
+    Secondary,
+}
+
 impl TabKind {
-    /// Whether a tab of this kind is listed under its worktree in the
-    /// sidebar (#125, decided in #130).
-    ///
-    /// A Browser tab is a tab like any other in the tab bar, and **never a
-    /// sidebar row**: the sidebar lists the work a worktree contains, and a
-    /// web page is not that. It appeared there anyway, drawn with the chat
-    /// icon through the sidebar's icon catch-all, which is what made the
-    /// omission look deliberate.
+    /// The center-split half this surface is drawn in. Rigid by design —
+    /// there is no move-between-panes gesture, because membership and
+    /// surface kind are the same fact read twice.
     ///
     /// Exhaustive on purpose — no `_` arm. A new surface kind must state
-    /// which side of this line it falls on rather than inheriting an answer
-    /// from whichever branch happened to be last.
-    pub fn appears_in_sidebar(self) -> bool {
+    /// which half it belongs to rather than inheriting an answer from
+    /// whichever branch happened to be last.
+    pub fn pane_role(self) -> PaneRole {
         match self {
-            Self::Terminal | Self::AgentChat | Self::Editor | Self::Diff => true,
-            Self::Browser => false,
+            Self::Terminal | Self::AgentChat => PaneRole::Primary,
+            Self::Browser | Self::Editor | Self::Diff => PaneRole::Secondary,
         }
+    }
+
+    /// Whether a tab of this kind is listed under its worktree in the
+    /// sidebar (#125, decided in #130; narrowed by #319/#322).
+    ///
+    /// Deliberately *derived* from [`Self::pane_role`] rather than kept as
+    /// a second list: the sidebar lists the work a worktree contains —
+    /// exactly the Primary pane's tabs — and one fact gets one definition.
+    /// A browser tab was never a sidebar row; editor and diff tabs joined
+    /// it when they moved to the Secondary half, where the right sidebar's
+    /// own Changes and Files listings already cover them.
+    pub fn appears_in_sidebar(self) -> bool {
+        self.pane_role() == PaneRole::Primary
     }
 }
 
@@ -73,7 +99,7 @@ impl Tab {
 
 #[cfg(test)]
 mod tests {
-    use super::TabKind;
+    use super::{PaneRole, TabKind};
 
     /// #125/#130: the sidebar lists the work a worktree contains, and a web
     /// page is not that. A Browser tab appeared there anyway, drawn with the
@@ -84,14 +110,29 @@ mod tests {
         assert!(!TabKind::Browser.appears_in_sidebar());
     }
 
-    /// The other four stay. Spelled out one by one rather than as a loop, so
-    /// adding a surface kind fails to compile here until someone decides
-    /// which side of the line it belongs on.
+    /// #319: the routing rule is the spine of the center split. Terminal
+    /// and chat are what the user talks to (Primary); browser, editor and
+    /// diff are what the user looks at (Secondary).
     #[test]
-    fn every_other_surface_kind_still_appears() {
+    fn pane_role_routes_by_surface_kind() {
+        assert_eq!(TabKind::Terminal.pane_role(), PaneRole::Primary);
+        assert_eq!(TabKind::AgentChat.pane_role(), PaneRole::Primary);
+        assert_eq!(TabKind::Browser.pane_role(), PaneRole::Secondary);
+        assert_eq!(TabKind::Editor.pane_role(), PaneRole::Secondary);
+        assert_eq!(TabKind::Diff.pane_role(), PaneRole::Secondary);
+    }
+
+    /// The sidebar predicate is *derived* from the routing rule, not a
+    /// second list that could drift from it: exactly the Primary kinds are
+    /// listed. Spelled out one by one rather than as a loop, so adding a
+    /// surface kind fails to compile here until someone decides which side
+    /// of the line it belongs on.
+    #[test]
+    fn the_sidebar_lists_exactly_the_primary_kinds() {
         assert!(TabKind::Terminal.appears_in_sidebar());
         assert!(TabKind::AgentChat.appears_in_sidebar());
-        assert!(TabKind::Editor.appears_in_sidebar());
-        assert!(TabKind::Diff.appears_in_sidebar());
+        assert!(!TabKind::Browser.appears_in_sidebar());
+        assert!(!TabKind::Editor.appears_in_sidebar());
+        assert!(!TabKind::Diff.appears_in_sidebar());
     }
 }

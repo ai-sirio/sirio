@@ -96,6 +96,13 @@ pub struct SessionTabState {
     /// restore then falls back on its own.
     #[serde(default)]
     pub browser_url: String,
+    /// #323: an Editor tab's file, so the tab can come back pointing at the
+    /// same document. Held here rather than derived because nothing else in
+    /// the session record names a file. Empty means nothing was captured;
+    /// restore then drops the tab, and so does a path that no longer
+    /// resolves — see `restored_editor_path`.
+    #[serde(default)]
+    pub editor_path: String,
 }
 
 impl SessionTabState {
@@ -122,6 +129,7 @@ impl SessionTabState {
                 .collect(),
             chat_draft: self.chat_draft.clone(),
             browser_url: self.browser_url.clone(),
+            editor_path: self.editor_path.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -986,6 +994,11 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
             if let Some(existing) = existing_by_id.get(&id) {
                 record.comment = existing.comment.clone();
                 record.created_at = existing.created_at;
+                // #323: same hazard as the comment above -- this upsert
+                // re-derives the row from a catalog that has no idea a pane
+                // is open, so without carrying it forward every startup
+                // normalization would close it.
+                record.secondary_pane_open = existing.secondary_pane_open;
             }
             db.save_worktree(&record)?;
         }
@@ -1401,6 +1414,59 @@ impl SessionStore {
                     "[session] failed to read tabs for {worktree_id}: {error}; using an empty layout"
                 );
                 default_restored(working_directory)
+            }
+        }
+    }
+
+    /// #323: whether this worktree's Secondary centre pane was open when the
+    /// session was last written. `false` for a worktree with no row yet, and
+    /// for a database in fallback mode -- a closed pane is the safe answer,
+    /// since it is also what a worktree with no Secondary tabs shows.
+    pub fn secondary_pane_open_for(&self, working_directory: &Path) -> bool {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return false;
+        };
+        match db.worktree_by_path(&working_directory.to_string_lossy()) {
+            Ok(record) => record.is_some_and(|record| record.secondary_pane_open),
+            Err(error) => {
+                eprintln!("[session] failed to read the pane flag: {error}; assuming closed");
+                false
+            }
+        }
+    }
+
+    /// #323: records that this worktree's Secondary pane is open or closed.
+    /// A no-op for a worktree with no persisted row -- the row is written by
+    /// the catalog upsert, and a pane state with no worktree to hang off is
+    /// not worth inventing one for.
+    pub fn save_secondary_pane_open(&self, working_directory: &Path, open: bool) {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        let path = working_directory.to_string_lossy();
+        match db.worktree_by_path(&path) {
+            Ok(Some(mut record)) => {
+                if record.secondary_pane_open == open {
+                    return;
+                }
+                record.secondary_pane_open = open;
+                if let Err(error) = db.save_worktree(&record) {
+                    eprintln!("[session] failed to persist the pane flag for {path}: {error}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("[session] failed to read the worktree row for {path}: {error}");
             }
         }
     }
@@ -1868,6 +1934,7 @@ mod tests {
             scrollback: std::collections::BTreeMap::from([(0, b"P28_SCROLLBACK_NONCE".to_vec())]),
             chat_draft: String::new(),
             browser_url: String::new(),
+            editor_path: String::new(),
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -1914,6 +1981,7 @@ mod tests {
             scrollback: std::collections::BTreeMap::new(),
             chat_draft: String::new(),
             browser_url: "https://example.org/probe".into(),
+            editor_path: String::new(),
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),
@@ -2028,10 +2096,12 @@ mod tests {
             opencode_workspace_id_override: "wrk_main".into(),
             translucency: true,
             // Deliberately neither default nor out of range: this round-trip
-            // is the only place that proves a dragged width survives the
-            // SessionStore layer, not just `AppDatabase`.
+            // is the only place that proves a dragged width -- and, #323, the
+            // dragged centre split -- survives the SessionStore layer, not
+            // just `AppDatabase`.
             sidebar_width: 300,
             right_panel_width: 500,
+            center_split_ratio: 610,
         };
 
         {
@@ -2051,6 +2121,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
+                ("appearance.centerSplitRatio".into(), "610".into()),
                 ("appearance.fileIconTheme".into(), "material".into()),
                 ("appearance.rightPanelWidth".into(), "500".into()),
                 ("appearance.sidebarWidth".into(), "300".into()),
@@ -2682,6 +2753,49 @@ mod tests {
             worktree.comment.as_deref(),
             Some("needs review"),
             "schedule_catalog must not clobber a previously persisted comment"
+        );
+    }
+
+    /// #323: the pane flag rides the same hazard the comment above does --
+    /// `schedule_catalog` re-derives the row from a catalog that has never
+    /// heard of it.
+    #[test]
+    fn the_secondary_pane_flag_round_trips_and_survives_a_catalog_rebuild() {
+        let dir = TempDir::new();
+        let root = dir.0.join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir");
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.email", "sirio-tests@example.com"]);
+        run_git(&root, &["config", "user.name", "Sirio Tests"]);
+        std::fs::write(root.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&root, &["add", "README"]);
+        run_git(&root, &["commit", "--quiet", "-m", "fixture"]);
+
+        let database = dir.db_path("secondary-pane-flag");
+        let store = SessionStore::open(&database);
+        let discovered = discover_project(&root).expect("discover the fixture repo");
+        let catalog = ProjectCatalog::from_projects(vec![catalog_project(&root, discovered)]);
+        store.schedule_catalog(&catalog);
+
+        assert!(
+            !store.secondary_pane_open_for(&root),
+            "a worktree that never opened the pane reads closed"
+        );
+
+        store.save_secondary_pane_open(&root, true);
+        assert!(store.secondary_pane_open_for(&root), "the flag round-trips");
+
+        // Any later boot re-runs this; it must not close the pane.
+        store.schedule_catalog(&catalog);
+        assert!(
+            store.secondary_pane_open_for(&root),
+            "schedule_catalog must not clobber the pane flag"
+        );
+
+        store.save_secondary_pane_open(&root, false);
+        assert!(
+            !store.secondary_pane_open_for(&root),
+            "closing the pane persists too"
         );
     }
 
