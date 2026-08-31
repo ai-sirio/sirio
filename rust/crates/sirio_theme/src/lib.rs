@@ -324,8 +324,8 @@ impl ThemeColors {
         let favorite = warning;
         let frame_fallback = Rgba::from(bezel.bg);
         let frame_surface = match appearance {
-            Appearance::Dark => softened(frame_fallback, 0.88),
-            Appearance::Light => softened(frame_fallback, 0.82),
+            Appearance::Dark => softened(frame_fallback, 0.35),
+            Appearance::Light => softened(frame_fallback, 0.30),
         };
         let panel_surface = Rgba::from(bezel.surface);
         let selected_fill = Rgba::from(bezel.element_active);
@@ -1395,13 +1395,17 @@ impl Theme {
 
     /// Returns the surface opacity used when translucency is enabled.
     ///
-    /// The fade is 0.85: strong enough to read as real translucency (the
-    /// original Swift-era 0.96 was imperceptible), light enough that a
-    /// panel at 0.85 alpha still holds its text at WCAG AA against the
-    /// blurred backdrop — the frame material behind it is a near-identical
-    /// grey in both appearances, so the composite barely shifts.
+    /// The fade is 0.45. The earlier steps (0.96 → 0.85 → 0.70) all read as
+    /// opaque in practice because the layers *stack*: a terminal pane paints
+    /// terminal_surface over the panel's surface over the frame material, so
+    /// at 0.70 the composite still covered ~97% of the backdrop — grey, not
+    /// glass. At 0.45 over the 0.35/0.30 frame the composite lets roughly a
+    /// third of the blurred desktop through in panel areas (a fifth where a
+    /// third layer stacks), which finally reads as glass. Legibility holds
+    /// because the backdrop is blurred: text sits on an averaged tone rather
+    /// than raw desktop pixels.
     pub fn surface_opacity(translucency_enabled: bool) -> f32 {
-        if translucency_enabled { 0.85 } else { 1.0 }
+        if translucency_enabled { 0.45 } else { 1.0 }
     }
 
     /// Returns the theme resolved for this theme's `mode` and `appearance`,
@@ -2462,8 +2466,8 @@ mod tests {
         assert_eq!(typography.ui_size, px(13.0));
         assert_eq!(typography.body_line_height, px(22.0));
         assert_eq!(typography.ui_line_height, px(17.0));
-        assert_eq!(Theme::dark().translucent_surface_opacity, 0.85);
-        assert_eq!(Theme::surface_opacity(true), 0.85);
+        assert_eq!(Theme::dark().translucent_surface_opacity, 0.45);
+        assert_eq!(Theme::surface_opacity(true), 0.45);
         assert_eq!(Theme::surface_opacity(false), 1.0);
     }
 
