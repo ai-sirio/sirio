@@ -1192,8 +1192,8 @@ impl ChangesTab {
                 .flex()
                 .items_center()
                 .text_size(px(12.5))
-                .text_color(theme.subtitle)
-                .bg(theme.diff_hunk_background)
+                .text_color(theme.text_muted)
+                .bg(theme.code_wash)
                 .child(header)
                 .into_any_element(),
             ChangeRow::ContextBand {
@@ -1232,7 +1232,7 @@ impl ChangesTab {
                 .flex()
                 .items_center()
                 .text_size(px(12.5))
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(
                     div()
                         .flex_1()
@@ -1275,20 +1275,20 @@ impl ChangesTab {
             .justify_center()
             .gap(px(8.0))
             .text_size(theme.typography.footnote)
-            .text_color(theme.meta)
-            .bg(theme.diff_hunk_background)
-            .hover(|style| style.bg(theme.row_hover))
+            .text_color(theme.text_faint)
+            .bg(theme.code_wash)
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 band_entity.update(cx, |tab, cx| {
                     tab.toggle_band(section, band_path.clone(), key, cx);
                 });
             })
-            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.hairline))
-            .child(div().text_color(theme.meta).child(label))
-            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.hairline))
+            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.border))
+            .child(div().text_color(theme.text_faint).child(label))
+            .child(div().h(px(1.0)).w(px(24.0)).bg(theme.border))
             .child(
                 div()
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(if expanded { "⌃" } else { "⌄" }),
             )
     }
@@ -1324,8 +1324,8 @@ impl ChangesTab {
             .items_center()
             .gap(px(6.0))
             .text_size(px(12.5))
-            .bg(theme.diff_hunk_background)
-            .hover(|style| style.bg(theme.row_hover))
+            .bg(theme.code_wash)
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| tab.toggle_section(section, cx));
             })
@@ -1337,19 +1337,23 @@ impl ChangesTab {
                     .justify_center()
                     .child(if collapsed {
                         IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                     } else {
                         IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                     }),
             )
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(section.label()),
             )
-            .child(div().text_color(theme.meta).child(format!("({count})")))
+            .child(
+                div()
+                    .text_color(theme.text_faint)
+                    .child(format!("({count})")),
+            )
             .child(div().flex_1())
             // A commit view renders no stage/unstage batch action either:
             // the header keeps its collapse toggle but not the mutation.
@@ -1419,11 +1423,11 @@ impl ChangesTab {
             .gap(px(6.0))
             .text_size(px(13.5))
             // The path is neutral text — the +/− counts carry the status.
-            .text_color(theme.title)
-            .hover(|style| style.bg(theme.row_hover))
+            .text_color(theme.text)
+            .hover(|style| style.bg(theme.element_hover))
             // #325: the keyboard selection has to be visible, or up/down
             // move something the user cannot see.
-            .when(is_selected, |this| this.bg(theme.row_hover))
+            .when(is_selected, |this| this.bg(theme.element_hover))
             .when_some(drag_payload, |this, payload| {
                 this.on_drag(payload, move |_, _, _, cx| {
                     cx.new(|_| DiffDragPreview { theme })
@@ -1446,10 +1450,10 @@ impl ChangesTab {
                     .justify_center()
                     .child(if expanded {
                         IconElement::new(Icon::ChevronDown, IconSize::XSmall)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                     } else {
                         IconElement::new(Icon::ChevronRight, IconSize::XSmall)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                     }),
             )
             .child(
@@ -1474,8 +1478,8 @@ impl ChangesTab {
                     .text_ellipsis()
                     .child(path.to_string_lossy().to_string()),
             )
-            .child(div().text_color(theme.diff_deletion).child(deletions))
-            .child(div().text_color(theme.diff_addition).child(additions))
+            .child(div().text_color(theme.diff_del).child(deletions))
+            .child(div().text_color(theme.diff_add).child(additions))
             .when(expanded, |this| {
                 this.child(
                     div()
@@ -1546,8 +1550,8 @@ impl ChangesTab {
                             div()
                                 .id(format!("open-{}-{}", section.slug(), path.display()))
                                 .debug_selector(|| "changes-open-file".into())
-                                .text_color(theme.subtitle)
-                                .hover(|style| style.text_color(theme.title))
+                                .text_color(theme.text_muted)
+                                .hover(|style| style.text_color(theme.text))
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
                                     // `entry.path` is repo-relative, and the
@@ -1610,7 +1614,7 @@ impl ChangesTab {
                 div()
                     .w(px(SPLIT_DIVIDER_WIDTH))
                     .flex_none()
-                    .bg(theme.hairline),
+                    .bg(theme.border),
             )
             .child(
                 split_cell(row.right, false, theme).debug_selector(|| "changes-split-right".into()),
@@ -1624,9 +1628,9 @@ impl ChangesTab {
         theme: Theme,
     ) -> impl IntoElement {
         let (background, marker_color, marker) = match line.origin {
-            DiffOrigin::Context => (theme.background, theme.meta, " "),
-            DiffOrigin::Addition => (theme.diff_addition_background, theme.diff_addition, "+"),
-            DiffOrigin::Deletion => (theme.diff_deletion_background, theme.diff_deletion, "−"),
+            DiffOrigin::Context => (theme.surface, theme.text_faint, " "),
+            DiffOrigin::Addition => (theme.diff_add_bg, theme.diff_add, "+"),
+            DiffOrigin::Deletion => (theme.diff_del_bg, theme.diff_del, "−"),
         };
         div()
             .id(format!(
@@ -1645,16 +1649,16 @@ impl ChangesTab {
             .items_center()
             .font_family(theme.typography.code_family)
             .text_size(px(12.5))
-            .text_color(theme.title)
+            .text_color(theme.text)
             .bg(background)
             .child(
-                div().w(px(22.0)).text_color(theme.meta).child(
+                div().w(px(22.0)).text_color(theme.text_faint).child(
                     line.old_line_number
                         .map_or(String::new(), |n| n.to_string()),
                 ),
             )
             .child(
-                div().w(px(22.0)).text_color(theme.meta).child(
+                div().w(px(22.0)).text_color(theme.text_faint).child(
                     line.new_line_number
                         .map_or(String::new(), |n| n.to_string()),
                 ),
@@ -1710,13 +1714,13 @@ impl ChangesTab {
             .items_center()
             .gap(px(7.0))
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .child(
                 div()
                     .flex_1()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(12.5))
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(title),
             )
             // The view-mode control sits at the head of the action cluster,
@@ -1932,12 +1936,12 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
         // has no number and a recessed ground. Leaving it unpainted made
         // the zip's own padding — half of what F-GIT-DIFF-03 asks the
         // renderer to show — invisible in a photograph.
-        return cell.bg(theme.code_inset_fill);
+        return cell.bg(theme.input_bg);
     };
     let background = match line.origin {
-        DiffOrigin::Context => theme.background,
-        DiffOrigin::Addition => theme.diff_addition_background,
-        DiffOrigin::Deletion => theme.diff_deletion_background,
+        DiffOrigin::Context => theme.surface,
+        DiffOrigin::Addition => theme.diff_add_bg,
+        DiffOrigin::Deletion => theme.diff_del_bg,
     };
     let number = if old {
         line.old_line_number
@@ -1963,7 +1967,7 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
                     // ragged text rather than as a column.
                     .justify_end()
                     .pr(px(4.0))
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(number.map_or(String::new(), |number| number.to_string())),
             )
             .child(
@@ -1972,7 +1976,7 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(line.content),
             ),
     )
@@ -2037,7 +2041,7 @@ impl ChangesTab {
                 .justify_center()
                 .gap(theme.spacing.card_gap)
                 .text_size(theme.typography.headline)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(loading::indeterminate(
                     "changes-loading-orb",
                     loading::GENERIC_ORB,
@@ -2071,7 +2075,7 @@ impl ChangesTab {
                 .items_center()
                 .justify_center()
                 .text_size(theme.typography.headline)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child("No changes")
                 .into_any_element();
         }
@@ -2154,7 +2158,7 @@ impl ChangesTab {
                 div()
                     .max_w(px(560.0))
                     .text_size(theme.typography.headline)
-                    .text_color(theme.git_conflict)
+                    .text_color(theme.danger)
                     .child(format!("Git is unavailable: {error}")),
             )
             .child(action_text_button(
@@ -2190,7 +2194,7 @@ impl Render for ChangesTab {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(self.render_toolbar(entity.clone(), theme, mode, _window, cx))
             .child(self.render_body(entity, theme, mode, _window, cx))
     }
@@ -2257,8 +2261,8 @@ impl Render for DiffDragPreview {
             .px(self.theme.spacing.titlebar_control_spacing)
             .py(self.theme.spacing.titlebar_control_spacing)
             .rounded(self.theme.radii.control)
-            .bg(self.theme.primary_pill_bg)
-            .text_color(self.theme.title)
+            .bg(self.theme.surface_raised)
+            .text_color(self.theme.text)
             .child("Diff")
     }
 }
@@ -2288,8 +2292,8 @@ fn action_text_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.title)
-        .hover(|style| style.bg(theme.row_hover))
+        .text_color(theme.text)
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -2312,8 +2316,8 @@ fn action_icon_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.title)
-        .hover(|style| style.bg(theme.row_hover))
+        .text_color(theme.text)
+        .hover(|style| style.bg(theme.element_hover))
         .tooltip(controls::text_tooltip(tooltip, theme))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -2338,8 +2342,8 @@ fn section_action_button(
         .py(theme.spacing.titlebar_control_spacing)
         .rounded(theme.radii.control)
         .text_size(theme.typography.caption2)
-        .text_color(theme.subtitle)
-        .hover(|style| style.bg(theme.row_hover).text_color(theme.title))
+        .text_color(theme.text_muted)
+        .hover(|style| style.bg(theme.element_hover).text_color(theme.text))
         .tooltip(controls::text_tooltip(label, theme))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -2366,8 +2370,8 @@ where
         .py(px(4.0))
         .rounded(px(6.0))
         .text_size(px(12.5))
-        .text_color(theme.subtitle)
-        .hover(|style| style.text_color(theme.git_conflict))
+        .text_color(theme.text_muted)
+        .hover(|style| style.text_color(theme.danger))
         .tooltip(controls::text_tooltip(tooltip, theme))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -2396,8 +2400,8 @@ where
         .py(px(4.0))
         .rounded(px(6.0))
         .text_size(px(12.5))
-        .text_color(theme.subtitle)
-        .hover(|style| style.text_color(theme.git_conflict))
+        .text_color(theme.text_muted)
+        .hover(|style| style.text_color(theme.danger))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_click(window, cx);
@@ -2948,13 +2952,13 @@ mod tests {
         );
         assert_eq!(
             status_color(&entry, theme),
-            theme.git_staged,
+            theme.success,
             "a staged-then-modified file reads as staged, matching Swift's \
              GitStatusStyle.color and the Files tree marker"
         );
         assert_ne!(
             status_color(&entry, theme),
-            theme.git_modified,
+            theme.warning,
             "the pre-fix order returned git_modified here"
         );
     }

@@ -55,7 +55,9 @@ On Windows, the MSVC toolchain is required; see `docs/prototypes/ghostty-pane-wi
 ```
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_agents, sirio_activity, sirio_markdown, sirio_usage,
-sirio_registry, sirio_release   (leaves — no local deps)
+sirio_registry, sirio_release   (leaves — no local deps;
+                                 sirio_theme and sirio_ui take the external
+                                 `bezel` crate, pinned `=0.1.3`)
     ^
 sirio_acp        (-> sirio_persistence)
 sirio_terminal    (-> sirio_project, sirio_theme)
@@ -71,6 +73,15 @@ sirio            (the app: main.rs — the only crate that depends on everything
                     including sirio_terminal, sirio_control, and sirio_activity, which
                     sirio_ui itself does not touch)
 ```
+
+`sirio_theme` holds no palette of its own. Every colour, and the base radius and
+spacing steps the measurements are derived from, come from `bezel::theme` — the
+pin is on appearance as much as on API, so treat a bezel bump as a visual change
+to review rather than a dependency chore (`docs/THEME-PROVENANCE.md` records what
+is bezel's, what is derived, and the three tokens that stay Sirio's). `ThemeMode`
+is bezel's `AppearanceMode` re-exported; the only other appearance enum is
+`sirio_persistence::AppearanceMode`, which carries the serde contract, and
+`sirio`'s `main.rs` holds the single conversion between them.
 
 There is no single crate every other crate funnels through the way Swift's `TillerCore` worked — each concern (git, persistence, agent adapters, activity detection, terminal, control socket, UI primitives) lives in its own largely-independent leaf or near-leaf crate, and `sirio`'s `main.rs` is the integration point that wires `PaneRegistry` (`sirio_control`), `AgentActivityModel` (`sirio_activity`), and the ACP/agent/git/persistence layers into the `sirio_ui` components it renders. Run `cargo build -p <crate>` to check one crate compiles in isolation before assuming a change is layered correctly.
 

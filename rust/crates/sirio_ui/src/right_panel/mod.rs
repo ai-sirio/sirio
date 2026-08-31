@@ -61,11 +61,11 @@ pub enum ActivityStatus {
 /// finished" and "this broke".
 pub fn status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
     match status {
-        ActivityStatus::Idle => theme.meta,
-        ActivityStatus::Running => theme.title,
-        ActivityStatus::NeedsInput => theme.tab_needs_input,
-        ActivityStatus::Done => theme.tab_done,
-        ActivityStatus::Error => theme.tab_error,
+        ActivityStatus::Idle => theme.text_faint,
+        ActivityStatus::Running => theme.text,
+        ActivityStatus::NeedsInput => theme.warning,
+        ActivityStatus::Done => theme.success,
+        ActivityStatus::Error => theme.danger,
     }
 }
 
@@ -428,15 +428,15 @@ impl RightPanel {
             .justify_center()
             .gap(px(4.0))
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .children(PanelView::ORDER.map(|view| {
                 let is_active = view == active;
                 let badge_color = (view == PanelView::Activity)
                     .then_some(badge)
                     .flatten()
                     .map(|status| match status {
-                        ActivityStatus::Error => theme.tab_error,
-                        _ => theme.tab_needs_input,
+                        ActivityStatus::Error => theme.danger,
+                        _ => theme.warning,
                     });
                 div()
                     .id(view.element_id())
@@ -448,13 +448,13 @@ impl RightPanel {
                     .items_center()
                     .justify_center()
                     .rounded(px(4.0))
-                    .when(is_active, |this| this.bg(theme.row_hover))
-                    .hover(|style| style.bg(theme.row_hover))
+                    .when(is_active, |this| this.bg(theme.element_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
-                            theme.title
+                            theme.text
                         } else {
-                            theme.subtitle
+                            theme.text_muted
                         },
                     ))
                     .when(
@@ -496,19 +496,19 @@ impl RightPanel {
             .gap(theme.spacing.card_gap)
             .p(theme.spacing.card_gap)
             .text_size(theme.typography.headline)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(
                 IconElement::new(
                     Icon::PanelRight,
                     IconSize::Custom(theme.typography.large_title),
                 )
-                .text_color(theme.title),
+                .text_color(theme.text),
             )
             .child("No worktree selected")
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("Select a worktree to inspect its files and changes."),
             )
     }
@@ -616,7 +616,7 @@ impl Render for RightPanel {
             .w_full()
             .h_full()
             .overflow_hidden()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(self.render_header(entity.clone(), theme, window, cx))
             .child(if !self.worktree_selected {
                 self.render_no_worktree(theme).into_any_element()

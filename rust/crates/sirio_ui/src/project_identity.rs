@@ -7,6 +7,7 @@
 //! `../../../docs/linux-rewrite/SEAMS.md` for the mount seam and the avatar
 //! network-fetch seam this file deliberately does not build.
 
+use bezel::theme::Theme as BezelTheme;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -682,7 +683,7 @@ impl ProjectIconPicker {
         let mut grid = div()
             .flex()
             .flex_wrap()
-            .gap(px(theme.cosmic.spacing.xs as f32));
+            .gap(px(BezelTheme::SPACE_MD));
         for glyph in ProjectGlyph::ALL {
             let glyph_entity = entity.clone();
             let active = selected_glyph == Some(glyph);
@@ -698,12 +699,8 @@ impl ProjectIconPicker {
                     .items_center()
                     .justify_center()
                     .border_2()
-                    .border_color(if active {
-                        theme.selection_ring
-                    } else {
-                        theme.hairline
-                    })
-                    .hover(|style| style.bg(theme.row_hover))
+                    .border_color(if active { theme.text } else { theme.border })
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         glyph_entity.update(cx, |picker, cx| picker.select_glyph(glyph, cx));
                     })
@@ -736,7 +733,7 @@ impl ProjectIconPicker {
         div()
             .flex()
             .flex_col()
-            .gap(px(theme.cosmic.spacing.s as f32))
+            .gap(px(BezelTheme::SPACE_LG))
             .child(grid)
             .child(controls::row("Colour", None, tint_picker, theme))
             .child(controls::action_row(
@@ -756,11 +753,11 @@ impl ProjectIconPicker {
             .track_focus(&self.emoji_focus)
             .w(px(96.0))
             .min_h(px(32.0))
-            .px(px(theme.cosmic.spacing.xs as f32))
+            .px(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .text_size(theme.typography.headline)
             .flex()
             .items_center()
@@ -777,7 +774,7 @@ impl ProjectIconPicker {
             .child(
                 div()
                     .debug_selector(|| "project-icon-emoji-caret".into())
-                    .child(caret::bar(px(18.0), theme.caret, self.emoji_caret_visible)),
+                    .child(caret::bar(px(18.0), theme.text, self.emoji_caret_visible)),
             );
 
         let commit_entity = entity.clone();
@@ -786,12 +783,12 @@ impl ProjectIconPicker {
         let mut column = div()
             .flex()
             .flex_col()
-            .gap(px(theme.cosmic.spacing.s as f32))
+            .gap(px(BezelTheme::SPACE_LG))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(theme.cosmic.spacing.xs as f32))
+                    .gap(px(BezelTheme::SPACE_MD))
                     .child(field)
                     .child(controls::button(
                         "project-icon-emoji-set",
@@ -818,7 +815,7 @@ impl ProjectIconPicker {
                     .id("project-icon-emoji-error")
                     .debug_selector(|| "project-icon-emoji-error".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .child(text!(id = "project-icon-emoji-error-text", error.clone())),
             );
         }
@@ -850,7 +847,7 @@ impl ProjectIconPicker {
         let mut grid = div()
             .flex()
             .flex_wrap()
-            .gap(px(theme.cosmic.spacing.xxs as f32));
+            .gap(px(BezelTheme::SPACE_SM));
         for emoji in &matches {
             let emoji = *emoji;
             let pick_entity = entity.clone();
@@ -866,7 +863,7 @@ impl ProjectIconPicker {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.headline)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_: &ClickEvent, _, cx| {
                         pick_entity.update(cx, |picker, cx| picker.pick_emoji_from_grid(emoji, cx));
                     })
@@ -877,7 +874,7 @@ impl ProjectIconPicker {
             grid = grid.child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("No matching emoji."),
             );
         }
@@ -886,20 +883,20 @@ impl ProjectIconPicker {
             .id("project-icon-emoji-grid")
             .debug_selector(|| "project-icon-emoji-grid".into())
             .w_full()
-            .p(px(theme.cosmic.spacing.xs as f32))
+            .p(px(BezelTheme::SPACE_MD))
             .flex()
             .flex_col()
-            .gap(px(theme.cosmic.spacing.xs as f32))
+            .gap(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(theme.cosmic.spacing.xs as f32))
+                    .gap(px(BezelTheme::SPACE_MD))
                     .child(
                         div()
                             .id("project-icon-emoji-grid-query")
@@ -907,18 +904,18 @@ impl ProjectIconPicker {
                             .track_focus(&self.emoji_grid_focus)
                             .flex_1()
                             .min_h(px(28.0))
-                            .px(px(theme.cosmic.spacing.xs as f32))
+                            .px(px(BezelTheme::SPACE_MD))
                             .flex()
                             .items_center()
                             .rounded(theme.radii.control)
-                            .bg(theme.filter_field_bg)
+                            .bg(theme.input_bg)
                             .border_1()
-                            .border_color(theme.hairline)
+                            .border_color(theme.border)
                             .text_size(theme.typography.footnote)
                             .text_color(if self.emoji_grid_query.is_empty() {
-                                theme.meta
+                                theme.text_faint
                             } else {
-                                theme.title
+                                theme.text
                             })
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 query_focus_entity.update(cx, |picker, cx| {
@@ -937,12 +934,10 @@ impl ProjectIconPicker {
                             })
                             .child(
                                 div()
-                                    .debug_selector(|| {
-                                        "project-icon-emoji-grid-caret".into()
-                                    })
+                                    .debug_selector(|| "project-icon-emoji-grid-caret".into())
                                     .child(caret::bar(
                                         px(14.0),
-                                        theme.caret,
+                                        theme.text,
                                         self.emoji_grid_caret_visible,
                                     )),
                             ),
@@ -953,8 +948,8 @@ impl ProjectIconPicker {
                             .debug_selector(|| "project-icon-emoji-grid-close".into())
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.meta)
-                            .hover(|style| style.bg(theme.row_hover))
+                            .text_color(theme.text_faint)
+                            .hover(|style| style.bg(theme.element_hover))
                             .on_click(move |_, _, cx| {
                                 close_entity.update(cx, |picker, cx| picker.close_emoji_grid(cx));
                             })
@@ -965,7 +960,6 @@ impl ProjectIconPicker {
     }
 
     fn render_avatar_mode(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
-        let spacing = theme.cosmic.spacing;
         let choose_entity = entity.clone();
         let current_avatar_label = match &self.value.value {
             ProjectIconValue::Avatar(AvatarSource::LocalPng(path)) => Some(format!(
@@ -987,7 +981,7 @@ impl ProjectIconPicker {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(spacing.s as f32))
+                .gap(px(BezelTheme::SPACE_LG))
                 .child(controls::action_row(
                     controls::button(
                         "project-icon-choose-png",
@@ -1007,7 +1001,7 @@ impl ProjectIconPicker {
                     .id("project-icon-png-error")
                     .debug_selector(|| "project-icon-png-error".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .child(text!(id = "project-icon-png-error-text", error.clone())),
             );
         }
@@ -1062,7 +1056,7 @@ impl ProjectIconPicker {
                     .id("project-icon-avatar-current")
                     .debug_selector(|| "project-icon-avatar-current".into())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(id = "project-icon-avatar-current-text", label)),
             );
         }
@@ -1094,9 +1088,9 @@ impl ProjectIconPicker {
             draft.to_string()
         };
         let text_color = if draft.is_empty() {
-            theme.subtitle
+            theme.text_muted
         } else {
-            theme.title
+            theme.text
         };
 
         let field = div()
@@ -1105,11 +1099,11 @@ impl ProjectIconPicker {
             .track_focus(focus)
             .w(px(220.0))
             .min_h(px(32.0))
-            .px(px(theme.cosmic.spacing.xs as f32))
+            .px(px(BezelTheme::SPACE_MD))
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .text_size(theme.typography.callout)
             .text_color(text_color)
             .flex()
@@ -1125,13 +1119,13 @@ impl ProjectIconPicker {
                 let caret_id = format!("project-icon-{id_prefix}-caret");
                 div()
                     .debug_selector(move || caret_id.clone())
-                    .child(caret::bar(px(16.0), theme.caret, caret_visible))
+                    .child(caret::bar(px(16.0), theme.text, caret_visible))
             });
 
         let mut row = div()
             .flex()
             .items_center()
-            .gap(px(theme.cosmic.spacing.xs as f32))
+            .gap(px(BezelTheme::SPACE_MD))
             .child(field)
             .child(controls::button(
                 button_label,
@@ -1149,7 +1143,7 @@ impl ProjectIconPicker {
                     .id(error_id.clone())
                     .debug_selector(move || error_id.clone())
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.diff_deletion)
+                    .text_color(theme.diff_del)
                     .child(message.clone()),
             );
         }
@@ -1203,7 +1197,7 @@ impl Render for ProjectIconPicker {
         controls::card(theme)
             .child(controls::row("Project icon", None, mode_switch, theme))
             .child(controls::separator(theme))
-            .child(div().p(px(theme.cosmic.spacing.s as f32)).child(body))
+            .child(div().p(px(BezelTheme::SPACE_LG)).child(body))
     }
 }
 
@@ -1744,9 +1738,7 @@ mod tests {
     /// `on_*_key`, and not one of them drew an insertion bar — across all
     /// three modes. The caret follows focus, so exactly one is ever lit.
     #[gpui::test]
-    async fn every_identity_text_field_draws_a_caret_while_it_holds_focus(
-        cx: &mut TestAppContext,
-    ) {
+    async fn every_identity_text_field_draws_a_caret_while_it_holds_focus(cx: &mut TestAppContext) {
         let (picker, _captured, cx) = picker_view_with_capture(cx);
         picker.update(cx, |picker, cx| picker.set_mode(1, cx));
         refresh_frame(cx);

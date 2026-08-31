@@ -49,7 +49,9 @@ use sirio_ui::{
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize},
     },
-    status_bar::{StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData},
+    status_bar::{
+        StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
+    },
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
@@ -3272,12 +3274,34 @@ fn settings_category_id(category: SettingsCategory) -> String {
     category.title().to_ascii_lowercase().replace(' ', "-")
 }
 
-fn theme_mode_name(mode: ThemeMode) -> &'static str {
+/// The persisted appearance for a selected theme mode.
+///
+/// Both enums are `System`/`Light`/`Dark`, but they belong to different
+/// crates — `ThemeMode` is bezel's, re-exported by `sirio_theme`, and
+/// `AppearanceMode` is `sirio_persistence`'s, which carries the serde
+/// contract with existing databases. `sirio` is the only crate that depends
+/// on both, so this pair is the single conversion point; it used to be two
+/// `match` blocks written out separately inside the settings converters.
+fn persisted_appearance(mode: ThemeMode) -> AppearanceMode {
     match mode {
-        ThemeMode::System => "system",
-        ThemeMode::Light => "light",
-        ThemeMode::Dark => "dark",
+        ThemeMode::System => AppearanceMode::System,
+        ThemeMode::Light => AppearanceMode::Light,
+        ThemeMode::Dark => AppearanceMode::Dark,
     }
+}
+
+fn theme_mode(appearance: AppearanceMode) -> ThemeMode {
+    match appearance {
+        AppearanceMode::System => ThemeMode::System,
+        AppearanceMode::Light => ThemeMode::Light,
+        AppearanceMode::Dark => ThemeMode::Dark,
+    }
+}
+
+/// Reads the mode's name through the persisted enum, so the string this shows
+/// cannot drift from the string the database stores.
+fn theme_mode_name(mode: ThemeMode) -> &'static str {
+    persisted_appearance(mode).raw()
 }
 
 fn tab_has_file(tab: &OpenTab) -> bool {
@@ -3435,7 +3459,7 @@ struct WorktreeActivity {
     ///
     /// This used to be a `settings::AgentAccentColor`, i.e. one of the eight
     /// *semantic theme tokens* the agent-colour picker offers, and Claude's
-    /// entry there is `Amber` — `theme.tab_needs_input`. A running Claude
+    /// entry there is `Amber` — `theme.warning`. A running Claude
     /// worktree therefore painted the byte-identical colour as one that
     /// needed input. `sirio_theme::AgentBrandColor` is a separate table for
     /// a separate job, which is also how the reference keeps them apart:
@@ -4639,7 +4663,8 @@ impl SirioWorkspace {
         // flag gates the install). A Dev build has no interval and this
         // task exits immediately — the compiled channel already surfaced
         // `Disabled` in the initial state.
-        let Some(interval) = sirio_update::poll_interval(sirio_control::ReleaseChannel::RELEASE_CHANNEL)
+        let Some(interval) =
+            sirio_update::poll_interval(sirio_control::ReleaseChannel::RELEASE_CHANNEL)
         else {
             return;
         };
@@ -4652,9 +4677,7 @@ impl SirioWorkspace {
                     // Opt-out: no polling, no network. Re-check the flag
                     // cheaply; `next_due` is left untouched so re-enabling
                     // makes the next tick due immediately.
-                    cx.background_executor()
-                        .timer(Duration::from_secs(1))
-                        .await;
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     continue;
                 }
                 let now = Instant::now();
@@ -4694,10 +4717,7 @@ impl SirioWorkspace {
                 if !update_wake.swap(false, Ordering::SeqCst) {
                     continue;
                 }
-                let outcome = update_outcomes
-                    .lock()
-                    .ok()
-                    .and_then(|mut slot| slot.take());
+                let outcome = update_outcomes.lock().ok().and_then(|mut slot| slot.take());
                 let Some(outcome) = outcome else {
                     continue;
                 };
@@ -4724,11 +4744,7 @@ impl SirioWorkspace {
     /// both surfaces (§4.1: check results propagate live). An outcome that
     /// arrives after the user opted out mid-flight is dropped: disabling
     /// updates must suppress downloads and indicator changes immediately.
-    fn apply_update_outcome(
-        &mut self,
-        outcome: UpdateHostOutcome,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_update_outcome(&mut self, outcome: UpdateHostOutcome, cx: &mut Context<Self>) {
         if !self.updates_enabled.load(Ordering::SeqCst) {
             return;
         }
@@ -4749,21 +4765,14 @@ impl SirioWorkspace {
                     | Err(_) => {}
                 }
                 let previous = self.live_update_state.clone();
-                let checked_at = self
-                    .updater
-                    .as_ref()
-                    .and_then(|updater| {
-                        updater
-                            .lock()
-                            .ok()
-                            .and_then(|updater| updater.last_checked_at())
-                    });
-                let next = ui_update_state_from_check(
-                    &previous,
-                    result,
-                    checked_at,
-                    SystemTime::now(),
-                );
+                let checked_at = self.updater.as_ref().and_then(|updater| {
+                    updater
+                        .lock()
+                        .ok()
+                        .and_then(|updater| updater.last_checked_at())
+                });
+                let next =
+                    ui_update_state_from_check(&previous, result, checked_at, SystemTime::now());
                 self.push_update_state(next, cx);
             }
             UpdateHostOutcome::Download(Ok(sirio_update::DownloadResult::Ready(verified))) => {
@@ -4795,16 +4804,12 @@ impl SirioWorkspace {
                 // and the staged file stays put for a same-version retry.
                 self.last_verified = Some(update.clone());
                 self.show_toast(
-                    format!(
-                        "Sirio {} applied — relaunch to use it",
-                        update.version
-                    ),
+                    format!("Sirio {} applied — relaunch to use it", update.version),
                     cx,
                 );
             }
             UpdateHostOutcome::Apply {
-                result: Err(error),
-                ..
+                result: Err(error), ..
             } => {
                 let mut next = self.live_update_state.clone();
                 next.status = UiUpdateStatus::Failed {
@@ -4839,9 +4844,10 @@ impl SirioWorkspace {
                 cx.spawn(async move |_this, cx| {
                     let result = cx
                         .background_executor()
-                        .spawn({ let verified = verified.clone(); async move {
-                            sirio_apply::apply(&verified)
-                        } })
+                        .spawn({
+                            let verified = verified.clone();
+                            async move { sirio_apply::apply(&verified) }
+                        })
                         .await;
                     if let Ok(mut slot) = outcomes.lock() {
                         *slot = Some(UpdateHostOutcome::Apply {
@@ -10361,16 +10367,16 @@ impl SirioWorkspace {
                         .items_center()
                         .justify_center()
                         .gap(theme.spacing.card_gap)
-                        .text_color(theme.meta)
+                        .text_color(theme.text_faint)
                         .child(
                             IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                                .text_color(theme.meta),
+                                .text_color(theme.text_faint),
                         )
                         .child(
                             div()
                                 .text_size(theme.typography.headline)
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .child("No Terminals"),
                         )
                         .child("Open a new terminal to get started.")
@@ -10382,10 +10388,10 @@ impl SirioWorkspace {
                                 .px(theme.spacing.card_gap)
                                 .py(theme.spacing.titlebar_control_spacing)
                                 .rounded(theme.radii.control)
-                                .bg(theme.tab_focus_accent)
+                                .bg(theme.solid)
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.canvas)
-                                .hover(|style| style.bg(theme.accent))
+                                .text_color(theme.on_solid)
+                                .hover(|style| style.opacity(0.9))
                                 .on_click(move |_, _, cx| {
                                     new_terminal_entity.update(cx, |workspace, cx| {
                                         workspace.add_terminal_tab("Terminal", cx);
@@ -10418,7 +10424,7 @@ impl SirioWorkspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(theme.meta)
+                        .text_color(theme.text_faint)
                         .child("No tabs in this pane")
                         .into_any_element()
                 }
@@ -10427,7 +10433,7 @@ impl SirioWorkspace {
             .flex()
             .flex_row()
             .size_full()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(surface)
             .into_any_element()
     }
@@ -10471,7 +10477,7 @@ impl SirioWorkspace {
         // `AgentIcon` view that every one of those three places draws, so a
         // mark looks the same wherever it appears. This port had drifted
         // into three different tints for the same mark, and the badge's was
-        // `theme.tab_focus_accent` — a coral close enough to Claude's brand to
+        // `theme.text` — a coral close enough to Claude's brand to
         // read as it — so a Codex mark was painted in Claude's colour.
         //
         // This is a deliberate, narrow divergence from a literal port:
@@ -10483,15 +10489,11 @@ impl SirioWorkspace {
         // it — `Icon::is_chromatic`, omp's gradient — exactly as `OmpShape`
         // ignores any inherited tint.
         let glyph_color = if icon.is_agent_mark() {
-            agent.map_or(theme.title, |agent| agent.brand.color())
+            agent.map_or(theme.text, |agent| agent.brand.color())
         } else if tab.kind == TabKind::AgentChat {
-            if is_file {
-                theme.file_link
-            } else {
-                theme.tab_focus_accent
-            }
+            if is_file { theme.file_link } else { theme.text }
         } else {
-            theme.meta
+            theme.text_faint
         };
         let width = Self::tab_render_width(tab);
         let close_entity = entity.clone();
@@ -10519,12 +10521,8 @@ impl SirioWorkspace {
             .overflow_hidden()
             .rounded_t(px(6.0))
             .text_size(px(13.0))
-            .text_color(if active {
-                theme.title_selected
-            } else {
-                theme.subtitle
-            })
-            .hover(|style| style.bg(theme.row_hover))
+            .text_color(if active { theme.text } else { theme.text_muted })
+            .hover(|style| style.bg(theme.element_hover))
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
             // the same point sidebar.rs's own drag resets `pending_reorder`
             // at. Snapshot the pre-drag tab order here so Escape has
@@ -10604,8 +10602,8 @@ impl SirioWorkspace {
                         .min_w_0()
                         .px(theme.spacing.titlebar_control_spacing)
                         .rounded(theme.radii.control)
-                        .bg(theme.filter_field_bg)
-                        .text_color(theme.title)
+                        .bg(theme.input_bg)
+                        .text_color(theme.text)
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             focus_for_click.focus(window, cx);
                         })
@@ -10623,7 +10621,7 @@ impl SirioWorkspace {
                                 .debug_selector(|| "tab-rename-caret".to_owned())
                                 .child(sirio_ui::caret::bar(
                                     px(14.0),
-                                    theme.caret,
+                                    theme.text,
                                     rename_caret_visible,
                                 )),
                         ),
@@ -10656,7 +10654,7 @@ impl SirioWorkspace {
                                 .id(format!("workspace-tab-exit-{id}"))
                                 .debug_selector(move || format!("workspace-tab-exit-{id}"))
                                 .text_size(px(10.0))
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .child(label),
                         )
                     }),
@@ -10673,8 +10671,8 @@ impl SirioWorkspace {
                         .items_center()
                         .justify_center()
                         .text_size(px(14.0))
-                        .text_color(theme.subtitle)
-                        .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
+                        .text_color(theme.text_muted)
+                        .hover(|style| style.bg(theme.element_hover).rounded(px(4.0)))
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             close_entity.update(cx, |this, cx| {
@@ -10683,7 +10681,7 @@ impl SirioWorkspace {
                         })
                         .child(
                             IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.subtitle),
+                                .text_color(theme.text_muted),
                         ),
                 )
             })
@@ -10696,10 +10694,10 @@ impl SirioWorkspace {
                         .h(theme.spacing.titlebar_control_spacing)
                         .flex_none()
                         .rounded(theme.radii.control)
-                        .bg(theme.tab_focus_accent),
+                        .bg(theme.text),
                 )
             })
-            .when(active, |this| this.bg(theme.selected_fill))
+            .when(active, |this| this.bg(theme.element_active))
             .when(active && pane_focused, |this| {
                 this.child(
                     div()
@@ -10708,7 +10706,7 @@ impl SirioWorkspace {
                         .left_0()
                         .right_0()
                         .h(px(2.0))
-                        .bg(theme.tab_focus_accent),
+                        .bg(theme.text),
                 )
             })
     }
@@ -10731,14 +10729,14 @@ impl SirioWorkspace {
             .items_center()
             .justify_center()
             .rounded(theme.radii.control)
-            .text_color(theme.meta)
-            .hover(|style| style.bg(theme.row_hover))
+            .text_color(theme.text_faint)
+            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| {
                 entity.update(cx, |workspace, cx| {
                     workspace.close_secondary_pane_tabs(window, cx);
                 });
             })
-            .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.meta))
+            .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text_faint))
     }
 
     /// Closes every Secondary tab, one real close each — the same path a tab's
@@ -11534,8 +11532,8 @@ impl SirioWorkspace {
             .gap(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |workspace, cx| {
@@ -11564,8 +11562,8 @@ impl SirioWorkspace {
                 .gap(theme.spacing.titlebar_control_spacing)
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.footnote)
-                .text_color(if active { theme.title } else { theme.subtitle })
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(if active { theme.text } else { theme.text_muted })
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, window, cx| {
                     select_entity.update(cx, |workspace, cx| {
                         workspace.select_tab(id, Some(window), cx);
@@ -11585,7 +11583,7 @@ impl SirioWorkspace {
                         div()
                             .id(selected_selector.clone())
                             .debug_selector(move || selected_selector.clone())
-                            .text_color(theme.tab_focus_accent)
+                            .text_color(theme.text)
                             .child("✓"),
                     )
                 });
@@ -11642,7 +11640,7 @@ impl SirioWorkspace {
             .flex()
             .items_start()
             .gap(px(1.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             // F-TAB-24: a real drop commits the reorder that
             // `preview_tab_reorder` already applied live during hover --
             // this just clears the pre-drag snapshot so a later, unrelated
@@ -11712,8 +11710,8 @@ impl SirioWorkspace {
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .text_color(theme.meta)
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(theme.text_faint)
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     overflow_entity.update(cx, |workspace, cx| {
                         workspace.overflow_menu_open = !workspace.overflow_menu_open;
@@ -11722,7 +11720,8 @@ impl SirioWorkspace {
                     });
                 })
                 .child(
-                    IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.meta),
+                    IconElement::new(Icon::ChevronDown, IconSize::XSmall)
+                        .text_color(theme.text_faint),
                 );
             tabs = tabs.child(overflow_button);
             if self.overflow_menu_open {
@@ -11778,9 +11777,9 @@ impl SirioWorkspace {
                                 .px(px(8.0))
                                 .flex()
                                 .items_center()
-                                .bg(theme.background)
+                                .bg(theme.surface)
                                 .text_size(px(14.0))
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .child(self.terminal_breadcrumb.clone()),
                         )
                     })
@@ -11797,16 +11796,16 @@ impl SirioWorkspace {
                 .items_center()
                 .justify_center()
                 .gap(theme.spacing.card_gap)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(
                     IconElement::new(Icon::SquareTerminal, IconSize::Custom(px(32.0)))
-                        .text_color(theme.meta),
+                        .text_color(theme.text_faint),
                 )
                 .child(
                     div()
                         .text_size(theme.typography.headline)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .child("No worktree selected"),
                 )
                 .child("Add a project, then select a worktree.")
@@ -13078,19 +13077,15 @@ impl SirioWorkspace {
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.footnote)
                     .text_color(if entry.is_enabled() {
-                        if active {
-                            theme.title_selected
-                        } else {
-                            theme.title
-                        }
+                        if active { theme.text } else { theme.text }
                     } else {
-                        theme.meta
+                        theme.text_faint
                     })
                     .when(active && entry.is_enabled(), |this| {
-                        this.bg(theme.selected_fill)
+                        this.bg(theme.element_active)
                     })
                     .when(entry.is_enabled(), move |this| {
-                        this.hover(|style| style.bg(theme.row_hover)).on_click(
+                        this.hover(|style| style.bg(theme.element_hover)).on_click(
                             move |_, window, cx| {
                                 entity.update(cx, |workspace, cx| {
                                     workspace.dispatch_palette_command(entry.command, window, cx)
@@ -13104,7 +13099,7 @@ impl SirioWorkspace {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .text_color(theme.meta)
+                            .text_color(theme.text_faint)
                             .child(entry.shortcut.unwrap_or(""))
                             .when_some(entry.disabled_reason, |this, reason| {
                                 this.child(
@@ -13135,7 +13130,7 @@ impl SirioWorkspace {
                 .flex()
                 .items_center()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child(EMPTY_RESULT_LABEL)
                 .into_any_element()
         } else {
@@ -13168,8 +13163,8 @@ impl SirioWorkspace {
             .p(px(8.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .shadow_lg()
             .child(
                 div()
@@ -13181,14 +13176,14 @@ impl SirioWorkspace {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
-                    .border_color(theme.selection_ring)
+                    .border_color(theme.text)
                     .text_size(theme.typography.headline)
                     .text_color(if query.is_empty() {
-                        theme.meta
+                        theme.text_faint
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .child(if query.is_empty() {
                         "Type to filter commands".to_owned()
@@ -13202,7 +13197,7 @@ impl SirioWorkspace {
                             .debug_selector(|| "command-palette-caret".to_owned())
                             .child(sirio_ui::caret::bar(
                                 px(18.0),
-                                theme.caret,
+                                theme.text,
                                 self.palette_caret_visible,
                             )),
                     ),
@@ -13213,7 +13208,7 @@ impl SirioWorkspace {
                     .mb(px(5.0))
                     .px(px(10.0))
                     .text_size(theme.typography.caption2)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child("Commands · substring filter"),
             )
             .child(div().flex_1().child(body))
@@ -13240,11 +13235,11 @@ impl SirioWorkspace {
                 .py(px(10.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.hairline)
-                .bg(theme.card_fill)
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
                 .shadow_lg()
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     dismiss_entity.update(cx, |workspace, cx| workspace.dismiss_toast(cx));
                 })
@@ -13267,7 +13262,7 @@ impl SirioWorkspace {
             match &self.update_state {
                 UpdateState::Idle => return None,
                 UpdateState::Checking => {
-                    ("Checking for updates…".to_string(), None, theme.subtitle)
+                    ("Checking for updates…".to_string(), None, theme.text_muted)
                 }
                 // An available update is the one state waiting on the reader,
                 // so it is the one state that spends a colour. Checking,
@@ -13275,19 +13270,21 @@ impl SirioWorkspace {
                 UpdateState::Available { version } => (
                     format!("Sirio {version} is available"),
                     Some("Download"),
-                    theme.tab_needs_input,
+                    theme.warning,
                 ),
                 UpdateState::Downloading { progress_percent } => (
                     format!("Downloading Sirio… {progress_percent}%"),
                     None,
-                    theme.subtitle,
+                    theme.text_muted,
                 ),
-                UpdateState::Installing => ("Installing update…".to_string(), None, theme.subtitle),
-                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.tab_done),
+                UpdateState::Installing => {
+                    ("Installing update…".to_string(), None, theme.text_muted)
+                }
+                UpdateState::UpToDate => ("Sirio is up to date".to_string(), None, theme.success),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
                     Some("Retry"),
-                    theme.tab_error,
+                    theme.danger,
                 ),
             };
         let progress_percent = match &self.update_state {
@@ -13310,8 +13307,8 @@ impl SirioWorkspace {
                 .py(px(10.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.hairline)
-                .bg(theme.card_fill)
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
                 .shadow_lg()
                 .child(
                     div()
@@ -13333,7 +13330,7 @@ impl SirioWorkspace {
                                 .id("update-toast-dismiss")
                                 .debug_selector(|| "update-toast-dismiss".to_owned())
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .cursor_pointer()
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     dismiss_entity.update(cx, |workspace, cx| {
@@ -13351,13 +13348,13 @@ impl SirioWorkspace {
                             .w_full()
                             .h(px(5.0))
                             .rounded(px(3.0))
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.surface_raised)
                             .child(
                                 div()
                                     .h(px(5.0))
                                     .rounded(px(3.0))
                                     // A bar filling up is a quantity, not a status.
-                                    .bg(theme.gauge)
+                                    .bg(theme.accent)
                                     .w(px(280.0 * (progress_percent as f32 / 100.0))),
                             ),
                     )
@@ -13368,7 +13365,7 @@ impl SirioWorkspace {
                             .id("update-toast-action")
                             .debug_selector(|| "update-toast-action".to_owned())
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                             .child(label),
                     )
                 })
@@ -14884,11 +14881,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         };
 
     SettingsSnapshot {
-        theme: match settings.appearance {
-            AppearanceMode::System => ThemeMode::System,
-            AppearanceMode::Light => ThemeMode::Light,
-            AppearanceMode::Dark => ThemeMode::Dark,
-        },
+        theme: theme_mode(settings.appearance),
         interface_font_size: settings.ui_font_size.clamp(10, 20) as i32,
         terminal_font_size: settings.terminal_font_size.clamp(9, 24) as i32,
         file_icons: match settings.file_icon_theme {
@@ -14921,11 +14914,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
 
 fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
     AppSettings {
-        appearance: match snapshot.theme {
-            ThemeMode::System => AppearanceMode::System,
-            ThemeMode::Light => AppearanceMode::Light,
-            ThemeMode::Dark => AppearanceMode::Dark,
-        },
+        appearance: persisted_appearance(snapshot.theme),
         ui_font_size: i64::from(snapshot.interface_font_size.clamp(10, 20)),
         terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(9, 24)),
         file_icon_theme: match snapshot.file_icons {
@@ -14962,9 +14951,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
 }
 
 fn format_update_check_age(now: SystemTime, checked_at: SystemTime) -> String {
-    let age = now
-        .duration_since(checked_at)
-        .unwrap_or(Duration::ZERO);
+    let age = now.duration_since(checked_at).unwrap_or(Duration::ZERO);
     if age < Duration::from_secs(60) {
         "just now".into()
     } else if age < Duration::from_secs(60 * 60) {
@@ -15146,25 +15133,24 @@ fn app_icon() -> Arc<image::RgbaImage> {
     Arc::new(image)
 }
 
-/// Registers the bundled Geist and Geist Mono faces with the text system.
-/// Windows and Linux only — macOS is the reference release platform and
-/// keeps SF Pro / SF Mono, so this never runs there.
+/// Registers bezel's bundled Geist faces with the text system, on every
+/// platform. Sirio used to carry its own copies in `assets/fonts` and skip
+/// macOS, which kept SF Pro there; B3 makes one face the face everywhere, and
+/// bezel's copies include the 500/600/700 statics Sirio's never had.
 ///
 /// Must run before [`Theme::init`]: `Theme::install` resolves and caches
 /// `UI_FAMILY`/`CODE_FAMILY` from `TextSystem::all_font_names()` on its
 /// first call, so a font registered afterwards would never be seen and the
 /// resolution would fall through to the JetBrains chain for the rest of the
 /// process's life.
-#[cfg(not(target_os = "macos"))]
+///
+/// Not covered by a test, and not for want of trying: under `TestAppContext`
+/// gpui installs a stub text system that answers `add_fonts` with `Ok(())`
+/// and then omits the added families from `all_font_names()`, so a test can
+/// neither see this succeed nor see it fail. A missing registration shows up
+/// as fallback or blank glyphs at runtime and nowhere earlier.
 fn register_fonts(cx: &App) {
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
-        std::borrow::Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Regular.ttf")),
-        std::borrow::Cow::Borrowed(include_bytes!("../../../assets/fonts/Geist-Medium.ttf")),
-        std::borrow::Cow::Borrowed(include_bytes!(
-            "../../../assets/fonts/GeistMono-Regular.ttf"
-        )),
-    ];
-    if let Err(error) = cx.text_system().add_fonts(fonts) {
+    if let Err(error) = bezel::ui::register_fonts(cx) {
         eprintln!("[fonts] failed to register Geist: {error}");
     }
 }
@@ -15211,7 +15197,6 @@ fn main() {
     application().run(|cx: &mut App| {
         // Must land before `Theme::init` — see `register_fonts`'s own doc
         // comment for why the order is load-bearing.
-        #[cfg(not(target_os = "macos"))]
         register_fonts(cx);
         Theme::init(cx);
 
@@ -15368,8 +15353,7 @@ fn main() {
             accepted_release_keys(),
         )));
         let updates_enabled = Arc::new(AtomicBool::new(saved_settings.updates_enabled));
-        let update_outcomes =
-            Arc::new(Mutex::new(None::<UpdateHostOutcome>));
+        let update_outcomes = Arc::new(Mutex::new(None::<UpdateHostOutcome>));
         let update_wake = Arc::new(AtomicBool::new(false));
         // F-PERSIST-DB-06: the account-identity cache lives in the same
         // database file the session store already opened above.
@@ -15528,8 +15512,7 @@ fn main() {
                         .on_update_enabled_change({
                             let pending = pending_for_update_enabled.clone();
                             move |enabled| {
-                                let mut settings =
-                                    session_store_for_update_enabled.load_settings();
+                                let mut settings = session_store_for_update_enabled.load_settings();
                                 settings.updates_enabled = enabled;
                                 session_store_for_update_enabled.save_settings(&settings);
                                 // The live half (indicator, polling gate)
@@ -15771,6 +15754,24 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
+
+    /// The persisted appearance and the theme's own mode round-trip.
+    ///
+    /// There used to be four `System`/`Light`/`Dark` enums — the persisted
+    /// one, bezel's, `sirio_theme`'s and a dead one in `sirio_project`. Two
+    /// remain, and `sirio` is the only crate that sees both, so this pair of
+    /// functions is the whole conversion. A gap here is a setting that
+    /// silently reverts to System on restart, which no other test would show.
+    #[test]
+    fn the_persisted_appearance_and_the_theme_mode_round_trip() {
+        for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+            assert_eq!(theme_mode(persisted_appearance(mode)), mode);
+        }
+        // The stored strings are a serde contract with existing databases.
+        assert_eq!(theme_mode_name(ThemeMode::System), "system");
+        assert_eq!(theme_mode_name(ThemeMode::Light), "light");
+        assert_eq!(theme_mode_name(ThemeMode::Dark), "dark");
+    }
 
     /// The defect this pins: `on_window_should_close` minimized and then
     /// vetoed the close on *every* platform, so #290's new Windows `×`
@@ -16239,10 +16240,7 @@ mod tests {
         let scratch_root = std::env::temp_dir()
             .canonicalize()
             .expect("canonicalize temp dir")
-            .join(format!(
-                "sirio-update-host-{}-{unique}",
-                std::process::id()
-            ));
+            .join(format!("sirio-update-host-{}-{unique}", std::process::id()));
         let working_directory = scratch_root.join("worktree");
         std::fs::create_dir_all(&working_directory).expect("create update host worktree");
         let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
@@ -19122,7 +19120,7 @@ mod tests {
         let theme = Theme::dark();
         assert_ne!(
             AgentBrandColor::for_agent_id("claude").color(),
-            theme.tab_needs_input,
+            theme.warning,
             "running Claude and needs-input used to be the identical #E0B36A"
         );
         for (id, brand) in [
@@ -19138,7 +19136,7 @@ mod tests {
             assert_eq!(mark.icon, Icon::for_agent_id(id).expect("catalog icon"));
             assert_ne!(
                 mark.brand.color(),
-                theme.tab_focus_accent,
+                theme.text,
                 "{id}'s mark used to be tinted tab_focus_accent -- Claude's own coral"
             );
         }
@@ -21374,7 +21372,7 @@ mod tests {
                  (the spec's opaque-fallback rule)"
             );
             assert_eq!(
-                theme.panel_surface.a, 1.0,
+                theme.surface.a, 1.0,
                 "an unfaded theme keeps its opaque panels"
             );
         });
@@ -21385,7 +21383,7 @@ mod tests {
                 !theme.translucency_enabled,
                 "a mode-switch reinstall must not invent translucency"
             );
-            assert_eq!(theme.panel_surface.a, 1.0);
+            assert_eq!(theme.surface.a, 1.0);
         });
     }
 
@@ -21765,9 +21763,10 @@ mod tests {
         // `xdg_data_home_for` to accept it (Windows has no `/` root), so
         // point it at the temp dir rather than a unix-only literal.
         let root = std::env::temp_dir();
-        let environment = BTreeMap::from([
-            ("XDG_DATA_HOME".to_string(), root.to_string_lossy().into_owned()),
-        ]);
+        let environment = BTreeMap::from([(
+            "XDG_DATA_HOME".to_string(),
+            root.to_string_lossy().into_owned(),
+        )]);
         assert_eq!(
             update_staging_dir(&environment),
             root.join("Sirio").join("updates")
@@ -21777,9 +21776,7 @@ mod tests {
     /// A host check outcome reaches both surfaces that render it: the
     /// status-bar indicator and the General settings detail (§4.1).
     #[gpui::test]
-    async fn host_check_outcome_propagates_to_status_bar_and_settings(
-        cx: &mut TestAppContext,
-    ) {
+    async fn host_check_outcome_propagates_to_status_bar_and_settings(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -21796,41 +21793,39 @@ mod tests {
             notes: "Fixes".into(),
             artifact: test_manifest_artifact(),
         };
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(
-                    UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Available(
-                        available.clone(),
-                    ))),
-                    cx,
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Available(
+                    available.clone(),
+                ))),
+                cx,
+            );
+        });
 
-        workspace
-            .read_with(&cx.cx, |workspace, app| {
-                assert_eq!(
-                    workspace.live_update_state.status,
-                    UiUpdateStatus::Available {
-                        version: "0.7.0".into(),
-                        notes: "Fixes".into(),
-                    }
-                );
-                assert_eq!(
-                    workspace.status_bar.read(app).update_state().status,
-                    UiUpdateStatus::Available {
-                        version: "0.7.0".into(),
-                        notes: "Fixes".into(),
-                    }
-                );
-                assert_eq!(
-                    workspace.settings.read(app).update_state().status,
-                    UiUpdateStatus::Available {
-                        version: "0.7.0".into(),
-                        notes: "Fixes".into(),
-                    }
-                );
-                assert!(workspace.last_available.is_some());
-            });
+        workspace.read_with(&cx.cx, |workspace, app| {
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                }
+            );
+            assert_eq!(
+                workspace.status_bar.read(app).update_state().status,
+                UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                }
+            );
+            assert_eq!(
+                workspace.settings.read(app).update_state().status,
+                UiUpdateStatus::Available {
+                    version: "0.7.0".into(),
+                    notes: "Fixes".into(),
+                }
+            );
+            assert!(workspace.last_available.is_some());
+        });
     }
 
     /// Opt-out is a real off: the shared flag flips (stopping the poll
@@ -21838,9 +21833,7 @@ mod tests {
     /// and an outcome still in flight when the toggle lands is dropped
     /// rather than applied (§7.2).
     #[gpui::test]
-    async fn host_opt_out_hides_indicator_and_drops_in_flight_outcomes(
-        cx: &mut TestAppContext,
-    ) {
+    async fn host_opt_out_hides_indicator_and_drops_in_flight_outcomes(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -21852,38 +21845,32 @@ mod tests {
                 .expect("workspace root")
         });
 
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.set_updates_enabled(false, cx);
-                assert!(
-                    !workspace.updates_enabled.load(AtomicOrdering::SeqCst),
-                    "the poll loop's shared flag flips immediately"
-                );
-            });
-        workspace
-            .read_with(&cx.cx, |workspace, app| {
-                assert!(!workspace.live_update_state.enabled);
-                assert!(
-                    !workspace.status_bar.read(app).update_state().enabled,
-                    "the indicator surface stops drawing"
-                );
-                assert!(!workspace.settings.read(app).update_state().enabled);
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_updates_enabled(false, cx);
+            assert!(
+                !workspace.updates_enabled.load(AtomicOrdering::SeqCst),
+                "the poll loop's shared flag flips immediately"
+            );
+        });
+        workspace.read_with(&cx.cx, |workspace, app| {
+            assert!(!workspace.live_update_state.enabled);
+            assert!(
+                !workspace.status_bar.read(app).update_state().enabled,
+                "the indicator surface stops drawing"
+            );
+            assert!(!workspace.settings.read(app).update_state().enabled);
+        });
 
         // A check that finished just as the toggle landed must not change
         // any surface: updates are off, so nothing may repaint around them.
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(
-                    UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::UpToDate)),
-                    cx,
-                );
-                assert!(!workspace.live_update_state.enabled);
-                assert_eq!(
-                    workspace.live_update_state.status,
-                    UiUpdateStatus::NotDue
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::UpToDate)),
+                cx,
+            );
+            assert!(!workspace.live_update_state.enabled);
+            assert_eq!(workspace.live_update_state.status, UiUpdateStatus::NotDue);
+        });
     }
 
     /// The apply pipeline: a verified artifact is applied off the UI
@@ -21892,9 +21879,7 @@ mod tests {
     /// `InstallNotFound` — the one outcome this fixture can produce without
     /// touching a real install.
     #[gpui::test]
-    async fn host_apply_runs_verified_update_and_reports_the_outcome(
-        cx: &mut TestAppContext,
-    ) {
+    async fn host_apply_runs_verified_update_and_reports_the_outcome(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -21912,56 +21897,50 @@ mod tests {
             path: PathBuf::from("/tmp/sirio-update-0.7.0"),
             platform: "linux-x86_64".into(),
         };
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(
-                    UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Ready(
-                        verified.clone(),
-                    ))),
-                    cx,
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(
+                UpdateHostOutcome::Check(Ok(sirio_update::CheckResult::Ready(verified.clone()))),
+                cx,
+            );
+        });
 
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.begin_update_apply(cx);
-                assert_eq!(
-                    workspace.live_update_state.status,
-                    UiUpdateStatus::Checking,
-                    "the surfaces show activity while the pipeline runs"
-                );
-            });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.begin_update_apply(cx);
+            assert_eq!(
+                workspace.live_update_state.status,
+                UiUpdateStatus::Checking,
+                "the surfaces show activity while the pipeline runs"
+            );
+        });
         cx.run_until_parked();
 
         // No drain loop runs on a Dev-channel test build (the poll task
         // exits at attach), so the apply outcome waits in the shared slot
         // for the real process's loop. Drain it by hand, as that loop does.
-        let outcome = workspace
-            .read_with(&cx.cx, |workspace, _| {
-                workspace
-                    .update_outcomes
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                    .expect("the apply task parked its outcome")
-            });
-        workspace
-            .update(&mut cx.cx, |workspace, cx| {
-                workspace.apply_update_outcome(outcome, cx);
-                assert!(
-                    matches!(
-                        workspace.live_update_state.status,
-                        UiUpdateStatus::Failed { ref message }
-                            if message.contains("install directory the updater recognizes")
-                    ),
-                    "a refused apply reports itself: {:?}",
-                    workspace.live_update_state.status
-                );
-                assert!(
-                    workspace.toast.is_some(),
-                    "the refused apply raises a dismissible toast"
-                );
-            });
+        let outcome = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .update_outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("the apply task parked its outcome")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.apply_update_outcome(outcome, cx);
+            assert!(
+                matches!(
+                    workspace.live_update_state.status,
+                    UiUpdateStatus::Failed { ref message }
+                        if message.contains("install directory the updater recognizes")
+                ),
+                "a refused apply reports itself: {:?}",
+                workspace.live_update_state.status
+            );
+            assert!(
+                workspace.toast.is_some(),
+                "the refused apply raises a dismissible toast"
+            );
+        });
     }
 
     #[test]
@@ -24015,7 +23994,7 @@ mod tests {
         };
         assert_eq!(
             border_now(&mut cx),
-            Theme::dark().panel_focus_ring,
+            Theme::dark().text_muted,
             "keyboard focus inside the sidebar must brighten the enclosing shell panel's border"
         );
 
@@ -24035,7 +24014,7 @@ mod tests {
         );
         assert_eq!(
             border_now(&mut cx),
-            Theme::dark().panel_border,
+            Theme::dark().border_opaque,
             "a pointer click must drop the panel back to its resting border"
         );
         assert!(cx.debug_bounds("shell-left-panel").is_some());
@@ -24075,7 +24054,7 @@ mod tests {
         assert!(!shell_chrome::CENTER_PANEL_FOCUS_VISIBLE);
         assert_eq!(
             shell_chrome::panel_border(&Theme::dark(), shell_chrome::CENTER_PANEL_FOCUS_VISIBLE),
-            Theme::dark().panel_border,
+            Theme::dark().border_opaque,
             "the center panel keeps its resting border regardless"
         );
         assert!(cx.debug_bounds("shell-center-panel").is_some());

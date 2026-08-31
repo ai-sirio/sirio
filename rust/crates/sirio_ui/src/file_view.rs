@@ -670,14 +670,14 @@ impl FileView {
         div()
             .w_full()
             .border_b_1()
-            .border_color(theme.hairline)
+            .border_color(theme.border)
             .px(px(20.0))
             .py(px(10.0))
             .flex()
             .items_center()
             .gap(px(8.0))
             .text_size(theme.typography.footnote)
-            .text_color(theme.meta)
+            .text_color(theme.text_faint)
             // #214: rendered through the helper written for this, not
             // `Path::display`, which put a verbatim `\\?\` prefix on
             // screen. The prefix is stripped from the *string only* --
@@ -688,7 +688,7 @@ impl FileView {
                 this.child(
                     div()
                         .text_size(theme.typography.caption2)
-                        .text_color(theme.title)
+                        .text_color(theme.text)
                         .child("● edited"),
                 )
             })
@@ -698,8 +698,8 @@ impl FileView {
                         .px(px(6.0))
                         .py(px(1.0))
                         .rounded(theme.radii.chip)
-                        .bg(theme.raised)
-                        .text_color(theme.subtitle)
+                        .bg(theme.surface_raised)
+                        .text_color(theme.text_muted)
                         .child(language.unwrap_or_default()),
                 )
             })
@@ -731,7 +731,7 @@ impl FileView {
                 .items_center()
                 .justify_center()
                 .gap(theme.spacing.card_gap)
-                .text_color(theme.subtitle)
+                .text_color(theme.text_muted)
                 .child(loading::indeterminate(
                     "file-loading-orb",
                     loading::GENERIC_ORB,
@@ -855,7 +855,7 @@ impl Render for FileView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.chat_surface)
+            .bg(theme.surface)
             .child(self.render_header(theme, entity))
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
                 theme,
@@ -902,7 +902,7 @@ fn render_mode_switch(
         .gap(px(2.0))
         .p(px(2.0))
         .rounded(theme.radii.control)
-        .bg(theme.raised)
+        .bg(theme.surface_raised)
         .child(preview)
         .child(code)
 }
@@ -922,13 +922,9 @@ fn render_mode_option(
         .py(px(2.0))
         .rounded(theme.radii.chip)
         .text_size(theme.typography.caption2)
-        .text_color(if active {
-            theme.title_selected
-        } else {
-            theme.meta
-        })
-        .when(active, |this| this.bg(theme.selected_fill))
-        .hover(|style| style.bg(theme.row_hover))
+        .text_color(if active { theme.text } else { theme.text_faint })
+        .when(active, |this| this.bg(theme.element_active))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
         })
@@ -962,11 +958,11 @@ fn render_conflict_banner(
         .flex()
         .items_center()
         .gap(px(12.0))
-        .bg(theme.danger_soft)
+        .bg(theme.danger_muted)
         .border_b_1()
-        .border_color(theme.hairline)
+        .border_color(theme.border)
         .text_size(theme.typography.footnote)
-        .text_color(theme.title)
+        .text_color(theme.text)
         .child(div().flex_1().child(message))
         .when(conflict == Conflict::ChangedOnDisk, |this| {
             this.child(
@@ -976,7 +972,7 @@ fn render_conflict_banner(
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         let _ = reload_entity.update(cx, |view, cx| view.reload(cx));
                     })
@@ -989,7 +985,7 @@ fn render_conflict_banner(
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(theme.radii.control)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         keep_entity.update(cx, |view, cx| view.keep(cx));
                     })
@@ -1017,8 +1013,8 @@ fn render_markdown_toolbar(
         .items_center()
         .gap(theme.spacing.titlebar_control_spacing)
         .border_b_1()
-        .border_color(theme.hairline)
-        .bg(theme.raised)
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
         .child(render_format_button(
             "B",
             "file-format-bold",
@@ -1081,8 +1077,8 @@ fn render_format_button(
         .justify_center()
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(theme.title)
-        .hover(|style| style.bg(theme.row_hover))
+        .text_color(theme.text)
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| {
                 let _ = view.format_markdown(operation.clone(), selection, cx);
@@ -1199,9 +1195,9 @@ fn render_content(
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(theme.radii.control)
-                            .bg(theme.raised)
+                            .bg(theme.surface_raised)
                             .text_size(theme.typography.footnote)
-                            .text_color(theme.subtitle)
+                            .text_color(theme.text_muted)
                             .flex()
                             .items_center()
                             .gap(px(10.0))
@@ -1213,7 +1209,7 @@ fn render_content(
                                     .px(px(8.0))
                                     .py(px(4.0))
                                     .rounded(theme.radii.control)
-                                    .hover(|style| style.bg(theme.row_hover))
+                                    .hover(|style| style.bg(theme.element_hover))
                                     .on_click(move |_, _, cx| {
                                         preview_entity.update(cx, |view, cx| {
                                             view.set_markdown_mode(MarkdownMode::Preview, cx);
@@ -1225,7 +1221,7 @@ fn render_content(
                 })
                 .font_family(theme.typography.code_family)
                 .text_size(theme.typography.code_size)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .children(lines.iter().map(|(index, line, line_selection)| {
                     div()
                         .id(("file-line", *index))
@@ -1241,7 +1237,7 @@ fn render_content(
                             div()
                                 .w(px(52.0))
                                 .flex_none()
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .child(format!("{:>5} ", index + 1)),
                         )
                         .child(EditableLine::new(
@@ -1459,9 +1455,9 @@ impl EditableLine {
                     // Blue keywords, green literals, grey comments: the three
                     // most conventional syntax colours there are, and none of
                     // them a brand tint.
-                    CodeSpanKind::Keyword => theme.gauge,
-                    CodeSpanKind::Literal => theme.diff_addition,
-                    CodeSpanKind::Comment => theme.meta,
+                    CodeSpanKind::Keyword => theme.accent,
+                    CodeSpanKind::Literal => theme.diff_add,
+                    CodeSpanKind::Comment => theme.text_faint,
                 };
                 (
                     span.range,
@@ -1499,9 +1495,9 @@ impl EditableLine {
             line_len,
             view,
             selection,
-            selection_fill: theme.selected_fill,
+            selection_fill: theme.element_active,
             caret_offset,
-            caret_color: theme.caret,
+            caret_color: theme.text,
             links,
             pressed: std::rc::Rc::new(std::cell::Cell::new(None)),
         }
@@ -1745,7 +1741,7 @@ fn notice(message: impl Into<String>, theme: Theme) -> AnyElement {
         .justify_center()
         .p(px(24.0))
         .text_size(theme.typography.headline)
-        .text_color(theme.subtitle)
+        .text_color(theme.text_muted)
         .child(message.into())
         .into_any_element()
 }

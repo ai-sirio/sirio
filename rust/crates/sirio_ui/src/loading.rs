@@ -18,7 +18,7 @@ use bezel::motion::Painter;
 use bezel::ui::loaders;
 use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
-use gpui::{div, px, AnyElement, App, Div, IntoElement, ParentElement, Styled, Window};
+use gpui::{AnyElement, App, Div, IntoElement, ParentElement, Styled, Window, div, px};
 use sirio_theme::Theme;
 
 /// The glyph slot in an Activity-derived reasoning header.
@@ -57,37 +57,22 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
     }
 }
 
-/// Point Bezel's context-free paint helpers at Sirio's appearance, and return
-/// the Bezel appearance so a caller that also needs a palette can reuse it.
-///
-/// `ink`, `wash` and `hairline` are free functions called from inside Bezel's
-/// element builders, which have no `cx`; they read a process-wide mirror that
-/// defaults to Dark rather than the theme handed to them. Every entry point
-/// that paints through a Bezel primitive must call this first, including the
-/// ones that never build a palette — hence a named function rather than a
-/// discarded `bezel_theme()` binding, which reads as dead code and invites
-/// deletion. Repeat calls are free: Bezel only bumps its theme generation when
-/// the appearance actually changes.
-fn sync_bezel_appearance(theme: &Theme) -> bezel::theme::Appearance {
-    let appearance = match theme.appearance {
-        sirio_theme::Appearance::Light => bezel::theme::Appearance::Light,
-        sirio_theme::Appearance::Dark => bezel::theme::Appearance::Dark,
-    };
-    bezel::theme::set_current_appearance(appearance);
-    appearance
-}
-
 /// Build the Bezel palette expected by its published UI primitives while
 /// retaining Sirio's appearance and accent. Bezel's loading APIs use their own
 /// theme type, whereas the adapter's public contract intentionally exposes
 /// Sirio's theme type to its callers.
+///
+/// This module used to push Sirio's appearance into Bezel's process-wide
+/// paint mirror on every call, because `ink`, `wash` and `hairline` are free
+/// functions with no `cx` and would otherwise paint for the previous
+/// appearance. `Theme::sync_appearance` now does it wherever the theme global
+/// is written, which is the one place that can be sure it happened.
 fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
-    let appearance = sync_bezel_appearance(theme);
-    let mut bezel_theme = match appearance {
-        bezel::theme::Appearance::Light => bezel::theme::Theme::light(),
-        bezel::theme::Appearance::Dark => bezel::theme::Theme::dark(),
+    let mut bezel_theme = match theme.appearance {
+        sirio_theme::Appearance::Light => bezel::theme::Theme::light(),
+        sirio_theme::Appearance::Dark => bezel::theme::Theme::dark(),
     };
-    bezel_theme.accent = theme.colors.accent.into();
+    bezel_theme.accent = theme.brand_coral.into();
     bezel_theme
 }
 
@@ -137,7 +122,6 @@ pub fn indeterminate(
 
 /// The compact Bezel mini gradient spinner for refresh/status slots.
 pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
-    sync_bezel_appearance(Theme::get(cx));
     loaders::mini_gradient_spinner(id, COMPACT_MINI_CELL, painter(window), cx).into_any_element()
 }
 
@@ -194,21 +178,21 @@ mod tests {
         assert_eq!(clamp_fraction(f32::NAN), 0.0);
     }
 
+    /// The palette handed to a Bezel primitive is built for Sirio's
+    /// appearance, not for whatever Bezel's process-wide mirror last held.
+    /// That mirror is `Theme::sync_appearance`'s job now, and it is tested in
+    /// `sirio_theme`; what is still this module's job is picking the right
+    /// side of Bezel's palette, and keeping Sirio's coral on the accent that
+    /// its loaders paint with.
     #[test]
-    fn bezel_paint_helpers_follow_sirios_appearance() {
-        let _guard = bezel::theme::lock_appearance();
+    fn the_bezel_palette_is_built_for_sirios_appearance() {
+        let light = bezel_theme(&Theme::light());
+        assert_eq!(light.bg, bezel::theme::Theme::light().bg);
+        assert_eq!(light.accent, Theme::light().brand_coral.into());
 
-        let _bezel_theme = bezel_theme(&Theme::light());
-        assert_eq!(
-            bezel::theme::current_appearance(),
-            bezel::theme::Appearance::Light
-        );
-
-        let _bezel_theme = bezel_theme(&Theme::dark());
-        assert_eq!(
-            bezel::theme::current_appearance(),
-            bezel::theme::Appearance::Dark
-        );
+        let dark = bezel_theme(&Theme::dark());
+        assert_eq!(dark.bg, bezel::theme::Theme::dark().bg);
+        assert_eq!(dark.accent, Theme::dark().brand_coral.into());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Full-window settings surface and its small fixture model.
 
+use bezel::theme::Theme as BezelTheme;
 use crate::caret;
 use crate::controls;
 use crate::loading;
@@ -61,7 +62,7 @@ fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl 
                 .mb(px(9.0))
                 .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(text!(id = format!("settings-section-title-{title}"), title)),
         )
         .child(card)
@@ -301,14 +302,14 @@ impl AgentAccentColor {
     /// The `Theme` token this choice draws with.
     pub fn resolve(self, theme: Theme) -> Rgba {
         match self {
-            Self::Coral => theme.accent,
-            Self::Amber => theme.tab_needs_input,
-            Self::Green => theme.tab_done,
-            Self::Red => theme.tab_error,
-            Self::Blue => theme.gauge,
-            Self::Purple => theme.rail_task,
+            Self::Coral => theme.brand_coral,
+            Self::Amber => theme.warning,
+            Self::Green => theme.success,
+            Self::Red => theme.danger,
+            Self::Blue => theme.accent,
+            Self::Purple => theme.border_strong,
             Self::Gold => theme.favorite,
-            Self::Slate => theme.rail_tool,
+            Self::Slate => theme.border_strong,
         }
     }
 
@@ -631,9 +632,9 @@ fn provider_icon(id: &str) -> Icon {
 fn provider_glyph_color(theme: Theme, id: &str) -> Rgba {
     match Icon::for_agent_id(id) {
         Some(icon) => icon
-            .agent_mark_color(theme.title)
-            .unwrap_or_else(|| theme.meta),
-        None => theme.meta,
+            .agent_mark_color(theme.text)
+            .unwrap_or_else(|| theme.text_faint),
+        None => theme.text_faint,
     }
 }
 
@@ -742,7 +743,7 @@ impl ProviderKind {
 /// actually contrasts with both fills, and it is already what the granted
 /// permission badge uses two screens over.
 fn on_status_fill(theme: &Theme) -> Rgba {
-    theme.background
+    theme.surface
 }
 
 /// Every process id currently a descendant of `root` (not including `root`
@@ -2364,7 +2365,7 @@ impl Settings {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 // The arrow is the control: no word beside it, and sized
                 // off `large_title` so it still tracks the interface font
@@ -2378,8 +2379,8 @@ impl Settings {
                     .items_center()
                     .justify_center()
                     .rounded(theme.radii.chip_active)
-                    .text_color(theme.title)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .text_color(theme.text)
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, _| {
                         if let Some(callback) = &back {
                             callback();
@@ -2390,14 +2391,14 @@ impl Settings {
                             Icon::ChevronLeft,
                             IconSize::Custom(theme.typography.large_title),
                         )
-                        .text_color(theme.title),
+                        .text_color(theme.text),
                     ),
             )
             .child(
                 div()
                     .text_size(theme.typography.title3)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(text!("Settings")),
             )
     }
@@ -2410,7 +2411,7 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .bg(theme.background);
+            .bg(theme.surface);
 
         for (category_index, category) in SettingsCategory::ALL.into_iter().enumerate() {
             let selected = self.category == category;
@@ -2433,12 +2434,12 @@ impl Settings {
                         FontWeight::NORMAL
                     })
                     .text_color(if selected {
-                        theme.title
+                        theme.text
                     } else {
-                        theme.subtitle
+                        theme.text_muted
                     })
-                    .when(selected, |this| this.bg(theme.selected_fill))
-                    .hover(|style| style.bg(theme.row_hover))
+                    .when(selected, |this| this.bg(theme.element_active))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| this.select_category(category, cx));
                     })
@@ -2451,9 +2452,9 @@ impl Settings {
                             .child(
                                 IconElement::new(category.glyph(), IconSize::Small).text_color(
                                     if selected {
-                                        theme.title
+                                        theme.text
                                     } else {
-                                        theme.subtitle
+                                        theme.text_muted
                                     },
                                 ),
                             ),
@@ -2593,7 +2594,7 @@ impl Settings {
             }
             let selected = self.agent_colors[index];
             let mut mark_element = IconElement::new(mark, IconSize::XSmall);
-            if let Some(tint) = mark.agent_mark_color(theme.title) {
+            if let Some(tint) = mark.agent_mark_color(theme.text) {
                 mark_element = mark_element.text_color(tint);
             }
             let label = div()
@@ -2601,7 +2602,7 @@ impl Settings {
                 .items_center()
                 .gap(px(9.0))
                 .text_size(theme.typography.headline)
-                .text_color(theme.title)
+                .text_color(theme.text)
                 .child(
                     div()
                         .w(px(14.0))
@@ -2660,7 +2661,7 @@ impl Settings {
             .items_center()
             .gap(px(8.0))
             .text_size(theme.typography.headline)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(
                 div()
                     .w(px(18.0))
@@ -2687,16 +2688,16 @@ impl Settings {
             .items_center()
             .gap(px(6.0))
             .text_size(theme.typography.callout)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(
                 div()
                     .w(px(8.0))
                     .h(px(8.0))
                     .rounded(px(4.0))
                     .bg(if status.signed_in {
-                        theme.tab_done
+                        theme.success
                     } else {
-                        theme.meta
+                        theme.text_faint
                     }),
             )
             .child(text!(status.label));
@@ -2706,7 +2707,7 @@ impl Settings {
                     .id(format!("settings-provider-account-identity-{title}"))
                     .debug_selector(move || format!("settings-provider-account-identity-{title}"))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(identity)),
             );
         }
@@ -2824,10 +2825,10 @@ impl Settings {
                 div()
                     .id(format!("provider-account-error-{title}"))
                     .debug_selector(move || format!("provider-account-error-{title}"))
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_error)
+                    .text_color(theme.danger)
                     .child(text!(error.clone())),
             );
         }
@@ -2842,13 +2843,13 @@ impl Settings {
             div()
                 .flex()
                 .items_center()
-                .gap(px(theme.cosmic.spacing.xs as f32))
+                .gap(px(BezelTheme::SPACE_MD))
                 .child(
                     div()
                         .id(format!("account-login-pending-{title}"))
                         .debug_selector(move || format!("account-login-pending-{title}"))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!("Signing in…")),
                 )
                 .child(controls::button(
@@ -2976,13 +2977,9 @@ impl Settings {
             .flex()
             .items_center()
             .rounded(theme.radii.control)
-            .bg(theme.filter_field_bg)
+            .bg(theme.input_bg)
             .border_1()
-            .border_color(if is_focused {
-                theme.selection_ring
-            } else {
-                theme.hairline
-            })
+            .border_color(if is_focused { theme.text } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |this, cx| on_focus(this, window, cx));
@@ -2991,7 +2988,11 @@ impl Settings {
                 key_entity.update(cx, |this, cx| on_key(this, event, window, cx));
             })
             .text_size(theme.typography.callout)
-            .text_color(if is_empty { theme.meta } else { theme.title })
+            .text_color(if is_empty {
+                theme.text_faint
+            } else {
+                theme.text
+            })
             // #212: shrink and ellipsise inside the field rather than
             // drawing past its border. Must shrink without growing:
             // `flex_1` would push the end-of-text caret to the far right.
@@ -3012,7 +3013,7 @@ impl Settings {
             // single-line fields always append. Invisible (but still laid
             // out) while unfocused so the bar never shifts the text.
             .when(is_focused, |this| {
-                this.child(caret::bar(px(16.0), theme.caret, caret_visible))
+                this.child(caret::bar(px(16.0), theme.text, caret_visible))
             })
     }
 
@@ -3026,10 +3027,10 @@ impl Settings {
         div()
             .id(id)
             .debug_selector(move || id.to_string())
-            .px(px(theme.cosmic.spacing.xs as f32))
-            .pb(px(theme.cosmic.spacing.xxxs as f32))
+            .px(px(BezelTheme::SPACE_MD))
+            .pb(px(BezelTheme::SPACE_XS))
             .text_size(theme.typography.footnote)
-            .text_color(theme.subtitle)
+            .text_color(theme.text_muted)
             .child(text!(caption))
     }
 
@@ -3042,7 +3043,6 @@ impl Settings {
         theme: Theme,
         window: &Window,
     ) -> gpui::Div {
-        let spacing = theme.cosmic.spacing;
         let cookie_text = self.opencode_cookie_input.clone();
         let cookie_is_empty = cookie_text.is_empty();
         // The cookie renders as mask dots only — the real value is never
@@ -3079,8 +3079,8 @@ impl Settings {
             .child(
                 div()
                     .w_full()
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -3119,10 +3119,10 @@ impl Settings {
                 div()
                     .id("provider-opencode-cookie-error")
                     .debug_selector(|| "provider-opencode-cookie-error".to_string())
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_error)
+                    .text_color(theme.danger)
                     .child(text!(error)),
             );
         }
@@ -3154,8 +3154,8 @@ impl Settings {
         card.child(
             div()
                 .w_full()
-                .px(px(spacing.xs as f32))
-                .py(px(spacing.xxs as f32))
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_SM))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -3186,7 +3186,6 @@ impl Settings {
         theme: Theme,
         window: &Window,
     ) -> gpui::Div {
-        let spacing = theme.cosmic.spacing;
         let cookie_text = self.ollama_cookie_input.clone();
         let cookie_is_empty = cookie_text.is_empty();
         // Mask dots only — the real value is never drawn, matching the
@@ -3222,8 +3221,8 @@ impl Settings {
             .child(
                 div()
                     .w_full()
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -3262,10 +3261,10 @@ impl Settings {
                 div()
                     .id("provider-ollama-cookie-error")
                     .debug_selector(|| "provider-ollama-cookie-error".to_string())
-                    .px(px(spacing.xs as f32))
-                    .py(px(spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_error)
+                    .text_color(theme.danger)
                     .child(text!(error)),
             );
         }
@@ -3280,9 +3279,9 @@ impl Settings {
     ) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
         let claude_mark = Icon::ClaudeCode
-            .agent_mark_color(theme.title)
-            .unwrap_or_else(|| theme.title);
-        let monochrome_mark = theme.title;
+            .agent_mark_color(theme.text)
+            .unwrap_or_else(|| theme.text);
+        let monochrome_mark = theme.text;
         let cards = [
             ProviderCardView::new(
                 ProviderKind::Claude,
@@ -3308,7 +3307,7 @@ impl Settings {
             ProviderCardView::new(
                 ProviderKind::OllamaCloud,
                 "Ollama Cloud",
-                theme.subtitle,
+                theme.text_muted,
                 accounts.ollama_cloud,
             ),
         ];
@@ -3340,8 +3339,8 @@ impl Settings {
                 .py(px(3.0))
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
-                .text_color(theme.subtitle)
-                .bg(theme.primary_pill_bg)
+                .text_color(theme.text_muted)
+                .bg(theme.surface_raised)
                 .child(text!(sirio_project::display_path(path))),
             None => div()
                 .id(status_id.clone())
@@ -3352,7 +3351,7 @@ impl Settings {
                 .text_size(theme.typography.caption2)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(on_status_fill(&theme))
-                .bg(theme.tab_error)
+                .bg(theme.danger)
                 .child(text!(availability.status_label())),
         }
     }
@@ -3395,8 +3394,8 @@ impl Settings {
                 .py(px(3.0))
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
-                .text_color(theme.subtitle)
-                .bg(theme.primary_pill_bg)
+                .text_color(theme.text_muted)
+                .bg(theme.surface_raised)
                 .child(text!(label))
         } else {
             div()
@@ -3408,7 +3407,7 @@ impl Settings {
                 .text_size(theme.typography.caption2)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(on_status_fill(&theme))
-                .bg(theme.tab_needs_input)
+                .bg(theme.warning)
                 .child(text!(label))
         }
     }
@@ -3469,7 +3468,7 @@ impl Settings {
                             div()
                                 .debug_selector(move || format!("settings-agent-name-{index}"))
                                 .text_size(theme.typography.headline)
-                                .text_color(theme.title)
+                                .text_color(theme.text)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(text!(id = ("settings-agent-name", index), row.name)),
@@ -3480,7 +3479,7 @@ impl Settings {
                                     format!("settings-agent-description-{index}")
                                 })
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .child(text!(
@@ -3547,9 +3546,9 @@ impl Settings {
                         .rounded(theme.radii.row_card)
                         .text_size(theme.typography.caption2)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.title)
-                        .bg(theme.primary_action_bg)
-                        .hover(|style| style.bg(theme.row_hover))
+                        .text_color(theme.text)
+                        .bg(theme.element_active)
+                        .hover(|style| style.bg(theme.element_hover))
                         .on_click(move |_, _, cx| {
                             install_entity.update(cx, |_, cx| {
                                 cx.emit(event.clone());
@@ -3574,7 +3573,7 @@ impl Settings {
                             div()
                                 .px(px(6.0))
                                 .text_size(theme.typography.caption2)
-                                .text_color(theme.meta)
+                                .text_color(theme.text_faint)
                                 .child(text!(
                                     id = ("settings-agent-version", index),
                                     // #197: name the subject. This is the
@@ -3603,9 +3602,9 @@ impl Settings {
                     div()
                         .id(("settings-agent-integrity", index))
                         .debug_selector(move || format!("settings-agent-integrity-{index}"))
-                        .px(px(theme.cosmic.spacing.xs as f32))
+                        .px(px(BezelTheme::SPACE_MD))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(note)),
                 );
             }
@@ -3622,14 +3621,14 @@ impl Settings {
                     div()
                         .id((kind, index))
                         .debug_selector(move || format!("settings-agent-install-{kind}-{index}"))
-                        .px(px(theme.cosmic.spacing.xs as f32))
+                        .px(px(BezelTheme::SPACE_MD))
                         .text_size(theme.typography.footnote)
                         .font_weight(if failed {
                             FontWeight::SEMIBOLD
                         } else {
                             FontWeight::NORMAL
                         })
-                        .text_color(theme.subtitle)
+                        .text_color(theme.text_muted)
                         .child(text!(label)),
                 );
             }
@@ -3666,12 +3665,12 @@ impl Settings {
                             .items_center()
                             .gap(px(6.0))
                             .rounded(theme.radii.control)
-                            .bg(theme.filter_field_bg)
+                            .bg(theme.input_bg)
                             .border_1()
                             .border_color(if search_is_focused {
-                                theme.selection_ring
+                                theme.text
                             } else {
-                                theme.hairline
+                                theme.border
                             })
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -3686,9 +3685,9 @@ impl Settings {
                             })
                             .text_size(theme.typography.callout)
                             .text_color(if search_text.is_empty() {
-                                theme.meta
+                                theme.text_faint
                             } else {
-                                theme.title
+                                theme.text
                             })
                             // #212: see the field above.
                             .overflow_hidden()
@@ -3707,7 +3706,7 @@ impl Settings {
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
                                     px(16.0),
-                                    theme.caret,
+                                    theme.text,
                                     self.field_caret_visible,
                                 ))
                             }),
@@ -3725,7 +3724,7 @@ impl Settings {
                                     .id("agents-last-refreshed")
                                     .debug_selector(|| "agents-last-refreshed".to_string())
                                     .text_size(theme.typography.footnote)
-                                    .text_color(theme.subtitle)
+                                    .text_color(theme.text_muted)
                                     .child(text!(format!("Refreshed {stamp}"))),
                             );
                         }
@@ -3755,7 +3754,7 @@ impl Settings {
                     .items_center()
                     .gap(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.tab_needs_input)
+                    .text_color(theme.warning)
                     .child(text!("⚠"))
                     .child(text!(error)),
             );
@@ -3772,7 +3771,7 @@ impl Settings {
                     .justify_center()
                     .gap(theme.spacing.card_gap)
                     .text_size(theme.typography.headline)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(loading::indeterminate(
                         "settings-agents-loading-orb",
                         loading::GENERIC_ORB,
@@ -3808,10 +3807,14 @@ impl Settings {
             .gap(px(6.0))
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
-            .text_color(if enabled { theme.title } else { theme.meta })
-            .bg(theme.primary_pill_bg)
+            .text_color(if enabled {
+                theme.text
+            } else {
+                theme.text_faint
+            })
+            .bg(theme.surface_raised)
             .when(enabled, |this| {
-                this.hover(|style| style.bg(theme.row_hover))
+                this.hover(|style| style.bg(theme.element_hover))
             })
             .on_click(move |_, window, cx| {
                 toggle_entity.update(cx, |this, cx| this.toggle_summarizer_picker(window, cx));
@@ -3819,9 +3822,9 @@ impl Settings {
             .child(text!(selected.title()))
             .child(
                 IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(if enabled {
-                    theme.title
+                    theme.text
                 } else {
-                    theme.hairline
+                    theme.border
                 }),
             )
     }
@@ -3854,8 +3857,8 @@ impl Settings {
             .p(px(4.0))
             .rounded(theme.radii.user_pill)
             .border_1()
-            .border_color(theme.hairline)
-            .bg(theme.card_fill)
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
             .shadow_lg();
         for choice in SummarizerChoice::ALL {
             let is_selected = choice == selected;
@@ -3871,13 +3874,9 @@ impl Settings {
                     .justify_between()
                     .rounded(theme.radii.control)
                     .text_size(theme.typography.callout)
-                    .text_color(if is_selected {
-                        theme.title_selected
-                    } else {
-                        theme.title
-                    })
-                    .when(is_selected, |this| this.bg(theme.selected_fill))
-                    .hover(|style| style.bg(theme.row_hover))
+                    .text_color(if is_selected { theme.text } else { theme.text })
+                    .when(is_selected, |this| this.bg(theme.element_active))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         choice_entity.update(cx, |this, cx| {
                             this.set_summarizer_agent(choice, cx);
@@ -3888,7 +3887,7 @@ impl Settings {
                         this.child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(theme.tab_focus_accent)
+                                .text_color(theme.text)
                                 .child(text!("✓")),
                         )
                     }),
@@ -3924,22 +3923,18 @@ impl Settings {
                     .as_ref()
                     .map_or_else(|| "Up to date".into(), |stamp| format!("Checked {stamp}")),
             ),
-            UpdateStatus::Available { version, .. } => Some(
-                self.update_state
-                    .last_checked
-                    .as_ref()
-                    .map_or_else(|| format!("Update available: {version}"), |stamp| {
-                        format!("Checked {stamp} · update available: {version}")
-                    }),
-            ),
-            UpdateStatus::Ready { version, .. } => Some(
-                self.update_state
-                    .last_checked
-                    .as_ref()
-                    .map_or_else(|| format!("Update ready: {version}"), |stamp| {
-                        format!("Checked {stamp} · update ready: {version}")
-                    }),
-            ),
+            UpdateStatus::Available { version, .. } => {
+                Some(self.update_state.last_checked.as_ref().map_or_else(
+                    || format!("Update available: {version}"),
+                    |stamp| format!("Checked {stamp} · update available: {version}"),
+                ))
+            }
+            UpdateStatus::Ready { version, .. } => {
+                Some(self.update_state.last_checked.as_ref().map_or_else(
+                    || format!("Update ready: {version}"),
+                    |stamp| format!("Checked {stamp} · update ready: {version}"),
+                ))
+            }
             UpdateStatus::Failed { message } => {
                 let mut text = "Could not check for updates".to_string();
                 if let Some(stamp) = &self.update_state.last_checked {
@@ -4037,7 +4032,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-version".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(self.version.clone())),
                 theme,
             ))
@@ -4047,7 +4042,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-channel".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(self.channel.clone())),
                 theme,
             ));
@@ -4058,7 +4053,7 @@ impl Settings {
                 div()
                     .debug_selector(|| "settings-update-last-checked".into())
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(
                         div()
                             .debug_selector(|| "settings-update-status".into())
@@ -4150,7 +4145,7 @@ impl Settings {
             .justify_center()
             .flex_1()
             .text_size(theme.typography.headline)
-            .text_color(theme.title)
+            .text_color(theme.text)
             .child(text!(
                 id = "settings-control-socket-title",
                 "Control socket"
@@ -4160,7 +4155,7 @@ impl Settings {
                     .debug_selector(|| "settings-control-socket-path".into())
                     .mt(px(2.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!(format!("{socket_kind}: {}", self.socket_path))),
             );
         // The sirioctl card shows the bundled binary's name. "Copy install
@@ -4180,7 +4175,7 @@ impl Settings {
                 None,
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!("sirioctl")),
                 theme,
             ));
@@ -4212,17 +4207,18 @@ impl Settings {
                 div()
                     .id("general-install-skill-status")
                     .debug_selector(|| "general-install-skill-status".into())
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!("Installing… running in a new terminal tab.")),
             );
         }
 
-        let apply_update_handler = self.on_apply_update.clone().map(|callback| {
-            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| callback()
-        });
+        let apply_update_handler = self
+            .on_apply_update
+            .clone()
+            .map(|callback| move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| callback());
         let mut updates = controls::card(theme).child(controls::row(
             "Automatic updates",
             Some("Check for and download updates in the background.".into()),
@@ -4233,35 +4229,33 @@ impl Settings {
             match &self.update_state.status {
                 UpdateStatus::Available { version, notes }
                 | UpdateStatus::Ready { version, notes } => {
-                    let update_label = if matches!(
-                        &self.update_state.status,
-                        UpdateStatus::Ready { .. }
-                    ) {
-                        "Ready to install"
-                    } else {
-                        "Available version"
-                    };
-                    updates = updates.child(controls::separator(theme)).child(
-                        controls::row(
+                    let update_label =
+                        if matches!(&self.update_state.status, UpdateStatus::Ready { .. }) {
+                            "Ready to install"
+                        } else {
+                            "Available version"
+                        };
+                    updates = updates
+                        .child(controls::separator(theme))
+                        .child(controls::row(
                             update_label,
                             None,
                             div()
                                 .debug_selector(|| "settings-update-version".into())
                                 .text_size(theme.typography.callout)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(text!(version.clone())),
                             theme,
-                        ),
-                    );
+                        ));
                     if self.update_channel().eq_ignore_ascii_case("nightly") {
                         updates = updates.child(
                             div()
                                 .id("settings-update-notes")
                                 .debug_selector(|| "settings-update-notes".into())
-                                .px(px(theme.cosmic.spacing.xs as f32))
-                                .py(px(theme.cosmic.spacing.xxs as f32))
+                                .px(px(BezelTheme::SPACE_MD))
+                                .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(text!("Nightly builds track main")),
                         );
                     } else if !notes.trim().is_empty() {
@@ -4269,10 +4263,10 @@ impl Settings {
                             div()
                                 .id("settings-update-notes")
                                 .debug_selector(|| "settings-update-notes".into())
-                                .px(px(theme.cosmic.spacing.xs as f32))
-                                .py(px(theme.cosmic.spacing.xxs as f32))
+                                .px(px(BezelTheme::SPACE_MD))
+                                .py(px(BezelTheme::SPACE_SM))
                                 .text_size(theme.typography.footnote)
-                                .text_color(theme.subtitle)
+                                .text_color(theme.text_muted)
                                 .child(text!(notes.clone())),
                         );
                     }
@@ -4322,7 +4316,7 @@ impl Settings {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(div().w(px(20.0)).text_color(theme.meta).child(text!(
+            .child(div().w(px(20.0)).text_color(theme.text_faint).child(text!(
                 id = format!("settings-permission-glyph-{title}"),
                 glyph
             )))
@@ -4330,7 +4324,7 @@ impl Settings {
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child(text!(
                         id = format!("settings-permission-title-{title}"),
                         title
@@ -4344,7 +4338,7 @@ impl Settings {
             ));
         let description = div()
             .text_size(theme.typography.footnote)
-            .text_color(theme.subtitle)
+            .text_color(theme.text_muted)
             .child(text!(
                 id = format!("settings-permission-description-{title}"),
                 description
@@ -4381,19 +4375,19 @@ impl Settings {
         let revoke_all = div()
             .id("settings-revoke-all-browser-origins")
             .debug_selector(|| "settings-revoke-all-browser-origins".into())
-            .px(px(theme.cosmic.spacing.xs as f32))
-            .py(px(theme.cosmic.spacing.xxxs as f32))
+            .px(px(BezelTheme::SPACE_MD))
+            .py(px(BezelTheme::SPACE_XS))
             .rounded(theme.radii.control)
             .text_size(theme.typography.callout)
             .text_color(if origins.is_empty() {
-                theme.meta
+                theme.text_faint
             } else {
-                theme.title
+                theme.text
             })
-            .bg(theme.primary_pill_bg)
+            .bg(theme.surface_raised)
             .child(text!("Revoke all"));
         let revoke_all = revoke_all.when(!origins.is_empty(), move |this| {
-            this.hover(|style| style.bg(theme.row_hover))
+            this.hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     revoke_all_entity
                         .update(cx, |settings, cx| settings.revoke_all_browser_origins(cx));
@@ -4413,12 +4407,12 @@ impl Settings {
                     .debug_selector(|| "settings-browser-grants-empty".into())
                     .min_h(px(44.0))
                     .w_full()
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .text_size(theme.typography.callout)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(text!("No browser origins have been granted.")),
             );
         }
@@ -4432,13 +4426,13 @@ impl Settings {
             let revoke = div()
                 .id(format!("settings-revoke-browser-origin-{index}"))
                 .debug_selector(move || format!("settings-revoke-browser-origin-{index}"))
-                .px(px(theme.cosmic.spacing.xs as f32))
-                .py(px(theme.cosmic.spacing.xxxs as f32))
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_XS))
                 .rounded(theme.radii.control)
                 .text_size(theme.typography.callout)
-                .text_color(theme.title)
-                .bg(theme.primary_pill_bg)
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(theme.text)
+                .bg(theme.surface_raised)
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     origin_entity.update(cx, |settings, cx| {
                         settings.revoke_browser_origin(origin.clone(), cx)
@@ -4451,8 +4445,8 @@ impl Settings {
                     .debug_selector(move || format!("settings-browser-grant-{index}"))
                     .min_h(px(44.0))
                     .w_full()
-                    .px(px(theme.cosmic.spacing.xs as f32))
-                    .py(px(theme.cosmic.spacing.xxs as f32))
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_SM))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -4460,7 +4454,7 @@ impl Settings {
                         div()
                             .flex_1()
                             .text_size(theme.typography.callout)
-                            .text_color(theme.title)
+                            .text_color(theme.text)
                             .child(text!(
                                 id = ("settings-browser-origin", index),
                                 display_origin
@@ -4474,11 +4468,11 @@ impl Settings {
 
     fn render_permissions(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
         #[cfg(target_os = "macos")]
-        let granted = theme.tab_done;
+        let granted = theme.success;
         #[cfg(target_os = "macos")]
-        let denied = theme.tab_error;
+        let denied = theme.danger;
         #[cfg(target_os = "macos")]
-        let neutral = theme.primary_pill_bg;
+        let neutral = theme.surface_raised;
         #[cfg(target_os = "macos")]
         let rows = controls::card(theme)
             .child(self.render_permission_row(
@@ -4488,7 +4482,7 @@ impl Settings {
                 PermissionBadge {
                     label: "GRANTED",
                     background: granted,
-                    foreground: theme.background,
+                    foreground: theme.surface,
                 },
                 "Open Settings",
                 theme,
@@ -4501,7 +4495,7 @@ impl Settings {
                 PermissionBadge {
                     label: "GRANTED",
                     background: granted,
-                    foreground: theme.background,
+                    foreground: theme.surface,
                 },
                 "Open Settings",
                 theme,
@@ -4527,7 +4521,7 @@ impl Settings {
                 PermissionBadge {
                     label: "CHECK MANUALLY",
                     background: neutral,
-                    foreground: theme.subtitle,
+                    foreground: theme.text_muted,
                 },
                 "Open Settings",
                 theme,
@@ -4540,7 +4534,7 @@ impl Settings {
                 PermissionBadge {
                     label: "GRANTED",
                     background: granted,
-                    foreground: theme.background,
+                    foreground: theme.surface,
                 },
                 "Open Settings",
                 theme,
@@ -4553,7 +4547,7 @@ impl Settings {
                 PermissionBadge {
                     label: "CHECK MANUALLY",
                     background: neutral,
-                    foreground: theme.subtitle,
+                    foreground: theme.text_muted,
                 },
                 "Trigger Prompt",
                 theme,
@@ -4630,9 +4624,9 @@ impl Render for Settings {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(self.render_header(theme))
-            .child(div().h(px(1.0)).w_full().bg(theme.hairline))
+            .child(div().h(px(1.0)).w_full().bg(theme.border))
             .child(
                 // `min_h(0)` is what lets this row be shorter than what it
                 // holds. A column flex item takes its content height as its
@@ -4647,7 +4641,7 @@ impl Render for Settings {
                     .w_full()
                     .flex()
                     .child(category_sidebar)
-                    .child(div().w(px(1.0)).h_full().bg(theme.hairline))
+                    .child(div().w(px(1.0)).h_full().bg(theme.border))
                     .child(
                         // A column, not a row. GPUI derives a scroller's
                         // `content_size` from its children's laid-out bounds,
@@ -7340,20 +7334,20 @@ mod tests {
     /// Ticket #316: Stable only renders non-empty manifest notes; Nightly
     /// uses the one honest fixed explanation instead of daily release notes.
     #[gpui::test]
-    async fn update_notes_follow_the_host_channel_and_manifest(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn update_notes_follow_the_host_channel_and_manifest(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let stable_without_notes = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(UpdateState {
-                enabled: true,
-                channel: "stable".into(),
-                status: UpdateStatus::Available {
-                    version: "0.7.0".into(),
-                    notes: String::new(),
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(
+                UpdateState {
+                    enabled: true,
+                    channel: "stable".into(),
+                    status: UpdateStatus::Available {
+                        version: "0.7.0".into(),
+                        notes: String::new(),
+                    },
+                    last_checked: None,
                 },
-                last_checked: None,
-            })
+            )
         });
         let mut stable_cx = VisualTestContext::from_window(stable_without_notes.into(), cx);
         stable_cx.run_until_parked();
@@ -7368,15 +7362,17 @@ mod tests {
         );
 
         let nightly = stable_cx.cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(UpdateState {
-                enabled: true,
-                channel: "nightly".into(),
-                status: UpdateStatus::Available {
-                    version: "0.7.0-nightly".into(),
-                    notes: "ignored for nightly".into(),
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_update_state(
+                UpdateState {
+                    enabled: true,
+                    channel: "nightly".into(),
+                    status: UpdateStatus::Available {
+                        version: "0.7.0-nightly".into(),
+                        notes: "ignored for nightly".into(),
+                    },
+                    last_checked: None,
                 },
-                last_checked: None,
-            })
+            )
         });
         let mut nightly_cx = VisualTestContext::from_window(nightly.into(), &mut stable_cx.cx);
         nightly_cx.run_until_parked();
@@ -8287,8 +8283,8 @@ mod tests {
                 _ => Theme::light(),
             };
             for (name, fill) in [
-                ("tab_error", theme.tab_error),
-                ("tab_needs_input", theme.tab_needs_input),
+                ("tab_error", theme.danger),
+                ("tab_needs_input", theme.warning),
             ] {
                 let ratio = contrast_ratio(on_status_fill(&theme), fill);
                 assert!(

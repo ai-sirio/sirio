@@ -31,9 +31,9 @@ use sirio_theme::Theme;
 /// Map a resolved status to its theme colour. The only mapping in the crate.
 pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
     match status {
-        DirectoryGitStatus::Conflicted => theme.git_conflict,
-        DirectoryGitStatus::Staged => theme.git_staged,
-        DirectoryGitStatus::Changed => theme.git_modified,
+        DirectoryGitStatus::Conflicted => theme.danger,
+        DirectoryGitStatus::Staged => theme.success,
+        DirectoryGitStatus::Changed => theme.warning,
         DirectoryGitStatus::Untracked => theme.git_untracked,
     }
 }
@@ -41,7 +41,7 @@ pub fn status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
 /// The colour a single file's row or marker takes, resolved through
 /// [`DirectoryGitStatus::for_file`] so every view agrees on precedence.
 ///
-/// Returns `theme.title` — the neutral, unmarked colour — for an entry
+/// Returns `theme.text` — the neutral, unmarked colour — for an entry
 /// carrying no status at all. That fallback is deliberate and is *not* what
 /// `for_file` would give: `for_file` ends in `Changed`, so delegating to it
 /// unconditionally would paint an unmarked row amber. The Changes list is not
@@ -54,7 +54,7 @@ pub fn entry_color(entry: &StatusEntry, theme: Theme) -> Rgba {
         && !entry.is_staged()
         && !entry.has_worktree_changes()
     {
-        return theme.title;
+        return theme.text;
     }
     status_color(DirectoryGitStatus::for_file(entry), theme)
 }
@@ -83,10 +83,10 @@ mod tests {
     fn the_four_status_colours_are_mutually_distinct() {
         let theme = Theme::dark();
         let all = [
-            theme.git_conflict,
+            theme.danger,
             theme.git_untracked,
-            theme.git_staged,
-            theme.git_modified,
+            theme.success,
+            theme.warning,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
@@ -111,8 +111,8 @@ mod tests {
         let both = entry(Some(StatusKind::Modified), Some(StatusKind::Modified));
 
         assert!(both.is_staged() && both.has_worktree_changes());
-        assert_eq!(entry_color(&both, theme), theme.git_staged);
-        assert_ne!(entry_color(&both, theme), theme.git_modified);
+        assert_eq!(entry_color(&both, theme), theme.success);
+        assert_ne!(entry_color(&both, theme), theme.warning);
     }
 
     #[test]
@@ -121,7 +121,7 @@ mod tests {
 
         // Conflicted outranks everything, including a staged index entry.
         let conflicted = entry(Some(StatusKind::Unmerged), Some(StatusKind::Modified));
-        assert_eq!(entry_color(&conflicted, theme), theme.git_conflict);
+        assert_eq!(entry_color(&conflicted, theme), theme.danger);
 
         // Untracked outranks staged.
         let untracked = entry(Some(StatusKind::Untracked), None);
@@ -129,11 +129,11 @@ mod tests {
 
         // Staged alone.
         let staged = entry(Some(StatusKind::Added), None);
-        assert_eq!(entry_color(&staged, theme), theme.git_staged);
+        assert_eq!(entry_color(&staged, theme), theme.success);
 
         // Modified alone is the fallback.
         let modified = entry(None, Some(StatusKind::Modified));
-        assert_eq!(entry_color(&modified, theme), theme.git_modified);
+        assert_eq!(entry_color(&modified, theme), theme.warning);
     }
 
     /// The fallback `for_file` alone would not give: an entry carrying no
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn an_entry_with_no_status_stays_neutral() {
         let theme = Theme::dark();
-        assert_eq!(entry_color(&entry(None, None), theme), theme.title);
+        assert_eq!(entry_color(&entry(None, None), theme), theme.text);
     }
 
     /// The drift guard. Both doors into this module must agree for the same
@@ -164,7 +164,7 @@ mod tests {
         for index in states {
             for worktree in states {
                 let e = entry(index, worktree);
-                if entry_color(&e, theme) == theme.title {
+                if entry_color(&e, theme) == theme.text {
                     continue; // the deliberate no-status carve-out
                 }
                 assert_eq!(

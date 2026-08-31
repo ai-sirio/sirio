@@ -127,12 +127,12 @@ pub(super) fn render_search_row(
                 .py(px(3.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.hairline)
+                .border_color(theme.border)
                 .text_size(theme.typography.footnote)
                 .text_color(if draft.is_empty() {
-                    theme.meta
+                    theme.text_faint
                 } else {
-                    theme.title
+                    theme.text
                 })
                 .flex()
                 .items_center()
@@ -144,7 +144,7 @@ pub(super) fn render_search_row(
                 // `caret::bar` and not a `|` appended to the string: the bar
                 // always occupies layout, so text does not shift as it
                 // blinks. It is this repo's one way to draw a caret.
-                .child(crate::caret::bar(px(14.0), theme.title, caret_visible)),
+                .child(crate::caret::bar(px(14.0), theme.text, caret_visible)),
         )
         .child(toggle(
             ".*",
@@ -192,13 +192,13 @@ fn toggle(
         .justify_center()
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if on { theme.title } else { theme.meta })
+        .text_color(if on { theme.text } else { theme.text_faint })
         .bg(if on {
-            theme.row_hover
+            theme.element_hover
         } else {
-            theme.background
+            theme.surface
         })
-        .hover(|style| style.bg(theme.row_hover))
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| on_click(cx))
         .child(label)
 }
@@ -230,13 +230,17 @@ pub(super) fn render_filter_chip(
         .py(px(3.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if active > 0 { theme.title } else { theme.meta })
-        .bg(if open {
-            theme.row_hover
+        .text_color(if active > 0 {
+            theme.text
         } else {
-            theme.background
+            theme.text_faint
         })
-        .hover(|style| style.bg(theme.row_hover))
+        .bg(if open {
+            theme.element_hover
+        } else {
+            theme.surface
+        })
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             entity.update(cx, |history, cx| {
                 history.open_chip = (history.open_chip != Some(chip)).then_some(chip);
@@ -268,8 +272,8 @@ pub(super) fn render_chip_popup(
         .p(px(4.0))
         .rounded(theme.radii.user_pill)
         .border_1()
-        .border_color(theme.hairline)
-        .bg(theme.card_fill)
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
         .shadow_lg();
 
     if chip == FilterChip::User {
@@ -278,7 +282,7 @@ pub(super) fn render_chip_popup(
                 .px(px(6.0))
                 .py(px(3.0))
                 .text_size(theme.typography.caption2)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child("Authors in the loaded history"),
         );
     }
@@ -299,8 +303,8 @@ pub(super) fn render_chip_popup(
                     .items_center()
                     .gap(px(6.0))
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.title)
-                    .hover(|style| style.bg(theme.row_hover))
+                    .text_color(theme.text)
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_click(move |_, _, cx| {
                         row_entity.update(cx, |history, cx| {
                             history.set_date_preset(value.clone(), cx);
@@ -321,7 +325,7 @@ pub(super) fn render_chip_popup(
                 .px(px(6.0))
                 .py(px(4.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.meta)
+                .text_color(theme.text_faint)
                 .child("Nothing to choose from"),
         );
     }
@@ -343,8 +347,8 @@ pub(super) fn render_chip_popup(
                 .items_center()
                 .gap(px(6.0))
                 .text_size(theme.typography.footnote)
-                .text_color(theme.title)
-                .hover(|style| style.bg(theme.row_hover))
+                .text_color(theme.text)
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| {
                     row_entity.update(cx, |history, cx| {
                         history.toggle_chip_option(chip, value.clone(), cx);
@@ -377,8 +381,8 @@ pub(super) fn render_paths_popup(
         .p(px(4.0))
         .rounded(theme.radii.user_pill)
         .border_1()
-        .border_color(theme.hairline)
-        .bg(theme.card_fill)
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
         .shadow_lg()
         .child(
             div()
@@ -393,12 +397,12 @@ pub(super) fn render_paths_popup(
                 .py(px(3.0))
                 .rounded(theme.radii.control)
                 .border_1()
-                .border_color(theme.hairline)
+                .border_color(theme.border)
                 .text_size(theme.typography.footnote)
                 .text_color(if draft.is_empty() {
-                    theme.meta
+                    theme.text_faint
                 } else {
-                    theme.title
+                    theme.text
                 })
                 .flex()
                 .items_center()
@@ -413,7 +417,7 @@ pub(super) fn render_paths_popup(
                 .child(
                     div()
                         .debug_selector(|| "history-path-caret".to_owned())
-                        .child(crate::caret::bar(px(14.0), theme.title, caret_visible)),
+                        .child(crate::caret::bar(px(14.0), theme.text, caret_visible)),
                 ),
         )
 }
@@ -452,13 +456,17 @@ pub(super) fn render_collapsed_chips(
         .py(px(3.0))
         .rounded(theme.radii.control)
         .text_size(theme.typography.footnote)
-        .text_color(if active > 0 { theme.title } else { theme.meta })
-        .bg(if open {
-            theme.row_hover
+        .text_color(if active > 0 {
+            theme.text
         } else {
-            theme.background
+            theme.text_faint
         })
-        .hover(|style| style.bg(theme.row_hover))
+        .bg(if open {
+            theme.element_hover
+        } else {
+            theme.surface
+        })
+        .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
             // ponytail: the combined four-in-one popup is not drawn yet; the
             // click only dismisses any open chip popup until it lands.

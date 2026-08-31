@@ -336,18 +336,18 @@ impl Render for CloneForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child("Clone repository"),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child("Paste a Git URL and choose where its folder should live."),
             )
             .child(form_label("Repository URL", &theme))
@@ -362,18 +362,18 @@ impl Render for CloneForm {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(if url_is_empty {
-                        theme.hairline
+                        theme.border
                     } else {
-                        theme.selection_ring
+                        theme.text
                     })
                     .text_size(theme.typography.footnote)
                     .text_color(if url_is_empty {
-                        theme.meta
+                        theme.text_faint
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(
@@ -395,7 +395,7 @@ impl Render for CloneForm {
                             .child(url_value),
                     )
                     .when(field_focused, |this| {
-                        this.child(caret::bar(px(16.0), theme.caret, caret_visible))
+                        this.child(caret::bar(px(16.0), theme.text, caret_visible))
                     }),
             )
             .child(form_label("Destination", &theme))
@@ -404,7 +404,7 @@ impl Render for CloneForm {
                     .id("clone-destination")
                     .w_full()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(destination),
             )
             .child(
@@ -418,13 +418,17 @@ impl Render for CloneForm {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .bg(if can_submit {
-                        theme.selected_fill
+                        theme.element_active
                     } else {
-                        theme.primary_pill_bg
+                        theme.surface_raised
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if can_submit { theme.title } else { theme.meta })
+                    .text_color(if can_submit {
+                        theme.text
+                    } else {
+                        theme.text_faint
+                    })
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
             )
@@ -668,18 +672,18 @@ impl Render for CreateForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.background)
+            .bg(theme.surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.title)
+                    .text_color(theme.text)
                     .child("Create project"),
             )
             .child(
                 div()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child("Make a new folder for a project in the selected location."),
             )
             .child(form_label("Project name", &theme))
@@ -694,18 +698,18 @@ impl Render for CreateForm {
                     .flex()
                     .items_center()
                     .rounded(theme.radii.control)
-                    .bg(theme.filter_field_bg)
+                    .bg(theme.input_bg)
                     .border_1()
                     .border_color(if name_is_empty {
-                        theme.hairline
+                        theme.border
                     } else {
-                        theme.selection_ring
+                        theme.text
                     })
                     .text_size(theme.typography.footnote)
                     .text_color(if name_is_empty {
-                        theme.meta
+                        theme.text_faint
                     } else {
-                        theme.title
+                        theme.text
                     })
                     .cursor(gpui::CursorStyle::IBeam)
                     .on_mouse_down(
@@ -727,7 +731,7 @@ impl Render for CreateForm {
                             .child(name_value),
                     )
                     .when(field_focused, |this| {
-                        this.child(caret::bar(px(16.0), theme.caret, caret_visible))
+                        this.child(caret::bar(px(16.0), theme.text, caret_visible))
                     }),
             )
             .child(form_label("Parent location", &theme))
@@ -736,7 +740,7 @@ impl Render for CreateForm {
                     .id("create-parent")
                     .w_full()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.subtitle)
+                    .text_color(theme.text_muted)
                     .child(parent),
             )
             .child(
@@ -744,7 +748,7 @@ impl Render for CreateForm {
                     .id("create-destination")
                     .w_full()
                     .text_size(theme.typography.footnote)
-                    .text_color(theme.meta)
+                    .text_color(theme.text_faint)
                     .child(format!("Creates {destination}")),
             )
             .child(
@@ -758,13 +762,17 @@ impl Render for CreateForm {
                     .justify_center()
                     .rounded(theme.radii.control)
                     .bg(if can_submit {
-                        theme.selected_fill
+                        theme.element_active
                     } else {
-                        theme.primary_pill_bg
+                        theme.surface_raised
                     })
                     .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if can_submit { theme.title } else { theme.meta })
+                    .text_color(if can_submit {
+                        theme.text
+                    } else {
+                        theme.text_faint
+                    })
                     .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
                     .child(button_label),
             )
@@ -809,12 +817,12 @@ fn destination_for(parent: &Path, url: &str) -> Option<PathBuf> {
 
 fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rgba) {
     match state.status() {
-        CloneStatus::Ready => ("Ready to clone".to_owned(), theme.subtitle),
+        CloneStatus::Ready => ("Ready to clone".to_owned(), theme.text_muted),
         CloneStatus::Running { progress } => (
             format!("Cloning… {}%", (progress * 100.0).round() as u8),
-            theme.tab_focus_accent,
+            theme.text,
         ),
-        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.tab_error),
+        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.danger),
         CloneStatus::Complete {
             destination,
             truncated: true,
@@ -823,25 +831,25 @@ fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rg
                 "Cloned to {} — progress output was truncated (repository is large)",
                 destination.display()
             ),
-            theme.git_modified,
+            theme.warning,
         ),
         CloneStatus::Complete {
             destination,
             truncated: false,
         } => (
             format!("Cloned to {}", destination.display()),
-            theme.tab_done,
+            theme.success,
         ),
     }
 }
 
 fn create_status_line(state: &CreateFormState, theme: &Theme) -> (String, gpui::Rgba) {
     match state.status() {
-        CreateStatus::Ready => ("Ready to create".to_owned(), theme.subtitle),
-        CreateStatus::Running => ("Creating project…".to_owned(), theme.tab_focus_accent),
-        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.tab_error),
+        CreateStatus::Ready => ("Ready to create".to_owned(), theme.text_muted),
+        CreateStatus::Running => ("Creating project…".to_owned(), theme.text),
+        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.danger),
         CreateStatus::Complete(destination) => {
-            (format!("Created {}", destination.display()), theme.tab_done)
+            (format!("Created {}", destination.display()), theme.success)
         }
     }
 }
@@ -850,7 +858,7 @@ fn form_label(label: &'static str, theme: &Theme) -> impl IntoElement {
     div()
         .text_size(theme.typography.footnote)
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.title)
+        .text_color(theme.text)
         .child(label)
 }
 
@@ -1151,11 +1159,11 @@ mod tests {
             "the status line must name the truncation, got: {line:?}"
         );
         assert_ne!(
-            color, theme.tab_error,
+            color, theme.danger,
             "a truncated clone is not a failure and must not use the error color"
         );
         assert_ne!(
-            color, theme.tab_done,
+            color, theme.success,
             "a truncated clone must be visually distinct from a clean completion"
         );
     }
