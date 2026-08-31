@@ -1,7 +1,7 @@
 # `rust/vendor/` — local override of the published `bezel-gpui-linux` crate
 
 This directory holds a `[patch.crates-io]` override for one package, `bezel-gpui-linux` (release
-`0.3.6`, see `rust/Cargo.toml`), wired in via that same file's `[patch.crates-io]` section.
+`0.3.8`, see `rust/Cargo.toml`), wired in via that same file's `[patch.crates-io]` section.
 Everything else in the Bezel GPUI family (`gpui`, `gpui_platform`, and the rest) still comes
 straight from the published crates.io release, unpatched.
 
@@ -30,7 +30,7 @@ action against a Terminal pane (see `docs/linux-rewrite/WAYLAND-LANE.md`'s XDND 
   `pending_drop`/`PendingDrop`/`pending_drop_submit_position` doc comments in
   `src/linux/wayland/client.rs` for the exact mechanism, and the `tests` module at the bottom of
   that file for regression coverage. Every other file in this crate is byte-for-byte the released
-  `bezel-gpui-linux` 0.3.6 source.
+  `bezel-gpui-linux` 0.3.8 source.
 - **`gpui_platform`** is **not** patched, and `vendor/gpui_platform/` no longer exists. It was
   patched under the old zed-git-rev dependency only because that `gpui_platform`'s own
   `gpui_linux = { workspace = true }` dependency was a *path* dependency inside the zed checkout —
@@ -71,20 +71,21 @@ field-for-field.
 `rust/Cargo.lock` actually ships. For every package the two locks share, their versions must
 agree — otherwise `Scripts/ci-linux.sh`'s vendored-crate stage is testing a graph that exists
 nowhere else. `bezel-gpui`, `bezel-gpui-wgpu`, and `bezel-gpui-linux` are the exception: those
-three are pinned exactly to `0.3.6` on purpose, everything else the family pulls in (its
+three are pinned exactly to `0.3.8` on purpose, everything else the family pulls in (its
 `bezel-zed-*` build-dep chain) resolves to whatever later patch release satisfies the caret range,
-`0.3.7` as of this writing — that's ordinary semver composition of a published family, not drift.
+`0.3.8` as of this writing — that's ordinary semver composition of a published family, not drift.
 
 To re-sync after `rust/Cargo.lock` moves: `cargo update --manifest-path
 vendor/gpui_linux/Cargo.toml -p <package> --precise <version>` per drifted package, matching
 whatever `rust/Cargo.lock` resolved it to. Never hand-edit either lockfile.
 
-**Trap:** don't "fix" this by pinning those `bezel-zed-*` dependencies to an exact `=0.3.6` in
+**Trap:** don't "fix" this by pinning those `bezel-zed-*` dependencies to an exact `=0.3.8` in
 `vendor/gpui_linux/Cargo.toml`. Cargo unifies each package to one version graph-wide, and the
-build-dep chain above already forces those packages to `0.3.7+`; an exact `=0.3.6` requirement
-inside the `[patch.crates-io]` candidate then makes that candidate infeasible, and cargo falls
-back to the unpatched registry crate — *silently*, with only a warning, not a build failure. The
-symptom is `patch ... was not used in the crate graph` and a registry-sourced `bezel-gpui-linux` in
+build-dep chain above is free to resolve those packages to a later compatible `0.3.x` release; an
+exact `=0.3.8` requirement inside the `[patch.crates-io]` candidate then makes that candidate
+infeasible as soon as it does, and cargo falls back to the unpatched registry crate — *silently*,
+with only a warning, not a build failure. The symptom is `patch ... was not used in the crate
+graph` and a registry-sourced `bezel-gpui-linux` in
 `rust/Cargo.lock` instead of the path-sourced one. After touching those dependency lines, always
 run `cargo tree --target x86_64-unknown-linux-gnu -i bezel-gpui-linux` and confirm it resolves to
 the path source with no such warning.

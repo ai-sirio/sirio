@@ -1,4 +1,4 @@
-# Local override of the published `bezel-gpui-linux` crate (Bezel GPUI family, release 0.3.6),
+# Local override of the published `bezel-gpui-linux` crate (Bezel GPUI family, release 0.3.8),
 # substituted in via the `[patch.crates-io]` section of ../../Cargo.toml. See ../README.md for
 # what changed and why, and docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md for the
 # upstream defect this fixes (F-CORE-FILE-03A). Everything below mirrors the released manifest
@@ -13,7 +13,7 @@
 
 [package]
 name = "bezel-gpui-linux"
-version = "0.3.6"
+version = "0.3.8"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -90,18 +90,18 @@ accesskit = { version = "0.24.0", features = ["enumn"] }
 accesskit_unix = "0.21.0"
 anyhow = "1.0.86"
 bytemuck = "1"
-collections = { package = "bezel-zed-collections", version = "0.3.6" }
+collections = { package = "bezel-zed-collections", version = "0.3.8" }
 futures = "0.3.32"
-gpui = { package = "bezel-gpui", version = "0.3.6", default-features = false }
-gpui_util = { package = "bezel-gpui-util", version = "0.3.6" }
-gpui_wgpu = { package = "bezel-gpui-wgpu", version = "0.3.6", optional = true, features = ["font-kit"] }
-http_client = { package = "bezel-zed-http-client", version = "0.3.6" }
+gpui = { package = "bezel-gpui", version = "0.3.8", default-features = false }
+gpui_util = { package = "bezel-gpui-util", version = "0.3.8" }
+gpui_wgpu = { package = "bezel-gpui-wgpu", version = "0.3.8", optional = true, features = ["font-kit"] }
+http_client = { package = "bezel-zed-http-client", version = "0.3.8" }
 libc = "0.2"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 parking_lot = "0.12.1"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 smol = "2.0"
-strum = { version = "0.27.2", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 url = "2.2"
 uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
 
