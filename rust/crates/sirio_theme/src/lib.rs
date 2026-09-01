@@ -130,9 +130,9 @@ pub struct ThemeColors {
     /// underline and the sidebar draw. Opaque rather than a veil, which is
     /// what keeps it a separate token from [`ThemeColors::border`].
     pub border_opaque: Rgba,
-    /// Terminal surface — paper-white in light and the pre-shell dark well in
-    /// dark mode, retained independently of the shell panel hierarchy. Kept
-    /// under its own name because bezel has no terminal-surface concept.
+    /// Terminal surface — the pane surface in dark mode and paper-white in
+    /// light mode. Kept under its own name because the terminal renderer also
+    /// uses it as the ANSI default background.
     pub terminal_surface: Rgba,
     /// Waiting-for-input status, a modified file, and the rail down a
     /// question card — the one card kind that is waiting on the reader, and
@@ -354,13 +354,10 @@ impl ThemeColors {
         // make the well legible at a glance and neither is a measurement;
         // `the_depth_ladder_reads_as_depth` holds the ordering.
         let inset = Rgba::from(bezel.input_bg);
-        // A terminal is the deepest thing on the page in dark, and paper in
-        // light — the same two extremes `inset` already names.
-        let terminal_surface = Self::adaptive(
-            scaled(rgb_hex(SURFACE_DARK), 0.72),
-            color(1.0, 1.0, 1.0, 1.0),
-            appearance,
-        );
+        // A terminal shares the pane surface in dark mode so its empty area
+        // cannot become a lighter grey than the pane around it. Light mode
+        // keeps the paper-white terminal surface.
+        let terminal_surface = Self::adaptive(panel_surface, color(1.0, 1.0, 1.0, 1.0), appearance);
         // Everything from here to `danger_soft` is a veil off the ladder — see
         // [`veil`] for why washes cannot be measured and must come from one
         // rule instead.
@@ -1590,21 +1587,6 @@ fn rgb_hex(hex: u32) -> Rgba {
     }
 }
 
-/// Scales an opaque colour's channels toward black, keeping alpha.
-///
-/// Used where one variant of a token is *our derivation* of another rather
-/// than a second independent measurement. Writing the relationship down is the
-/// point: a derived value can be checked against its source, and a pasted hex
-/// cannot be checked against anything.
-fn scaled(color: Rgba, factor: f32) -> Rgba {
-    Rgba {
-        r: color.r * factor,
-        g: color.g * factor,
-        b: color.b * factor,
-        a: color.a,
-    }
-}
-
 /// bezel's interactive-state wash at `alpha`, for a stated appearance.
 ///
 /// A mirror of `bezel::wash`, which exists only in the form that resolves
@@ -1653,10 +1635,6 @@ const TEXT_SOFTENING: f32 = 0.10;
 
 const VEIL_FAINT: f32 = 0.05;
 const VEIL_MID: f32 = 0.12;
-
-/// The former dark page, retained solely to preserve the terminal's established
-/// dark well while the shell moves to its new panel surface.
-const SURFACE_DARK: u32 = 0x1A_1A_1A;
 
 /// The same colour at a lower opacity.
 ///
@@ -1854,8 +1832,8 @@ mod tests {
     #[test]
     fn a_tinted_base_moves_the_greys_and_leaves_sirios_own_colours_alone() {
         // Decision B4: the coral is Sirio's identity, anchored by two
-        // measured constraints, and the terminal well is deliberately
-        // independent of the shell's panel hierarchy. Neither rotates.
+        // measured constraints. The dark terminal now follows the pane's
+        // tinted surface; the light terminal intentionally remains paper.
         for appearance in [Appearance::Light, Appearance::Dark] {
             let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             let slate = ThemeColors::for_appearance(appearance, BaseColor::Slate);
@@ -1874,9 +1852,23 @@ mod tests {
                 slate.brand_coral, neutral.brand_coral,
                 "{appearance:?} coral is Sirio's, not bezel's to rotate"
             );
+            if appearance == Appearance::Light {
+                assert_eq!(
+                    slate.terminal_surface, neutral.terminal_surface,
+                    "light terminal remains paper despite the pane tint"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dark_terminal_surface_matches_the_pane_surface() {
+        for base in BaseColor::ALL {
+            let theme = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, base);
+
             assert_eq!(
-                slate.terminal_surface, neutral.terminal_surface,
-                "{appearance:?} terminal well stays out of the panel hierarchy"
+                theme.terminal_surface, theme.surface,
+                "dark terminal background must match the pane for {base:?}"
             );
         }
     }
