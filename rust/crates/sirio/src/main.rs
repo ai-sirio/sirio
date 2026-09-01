@@ -8046,7 +8046,9 @@ impl SirioWorkspace {
 
         let mut terminals = Vec::new();
         let mut browsers = Vec::new();
-        self.tabs[index].panes.for_each(&mut |_, content| {
+        let mut closed_panes = Vec::new();
+        self.tabs[index].panes.for_each(&mut |pane_id, content| {
+            closed_panes.push(pane_id);
             if let Some(terminal) = content.terminal() {
                 terminals.push(terminal);
             }
@@ -8070,6 +8072,14 @@ impl SirioWorkspace {
             browser.update(cx, |surface, _| surface.close_native());
         }
         self.tabs.remove(index);
+        // The model is keyed by pane id and `next_pane_id` is `max + 1` of
+        // the tabs that remain, so a closed pane's entry would be inherited
+        // by the next pane to get its id. Only explicit closes forget: a
+        // worktree switch keeps its entries on purpose (the rows of
+        // unselected worktrees read their status from the model).
+        for pane_id in closed_panes {
+            self.activity.pane_closed(&format!("pane-{pane_id}"));
+        }
         if self.tab_menu_tab == Some(tab_id) {
             self.tab_menu_tab = None;
             self.tab_menu_open = false;
@@ -9999,6 +10009,9 @@ impl SirioWorkspace {
                     window.focus(&focus_handle, cx);
                 }
             }
+            // Same reason as `close_tab`: the id is free for reuse the moment
+            // the leaf is gone, and its model entry must not outlive it.
+            self.activity.pane_closed(&format!("pane-{focused_pane}"));
             self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
@@ -18669,6 +18682,56 @@ mod tests {
         cx: &VisualTestContext,
     ) -> Option<AgentStatus> {
         workspace.read_with(&cx.cx, |workspace, _| workspace.activity.status("pane-0"))
+    }
+
+    /// Closing a tab must forget its panes in the activity model: the model
+    /// is keyed by pane id and the next pane to get that id would otherwise
+    /// inherit the closed pane's status, agent and ownership.
+    #[gpui::test]
+    async fn closing_a_tab_forgets_its_pane_in_the_activity_model(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("sirio-close-tab-activity-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create close-tab test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn close-tab test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        cx.run_until_parked();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        assert_eq!(activity_status(&workspace, &cx), Some(AgentStatus::Running));
+
+        // `close_tab` arms the reconcile itself; the explicit one below only
+        // makes the assertion independent of whether a frame ran in between.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.close_tab(0, None, cx);
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        assert_eq!(activity_status(&workspace, &cx), None);
+        assert!(workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.activity.agent_id("pane-0").is_none()
+                && !workspace.activity.is_process_owned("pane-0")
+                && !workspace.activity.is_title_owned("pane-0")
+        }));
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// The control registry must publish a live source during the render
