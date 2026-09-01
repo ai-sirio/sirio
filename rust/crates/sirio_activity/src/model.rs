@@ -338,6 +338,28 @@ impl AgentActivityModel {
         self.track_status_change(pane_id, old, Instant::now());
     }
 
+    /// Applies a Layer-D observation to the model. The I/O half
+    /// (`inspect_foreground_agent_in`) may run on any thread; this is the
+    /// state half and must run wherever the model lives.
+    pub fn apply_process_signal(
+        &mut self,
+        pane_id: &str,
+        observation: io::Result<Option<&'static str>>,
+    ) -> io::Result<Option<Transition>> {
+        match observation {
+            Ok(Some(agent_id)) => Ok(self.process_identified(pane_id, agent_id)),
+            Ok(None) => {
+                self.process_gone(pane_id);
+                Ok(None)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.process_gone(pane_id);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Refreshes Layer-D evidence from a terminal shell PID. A matching
     /// descendant claims an otherwise-unregistered pane as running; an
     /// unmatched or disappeared process tree clears only process-owned state.
@@ -363,18 +385,8 @@ impl AgentActivityModel {
         pane_id: &str,
         shell_pid: u32,
     ) -> io::Result<Option<Transition>> {
-        match crate::process::inspect_foreground_agent_in(snapshot, shell_pid) {
-            Ok(Some(agent_id)) => Ok(self.process_identified(pane_id, agent_id)),
-            Ok(None) => {
-                self.process_gone(pane_id);
-                Ok(None)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.process_gone(pane_id);
-                Ok(None)
-            }
-            Err(error) => Err(error),
-        }
+        let observation = crate::process::inspect_foreground_agent_in(snapshot, shell_pid);
+        self.apply_process_signal(pane_id, observation)
     }
 
     // ------------------------------------------------------------------
@@ -731,5 +743,55 @@ mod tests {
             model.status_age_for_panes(&["pane-1"], start + std::time::Duration::from_secs(40),),
             Some(std::time::Duration::from_secs(15))
         );
+    }
+
+    #[test]
+    fn apply_process_signal_identifies_and_clears_process_owned_panes() {
+        let mut model = AgentActivityModel::new();
+        let identified = model
+            .apply_process_signal("pane-process", Ok(Some("codex")))
+            .expect("process observation should apply");
+        assert_eq!(
+            identified.map(|transition| transition.new),
+            Some(AgentStatus::Running)
+        );
+        assert!(model.is_process_owned("pane-process"));
+
+        let cleared = model
+            .apply_process_signal("pane-process", Ok(None))
+            .expect("process disappearance should apply");
+        assert_eq!(cleared, None);
+        assert!(!model.is_process_owned("pane-process"));
+        assert_eq!(model.status("pane-process"), None);
+    }
+
+    #[test]
+    fn apply_process_signal_not_found_clears_process_owned_panes() {
+        let mut model = AgentActivityModel::new();
+        model.process_identified("pane-process", "codex");
+
+        let result = model.apply_process_signal(
+            "pane-process",
+            Err(io::Error::new(io::ErrorKind::NotFound, "process gone")),
+        );
+        assert!(matches!(result, Ok(None)));
+        assert!(!model.is_process_owned("pane-process"));
+        assert_eq!(model.status("pane-process"), None);
+    }
+
+    #[test]
+    fn apply_process_signal_propagates_other_errors_without_mutating_process_owned_panes() {
+        let mut model = AgentActivityModel::new();
+        model.process_identified("pane-process", "codex");
+
+        let error = model
+            .apply_process_signal(
+                "pane-process",
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            )
+            .expect_err("non-NotFound errors should be propagated");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(model.is_process_owned("pane-process"));
+        assert_eq!(model.status("pane-process"), Some(AgentStatus::Running));
     }
 }

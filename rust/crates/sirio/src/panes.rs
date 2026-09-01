@@ -5,10 +5,7 @@
 //! workspace can therefore redraw the tree without recreating a terminal or a
 //! chat transcript.
 
-use std::{
-    io,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, KeyBinding, actions};
 use sirio_activity::{AgentActivityModel, Transition, detect_content_status};
@@ -52,21 +49,6 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
         }
     }
-}
-
-/// Performs one Layer-D refresh for a pane. The caller schedules this once per
-/// terminal at [`PROCESS_SIGNAL_INTERVAL`]; process ownership and clearing
-/// remain inside `AgentActivityModel`.
-/// The same refresh against a snapshot the tick already took (#248), so one
-/// enumeration of the machine's processes serves every pane instead of one
-/// each.
-pub(crate) fn refresh_process_signal_in(
-    activity: &mut AgentActivityModel,
-    snapshot: &sirio_activity::process::ProcessSnapshot,
-    pane_id: &str,
-    shell_pid: u32,
-) -> io::Result<Option<Transition>> {
-    activity.refresh_process_signal_in(snapshot, pane_id, shell_pid)
 }
 
 fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
@@ -629,8 +611,7 @@ fn remove_node<T>(node: PaneNode<T>, target: usize) -> (Option<PaneNode<T>>, Opt
 mod tests {
     use super::{
         PaneNode, PaneSize, SplitDirection, SplitDisabledReason, SplitPlacement, TabSelection,
-        apply_terminal_activity_event, process_signal_interval, refresh_process_signal_in,
-        split_disabled_reason,
+        apply_terminal_activity_event, process_signal_interval, split_disabled_reason,
     };
     use sirio_activity::{AgentActivityModel, AgentStatus};
     use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalShell, TerminalView};
@@ -701,12 +682,14 @@ mod tests {
         // The real periodic caller supplies the shell PID to this helper; the
         // process model, not a title or child-exit event, owns the clearing.
         assert_eq!(process_signal_interval(), Duration::from_millis(500));
-        // #248: the production path now takes one snapshot per tick and walks
-        // every pane against it, so the test drives that rather than a wrapper
-        // nothing calls.
+        // The production path takes one snapshot per tick and walks every
+        // pane against it on the background executor (#248), then applies
+        // the observations on the UI thread; the test drives that split
+        // rather than a wrapper nothing calls.
         let snapshot = sirio_activity::process::take_snapshot().expect("process snapshot");
-        let refresh =
-            refresh_process_signal_in(&mut activity, &snapshot, "pane-process", std::process::id());
+        let observation =
+            sirio_activity::process::inspect_foreground_agent_in(&snapshot, std::process::id());
+        let refresh = activity.apply_process_signal("pane-process", observation);
         assert!(matches!(refresh, Ok(None)));
         assert_eq!(activity.status("pane-process"), None);
         assert!(!activity.is_process_owned("pane-process"));
@@ -1151,6 +1134,60 @@ mod tests {
             .refresh_process_signal("pane-process-e2e", child.id())
             .expect("refresh after child exit");
         assert_eq!(activity.status("pane-process-e2e"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_process_signal_matches_a_direct_refresh() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!(
+            "sirio-pane-process-apply-e2e-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create process fixture");
+        let agent = root.join("codex");
+        symlink("/bin/sleep", &agent).expect("create matching comm alias");
+        let mut child = Command::new("sh")
+            .args(["-c", &format!("{} 2; true", agent.display())])
+            .spawn()
+            .expect("spawn shell with a real matching child");
+        std::thread::sleep(Duration::from_millis(50));
+
+        let shell_pid = child.id();
+        let observation = std::thread::spawn(move || {
+            let snapshot = sirio_activity::process::take_snapshot().unwrap();
+            sirio_activity::process::inspect_foreground_agent_in(&snapshot, shell_pid)
+        })
+        .join()
+        .expect("join process observation thread");
+        let mut activity = AgentActivityModel::new();
+        let transition = activity
+            .apply_process_signal("pane-x", observation)
+            .expect("apply process observation");
+        assert_eq!(
+            transition.map(|transition| transition.new),
+            Some(AgentStatus::Running)
+        );
+        assert!(activity.is_process_owned("pane-x"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let shell_pid = child.id();
+        let observation = std::thread::spawn(move || {
+            let snapshot = sirio_activity::process::take_snapshot().unwrap();
+            sirio_activity::process::inspect_foreground_agent_in(&snapshot, shell_pid)
+        })
+        .join()
+        .expect("join process observation thread after exit");
+        activity
+            .apply_process_signal("pane-x", observation)
+            .expect("apply process disappearance");
+        assert!(!activity.is_process_owned("pane-x"));
+        assert_eq!(activity.status("pane-x"), None);
         let _ = std::fs::remove_dir_all(root);
     }
 }
