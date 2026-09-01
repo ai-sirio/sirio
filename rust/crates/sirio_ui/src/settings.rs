@@ -3161,18 +3161,29 @@ impl Settings {
     /// is absent. A badge that claimed a binary not on PATH was installed
     /// would be the exact lie this screen used to tell.
     fn render_provider_status(availability: &AgentAvailability, theme: Theme) -> impl IntoElement {
+        /// Widest the resolved-path pill may grow: room for a typical
+        /// `~/.local/bin/<cli>` whole, while a node-hosted CLI's install
+        /// prefix is clipped instead of the row's identity.
+        const PATH_PILL_MAX_WIDTH: f32 = 240.0;
         let status_id = format!("settings-agent-status-{}", availability.id);
         match &availability.executable {
+            // #334: the path is capped, and clipped from its *start*, so a
+            // deep install prefix gives way before the binary's name does
+            // — and long before the row's own name and description, which
+            // are the only other shrinkable items in the row and used to
+            // collapse to nothing under a max-content pill.
             Some(path) => div()
                 .id(status_id.clone())
                 .debug_selector(move || status_id.clone())
+                .max_w(px(PATH_PILL_MAX_WIDTH))
+                .overflow_hidden()
                 .px(px(8.0))
                 .py(px(3.0))
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
                 .text_color(theme.text_muted)
                 .bg(theme.surface_raised)
-                .child(text!(sirio_project::display_path(path))),
+                .child(caret::field_value(text!(sirio_project::display_path(path)))),
             None => div()
                 .id(status_id.clone())
                 .debug_selector(move || status_id)
@@ -4897,6 +4908,59 @@ mod tests {
         assert!(
             description.origin.x + description.size.width <= row.origin.x + row.size.width,
             "agent description must stay inside its row: description={description:?} row={row:?}"
+        );
+    }
+
+    /// #334: the status pill carried the resolved binary's full path at its
+    /// max-content width, and the row's label side was the only shrinkable
+    /// flex item — a long install path (Pi under
+    /// `~/.local/share/pi-node/node-v22.23.2-linux-x64/bin/pi`) squeezed
+    /// the agent's name and description down to nothing while the path
+    /// stayed whole. The name is the row's identity; the path is the part
+    /// that gives way.
+    #[gpui::test]
+    async fn a_long_binary_path_never_squeezes_the_agent_name_out_of_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "pi",
+            display_name: "Pi",
+            executable: Some(std::path::PathBuf::from(
+                "/home/user/.local/share/pi-node/node-v22.23.2-linux-x64/lib/node_modules/\
+                 @mariozechner/pi-coding-agent/node_modules/.bin/some-very-deeply-nested/\
+                 vendor/runtime/bin/pi",
+            )),
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Pi row renders");
+        let name = cx
+            .debug_bounds("settings-agent-name-0")
+            .expect("the Pi name renders");
+        let status = cx
+            .debug_bounds("settings-agent-status-pi")
+            .expect("the resolved-path pill renders");
+
+        assert!(
+            name.size.width >= px(7.8 * 2.0),
+            "the agent's name keeps its full width — it is the row's identity: \
+             name={name:?} status={status:?}"
+        );
+        assert!(
+            status.origin.x + status.size.width <= row.origin.x + row.size.width,
+            "the path pill stays inside the row: status={status:?} row={row:?}"
+        );
+        assert!(
+            status.size.width < row.size.width / 2.0,
+            "the path pill gives way before the name does: status={status:?} row={row:?}"
         );
     }
 
