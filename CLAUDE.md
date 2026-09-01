@@ -8,13 +8,16 @@ Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github
 
 ### External references
 
-- [gpui-component](https://github.com/longbridge/gpui-component) — component library for gpui. Consult it before hand-rolling a new UI primitive in `sirio_ui`; it is the reference for how a gpui component is normally structured.
+- [bezel](https://github.com/crabtalk/bezel) — **the UI library, always**. Every UI primitive or component in `sirio_ui` is built from bezel (`bezel::ui`, `bezel::motion`, `bezel::theme`, `bezel::agent`) before anything is hand-rolled. Its `gallery` crate (`cargo run -p gallery` in a bezel checkout) is the reference example for how each component looks and is used — the same reference already used for the loading and theme-adoption work.
+- [gpui-component](https://github.com/longbridge/gpui-component) — secondary structural reference for how a gpui component is normally shaped, consulted only when bezel has no equivalent; bezel always wins.
 - [waku](https://github.com/egoist/waku) — a comparable app (multiple coding agents, one pane each). Reference for prior art on the same problem, not a dependency.
 
 ## Commands
 
 ```bash
-# Single verification gate for the whole repo — run before considering any task done.
+# Single verification gate for the whole repo.
+# ONLY on the user's explicit request — an agent must NEVER launch this (or
+# Scripts/ci-linux.sh) on its own. For iteration use `cargo build/test -p <crate>`.
 Scripts/ci.sh    # -> prints "CI OK" if everything passes
 
 # Fuller, stricter gate: the above plus fmt/clippy/cross-target checks and a headless
@@ -125,7 +128,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 - **Tests first**, standard Rust `#[test]` (see `Scripts/ci-linux.sh`'s comment on the two workspace-wide tests that need to run per-crate rather than concurrently with every other test binary).
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
-- `Scripts/ci.sh` must print `CI OK` before a PR is opened.
+- `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead.
 
 ## Agent skills
 
