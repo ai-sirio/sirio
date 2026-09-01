@@ -145,8 +145,8 @@ pub mod windows_pipe;
 pub use client::{ClientError, round_trip};
 pub use extract::{session_ref_from_json, session_ref_from_payload_arguments};
 pub use panel::{
-    PaneError, PaneExitStatus, PaneInfo, PaneRegistry, PaneStateSnapshot, base64_encode,
-    terminal_key_bytes,
+    PaneError, PaneExitStatus, PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource,
+    base64_encode, terminal_key_bytes,
 };
 pub use protocol::{
     ControlRequest, ControlResponse, decode_request, decode_response, default_socket_path,

@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ use sirio_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot};
 use sirio_control::protocol::rows;
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
-    PaneInfo, PaneRegistry, PaneStateSnapshot, protocol::request, round_trip,
+    PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, protocol::request, round_trip,
 };
 use sirio_persistence::{AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
@@ -1051,6 +1051,12 @@ fn pane_registry_lists_live_application_panes_for_their_worktree() {
 fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
     let registry = PaneRegistry::new();
     let working_directory = std::env::current_dir().expect("current directory");
+    let source_calls = Arc::new(AtomicUsize::new(0));
+    let source_calls_for_reader = Arc::clone(&source_calls);
+    let source: ScrollbackSource = Arc::new(move || {
+        source_calls_for_reader.fetch_add(1, Ordering::Relaxed);
+        b"old\nnew\n".to_vec()
+    });
     let pane = PaneInfo {
         id: "pane-ui-state".to_string(),
         tab: "Terminal".to_string(),
@@ -1065,21 +1071,69 @@ fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
-                    scrollback: b"old\nnew\n".to_vec(),
                     exit_status: Some(PaneExitStatus::Success),
                 },
+                Some(source),
             )],
         )
         .expect("application pane state registers");
 
+    assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        registry
+            .list_for(&working_directory)
+            .expect("list panes")
+            .len(),
+        1
+    );
+    assert_eq!(
+        source_calls.load(Ordering::Relaxed),
+        0,
+        "listing panes must not consult their scrollback sources"
+    );
+
     let state = registry.state(&pane.id).expect("live state");
-    assert_eq!(state.scrollback, b"old\nnew\n");
     assert_eq!(state.exit_status, Some(PaneExitStatus::Success));
+    assert_eq!(source_calls.load(Ordering::Relaxed), 0);
     assert_eq!(
         registry
             .scrollback(&pane.id, Some(4))
             .expect("bounded scrollback"),
         b"new\n".to_vec()
+    );
+    assert_eq!(source_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(registry.read(&pane.id).expect("live read"), b"old\nnew\n");
+    assert_eq!(source_calls.load(Ordering::Relaxed), 2);
+
+    registry
+        .set_external_state(
+            working_directory.clone(),
+            vec![(
+                pane.clone(),
+                PaneStateSnapshot {
+                    working_directory: working_directory.clone(),
+                    exit_status: Some(PaneExitStatus::Success),
+                },
+                None,
+            )],
+        )
+        .expect("application pane republishes without a source");
+    assert!(
+        registry
+            .read(&pane.id)
+            .expect("read without source")
+            .is_empty()
+    );
+    assert!(
+        registry
+            .scrollback(&pane.id, None)
+            .expect("scrollback without source")
+            .is_empty()
+    );
+    assert_eq!(
+        source_calls.load(Ordering::Relaxed),
+        2,
+        "a republished pane without a source cannot call the old source"
     );
 
     registry
@@ -1118,9 +1172,9 @@ fn pane_registry_read_finds_a_live_application_pane_panel_list_already_reported(
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
-                    scrollback: b"opencode ready\n".to_vec(),
                     exit_status: None,
                 },
+                Some(Arc::new(|| b"opencode ready\n".to_vec())),
             )],
         )
         .expect("application pane state registers");
@@ -1137,6 +1191,48 @@ fn pane_registry_read_finds_a_live_application_pane_panel_list_already_reported(
         registry.read(&pane.id).expect("panel.read finds the pane"),
         b"opencode ready\n".to_vec()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn pane_registry_caches_canonical_worktree_paths_for_queries() {
+    let registry = PaneRegistry::new();
+    let root = std::env::temp_dir().join(format!(
+        "sirio-control-canonical-cache-{}",
+        std::process::id()
+    ));
+    let alias = root.with_extension("alias");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&alias);
+    std::fs::create_dir_all(&root).expect("create canonical cache directory");
+    std::os::unix::fs::symlink(&root, &alias).expect("create canonical cache symlink");
+
+    let pane = PaneInfo {
+        id: "pane-canonical-cache".to_string(),
+        tab: "Terminal".to_string(),
+        title: "Terminal".to_string(),
+        agent: String::new(),
+        active: true,
+    };
+    registry
+        .set_external(&root, vec![pane.clone()])
+        .expect("register canonical directory");
+    assert_eq!(
+        registry.list_for(&alias).expect("first alias lookup"),
+        vec![pane]
+    );
+
+    std::fs::remove_file(&alias).expect("remove alias after it is cached");
+    assert_eq!(
+        registry
+            .list_for(&alias)
+            .expect("cached alias lookup after filesystem removal")
+            .len(),
+        1,
+        "a repeated query must use the canonicalization cache"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

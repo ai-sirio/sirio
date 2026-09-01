@@ -59,6 +59,12 @@ const FONT_SIZE: Pixels = px(13.0);
 const LINE_HEIGHT: Pixels = px(18.0);
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Test-observable count of scrollback extraction commands served by terminal
+/// owner threads. This is intentionally public only for regression tests that
+/// guard the render-loop capture invariant.
+#[doc(hidden)]
+pub static SCROLLBACK_CAPTURES: AtomicU64 = AtomicU64::new(0);
+
 /// What a terminal's PTY runs, mirroring the shape of Zed's own `Shell`
 /// (`util::shell::Shell`): a terminal is constructed with its task already
 /// decided, never mutated into running a command after the fact.
@@ -471,6 +477,28 @@ enum SirioScroll {
     /// line at a time; a page per tick would fly past whatever the user was
     /// dragging towards.
     Lines(isize),
+}
+
+/// A cheap, clonable reader for a live terminal's retained scrollback.
+///
+/// It is `Send` and `Sync` because it only holds a clone of the owner
+/// thread's command sender. A held sender clone keeps that command channel
+/// alive; terminal shutdown remains explicit, and `Shutdown` makes the owner
+/// thread return so later captures fail cleanly when the receiver is dropped.
+#[derive(Clone)]
+pub struct ScrollbackCapture {
+    commands: std::sync::mpsc::Sender<TerminalCommand>,
+}
+
+impl ScrollbackCapture {
+    /// Captures normalized retained scrollback on the terminal owner thread.
+    pub fn capture(&self) -> Vec<u8> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
+            return Vec::new();
+        }
+        reply_rx.recv().unwrap_or_default().into_bytes()
+    }
 }
 
 #[derive(Clone)]
@@ -1334,6 +1362,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         let _ = reply.send(collect_kitty_placements(&mut terminal));
                     }
                     TerminalCommand::Text(reply) => {
+                        SCROLLBACK_CAPTURES.fetch_add(1, Ordering::SeqCst);
                         let _ = reply.send(capture_scrollback_text(&mut terminal));
                     }
                     TerminalCommand::ClickSelect(cell, kind, reply) => {
@@ -1347,7 +1376,10 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         let text = selection_text(&terminal, range).unwrap_or_default();
                         let _ = reply.send(text);
                     }
-                    TerminalCommand::Shutdown => shutdown = true,
+                    TerminalCommand::Shutdown => {
+                        shutdown = true;
+                        break;
+                    }
                 }
             }
             // #308 R4.4: any mutation that can move placements or change
@@ -1966,11 +1998,13 @@ impl TerminalHandle {
     }
 
     fn capture_scrollback(&self) -> Vec<u8> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
-            return Vec::new();
+        self.scrollback_source().capture()
+    }
+
+    fn scrollback_source(&self) -> ScrollbackCapture {
+        ScrollbackCapture {
+            commands: self.commands.clone(),
         }
-        reply_rx.recv().unwrap_or_default().into_bytes()
     }
 
     /// Replays captured output directly into the emulator. It does not write
@@ -2002,8 +2036,9 @@ fn capture_scrollback_text(terminal: &mut Terminal<'static, 'static>) -> String 
         for column in 0..columns {
             // Screen coordinates span history + viewport; row 0 is the top
             // of the scrollback. This walk is not render-loop work (the doc
-            // on Terminal::grid_ref warns it may traverse the page list),
-            // which is fine: capture happens once per settle/persist.
+            // on Terminal::grid_ref warns it may traverse the page list).
+            // Capture happens once per settle/persist or on demand when the
+            // control socket's scrollback source is read.
             match terminal.grid_ref(GhosttyPoint::Screen(PointCoordinate {
                 x: column as u16,
                 y: row as u32,
@@ -2697,6 +2732,16 @@ impl TerminalView {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
             TerminalState::Pending | TerminalState::Failed { .. } => Vec::new(),
+        }
+    }
+
+    /// Returns the live on-demand source used by the control socket to read
+    /// this terminal's scrollback. Pending and failed panes have no owner
+    /// thread and therefore expose no source.
+    pub fn scrollback_source(&self) -> Option<ScrollbackCapture> {
+        match &self.terminal {
+            TerminalState::Running(terminal) => Some(terminal.scrollback_source()),
+            TerminalState::Pending | TerminalState::Failed { .. } => None,
         }
     }
 
@@ -8029,6 +8074,124 @@ mod view_tests {
                 .map(|directory| directory.join(program))
                 .find(|candidate| candidate.exists())
         })
+    }
+
+    #[gpui::test]
+    async fn scrollback_source_captures_the_same_bytes_as_direct_capture(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-scrollback-source-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'SCROLLBACK_SOURCE_TEST\\n'; exec sleep 1".to_string(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let captured = loop {
+            cx.run_until_parked();
+            let source = terminal
+                .read_with(&cx.cx, |terminal, _| terminal.scrollback_source())
+                .expect("running terminal must expose a source");
+            let bytes = source.capture();
+            if String::from_utf8_lossy(&bytes).contains("SCROLLBACK_SOURCE_TEST") {
+                break bytes;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("the source never observed the PTY output");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let direct = terminal.read_with(&cx.cx, |terminal, _| terminal.capture_scrollback());
+        assert_eq!(captured, direct);
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    #[gpui::test]
+    async fn scrollback_source_is_none_for_a_failed_terminal(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let missing = std::env::temp_dir().join(format!(
+            "sirio-terminal-failed-scrollback-source-{}",
+            std::process::id()
+        ));
+        let window = cx.add_window(|_, cx| {
+            TerminalView::failed(
+                &missing,
+                TerminalShell::System,
+                "failed source test",
+                cx,
+            )
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("failed terminal root")
+        });
+        assert!(
+            terminal
+                .read_with(&cx.cx, |terminal, _| terminal.scrollback_source())
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    async fn scrollback_source_returns_empty_after_shutdown(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-shutdown-scrollback-source-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(
+                &working_directory,
+                TerminalShell::WithArguments {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), "exec sleep 60".into()],
+                },
+                cx,
+            )
+            .expect("spawn PTY")
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let source = terminal
+            .read_with(&cx.cx, |terminal, _| terminal.scrollback_source())
+            .expect("running terminal must expose a source");
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(source.capture());
+        });
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a source captured after shutdown must not hang");
+        assert!(result.is_empty());
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// A real PTY must expose the shell's OSC title and its settled scrollback

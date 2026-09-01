@@ -15,7 +15,7 @@ use sirio_activity::{
 use sirio_agents::ALL as AGENT_CATALOG;
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
-    PaneInfo, PaneRegistry, PaneStateSnapshot, base64_encode,
+    PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, base64_encode,
 };
 use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
@@ -28,7 +28,7 @@ use sirio_project::{
 use sirio_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
     TerminalExitStatus, TerminalIdentity, TerminalLinkEvent, TerminalPaneCache,
-    TerminalPromptAction, TerminalPromptEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
+    TerminalPromptAction, TerminalPromptEvent, TerminalShell, TerminalView,
     command_shell_invocation,
 };
 use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
@@ -2993,7 +2993,10 @@ fn launch_refusal_reason(source: &sirio_registry::LaunchSource) -> String {
     }
 }
 
-fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
+fn panel_state_pairs(
+    snapshot: &PaneStateSnapshot,
+    scrollback: &[u8],
+) -> Vec<(String, String)> {
     let mut pairs = vec![
         (
             "workingDirectory".to_string(),
@@ -3001,11 +3004,11 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
         ),
         (
             "scrollback".to_string(),
-            base64_encode(&snapshot.scrollback),
+            base64_encode(scrollback),
         ),
         (
             "scrollbackBytes".to_string(),
-            snapshot.scrollback.len().to_string(),
+            scrollback.len().to_string(),
         ),
     ];
     if let Some(status) = snapshot.exit_status {
@@ -3025,17 +3028,13 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
     pairs
 }
 
-fn panel_state_from_terminal(snapshot: TerminalStateSnapshot) -> PaneStateSnapshot {
-    PaneStateSnapshot {
-        working_directory: snapshot.working_directory,
-        scrollback: snapshot.scrollback,
-        exit_status: snapshot.exit_status.map(|status| match status {
-            TerminalExitStatus::Success => PaneExitStatus::Success,
-            TerminalExitStatus::Code(code) => PaneExitStatus::Code(code),
-            TerminalExitStatus::Signal(signal) => PaneExitStatus::Signal(signal),
-            TerminalExitStatus::Unknown => PaneExitStatus::Unknown,
-        }),
-    }
+fn pane_exit_status(status: Option<TerminalExitStatus>) -> Option<PaneExitStatus> {
+    status.map(|status| match status {
+        TerminalExitStatus::Success => PaneExitStatus::Success,
+        TerminalExitStatus::Code(code) => PaneExitStatus::Code(code),
+        TerminalExitStatus::Signal(signal) => PaneExitStatus::Signal(signal),
+        TerminalExitStatus::Unknown => PaneExitStatus::Unknown,
+    })
 }
 
 fn changes_report_pairs(
@@ -4294,7 +4293,14 @@ impl SirioWorkspace {
                                         PaneQuery::State => workspace
                                             .panes
                                             .state(&id)
-                                            .map(|snapshot| panel_state_pairs(&snapshot))
+                                            .and_then(|snapshot| {
+                                                workspace
+                                                    .panes
+                                                    .scrollback(&id, None)
+                                                    .map(|scrollback| {
+                                                        panel_state_pairs(&snapshot, &scrollback)
+                                                    })
+                                            })
                                             .map_err(|error| error.to_string()),
                                         PaneQuery::Scrollback(max_bytes) => workspace
                                             .panes
@@ -6466,39 +6472,52 @@ impl SirioWorkspace {
     /// which is how selecting an untouched worktree could inherit another
     /// one's failing agent and show up red.
     ///
+    /// This publishes cheap pane facts and live scrollback sources. It does
+    /// not capture terminal contents: a source is consulted by the control
+    /// registry only when a read asks for bytes.
+    ///
     /// `set_external_state` replaces a directory's whole app-pane list, so
     /// directories that were published last time and own nothing now are
     /// explicitly cleared — otherwise a pane that moved (or closed) would
     /// leave a ghost behind. The selected worktree is always published,
     /// even empty, for the same reason.
     fn sync_control_panes(&mut self, cx: &App) {
-        let mut by_directory: BTreeMap<PathBuf, Vec<(PaneInfo, PaneStateSnapshot)>> =
+        let mut by_directory:
+            BTreeMap<PathBuf, Vec<(PaneInfo, PaneStateSnapshot, Option<ScrollbackSource>)>> =
             BTreeMap::new();
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             tab.panes.for_each(&mut |pane_id, content| {
-                let (title, agent, state) = match content {
+                let (title, agent, state, scrollback_source) = match content {
                     TabContent::Chat(_) => (
                         "Chat".to_string(),
                         String::new(),
                         PaneStateSnapshot {
                             working_directory: self.working_directory.clone(),
-                            scrollback: Vec::new(),
                             exit_status: None,
                         },
+                        None,
                     ),
                     TabContent::Terminal { view } => {
                         let agent = tab.agent_id.clone().unwrap_or_default();
-                        let state = panel_state_from_terminal(view.read(cx).snapshot());
-                        (tab.title.clone(), agent, state)
+                        let terminal = view.read(cx);
+                        let state = PaneStateSnapshot {
+                            working_directory: terminal.working_directory().to_path_buf(),
+                            exit_status: pane_exit_status(terminal.exit_status()),
+                        };
+                        let scrollback_source = terminal.scrollback_source().map(|source| {
+                            let source: ScrollbackSource = Arc::new(move || source.capture());
+                            source
+                        });
+                        (tab.title.clone(), agent, state, scrollback_source)
                     }
                     TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
                             working_directory: self.working_directory.clone(),
-                            scrollback: Vec::new(),
                             exit_status: None,
                         },
+                        None,
                     ),
                 };
                 by_directory
@@ -6513,6 +6532,7 @@ impl SirioWorkspace {
                             active: tab_index == self.active_tab && pane_id == tab.focused_pane,
                         },
                         state,
+                        scrollback_source,
                     ));
             });
         }
@@ -18536,6 +18556,60 @@ mod tests {
         cx: &VisualTestContext,
     ) -> Option<AgentStatus> {
         workspace.read_with(&cx.cx, |workspace, _| workspace.activity.status("pane-0"))
+    }
+
+    /// The control registry must publish a live source during the render
+    /// refresh without asking the terminal owner thread for its scrollback.
+    /// An explicit registry read is the only operation in this test allowed
+    /// to cross that boundary.
+    #[gpui::test]
+    async fn render_never_captures_scrollback(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-render-no-scrollback-capture-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create regression test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn regression test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        cx.run_until_parked();
+
+        let panes = workspace.read_with(&cx.cx, |workspace, _| workspace.panes.clone());
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.sync_control_panes(cx);
+        });
+        let before = sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst);
+        for _ in 0..3 {
+            workspace.update(&mut cx.cx, |workspace, cx| {
+                workspace.sync_activity(cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst),
+            before,
+            "render and activity synchronization must never capture scrollback"
+        );
+
+        panes.read("pane-0").expect("published terminal pane");
+        assert!(
+            sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst) > before,
+            "an explicit registry read must consult the live scrollback source"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     #[gpui::test]

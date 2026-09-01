@@ -75,12 +75,18 @@ pub enum PaneExitStatus {
     Unknown,
 }
 
+/// A live source of a panel's retained scrollback.
+///
+/// The source is consulted only when a read asks for the bytes. It may
+/// legitimately return an empty buffer when the panel is shutting down
+/// mid-call, and it must never block indefinitely.
+pub type ScrollbackSource = Arc<dyn Fn() -> Vec<u8> + Send + Sync>;
+
 /// State observed from the actual terminal surface, whether it is a
 /// control-owned PTY or an application-owned GPUI terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneStateSnapshot {
     pub working_directory: PathBuf,
-    pub scrollback: Vec<u8>,
     pub exit_status: Option<PaneExitStatus>,
 }
 
@@ -165,12 +171,14 @@ struct ExternalPane {
     working_directory: PathBuf,
     info: PaneInfo,
     state: PaneStateSnapshot,
+    scrollback_source: Option<ScrollbackSource>,
 }
 
 /// Thread-safe source of truth for panes created through the control socket.
 pub struct PaneRegistry {
     panes: Mutex<HashMap<String, Arc<PaneEntry>>>,
     external: Mutex<HashMap<String, ExternalPane>>,
+    canonical_directories: Mutex<HashMap<PathBuf, PathBuf>>,
     closed: Mutex<HashSet<String>>,
     active: Mutex<Option<String>>,
     next_id: AtomicU64,
@@ -187,6 +195,7 @@ impl PaneRegistry {
         Self {
             panes: Mutex::new(HashMap::new()),
             external: Mutex::new(HashMap::new()),
+            canonical_directories: Mutex::new(HashMap::new()),
             closed: Mutex::new(HashSet::new()),
             active: Mutex::new(None),
             next_id: AtomicU64::new(1),
@@ -199,7 +208,7 @@ impl PaneRegistry {
         command: Option<&str>,
         title: impl Into<String>,
     ) -> Result<PaneInfo, PaneError> {
-        let working_directory = checked_directory(working_directory.as_ref())?;
+        let working_directory = self.checked_directory(working_directory.as_ref())?;
         let id = format!(
             "pane-{}-{}",
             std::process::id(),
@@ -245,7 +254,7 @@ impl PaneRegistry {
         working_directory: impl AsRef<Path>,
         panes: Vec<PaneInfo>,
     ) -> Result<(), PaneError> {
-        let working_directory = checked_directory(working_directory.as_ref())?;
+        let working_directory = self.checked_directory(working_directory.as_ref())?;
         let panes = panes
             .into_iter()
             .map(|pane| {
@@ -253,9 +262,9 @@ impl PaneRegistry {
                     pane,
                     PaneStateSnapshot {
                         working_directory: working_directory.clone(),
-                        scrollback: Vec::new(),
                         exit_status: None,
                     },
+                    None,
                 )
             })
             .collect();
@@ -263,14 +272,15 @@ impl PaneRegistry {
     }
 
     /// Replaces the live application-pane snapshot and the terminal state
-    /// held by each renderer-owned pane. The app supplies these snapshots;
-    /// this crate never recomputes them from git or a second PTY.
+    /// held by each renderer-owned pane. The app supplies these facts and a
+    /// source for on-demand scrollback; this crate never recomputes them from
+    /// git or a second PTY.
     pub fn set_external_state(
         &self,
         working_directory: impl AsRef<Path>,
-        panes: Vec<(PaneInfo, PaneStateSnapshot)>,
+        panes: Vec<(PaneInfo, PaneStateSnapshot, Option<ScrollbackSource>)>,
     ) -> Result<(), PaneError> {
-        let working_directory = checked_directory(working_directory.as_ref())?;
+        let working_directory = self.lookup_directory(working_directory.as_ref())?;
         let mut external = self
             .external
             .lock()
@@ -282,10 +292,10 @@ impl PaneRegistry {
             .collect::<Vec<_>>();
         let current_ids = panes
             .iter()
-            .map(|(pane, _)| pane.id.clone())
+            .map(|(pane, _, _)| pane.id.clone())
             .collect::<Vec<_>>();
         external.retain(|_, pane| pane.working_directory != working_directory);
-        for (pane, mut state) in panes {
+        for (pane, mut state, scrollback_source) in panes {
             state.working_directory = working_directory.clone();
             external.insert(
                 pane.id.clone(),
@@ -293,6 +303,7 @@ impl PaneRegistry {
                     working_directory: working_directory.clone(),
                     info: pane,
                     state,
+                    scrollback_source,
                 },
             );
         }
@@ -360,7 +371,7 @@ impl PaneRegistry {
     }
 
     pub fn list_for(&self, working_directory: &Path) -> Result<Vec<PaneInfo>, PaneError> {
-        let working_directory = checked_directory(working_directory)?;
+        let working_directory = self.lookup_directory(working_directory)?;
         let active = self
             .active
             .lock()
@@ -427,13 +438,17 @@ impl PaneRegistry {
                 .output
                 .clone());
         }
-        if let Some(pane) = self
-            .external
-            .lock()
-            .map_err(|_| PaneError::Io("external pane registry lock poisoned".to_string()))?
-            .get(pane_id)
-        {
-            return Ok(pane.state.scrollback.clone());
+        let external_source = {
+            let external = self
+                .external
+                .lock()
+                .map_err(|_| PaneError::Io("external pane registry lock poisoned".to_string()))?;
+            external
+                .get(pane_id)
+                .map(|pane| pane.scrollback_source.clone())
+        };
+        if let Some(source) = external_source {
+            return Ok(source.map_or_else(Vec::new, |source| source()));
         }
         Err(self.missing_pane_error(pane_id))
     }
@@ -454,7 +469,6 @@ impl PaneRegistry {
                 .map_err(|_| PaneError::Io("pane state lock poisoned".to_string()))?;
             return Ok(PaneStateSnapshot {
                 working_directory: pane.working_directory.clone(),
-                scrollback: state.output.clone(),
                 exit_status: state.exit_code.map(pane_exit_status),
             });
         }
@@ -469,14 +483,45 @@ impl PaneRegistry {
         Err(self.missing_pane_error(pane_id))
     }
 
-    /// Returns the renderer-owned scrollback bytes, bounded by the caller's
-    /// requested maximum without changing the stored surface state.
+    /// Returns scrollback bytes, bounded by the caller's requested maximum.
+    /// Renderer-owned panes invoke their live source at read time without
+    /// changing the stored pane facts.
     pub fn scrollback(
         &self,
         pane_id: &str,
         max_bytes: Option<usize>,
     ) -> Result<Vec<u8>, PaneError> {
-        let mut bytes = self.state(pane_id)?.scrollback;
+        let mut bytes = if let Some(pane) = self
+            .panes
+            .lock()
+            .map_err(|_| PaneError::Io("pane registry lock poisoned".to_string()))?
+            .get(pane_id)
+            .cloned()
+        {
+            pane.process
+                .state
+                .lock()
+                .map_err(|_| PaneError::Io("pane state lock poisoned".to_string()))?
+                .output
+                .clone()
+        } else {
+            let external_source = {
+                let external = self
+                    .external
+                    .lock()
+                    .map_err(|_| {
+                        PaneError::Io("external pane registry lock poisoned".to_string())
+                    })?;
+                external
+                    .get(pane_id)
+                    .map(|pane| pane.scrollback_source.clone())
+            };
+            if let Some(source) = external_source {
+                source.map_or_else(Vec::new, |source| source())
+            } else {
+                return Err(self.missing_pane_error(pane_id));
+            }
+        };
         if let Some(max_bytes) = max_bytes
             && bytes.len() > max_bytes
         {
@@ -655,16 +700,40 @@ fn pane_exit_status(code: i32) -> PaneExitStatus {
     }
 }
 
-fn checked_directory(path: &Path) -> Result<PathBuf, PaneError> {
-    let path = path
-        .canonicalize()
-        .map_err(|error| PaneError::InvalidWorkingDirectory(error.to_string()))?;
-    if !path.is_dir() {
-        return Err(PaneError::InvalidWorkingDirectory(
-            path.display().to_string(),
-        ));
+impl PaneRegistry {
+    /// Resolves and validates a write path against the filesystem, then
+    /// remembers the result for later lookups.
+    fn checked_directory(&self, raw_path: &Path) -> Result<PathBuf, PaneError> {
+        let path = raw_path
+            .canonicalize()
+            .map_err(|error| PaneError::InvalidWorkingDirectory(error.to_string()))?;
+        if !path.is_dir() {
+            return Err(PaneError::InvalidWorkingDirectory(
+                path.display().to_string(),
+            ));
+        }
+        self.canonical_directories
+            .lock()
+            .map_err(|_| PaneError::Io("canonical directory cache lock poisoned".to_string()))?
+            .insert(raw_path.to_path_buf(), path.clone());
+        Ok(path)
     }
-    Ok(path)
+
+    /// Resolves a query path without touching the filesystem when its raw
+    /// spelling has already been seen. A first lookup falls back to the
+    /// validating path routine, which also seeds the cache.
+    fn lookup_directory(&self, raw_path: &Path) -> Result<PathBuf, PaneError> {
+        if let Some(path) = self
+            .canonical_directories
+            .lock()
+            .map_err(|_| PaneError::Io("canonical directory cache lock poisoned".to_string()))?
+            .get(raw_path)
+            .cloned()
+        {
+            return Ok(path);
+        }
+        self.checked_directory(raw_path)
+    }
 }
 
 /// The interpreter a control-owned pane runs when no `--cmd` is given.
