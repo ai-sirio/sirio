@@ -45,6 +45,21 @@ when the last of them closes.
 Despite the name it is not a [pane](#pane); see
 [primary pane role](#primary-pane-role).
 
+## Control socket
+
+### Panel
+
+A pty record addressed by the control socket's `panel.*` verbs — created over
+the socket itself, or published by the app for a terminal it renders. Decided
+in [#319](https://github.com/ai-sirio/sirio/issues/319): never called a
+[pane](#pane), which is reserved for the split tree inside a tab.
+
+### Scrollback source
+
+The live handle a [panel](#panel)'s scrollback is read through: consulted only
+at the moment a read asks for the bytes, never eagerly. A panel without one —
+still spawning, failed, or already shut down — reads as empty scrollback.
+
 ## Browser
 
 ### Origin grant
