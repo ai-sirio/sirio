@@ -1078,42 +1078,68 @@ impl TranscriptSelectableText {
 
         let local_start = start - self.source_range.start;
         let local_end = end - self.source_range.start;
-        let layout = self.text.layout();
-        let line_height = layout.line_height();
-        let start_position = layout
-            .position_for_index(local_start)
-            .unwrap_or(bounds.origin);
-        let end_position = layout
-            .position_for_index(local_end)
-            .unwrap_or(point(bounds.right(), bounds.bottom() - line_height));
-        let color = self.selection_fill;
-        let mut paint_line = |y: Pixels, left: Pixels, right: Pixels| {
-            if right > left {
-                window.paint_quad(quad(
-                    Bounds::from_corners(
-                        point(left, y),
-                        point(right, (y + line_height).min(bounds.bottom())),
-                    ),
-                    px(0.0),
-                    color,
-                    Edges::default(),
-                    transparent_black(),
-                    BorderStyle::default(),
-                ));
-            }
-        };
+        paint_wrapped_span(
+            self.text.layout(),
+            bounds,
+            local_start..local_end,
+            self.selection_fill,
+            window,
+            |_| {},
+        );
+    }
+}
 
-        if start_position.y == end_position.y {
-            paint_line(start_position.y, start_position.x, end_position.x);
-        } else {
-            paint_line(start_position.y, start_position.x, bounds.right());
-            let mut y = start_position.y + line_height;
-            while y < end_position.y {
-                paint_line(y, bounds.left(), bounds.right());
-                y += line_height;
-            }
-            paint_line(end_position.y, bounds.left(), end_position.x);
+/// Shades the byte range `span` of a laid-out `StyledText` that may have
+/// wrapped: one quad per visual line — from the span's start to the right
+/// edge, full-width for every line in between, and from the left edge to the
+/// span's end — so a selection reads as one continuous highlight however the
+/// text broke. `on_quad` sees each quad's bounds as it is painted.
+fn paint_wrapped_span(
+    layout: &gpui::TextLayout,
+    bounds: Bounds<Pixels>,
+    span: Range<usize>,
+    color: Rgba,
+    window: &mut Window,
+    mut on_quad: impl FnMut(Bounds<Pixels>),
+) {
+    if span.start >= span.end {
+        return;
+    }
+    let line_height = layout.line_height();
+    let start_position = layout
+        .position_for_index(span.start)
+        .unwrap_or(bounds.origin);
+    let end_position = layout
+        .position_for_index(span.end)
+        .unwrap_or(point(bounds.right(), bounds.bottom() - line_height));
+    let mut paint_line = |y: Pixels, left: Pixels, right: Pixels| {
+        if right > left {
+            let quad_bounds = Bounds::from_corners(
+                point(left, y),
+                point(right, (y + line_height).min(bounds.bottom())),
+            );
+            window.paint_quad(quad(
+                quad_bounds,
+                px(0.0),
+                color,
+                Edges::default(),
+                transparent_black(),
+                BorderStyle::default(),
+            ));
+            on_quad(quad_bounds);
         }
+    };
+
+    if start_position.y == end_position.y {
+        paint_line(start_position.y, start_position.x, end_position.x);
+    } else {
+        paint_line(start_position.y, start_position.x, bounds.right());
+        let mut y = start_position.y + line_height;
+        while y < end_position.y {
+            paint_line(y, bounds.left(), bounds.right());
+            y += line_height;
+        }
+        paint_line(end_position.y, bounds.left(), end_position.x);
     }
 }
 
@@ -1263,6 +1289,136 @@ impl Element for TranscriptSelectableText {
     }
 }
 
+/// What the composer's text runs painted in the last frame: the caret bar's
+/// bounds and every selection quad. A paint-time quad leaves no
+/// `debug_bounds` behind, so this is the seam the layout tests read caret
+/// and selection geometry through; the renderer clears it every frame.
+#[derive(Default)]
+struct ComposerPaintTrace {
+    caret: Cell<Option<Bounds<Pixels>>>,
+    selection: std::cell::RefCell<Vec<Bounds<Pixels>>>,
+}
+
+/// One `ComposerPart::Text` run of the draft: a single wrapping `StyledText`
+/// with the selection shading and the insertion caret painted over it at
+/// `position_for_index` — the same shape as `TranscriptSelectableText` above
+/// and `EditableLine` in `file_view.rs`.
+///
+/// The draft used to be cut into separate flex items at the caret and the
+/// selection edges. In the wrapping `composer-input` row a piece that wraps
+/// becomes a full-width block, so everything after it — the caret first of
+/// all — dropped onto a row of its own, and a mid-text caret split the word
+/// it sat in across two rows. Painting over one run keeps the text's own
+/// line breaks, and `position_for_index` already knows which wrapped line an
+/// offset landed on.
+struct ComposerText {
+    id: ElementId,
+    text: StyledText,
+    /// Selected byte range, local to this run.
+    selection: Option<Range<usize>>,
+    selection_fill: Rgba,
+    /// Byte offset of the insertion caret when this run hosts it.
+    caret: Option<usize>,
+    /// Blink phase: the caret's bounds are traced either way, the bar is
+    /// only painted while lit.
+    caret_visible: bool,
+    caret_color: Rgba,
+    trace: Rc<ComposerPaintTrace>,
+}
+
+impl IntoElement for ComposerText {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ComposerText {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.text.request_layout(id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.text
+            .prepaint(id, inspector_id, bounds, state, window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(span) = self.selection.clone() {
+            let trace = self.trace.clone();
+            paint_wrapped_span(
+                self.text.layout(),
+                bounds,
+                span,
+                self.selection_fill,
+                window,
+                |quad_bounds| trace.selection.borrow_mut().push(quad_bounds),
+            );
+        }
+        // The caret goes under the glyphs, like the selection: a bar between
+        // two characters must not cover the stems it sits between.
+        if let Some(caret) = self.caret {
+            let layout = self.text.layout();
+            let line_height = layout.line_height();
+            let position = layout
+                .position_for_index(caret)
+                .unwrap_or(point(bounds.right(), bounds.bottom() - line_height));
+            let bar = Bounds::new(
+                point(position.x.min(bounds.right()), position.y),
+                gpui::size(caret::BAR_WIDTH, line_height),
+            );
+            self.trace.caret.set(Some(bar));
+            if self.caret_visible {
+                window.paint_quad(quad(
+                    bar,
+                    px(1.0),
+                    self.caret_color,
+                    Edges::default(),
+                    transparent_black(),
+                    BorderStyle::default(),
+                ));
+            }
+        }
+        self.text
+            .paint(id, inspector_id, bounds, state, &mut (), window, cx);
+    }
+}
+
 impl IntoElement for TranscriptSelectableText {
     type Element = Self;
 
@@ -1287,6 +1443,9 @@ pub struct Chat {
     /// the bar must wake instead of blinking off mid-interaction.
     composer_blink: caret::Blink,
     composer_caret_sig: (usize, usize, usize),
+    /// Where the composer's text runs painted the caret and the selection
+    /// last frame (see `ComposerPaintTrace`).
+    composer_paint: Rc<ComposerPaintTrace>,
     composer_focus: FocusHandle,
     /// F-CHAT-25: the question answer field (focus, draft, owner request).
     question_answer: QuestionAnswerState,
@@ -1556,6 +1715,7 @@ impl Chat {
             entries: Vec::new(),
             composer: Composer::new(),
             composer_blink: caret::Blink::new(),
+            composer_paint: Rc::new(ComposerPaintTrace::default()),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
             model_search_blink: caret::Blink::new(),
@@ -4032,17 +4192,23 @@ impl Chat {
                     })
                     .flex()
                     .items_center()
-                    .child(if question_answer.draft.is_empty() {
-                        div()
-                            .text_color(theme.text_faint)
-                            .child(placeholder)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .text_color(theme.text)
-                            .child(question_answer.draft.clone())
-                            .into_any_element()
-                    })
+                    // A long answer is clipped from the start, so the tail
+                    // being typed stays in view (`caret::field_value`).
+                    .overflow_hidden()
+                    .child(
+                        caret::field_value(if question_answer.draft.is_empty() {
+                            div()
+                                .text_color(theme.text_faint)
+                                .child(placeholder)
+                                .into_any_element()
+                        } else {
+                            div()
+                                .text_color(theme.text)
+                                .child(question_answer.draft.clone())
+                                .into_any_element()
+                        })
+                        .debug_selector(|| "question-answer-text".into()),
+                    )
                     // The bar always occupies layout, so the answer text does
                     // not shift by two pixels every half second as it blinks.
                     .child(
@@ -5803,6 +5969,9 @@ impl Chat {
         );
         self.model_search_caret_visible = model_search_focused && self.model_search_blink.visible();
         let model_search_caret_visible = self.model_search_caret_visible;
+        let composer_paint = self.composer_paint.clone();
+        composer_paint.caret.set(None);
+        composer_paint.selection.borrow_mut().clear();
         let caret_bar = || {
             div()
                 .debug_selector(|| "composer-caret".into())
@@ -5815,7 +5984,19 @@ impl Chat {
         };
         // Where the insertion caret sits in the draft: `(part index, char
         // offset inside that Text part)`, `part == parts.len()` at the end.
-        let (caret_part, caret_offset) = self.composer.cursor();
+        // The model's end-of-document position is folded onto the end of a
+        // trailing text run, so that run paints the caret at its last glyph
+        // (wherever the run wrapped to) instead of a standalone bar being
+        // laid out after the run's whole block — on a row of its own once
+        // the run spans more than one.
+        let (caret_part, caret_offset) = match self.composer.parts().last() {
+            Some(ComposerPart::Text(last))
+                if self.composer.cursor().0 == self.composer.parts().len() =>
+            {
+                (self.composer.parts().len() - 1, last.chars().count())
+            }
+            _ => self.composer.cursor(),
+        };
 
         // Swift's `modePill` (ComposerControlBar.swift) always pairs a
         // status dot with a label, whether that label is a raw state word
@@ -6101,17 +6282,21 @@ impl Chat {
                                 .text_size(typography.footnote)
                                 .flex()
                                 .items_center()
-                                .child(if search_placeholder {
-                                    div()
-                                        .text_color(theme.text_faint)
-                                        .child("Search models…")
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .text_color(theme.text)
-                                        .child(search_text)
-                                        .into_any_element()
-                                })
+                                .overflow_hidden()
+                                .child(
+                                    caret::field_value(if search_placeholder {
+                                        div()
+                                            .text_color(theme.text_faint)
+                                            .child("Search models…")
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .text_color(theme.text)
+                                            .child(search_text)
+                                            .into_any_element()
+                                    })
+                                    .debug_selector(|| "model-search-text".into()),
+                                )
                                 .child(div().debug_selector(|| "model-search-caret".into()).child(
                                     caret::bar(
                                         typography.body_line_height,
@@ -7010,82 +7195,36 @@ impl Chat {
                 .enumerate()
                 .flat_map(|(index, part)| match part {
                     ComposerPart::Text(text) => {
-                        // A text part is cut at up to three boundaries — the
-                        // caret and the two ends of the selected span — and
-                        // the pieces are laid out inline, so the draft still
-                        // reads as one continuous line. Splitting rather
-                        // than overlaying keeps the shading exactly as wide
-                        // as the characters it covers, with no measuring.
-                        let chars: Vec<char> = text.chars().collect();
-                        let len = chars.len();
-                        let span = self.composer.selected_span_in_part(index, len);
-                        let caret_at = (index == caret_part).then(|| caret_offset.min(len));
-
-                        let mut cuts = vec![0usize, len];
-                        if let Some((lo, hi)) = span {
-                            cuts.push(lo);
-                            cuts.push(hi);
-                        }
-                        if let Some(at) = caret_at {
-                            cuts.push(at);
-                        }
-                        cuts.sort_unstable();
-                        cuts.dedup();
-
-                        let mut run: Vec<AnyElement> = Vec::new();
-                        // The first unselected piece keeps the plain
-                        // `composer-text-{index}` name; any later one is a
-                        // tail, so the existing caret-placement assertions
-                        // keep addressing the piece they always did.
-                        let mut plain_seen = false;
-                        for cut in cuts.windows(2) {
-                            let (from, to) = (cut[0], cut[1]);
-                            if caret_at == Some(from) {
-                                run.push(caret_bar());
-                            }
-                            if from == to {
-                                continue;
-                            }
-                            let piece: String = chars[from..to].iter().collect();
-                            let selected = span.is_some_and(|(lo, hi)| from >= lo && to <= hi);
-                            if selected {
-                                run.push(
-                                    div()
-                                        .debug_selector(move || {
-                                            format!("composer-selection-{index}")
-                                        })
-                                        .min_w_0()
-                                        .rounded(px(2.0))
-                                        .bg(theme.element_active)
-                                        .text_color(theme.text)
-                                        .child(piece)
-                                        .into_any_element(),
-                                );
-                            } else {
-                                let tail = plain_seen;
-                                plain_seen = true;
-                                run.push(
-                                    div()
-                                        .debug_selector(move || {
-                                            if tail {
-                                                format!("composer-text-{index}-tail")
-                                            } else {
-                                                format!("composer-text-{index}")
-                                            }
-                                        })
-                                        .min_w_0()
-                                        .text_color(theme.text)
-                                        .child(piece)
-                                        .into_any_element(),
-                                );
-                            }
-                        }
-                        // `windows(2)` never starts a pair at the last cut,
-                        // so an end-of-part caret is emitted here.
-                        if caret_at == Some(len) {
-                            run.push(caret_bar());
-                        }
-                        run
+                        // The model addresses a run in chars; `StyledText`
+                        // lays it out in bytes.
+                        let byte_at = |chars: usize| {
+                            text.char_indices()
+                                .nth(chars)
+                                .map_or(text.len(), |(byte, _)| byte)
+                        };
+                        let len = text.chars().count();
+                        let selection = self
+                            .composer
+                            .selected_span_in_part(index, len)
+                            .map(|(lo, hi)| byte_at(lo)..byte_at(hi));
+                        let caret = (index == caret_part).then(|| byte_at(caret_offset.min(len)));
+                        vec![
+                            div()
+                                .debug_selector(move || format!("composer-text-{index}"))
+                                .min_w_0()
+                                .text_color(theme.text)
+                                .child(ComposerText {
+                                    id: ElementId::from(("composer-text", index)),
+                                    text: StyledText::new(text.clone()),
+                                    selection,
+                                    selection_fill: theme.element_active,
+                                    caret,
+                                    caret_visible,
+                                    caret_color: theme.text,
+                                    trace: composer_paint.clone(),
+                                })
+                                .into_any_element(),
+                        ]
                     }
                     ComposerPart::Chip(chip) => {
                         // On a chip part the caret always sits just before it.
@@ -8937,11 +9076,15 @@ mod tests {
     }
 
     /// The insertion caret marks the exact character position, so it must sit
-    /// flush against the character it follows. `composer-input` carried a 4px
-    /// `gap_x` for separating chips, and flex gap applies between *every*
-    /// adjacent pair — including the two halves a caret splits its own text
-    /// run into, which pushed the bar a phantom space away from the last
-    /// character the user typed.
+    /// flush against the character it follows. The draft used to be split
+    /// into flex items around the caret (`composer-input` carried a 4px
+    /// `gap_x` for chips, and flex gap applies between *every* adjacent
+    /// pair), which pushed the bar a phantom space away from the last typed
+    /// character. Now one `ComposerText` element paints the bar itself, at
+    /// the text layout's own position for the caret index; the headless text
+    /// system stubs every glyph at one width (see `conformance.rs`), so this
+    /// checks the layout contract — the bar ends where the run ends — and
+    /// not glyph-level alignment, which only a screenshot can.
     #[gpui::test]
     async fn the_caret_sits_flush_against_the_character_it_follows(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
@@ -8954,15 +9097,85 @@ mod tests {
         let text = cx
             .debug_bounds("composer-text-0")
             .expect("the typed draft is drawn");
-        let caret = cx
-            .debug_bounds("composer-caret")
-            .expect("a focused composer draws its insertion caret");
+        let caret = chat
+            .read_with(cx, |chat, _| chat.composer_paint.caret.get())
+            .expect("a focused composer paints its insertion caret on the draft");
 
         assert_eq!(
             caret.origin.x,
             text.origin.x + text.size.width,
             "the caret must touch the last typed character, with no gap \
              between them: text={text:?} caret={caret:?}"
+        );
+        assert_eq!(
+            caret.origin.y, text.origin.y,
+            "a one-line draft keeps its caret on that line: text={text:?} caret={caret:?}"
+        );
+    }
+
+    /// A draft that wraps keeps its caret on the text: the end-of-draft bar
+    /// used to be a separate flex item after the text run, and a wrapped
+    /// item in a `flex_wrap` row lands on a row of its own — the bar dropped
+    /// to an empty third line below the draft. The bar is now painted by the
+    /// text element at the layout position of its last character, so it sits
+    /// inside the run's bounds on the last wrapped line, and a caret moved
+    /// back into the run sits on the first line.
+    #[gpui::test]
+    async fn the_caret_of_a_wrapped_draft_stays_on_the_draft(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(1715.0), px(972.0)));
+        refresh_frame(cx);
+
+        let draft = "un messaggio abbastanza lungo da andare a capo dentro il composer, \
+                     con parole che proseguono ben oltre la larghezza della scheda e \
+                     che quindi devono essere spezzate su una seconda riga visiva";
+        focus_and_type(cx, draft);
+        refresh_frame(cx);
+
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input row is drawn");
+        let text = cx
+            .debug_bounds("composer-text-0")
+            .expect("the typed draft is drawn");
+        let caret = chat
+            .read_with(cx, |chat, _| chat.composer_paint.caret.get())
+            .expect("a focused composer paints its insertion caret on the draft");
+        let line_height = caret.size.height;
+
+        assert!(
+            text.size.height >= line_height * 2.0,
+            "fixture invariant: the draft wraps onto more than one line: \
+             text={text:?} line_height={line_height:?}"
+        );
+        assert!(
+            caret.origin.y + caret.size.height <= text.origin.y + text.size.height,
+            "the end-of-draft caret sits on the draft's last line, not on a \
+             row of its own below it: caret={caret:?} text={text:?}"
+        );
+        assert!(
+            caret.origin.y >= text.origin.y + line_height,
+            "the end-of-draft caret is on a wrapped line, not the first: \
+             caret={caret:?} text={text:?}"
+        );
+        assert!(
+            caret.origin.x + caret.size.width <= input.origin.x + input.size.width,
+            "the caret stays inside the writing area: caret={caret:?} input={input:?}"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.composer.move_home(false);
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let caret = chat
+            .read_with(cx, |chat, _| chat.composer_paint.caret.get())
+            .expect("the caret is still painted after moving it");
+        assert_eq!(
+            (caret.origin.x, caret.origin.y),
+            (text.origin.x, text.origin.y),
+            "Home puts the caret at the start of the first line: caret={caret:?} text={text:?}"
         );
     }
 
@@ -8971,7 +9184,8 @@ mod tests {
     /// acts on it — but nothing ever drew it. Select-all followed by one
     /// keystroke therefore replaced the entire draft with no on-screen sign
     /// that anything had been selected: a destructive edit with an
-    /// invisible precondition.
+    /// invisible precondition. The fill is painted by the text element, one
+    /// quad per wrapped line, behind the text it covers.
     #[gpui::test]
     async fn the_composer_paints_the_run_it_has_selected(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
@@ -8981,7 +9195,11 @@ mod tests {
         focus_and_type(cx, "ciao");
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("composer-selection-0").is_none(),
+            chat.read_with(cx, |chat, _| chat
+                .composer_paint
+                .selection
+                .borrow()
+                .is_empty()),
             "fixture invariant: a freshly typed draft has nothing selected"
         );
 
@@ -8991,16 +9209,17 @@ mod tests {
         });
         refresh_frame(cx);
 
-        let selected = cx
-            .debug_bounds("composer-selection-0")
-            .expect("selected text must be drawn as a filled run, not as plain text");
-        assert!(
-            selected.size.width > px(0.0),
-            "the filled run must cover the selected characters: {selected:?}"
-        );
-        assert!(
-            cx.debug_bounds("composer-text-0").is_none(),
-            "select-all leaves no unselected remainder of the draft behind"
+        let text = cx
+            .debug_bounds("composer-text-0")
+            .expect("select-all keeps the draft drawn");
+        let selected = chat.read_with(cx, |chat, _| chat.composer_paint.selection.borrow().clone());
+        let [fill] = selected.as_slice() else {
+            panic!("a one-line select-all paints exactly one filled run: {selected:?}");
+        };
+        assert_eq!(
+            (fill.origin.x, fill.size.width),
+            (text.origin.x, text.size.width),
+            "the filled run covers the whole selected draft: fill={fill:?} text={text:?}"
         );
     }
 
