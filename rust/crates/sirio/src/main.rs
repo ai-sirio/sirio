@@ -58,6 +58,7 @@ use sirio_ui::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -5537,6 +5538,9 @@ impl SirioWorkspace {
     /// One Layer D tick for every terminal pane, sharing a single process
     /// snapshot (#248).
     ///
+    /// The foreground-process walk runs on the background executor; the UI
+    /// thread only applies the resulting observations to the activity model.
+    ///
     /// This used to be one loop per terminal, each taking its own whole-system
     /// process snapshot every 500 ms. On Windows that is
     /// `CreateToolhelp32Snapshot` over every process on the machine, so the
@@ -5576,8 +5580,26 @@ impl SirioWorkspace {
                     continue;
                 }
 
-                let snapshot = match sirio_activity::process::take_snapshot() {
-                    Ok(snapshot) => snapshot,
+                let observations = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let snapshot = sirio_activity::process::take_snapshot()?;
+                        Ok::<_, io::Error>(
+                            panes
+                                .into_iter()
+                                .map(|(pane_id, shell_pid)| {
+                                    let observation =
+                                        sirio_activity::process::inspect_foreground_agent_in(
+                                            &snapshot, shell_pid,
+                                        );
+                                    (pane_id, observation)
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .await;
+                let observations = match observations {
+                    Ok(observations) => observations,
                     // A snapshot that cannot be taken is not evidence that the
                     // panes' agents are gone, so nothing is cleared: skip the
                     // tick and try again on the next one.
@@ -5589,17 +5611,28 @@ impl SirioWorkspace {
 
                 if this
                     .update(cx, |workspace, cx| {
+                        // The walk ran off the UI thread, so a pane can have
+                        // closed since its pid was collected. Its late
+                        // observation must not land: it would post a
+                        // notification and an auto-rename for a pane that no
+                        // longer exists.
+                        let live: HashSet<usize> = workspace
+                            .terminals_to_poll()
+                            .into_iter()
+                            .map(|(_, pane_id, _)| pane_id)
+                            .collect();
                         let mut any_transition = false;
-                        for (pane_id, shell_pid) in panes {
+                        for (pane_id, observation) in observations {
+                            if !live.contains(&pane_id) {
+                                continue;
+                            }
                             let activity_pane_id = format!("pane-{pane_id}");
                             let process_owned_before =
                                 workspace.activity.is_process_owned(&activity_pane_id);
-                            match panes::refresh_process_signal_in(
-                                &mut workspace.activity,
-                                &snapshot,
-                                &activity_pane_id,
-                                shell_pid,
-                            ) {
+                            match workspace
+                                .activity
+                                .apply_process_signal(&activity_pane_id, observation)
+                            {
                                 Ok(Some(transition)) => {
                                     any_transition = true;
                                     workspace.post_activity_notification(&transition);

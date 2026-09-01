@@ -29,8 +29,11 @@ fn linux_process_inspection_reads_agent_names_from_proc_children() {
     std::fs::create_dir_all(&root).expect("create process fixture directory");
     let agent = root.join("codex");
     symlink("/bin/sleep", &agent).expect("create codex test alias");
+    // The trailing `true` keeps the shell alive as the parent: `sh -c` with
+    // a single command exec-replaces itself (bash and dash both do), and the
+    // walk reads comm for descendants only, never for the shell.
     let mut child = Command::new("sh")
-        .args(["-c", &format!("{} 2", agent.display())])
+        .args(["-c", &format!("{} 2; true", agent.display())])
         .spawn()
         .expect("spawn shell with agent child");
     thread::sleep(Duration::from_millis(50));
