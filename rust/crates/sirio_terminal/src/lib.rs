@@ -1971,6 +1971,29 @@ impl TerminalHandle {
         reply_rx.recv().unwrap_or((Vec::new(), (usize::MAX, 0)))
     }
 
+    /// Returns the retained grid, refreshing it from the owner thread when
+    /// the owner's mutation stamp has moved.
+    ///
+    /// Load the stamp before taking the cache lock and before the blocking
+    /// `snapshot` round trip. If the owner mutates while that round trip is in
+    /// flight, caching newer cells under the loaded stamp is safe because the
+    /// next caller observes the newer stamp and refreshes again. Loading the
+    /// stamp afterwards could retain stale cells under the current stamp.
+    /// Never hold the cache lock across the owner-thread round trip.
+    fn current_grid(&self) -> parking_lot::MutexGuard<'_, GridRenderCache> {
+        let mutation_stamp = self.mutation_stamp.load(Ordering::Relaxed);
+        let mut grid_cache = self.grid_render_cache.lock();
+        if grid_cache.grid_stamp != Some(mutation_stamp) {
+            drop(grid_cache);
+            let (cells, cursor) = self.snapshot();
+            grid_cache = self.grid_render_cache.lock();
+            grid_cache.grid_stamp = Some(mutation_stamp);
+            grid_cache.cells = cells;
+            grid_cache.cursor = cursor;
+        }
+        grid_cache
+    }
+
     /// #301 + #302 R3.1: every visible Kitty placement for this frame,
     /// already bucketed into the three z-bands by the owner thread's
     /// `set_layer` walks, copied as plain data (R2.3). Empty buckets when
@@ -1987,14 +2010,18 @@ impl TerminalHandle {
         reply_rx.recv().unwrap_or_default()
     }
 
-    /// Resolves the link under a viewport cell: the cell's OSC 8 hyperlink
-    /// target when the emulator state carries one (#41), else the shared regex
-    /// router over the row's plain text — bare URLs stay clickable, common in
-    /// agent output that emits no OSC 8. An OSC 8 region whose display text
-    /// also regex-matches prefers its target.
+    /// Resolves the link under a viewport cell from the retained grid: the
+    /// cell's OSC 8 hyperlink target when the emulator state carries one (#41),
+    /// else the shared regex router over the row's plain text — bare URLs stay
+    /// clickable, common in agent output that emits no OSC 8. An OSC 8 region
+    /// whose display text also regex-matches prefers its target. The retained
+    /// grid is refreshed only when its mutation stamp is stale, which is the
+    /// only case that round-trips to the owner thread. Callers are main-thread
+    /// mouse handlers and never hold the cache lock. The cache uses a
+    /// non-reentrant `parking_lot::Mutex`, so this method never re-enters it.
     fn link_at(&self, row: usize, column: usize) -> Option<String> {
-        let (cells, _) = self.snapshot();
-        resolve_link(&cells, row, column)
+        let grid = self.current_grid();
+        resolve_link(&grid.cells, row, column)
     }
 
     /// Captures the grid as newline-delimited plain text. This intentionally
@@ -3707,10 +3734,8 @@ struct TerminalPalette {
 /// bounds_origin, bounds_size)`, so a pane move or selection change rebuilds
 /// draw products from retained cells without another owner-thread round trip.
 ///
-/// `prepaint` loads the stamp before deciding whether to issue `Snapshot`.
-/// If the owner mutates during that round trip, caching content newer than the
-/// loaded stamp is safe because the next frame observes the newer stamp; the
-/// reverse ordering could retain stale content under the current stamp.
+/// `TerminalHandle::current_grid` refreshes the grid level with the stamp
+/// ordering required to keep the retained cells current.
 #[derive(Default)]
 struct GridRenderCache {
     grid_stamp: Option<u64>,
@@ -3811,15 +3836,13 @@ impl Element for TerminalElement {
             f32::from(LINE_HEIGHT).round().max(1.0) as u16,
         );
 
-        // Load the shared stamp before any blocking Snapshot round trip. If
-        // the owner mutates while Snapshot is in flight, caching newer cells
-        // under the older stamp is safe: the next frame sees the new stamp
-        // and refreshes again. Loading it afterwards could retain stale cells
-        // under the current stamp.
-        let mutation_stamp = self.terminal.mutation_stamp.load(Ordering::Relaxed);
         // #259: read once per frame, not per cell. The range is plain numbers
         // precisely so the inner loop stays arithmetic.
         let selection = *self.terminal.selection.lock();
+        let mut grid_cache = self.terminal.current_grid();
+        let mutation_stamp = grid_cache
+            .grid_stamp
+            .expect("current_grid always returns a stamped grid");
         let assembly_key = GridAssemblyKey {
             stamp: mutation_stamp,
             selection,
@@ -3827,17 +3850,6 @@ impl Element for TerminalElement {
             bounds_origin: bounds.origin,
             bounds_size: bounds.size,
         };
-        let mut grid_cache = self.terminal.grid_render_cache.lock();
-        if grid_cache.grid_stamp != Some(mutation_stamp) {
-            // Never hold the cache lock across the blocking owner-thread
-            // round trip.
-            drop(grid_cache);
-            let (cells, cursor) = self.terminal.snapshot();
-            grid_cache = self.terminal.grid_render_cache.lock();
-            grid_cache.grid_stamp = Some(mutation_stamp);
-            grid_cache.cells = cells;
-            grid_cache.cursor = cursor;
-        }
 
         let (backgrounds, lines, cursor) =
             if grid_cache.assembly_key.as_ref() == Some(&assembly_key) {
@@ -8584,6 +8596,93 @@ mod view_tests {
             both_moved,
             "terminal output must move both snapshot and assembly counters"
         );
+        handle.shutdown();
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A link lookup on a still pane should read the retained grid, while a
+    /// lookup after terminal output must refresh it exactly once.
+    #[gpui::test]
+    async fn link_at_on_a_still_drawn_pane_reuses_the_retained_grid(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-retained-link-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-i".to_string()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
+        });
+
+        let handle = settled_drawn_terminal(&terminal, cx);
+        let before_snapshot_builds = handle.snapshot_builds.load(Ordering::SeqCst);
+        for (row, column) in [(0, 0), (0, 1), (1, 0)] {
+            let _ = handle.link_at(row, column);
+        }
+        assert_eq!(handle.link_at(usize::MAX, 0), None);
+        assert_eq!(handle.link_at(0, usize::MAX), None);
+        assert_eq!(
+            handle.snapshot_builds.load(Ordering::SeqCst),
+            before_snapshot_builds,
+            "link lookups on a still pane must reuse the retained grid"
+        );
+
+        let before_stamp = handle.mutation_stamp.load(Ordering::SeqCst);
+        terminal.update(&mut cx.cx, |terminal, _| {
+            terminal.input(b"echo X\n".to_vec());
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while handle.mutation_stamp.load(Ordering::SeqCst) == before_stamp {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal output never moved the mutation stamp"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // The retained grid was stamped before the output landed, so one
+        // lookup costs exactly one owner-thread round trip: `current_grid`
+        // issues at most one `Snapshot` per call, and nothing else asks for
+        // one here (no frame is drawn between these calls).
+        let before_stale_lookup = handle.snapshot_builds.load(Ordering::SeqCst);
+        let _ = handle.link_at(0, 0);
+        assert_eq!(
+            handle.snapshot_builds.load(Ordering::SeqCst),
+            before_stale_lookup + 1,
+            "the first lookup after output must refresh the stale retained grid"
+        );
+
+        // The shell may still be writing (its echo, the command output and
+        // the next prompt can arrive as separate chunks), so judge reuse only
+        // inside a window in which the stamp provably held still: sync with
+        // one lookup, count the next, and accept the sample only if the stamp
+        // read afterwards equals the one read before.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let stamp_before = handle.mutation_stamp.load(Ordering::SeqCst);
+            let _ = handle.link_at(0, 0);
+            let builds_after_sync = handle.snapshot_builds.load(Ordering::SeqCst);
+            let _ = handle.link_at(0, 0);
+            let builds_after_reuse = handle.snapshot_builds.load(Ordering::SeqCst);
+            if handle.mutation_stamp.load(Ordering::SeqCst) == stamp_before {
+                assert_eq!(
+                    builds_after_reuse, builds_after_sync,
+                    "a lookup under an unchanged stamp must reuse the retained grid"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mutation stamp never held still long enough to observe a reuse"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         handle.shutdown();
         cx.run_until_parked();
         let _ = std::fs::remove_dir_all(working_directory);
