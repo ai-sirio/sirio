@@ -4027,9 +4027,10 @@ impl Element for TerminalElement {
         if kitty_cache.last_stamp != mutation_stamp {
             // Never hold the cache lock across the blocking round trip.
             drop(kitty_cache);
+            let buckets = self.terminal.kitty_places();
             kitty_cache = self.terminal.kitty_images.lock();
             kitty_cache.last_stamp = mutation_stamp;
-            kitty_cache.last_buckets = self.terminal.kitty_places();
+            kitty_cache.last_buckets = buckets;
         }
         let kitty_buckets = std::mem::take(&mut kitty_cache.last_buckets);
         let tick = kitty_cache.begin_frame();
