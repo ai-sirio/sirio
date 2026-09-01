@@ -59,6 +59,8 @@ pub fn display_path(path: &Path) -> String {
 /// (clipboard "copy path", command lines). The verbatim prefix is still
 /// stripped from the string only.
 pub fn display_absolute_path(path: &Path) -> String {
+    // Only the Windows verbatim-prefix strip below ever reassigns this.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut string = path.to_string_lossy().into_owned();
     #[cfg(windows)]
     if let Some(stripped) = strip_verbatim_prefix(&string) {
