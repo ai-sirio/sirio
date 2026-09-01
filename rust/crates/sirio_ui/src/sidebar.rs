@@ -4026,6 +4026,7 @@ impl Render for Sidebar {
         );
         let field_caret_visible = field_focused && self.field_blink.visible();
         let filter_text = self.filter.clone();
+        let filter_is_empty = filter_text.is_empty();
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {
@@ -4151,16 +4152,29 @@ impl Render for Sidebar {
                     .child(
                         div()
                             .flex_1()
+                            .flex()
+                            .items_center()
                             .text_size(px(12.5))
-                            .text_color(if filter_text.is_empty() {
+                            .text_color(if filter_is_empty {
                                 theme.text_faint
                             } else {
                                 theme.text
                             })
-                            .child(if filter_text.is_empty() {
-                                "Filter".to_owned()
-                            } else {
-                                filter_text
+                            // Keep the placeholder as its own conditional
+                            // element. Its absence is then the renderer's
+                            // unambiguous representation of a non-empty
+                            // filter, instead of replacing the contents of
+                            // the same text child.
+                            .when(filter_is_empty, |this| {
+                                this.child(
+                                    div()
+                                        .id("filter-placeholder")
+                                        .debug_selector(|| "filter-placeholder".to_owned())
+                                        .child("Filter"),
+                                )
+                            })
+                            .when(!filter_is_empty, |this| {
+                                this.child(filter_text)
                             })
                             .when(filter_is_focused, |this| {
                                 this.child(caret::bar(px(12.0), theme.text, field_caret_visible))
@@ -7217,9 +7231,22 @@ mod tests {
             .expect("the Filter field is drawn");
         cx.simulate_click(filter.center(), Modifiers::none());
         cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("filter-placeholder").is_some(),
+            "an empty filter shows its placeholder"
+        );
 
-        // Type text matching exactly one project of the four.
-        cx.simulate_input("tracker");
+        // The first character must remove the placeholder immediately.
+        cx.simulate_input("t");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("filter-placeholder").is_none(),
+            "the placeholder disappears as soon as the filter receives text"
+        );
+
+        // Finish a query matching exactly one project of the four.
+        cx.simulate_input("racker");
         cx.run_until_parked();
 
         let sidebar_entity =
