@@ -8,6 +8,9 @@ publish.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 bezel = { workspace = true }
+bezel-markdown.workspace = true
+bezel-editor.workspace = true
+bezel-syntax.workspace = true
 anyhow.workspace = true
 sirio_theme.workspace = true
 sirio_git.workspace = true

@@ -538,6 +538,18 @@ impl Editor {
         self.insert(at, INDENT_UNIT)
     }
 
+    /// Replaces the live text with a serialized document supplied by the
+    /// GPUI editor. This is the one synchronization seam bezel-editor needs:
+    /// disk snapshots, conflicts, and save/reload behavior remain owned by
+    /// this headless model.
+    pub(crate) fn sync_serialized_markdown(&mut self, text: String) {
+        if self.buffer() == text {
+            return;
+        }
+        self.buffer = text;
+        self.sync_document_from_buffer();
+    }
+
     // ── External change (F-EDIT-05 / F-EDIT-06) ────────────────────────
 
     /// Re-reads the file and compares it against the snapshot. This is the
