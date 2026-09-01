@@ -4,12 +4,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-Sirio — a native Linux app (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory. Its final commit is `5430d7bfdb4a295be8ce072526ae5108259b80f8`; read any of its source with `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`, or check it out with `git worktree add <dir> 5430d7bfdb4a295be8ce072526ae5108259b80f8`. Terminal rendering is built on `alacritty_terminal`.
+Sirio — a native Linux app (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory. Its final commit is `5430d7bfdb4a295be8ce072526ae5108259b80f8`; read any of its source with `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`, or check it out with `git worktree add <dir> 5430d7bfdb4a295be8ce072526ae5108259b80f8`. Terminal rendering is built on `libghostty-vt`, with `portable-pty` supplying the PTY.
 
 ## Commands
 
 ```bash
-# Single verification gate for the whole repo — run before considering any task done.
+# Single verification gate for the whole repo.
+# ONLY on the user's explicit request — an agent must NEVER launch this (or
+# Scripts/ci-linux.sh) on its own. For iteration use `cargo build/test -p <crate>`.
 Scripts/ci.sh    # -> prints "CI OK" if everything passes
 
 # Fuller, stricter gate: the above plus fmt/clippy/cross-target checks and a headless
@@ -87,7 +89,8 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
   dead-transport races are fixed at their fixture synchronization points; the common
   gate now uses `cargo test --workspace --no-fail-fast` so every binary reports results.
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
-- `Scripts/ci.sh` must print `CI OK` before a PR is opened.
+- **UI**: always build on [bezel](https://github.com/crabtalk/bezel) (`bezel::ui`, `bezel::motion`, `bezel::theme`, `bezel::agent`) — never hand-roll a UI primitive it already provides. Its `gallery` crate (`cargo run -p gallery` in a bezel checkout) is the reference example for how each component looks and is used.
+- `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead.
 
 ## Agent skills
 
