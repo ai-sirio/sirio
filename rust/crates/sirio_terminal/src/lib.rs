@@ -2597,11 +2597,14 @@ impl TerminalView {
 
     /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): the host calls
     /// this whenever it re-renders the pane tree, since tab-group membership
-    /// can change without this terminal's own state changing. Does not
-    /// notify on its own — the host wraps the call in an `Entity::update`
-    /// and calls `cx.notify()` itself so this stays a pure setter.
-    pub fn set_sole_tab_in_group(&mut self, sole: bool) {
+    /// can change without this terminal's own state changing. Returns whether
+    /// the stored value changed; the host notifies only when it returns true.
+    pub fn set_sole_tab_in_group(&mut self, sole: bool) -> bool {
+        if self.sole_tab_in_group == sole {
+            return false;
+        }
         self.sole_tab_in_group = sole;
+        true
     }
 
     /// Test/inspection accessor for [`Self::set_sole_tab_in_group`]'s
@@ -7812,6 +7815,40 @@ mod view_tests {
             result.is_err(),
             "the caller must receive the failure, not a panic"
         );
+    }
+
+    /// The host uses the return value to avoid notifying an unchanged
+    /// terminal while still notifying when pane-group membership changes.
+    #[gpui::test]
+    async fn set_sole_tab_in_group_reports_only_changes(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let missing = missing_directory("sole-tab-setter");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::failed(
+                &missing,
+                TerminalShell::System,
+                "sole-tab setter test",
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("failed terminal root")
+        });
+
+        assert!(!terminal.update(&mut cx.cx, |terminal, _| {
+            terminal.set_sole_tab_in_group(false)
+        }));
+        assert!(terminal.update(&mut cx.cx, |terminal, _| {
+            terminal.set_sole_tab_in_group(true)
+        }));
+        assert!(!terminal.update(&mut cx.cx, |terminal, _| {
+            terminal.set_sole_tab_in_group(true)
+        }));
     }
 
     /// A failed pane renders its message and a retry button, and the retry
