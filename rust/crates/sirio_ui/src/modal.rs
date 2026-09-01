@@ -194,18 +194,14 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
                     focus_for_click.focus(window, cx);
                 })
                 .on_key_down(move |event, window, cx| on_key_down(event, window, cx))
-                // #212: shrink and ellipsise inside the field rather
-                // than drawing past its border. Must shrink without
-                // growing: `flex_1` would push the end-of-text caret
-                // below to the far right.
+                // #212: clip inside the field rather than drawing past
+                // its border. Must shrink without growing: `flex_1` would
+                // push the end-of-text caret below to the far right.
                 .overflow_hidden()
                 .child(
-                    div()
+                    crate::caret::field_value(field.value)
                         .id("modal-field-text")
-                        .debug_selector(|| "modal-field-text".to_owned())
-                        .min_w_0()
-                        .text_ellipsis()
-                        .child(field.value),
+                        .debug_selector(|| "modal-field-text".to_owned()),
                 )
                 // End-of-text insertion caret; laid out even when invisible
                 // so the bar never shifts the value while blinking.

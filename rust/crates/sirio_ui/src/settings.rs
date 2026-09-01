@@ -2827,21 +2827,18 @@ impl Settings {
             } else {
                 theme.text
             })
-            // #212: shrink and ellipsise inside the field rather than
-            // drawing past its border. Must shrink without growing:
-            // `flex_1` would push the end-of-text caret to the far right.
+            // #212: clip inside the field rather than drawing past its
+            // border. Must shrink without growing: `flex_1` would push
+            // the end-of-text caret to the far right.
             .overflow_hidden()
             .child(
-                div()
-                    .id("settings-text-field-text")
-                    .debug_selector(|| "settings-text-field-text".to_owned())
-                    .min_w_0()
-                    .text_ellipsis()
-                    .child(text!(if is_empty {
-                        placeholder.to_string()
-                    } else {
-                        display_text
-                    })),
+                caret::field_value(text!(if is_empty {
+                    placeholder.to_string()
+                } else {
+                    display_text
+                }))
+                .id("settings-text-field-text")
+                .debug_selector(|| "settings-text-field-text".to_owned()),
             )
             // The field's insertion caret: end-of-text, since these compact
             // single-line fields always append. Invisible (but still laid
@@ -3497,7 +3494,9 @@ impl Settings {
                             .px(px(10.0))
                             .flex()
                             .items_center()
-                            .gap(px(6.0))
+                            // No `gap`: flex gap goes between *every* pair of
+                            // items, the value and its caret included, and
+                            // held the bar a phantom space off the text.
                             .rounded(theme.radii.control)
                             .bg(theme.input_bg)
                             .border_1()
@@ -3526,16 +3525,13 @@ impl Settings {
                             // #212: see the field above.
                             .overflow_hidden()
                             .child(
-                                div()
-                                    .id("settings-agent-search-text")
-                                    .debug_selector(|| "settings-agent-search-text".to_owned())
-                                    .min_w_0()
-                                    .text_ellipsis()
-                                    .child(text!(if search_text.is_empty() {
-                                        "Search agents".to_string()
-                                    } else {
-                                        search_text
-                                    })),
+                                caret::field_value(text!(if search_text.is_empty() {
+                                    "Search agents".to_string()
+                                } else {
+                                    search_text
+                                }))
+                                .id("settings-agent-search-text")
+                                .debug_selector(|| "settings-agent-search-text".to_owned()),
                             )
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
