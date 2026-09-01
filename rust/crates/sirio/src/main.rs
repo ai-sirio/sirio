@@ -15214,6 +15214,7 @@ fn main() {
         register_fonts(cx);
         Theme::init(cx);
         bezel::ui::input::init(cx);
+        bezel::ui::tree::init(cx);
         sirio_ui::chat::init(cx);
         sirio_ui::file_view::init(cx);
 

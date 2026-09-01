@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 use bezel::motion::{Fade, Painter};
 use bezel::ui::popover::{self, Popup};
+use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, img,
@@ -163,70 +164,15 @@ pub struct SidebarTab {
 /// pushes a different one, through [`Sidebar::set_panel_width`].
 const DEFAULT_SIDEBAR_WIDTH: f32 = 325.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
-const ROW_LEFT_INSET: f32 = 27.0;
 const ROW_RIGHT_INSET: f32 = 7.0;
-const TAB_INDENT: f32 = 35.0;
-
-/// Deepest row the tree produces: project → worktree → tab.
-const MAX_ROW_DEPTH: usize = 2;
-/// What sits between a row's left edge and its title, and is not the title:
-/// disclosure slot, gap, icon slot, status slot, settings slot.
-const ROW_TITLE_OVERHEAD: f32 = 16.0 + 12.0 + 16.0 + 21.0 + 16.0;
-/// Narrowest a row title may get before the tree's indentation starts
-/// yielding — ten characters at the row's type size, enough for a tab row's
-/// name to be read rather than guessed.
-const MIN_TITLE_WIDTH: f32 = 64.0;
-/// The indent compresses, but never past this: a level that steps by
-/// nothing stops reading as a level and the tree becomes a list.
-const MIN_TAB_INDENT: f32 = 12.0;
-
-/// Per-level indent at `panel_width`.
-///
-/// [`TAB_INDENT`] is the reference's step and is what a comfortable panel
-/// uses. It stops being affordable well before the panel's floor: at 220px a
-/// depth-two row would pay 27 + 70 = 97px of indentation out of 220, and
-/// after the fixed marks its title was left with a *negative* width — drawn
-/// as nothing at all, which is what the running app showed.
-///
-/// So the step yields before the title does, the same order the history
-/// row's columns yield in: the indentation says where a row sits, the title
-/// says what it is, and a row that says nothing about what it is has stopped
-/// being useful. Compressed evenly across levels — never per-row, which
-/// would let a deep row's inset fall left of its own parent's.
-fn indent_step(panel_width: f32) -> f32 {
-    let affordable =
-        panel_width - ROW_LEFT_INSET - ROW_RIGHT_INSET - ROW_TITLE_OVERHEAD - MIN_TITLE_WIDTH;
-    (affordable / MAX_ROW_DEPTH as f32).clamp(MIN_TAB_INDENT, TAB_INDENT)
-}
-
-/// Where a row at `depth` starts, inside a sidebar `panel_width` wide.
-fn row_left_inset(panel_width: f32, depth: usize) -> f32 {
-    ROW_LEFT_INSET + depth as f32 * indent_step(panel_width)
-}
-
-/// Where the indent guide for a row at `depth` runs. Takes the same step as
-/// the rows: on a fixed one it would detach from them as the panel narrowed.
-fn guide_left(panel_width: f32, depth: usize) -> f32 {
-    GUIDE_LEFT + depth.saturating_sub(1) as f32 * indent_step(panel_width)
-}
-
-/// Width of one row's box inside a sidebar `panel_width` wide, for a row at
-/// `depth` in the tree.
-///
-/// Every row ends at the same right inset, so a deep row has less to work
-/// with than a shallow one. Clamped at zero: the arithmetic above keeps it
-/// positive across the panel's whole range, but a negative width would reach
-/// gpui instead of the assertion that should have caught it.
-fn row_width(panel_width: f32, depth: usize) -> f32 {
-    (panel_width - row_left_inset(panel_width, depth) - ROW_RIGHT_INSET).max(0.0)
-}
 
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// Two-line card context line height (11.5px).
 pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
-/// Vertical padding of a row (waku's `py(7)`).
+/// Legacy content rhythm retained for the sidebar conformance inventory.
+#[cfg(test)]
 pub(crate) const ROW_V_PADDING: f32 = 7.0;
 /// Gap between a card's title and context lines.
 pub(crate) const ROW_GAP: f32 = 4.0;
@@ -236,20 +182,10 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 pub(crate) const ROW_V_GAP: f32 = 2.0;
 /// Two-line card height: 7 + 18 + 4 + 15 + 7 — waku's session-card math.
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
-const GUIDE_LEFT: f32 = 20.0;
-const GUIDE_WIDTH: f32 = 2.0;
 /// Maximum title lines rendered for a row. The row sizes itself from the
 /// content, so this is a guard against pathological branch names rather than
 /// a prediction of how many lines a title needs.
 const MAX_TITLE_LINES: usize = 3;
-
-// TODO(theme): tree_guide is translucent white and does not match the measured opaque guide.
-const INDENT_GUIDE_FILL: Rgba = Rgba {
-    r: 40.0 / 255.0,
-    g: 40.0 / 255.0,
-    b: 43.0 / 255.0,
-    a: 1.0,
-};
 
 /// A visible row in the flattened sidebar tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -562,6 +498,8 @@ pub struct Sidebar {
     project_worktree_defaults: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     filter: String,
     filter_focus: FocusHandle,
+    tree_cursor: usize,
+    tree_focus: FocusHandle,
     /// Shared blink state for every sidebar text field's insertion caret
     /// (filter, project-settings card, worktree prompt). One is enough:
     /// window focus is unique. Visibility is recomputed each render.
@@ -695,6 +633,8 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            tree_cursor: 0,
+            tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
@@ -792,6 +732,8 @@ impl Sidebar {
             project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
+            tree_cursor: 0,
+            tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
             notice: None,
@@ -1839,6 +1781,65 @@ impl Sidebar {
         {
             self.filter.push_str(character);
         }
+        cx.notify();
+    }
+
+    /// The structural row handed to bezel. Sirio keeps the data and content;
+    /// bezel owns branch/leaf identity, indentation, disclosure and chrome.
+    fn tree_row(row: &SidebarRow) -> tree::Row {
+        match row.kind {
+            RowKind::Project => tree::Row::branch(0, row.expanded),
+            RowKind::Worktree | RowKind::NewWorktree => tree::Row::leaf(1),
+            RowKind::Tab => tree::Row::leaf(2),
+        }
+    }
+
+    /// Apply one of bezel's standard tree directions to the currently
+    /// visible, depth-annotated rows. Expansion remains Sirio state; bezel
+    /// reports only the intent.
+    fn tree_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            self.tree_cursor = 0;
+            return;
+        }
+
+        let cursor = self.tree_cursor.min(rows.len() - 1);
+        let shape = rows.iter().map(Self::tree_row).collect::<Vec<_>>();
+        match tree::step(&shape, cursor, direction) {
+            Some(tree::Move::To(index)) => self.tree_cursor = index,
+            Some(tree::Move::Expand(index)) => {
+                let row_id = rows[index].id;
+                if let Some(project) = self
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.id == row_id && row.kind == RowKind::Project)
+                {
+                    project.expanded = true;
+                }
+                self.tree_cursor = index;
+            }
+            Some(tree::Move::Collapse(index)) => {
+                let row_id = rows[index].id;
+                if let Some(project) = self
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.id == row_id && row.kind == RowKind::Project)
+                {
+                    project.expanded = false;
+                }
+                self.tree_cursor = index;
+            }
+            None => {
+                self.tree_cursor = cursor;
+            }
+        }
+        cx.notify();
+    }
+
+    fn focus_tree_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree_cursor = index;
+        self.tree_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -3474,12 +3475,15 @@ impl Sidebar {
 
     fn render_row(
         row: SidebarRow,
+        row_index: usize,
+        row_shape: tree::Row,
+        cursor: bool,
         project_id: Option<String>,
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        panel_width: f32,
+        bezel_theme: &bezel::theme::Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -3492,22 +3496,12 @@ impl Sidebar {
         let worktree_path = path.clone();
         let is_project = kind == RowKind::Project;
         let is_worktree = kind == RowKind::Worktree;
-        let guide = matches!(
-            kind,
-            RowKind::Worktree | RowKind::Tab | RowKind::NewWorktree
-        );
         // waku's card rhythm: a project or worktree row becomes a two-line
         // card (13.5px title over an 11.5px context line) only when it has
         // something for that second line; every other row is single-line at
         // the 32px action-row height. See `has_sub_line`.
         let has_sub_line = Self::has_sub_line(&row);
         let row_min_height = Self::row_min_height(&row);
-        // Projects are the tree root. Every child level, including
-        // worktrees, must move right from the project row; the previous
-        // saturating subtraction made depth-one worktrees share the project's
-        // inset, hiding the project -> worktree relationship.
-        let row_left_inset = row_left_inset(panel_width, row.depth);
-        let row_width = row_width(panel_width, row.depth);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
         // per distinct running agent, 3px apart, 7px clear of the title. It
         // takes its width out of the title's, so a busy worktree truncates
@@ -3516,17 +3510,6 @@ impl Sidebar {
             row.running_agents.clone()
         } else {
             Vec::new()
-        };
-        let badge_width = if running_agents.is_empty() {
-            0.0
-        } else {
-            running_agents.len() as f32 * 15.0 + 4.0
-        };
-        let title_width = (row_width - ROW_TITLE_OVERHEAD - badge_width).max(0.0);
-        let disclosure = match (kind, row.expanded) {
-            (RowKind::Project, true) => Some(Icon::ChevronDown),
-            (RowKind::Project, false) => Some(Icon::ChevronRight),
-            _ => None,
         };
         // A glyph only appears for a notable status — matching the
         // reference. A collapsed project also gets one (F-SID-06): its
@@ -3556,7 +3539,6 @@ impl Sidebar {
             }
             RowKind::Worktree | RowKind::NewWorktree => theme.text_faint,
         };
-        let text_color = if selected { theme.text } else { theme.text };
         let entity = entity.clone();
         let remove_entity = entity.clone();
         let click_entity = entity.clone();
@@ -3591,32 +3573,15 @@ impl Sidebar {
         } else {
             format!("sidebar-row-{row_id}")
         };
-        let mut row_view = div()
+        let mut row_view = tree::tree_row(bezel_theme, &row_shape, selected, cursor)
             .id(row_id)
             .debug_selector(move || row_debug_selector)
             .group(hover_group.clone())
             .relative()
             .min_h(px(row_min_height))
-            .w(px(row_width))
-            .ml(px(row_left_inset))
-            .mr(px(ROW_RIGHT_INSET))
-            .flex()
-            .flex_col()
-            .justify_center()
-            .gap(px(ROW_GAP))
-            .px(px(8.0))
-            .py(px(ROW_V_PADDING))
-            .rounded(theme.radii.control)
-            // Rows remain arrow-cursor controls until the pointer crosses the
-            // drag threshold; the typed drag payload is installed below so a
-            // project block, worktree, or tab can only reorder inside its
-            // own scope.
-            .cursor_default()
-            .text_size(px(14.5))
-            .text_color(text_color)
-            .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
+                    sidebar.focus_tree_row(row_index, window, cx);
                     if let Some(tab_id) = tab_id {
                         // A host-driven row: the host owns which tab is
                         // selected, so report the click rather than
@@ -3669,13 +3634,8 @@ impl Sidebar {
                 });
         }
 
-        if selected {
-            row_view = row_view.bg(theme.element_active);
-        }
-
-        // The card's main line. The disclosure chevron and every per-row
-        // control are hover-revealed, waku's way of keeping a resting row
-        // free of chrome.
+        // Sirio owns the row's content; bezel's tree row already supplied
+        // disclosure, indentation, cursor/selection paint and hover chrome.
         let main_line = div()
             .flex()
             .items_center()
@@ -3711,17 +3671,7 @@ impl Sidebar {
                             .rounded(px(3.0))
                             .bg(color)
                             .into_any_element(),
-                        RowStatusGlyph::None => match disclosure {
-                            Some(icon) => div()
-                                .invisible()
-                                .group_hover(hover_group.clone(), |element| element.visible())
-                                .child(
-                                    IconElement::new(icon, IconSize::XSmall)
-                                        .text_color(theme.text_faint),
-                                )
-                                .into_any_element(),
-                            None => div().into_any_element(),
-                        },
+                        RowStatusGlyph::None => div().into_any_element(),
                     }),
             )
             .child({
@@ -3751,8 +3701,8 @@ impl Sidebar {
             })
             .child(
                 div()
-                    .w(px(title_width))
-                    .flex_none()
+                    .min_w_0()
+                    .flex_1()
                     .whitespace_normal()
                     // The row sizes itself from this title's content, so
                     // its height and the rendered lines cannot disagree. The
@@ -3771,7 +3721,6 @@ impl Sidebar {
                     } else {
                         FontWeight::NORMAL
                     })
-                    .text_color(text_color)
                     .child(title),
             )
             .when(is_project, |this| {
@@ -3894,72 +3843,66 @@ impl Sidebar {
                 )
             });
 
-        let row_view = row_view.child(main_line).when(has_sub_line, |this| {
-            this.child(
-                div()
-                    // Aligned under the title: 12px leading slot + 7px gap
-                    // + 16px glyph + 7px gap.
-                    .pl(px(42.0))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(12.5))
-                    .line_height(px(ROW_SUB_LINE_HEIGHT))
-                    .text_color(theme.text_faint)
-                    .when(row.is_primary, |this| {
-                        this.child(
-                            div()
-                                .id(("sidebar-primary-pill", row_id))
-                                .debug_selector(move || format!("sidebar-primary-pill-{row_id}"))
-                                .px(px(5.0))
-                                .rounded(theme.radii.chip)
-                                .bg(theme.surface_raised)
-                                .text_color(theme.text)
-                                .text_size(px(11.0))
-                                .child("Primary"),
-                        )
-                    })
-                    // F-SID-11: the durable `worktree.comment` annotation
-                    // (`worktree.set` over the control socket) was already
-                    // persisted and read by the status bar; the worktree
-                    // row itself never rendered it.
-                    .when_some(
-                        row.comment.filter(|comment| !comment.is_empty()),
-                        |this, comment| {
+        let content = div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(ROW_GAP))
+            .child(main_line)
+            .when(has_sub_line, |this| {
+                this.child(
+                    div()
+                        // Aligned under the title: 12px leading slot + 7px gap
+                        // + 16px glyph + 7px gap.
+                        .pl(px(42.0))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(12.5))
+                        .line_height(px(ROW_SUB_LINE_HEIGHT))
+                        .text_color(theme.text_faint)
+                        .when(row.is_primary, |this| {
                             this.child(
                                 div()
-                                    .id(("sidebar-worktree-comment", row_id))
+                                    .id(("sidebar-primary-pill", row_id))
                                     .debug_selector(move || {
-                                        format!("sidebar-worktree-comment-{row_id}")
+                                        format!("sidebar-primary-pill-{row_id}")
                                     })
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.text_faint)
-                                    .child(comment),
+                                    .px(px(5.0))
+                                    .rounded(theme.radii.chip)
+                                    .bg(theme.surface_raised)
+                                    .text_color(theme.text)
+                                    .text_size(px(11.0))
+                                    .child("Primary"),
                             )
-                        },
-                    ),
-            )
-        });
+                        })
+                        // F-SID-11: the durable `worktree.comment` annotation
+                        // (`worktree.set` over the control socket) was already
+                        // persisted and read by the status bar; the worktree
+                        // row itself never rendered it.
+                        .when_some(
+                            row.comment.filter(|comment| !comment.is_empty()),
+                            |this, comment| {
+                                this.child(
+                                    div()
+                                        .id(("sidebar-worktree-comment", row_id))
+                                        .debug_selector(move || {
+                                            format!("sidebar-worktree-comment-{row_id}")
+                                        })
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.text_faint)
+                                        .child(comment),
+                                )
+                            },
+                        ),
+                )
+            });
 
-        let mut container = div().relative().w_full();
-        if guide {
-            let guide_left = guide_left(panel_width, row.depth);
-            container = container.child(
-                div()
-                    .absolute()
-                    .left(px(guide_left))
-                    // The tree separates row cards by `ROW_V_GAP`; the guide
-                    // reaches across that seam so the gutter still reads as
-                    // one line down the worktree list.
-                    .top(px(-ROW_V_GAP))
-                    .bottom(px(-ROW_V_GAP))
-                    .w(px(GUIDE_WIDTH))
-                    .bg(INDENT_GUIDE_FILL),
-            );
-        }
-        container.child(row_view)
+        row_view.child(content)
     }
 }
 
@@ -3975,13 +3918,12 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         // Production installs bezel alongside Sirio's theme. Some isolated
-        // shell fixtures set only the Sirio global, so establish the same
-        // invariant before either popup reaches bezel's surface paint.
-        if (self.context_menu.get().is_some() || self.add_project_menu.get().is_some())
-            && cx.try_global::<bezel::theme::Theme>().is_none()
-        {
+        // sidebar fixtures set only the Sirio global, so establish the same
+        // invariant lazily before the tree or a popup reads bezel's palette.
+        if cx.try_global::<bezel::theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
+        let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let rows = self.visible_rows();
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
@@ -3993,6 +3935,7 @@ impl Render for Sidebar {
             .filter_map(|row| self.row_drag(row).map(|drag| (row.id, drag)))
             .collect::<std::collections::HashMap<_, _>>();
         let filter_focus = self.filter_focus.clone();
+        let tree_focus = self.tree_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
         // Sidebar text fields (filter, project-settings card, worktree
         // prompt) share one blink: window focus is unique, so at most one
@@ -4051,22 +3994,28 @@ impl Render for Sidebar {
         let project_form = self.project_form.clone();
         let reorder_drop_entity = entity.clone();
         let panel_width = self.panel_width;
+        let tree_cursor = self.tree_cursor.min(rows.len().saturating_sub(1));
         let rendered_rows = rows
             .into_iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(index, row)| {
                 let project_id = project_ids.get(&row.id).cloned();
                 let project_icon = project_id
                     .as_ref()
                     .and_then(|id| project_identities.get(id).cloned());
                 let drag = row_drags.get(&row.id).copied();
+                let row_shape = Self::tree_row(&row);
                 Self::render_row(
                     row,
+                    index,
+                    row_shape,
+                    index == tree_cursor,
                     project_id,
                     project_icon,
                     drag,
                     entity.clone(),
                     theme,
-                    panel_width,
+                    &bezel_theme,
                     window,
                     cx,
                 )
@@ -4184,12 +4133,23 @@ impl Render for Sidebar {
             .child(
                 div()
                     .id("sidebar-tree")
+                    .key_context(tree::KEY_CONTEXT)
+                    .track_focus(&tree_focus)
+                    .on_action(cx.listener(|sidebar, _: &tree::SelectPrevious, _, cx| {
+                        sidebar.tree_step(tree::Direction::Up, cx);
+                    }))
+                    .on_action(cx.listener(|sidebar, _: &tree::SelectNext, _, cx| {
+                        sidebar.tree_step(tree::Direction::Down, cx);
+                    }))
+                    .on_action(cx.listener(|sidebar, _: &tree::Collapse, _, cx| {
+                        sidebar.tree_step(tree::Direction::Left, cx);
+                    }))
+                    .on_action(cx.listener(|sidebar, _: &tree::Expand, _, cx| {
+                        sidebar.tree_step(tree::Direction::Right, cx);
+                    }))
                     .mt(px(11.0))
                     .flex_1()
                     .h_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(ROW_V_GAP))
                     .overflow_y_scroll()
                     // Rows reorder during the drag, so the row originally
                     // under the pointer may be a different entity by
@@ -4199,7 +4159,7 @@ impl Render for Sidebar {
                     .on_drop::<RowDrag>(move |_, _, cx| {
                         reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
                     })
-                    .children(rendered_rows),
+                    .child(tree::tree().gap(px(ROW_V_GAP)).children(rendered_rows)),
             )
             .when(notice.is_some(), |this| {
                 this.child(
@@ -4365,10 +4325,6 @@ impl Render for Sidebar {
 mod tests {
     use super::*;
     use crate::project_identity::ProjectGlyph;
-    // The layout guarantees below are only meaningful over the range the
-    // panel can actually be dragged to, so they read it from the same place
-    // the shell clamps against rather than restating it.
-    use sirio_persistence::settings_ranges;
 
     /// A path picker that cannot open must say so, not fail silently.
     ///
@@ -4601,136 +4557,86 @@ mod tests {
         );
     }
 
-    #[test]
-    fn child_rows_have_a_distinct_project_root_inset_and_guide_level() {
-        let project = SidebarRow {
-            id: 0,
-            kind: RowKind::Project,
-            depth: 0,
-            title: "project".to_string(),
+    fn structural_row(kind: RowKind, depth: usize, expanded: bool) -> SidebarRow {
+        SidebarRow {
+            id: depth,
+            kind,
+            depth,
+            title: "row".to_string(),
             selected: false,
-            expanded: true,
+            expanded,
             is_primary: false,
             agent_status: None,
             is_git: true,
-            path: Some(PathBuf::from("/tmp/project")),
+            path: None,
             tab_id: None,
             tab_kind: None,
             agent_icon: None,
             agent_brand: None,
             comment: None,
             running_agents: Vec::new(),
-        };
-        let worktree = SidebarRow {
-            depth: 1,
-            kind: RowKind::Worktree,
-            id: 1,
-            title: "main".to_string(),
-            path: Some(PathBuf::from("/tmp/project-main")),
-            selected: false,
-            expanded: false,
-            is_primary: true,
-            agent_status: None,
-            is_git: true,
-            tab_id: None,
-            tab_kind: None,
-            agent_icon: None,
-            agent_brand: None,
-            comment: None,
-            running_agents: Vec::new(),
-        };
-        // Asked of the real functions rather than of a copy of their
-        // arithmetic: a copy here would have kept passing when the indent
-        // became width-dependent.
-        let inset = |row: &SidebarRow| row_left_inset(DEFAULT_SIDEBAR_WIDTH, row.depth);
-        let guide = |row: &SidebarRow| guide_left(DEFAULT_SIDEBAR_WIDTH, row.depth);
-
-        assert_eq!(inset(&project), ROW_LEFT_INSET);
-        assert_eq!(inset(&worktree), ROW_LEFT_INSET + TAB_INDENT);
-        assert_eq!(guide(&worktree), GUIDE_LEFT);
-        assert_ne!(inset(&project), inset(&worktree));
-    }
-
-    /// A row's box follows the panel one pixel for one pixel. Every pixel it
-    /// does not give back is a pixel of text the panel clips.
-    #[test]
-    fn a_row_gives_up_width_as_the_panel_does() {
-        assert_eq!(
-            row_width(DEFAULT_SIDEBAR_WIDTH, 0),
-            DEFAULT_SIDEBAR_WIDTH - ROW_LEFT_INSET - ROW_RIGHT_INSET
-        );
-        assert_eq!(
-            row_width(DEFAULT_SIDEBAR_WIDTH, 0) - row_width(DEFAULT_SIDEBAR_WIDTH - 125.0, 0),
-            125.0
-        );
-        // Deeper rows start further right and still end at the same edge.
-        assert_eq!(
-            row_width(DEFAULT_SIDEBAR_WIDTH, 1),
-            row_width(DEFAULT_SIDEBAR_WIDTH, 0) - TAB_INDENT
-        );
-        assert_eq!(row_width(20.0, 3), 0.0, "a width is never negative");
-    }
-
-    /// The indent is the reference's and stays the reference's until the
-    /// panel genuinely cannot afford it.
-    #[test]
-    fn the_indent_is_untouched_until_the_panel_needs_the_room() {
-        assert_eq!(indent_step(DEFAULT_SIDEBAR_WIDTH), TAB_INDENT);
-        assert_eq!(
-            indent_step(*settings_ranges::SIDEBAR_WIDTH.end() as f32),
-            TAB_INDENT
-        );
-    }
-
-    /// The defect this exists to prevent: at the old 160px floor a depth-two
-    /// row paid 27 + 70 = 97px of indentation out of 160 and its title was
-    /// left with a negative width, drawn as nothing at all. The indentation
-    /// yields first now, the same way the history row's author column does.
-    ///
-    /// The guarantee is exact at `MAX_ROW_DEPTH`, which is where it matters:
-    /// tab rows are the deepest and never carry a running-agents badge. A
-    /// depth-one worktree row with several agents running still spends part
-    /// of its title on that badge — F-CORE-ACT-18's own trade, untouched.
-    #[test]
-    fn the_deepest_row_keeps_a_readable_title_across_the_panels_range() {
-        let floor = *settings_ranges::SIDEBAR_WIDTH.start() as f32;
-        assert!(
-            indent_step(floor) < TAB_INDENT,
-            "at the floor the indent has to have given something up"
-        );
-
-        for width in (floor as i64)..=*settings_ranges::SIDEBAR_WIDTH.end() {
-            let width = width as f32;
-            let title = row_width(width, MAX_ROW_DEPTH) - ROW_TITLE_OVERHEAD;
-            assert!(
-                title >= MIN_TITLE_WIDTH,
-                "at {width}px the deepest row leaves its title {title}px"
-            );
         }
     }
 
-    /// Compressing the indent must not erase it: a level that steps by
-    /// nothing stops reading as a level, and the tree becomes a list.
     #[test]
-    fn the_indent_never_collapses_a_level() {
-        for width in *settings_ranges::SIDEBAR_WIDTH.start()..=*settings_ranges::SIDEBAR_WIDTH.end()
-        {
-            assert!(indent_step(width as f32) >= MIN_TAB_INDENT);
-        }
+    fn project_and_worktree_rows_map_to_bezel_tree_levels() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
+            tree::Row::branch(0, true)
+        );
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false)),
+            tree::Row::leaf(1)
+        );
     }
 
-    /// The guides run down the gutter the indentation opens, so they take
-    /// the same step. Left on `TAB_INDENT` they would detach from the rows
-    /// they belong to as soon as the panel narrowed.
     #[test]
-    fn the_indent_guides_follow_the_same_step_as_the_rows() {
-        for width in [DEFAULT_SIDEBAR_WIDTH, 260.0, 220.0] {
-            assert_eq!(
-                guide_left(width, 2) - guide_left(width, 1),
-                row_left_inset(width, 2) - row_left_inset(width, 1),
-                "guide and row must move together at {width}px"
-            );
-        }
+    fn project_tree_rows_keep_the_sidebar_expansion_state() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, false)),
+            tree::Row::branch(0, false)
+        );
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
+            tree::Row::branch(0, true)
+        );
+    }
+
+    #[test]
+    fn a_worktree_is_always_a_leaf() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true)),
+            tree::Row::leaf(1)
+        );
+    }
+
+    #[test]
+    fn the_new_worktree_action_is_a_depth_one_leaf() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false)),
+            tree::Row::leaf(1)
+        );
+    }
+
+    #[test]
+    fn tab_rows_are_depth_two_leaves() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false)),
+            tree::Row::leaf(2)
+        );
+    }
+
+    #[test]
+    fn bezel_parent_navigation_matches_the_sidebar_hierarchy() {
+        let shape = [
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false)),
+            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false)),
+            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false)),
+        ];
+        assert_eq!(tree::parent_of(&shape, 1), Some(0));
+        assert_eq!(tree::parent_of(&shape, 2), Some(1));
+        assert_eq!(tree::parent_of(&shape, 3), Some(0));
     }
 
     /// The row's rhythm is a minimum, not a prediction: a row keeps the
@@ -7338,11 +7244,12 @@ mod tests {
         );
     }
 
-    /// F-SID-04: clicking a project row's chevron reveals a collapsed
-    /// project's worktree/tab rows, and a second click hides them again.
+    /// F-SID-04: clicking a project row's chevron reveals its children;
+    /// bezel's arrow actions then walk, collapse and re-expand the same rows.
     #[gpui::test]
     async fn project_chevron_hides_and_restores_children(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::tree::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -7375,16 +7282,51 @@ mod tests {
             "the chevron click reveals the project's tab row"
         );
 
-        // And the second click hides them again.
-        cx.simulate_click(chevron, Modifiers::none());
+        let sidebar = cx.update(|window, _| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+        });
+        let project_cursor = sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor);
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor),
+            project_cursor + 1,
+            "down moves the bezel cursor to the first worktree"
+        );
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(
+            sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor),
+            project_cursor,
+            "up returns the bezel cursor to the project"
+        );
+
+        // The click also places the bezel tree cursor on the project. From
+        // there the standard tree actions collapse and re-expand it without
+        // changing the sidebar's project/worktree semantics.
+        cx.simulate_keystrokes("left");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("sidebar-row-5").is_none(),
-            "the second chevron click hides the worktree row again"
+            "left collapses the project and hides its worktree row"
         );
         assert!(
             cx.debug_bounds("sidebar-row-6").is_none(),
-            "the second chevron click hides the tab row again"
+            "left collapses the project and hides its tab row"
+        );
+
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-5").is_some(),
+            "right expands the project and restores its worktree row"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-row-6").is_some(),
+            "right expands the project and restores its tab row"
         );
     }
 
