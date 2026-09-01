@@ -3847,6 +3847,19 @@ struct SirioWorkspace {
     /// through this (or, for a chat pane, through `Chat`'s own state) —
     /// never a second, independently-tracked flag.
     activity: AgentActivityModel,
+    /// Set when a change can affect what the activity reconciliation reads.
+    /// Render consumes it at most once per frame.
+    activity_dirty: bool,
+    /// The `has_current_worktree()` value the last render observed. A
+    /// worktree can become (or stop being) current *passively* — F-CHG-02's
+    /// case: `sync_control_state` re-matching `working_directory` against a
+    /// project just added, with no `select_worktree` call anywhere — so no
+    /// mutation site can be trusted to arm the gate for it. Render compares
+    /// one bool per frame and arms on the flip.
+    last_seen_has_worktree: Option<bool>,
+    /// Number of activity reconciliations performed by this workspace.
+    /// Test-observable, like `ChangesTab::renders`.
+    reconciles: u64,
     /// Prevents scheduling restored scrollback more than once before the
     /// first frame mounts the terminal entities.
     ///
@@ -4193,7 +4206,8 @@ impl SirioWorkspace {
                                         workspace.activity.notify(&pane_id, status, Instant::now());
                                     workspace.post_activity_notification(&transition);
                                     workspace.request_auto_rename(&transition, cx);
-                                    workspace.sync_activity(cx);
+                                    workspace.mark_activity_dirty();
+                                    cx.notify();
                                 }
                                 ControlAction::UpdateEvent(event) => {
                                     workspace.update_state =
@@ -4591,6 +4605,9 @@ impl SirioWorkspace {
             palette_previous_focus: None,
             root_focus: cx.focus_handle(),
             activity,
+            activity_dirty: true,
+            last_seen_has_worktree: None,
+            reconciles: 0,
             restored_scrollback_scheduled: OnceGate::default(),
             window_active: true,
             browser_origins,
@@ -4636,12 +4653,12 @@ impl SirioWorkspace {
         // just not a selected worktree), so the Files panel would otherwise
         // render that unrelated real tree instead of its own no-worktree
         // placeholder, even though the centre surface already gets this
-        // right via `has_current_worktree()`. `sync_activity` (below)
-        // reconciles the panel's selection state against
-        // `has_current_worktree()` every time it runs, including this first
-        // call, so construction needs no separate one-off check.
+        // right via `has_current_worktree()`. The activity gate starts armed,
+        // so the first render reconciles the panel's selection state against
+        // `has_current_worktree()` without a separate one-off pass here.
         workspace.bind_settings(cx);
-        workspace.sync_activity(cx);
+        workspace.mark_activity_dirty();
+        cx.notify();
         workspace.recompute_launch_sources(cx);
         // Sweep abandoned installs and fetch the registry off the UI
         // thread; the foreground continuation recomputes every launch
@@ -5486,21 +5503,32 @@ impl SirioWorkspace {
         cx.subscribe(
             terminal,
             move |workspace, _, event: &TerminalActivityEvent, cx| {
+                let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
                 let transition = panes::apply_terminal_activity_event(
                     &mut workspace.activity,
                     &activity_pane_id,
                     event,
                     Instant::now(),
                 );
-                if let Some(transition) = transition {
-                    workspace.post_activity_notification(&transition);
-                    workspace.request_auto_rename(&transition, cx);
+                if let Some(transition) = transition.as_ref() {
+                    workspace.post_activity_notification(transition);
+                    workspace.request_auto_rename(transition, cx);
                 }
-                // Terminal exit status is stored on TerminalView even when
-                // no agent activity transition exists. Repaint the shell so
-                // the tab status cell can show the concrete exit/signal.
-                workspace.sync_activity(cx);
-                cx.notify();
+                // ChildExited must repaint even without a model transition:
+                // the exit status lives on TerminalView and the tab status
+                // cell reads it. An OscTitle or OutputSettled with no
+                // transition (and no title-owned clear) changes nothing the
+                // workspace draws; the terminal repaints itself through its
+                // own notify.
+                let title_owned_clear = title_owned_before
+                    && !workspace.activity.is_title_owned(&activity_pane_id);
+                if transition.is_some()
+                    || title_owned_clear
+                    || matches!(event, TerminalActivityEvent::ChildExited { .. })
+                {
+                    workspace.mark_activity_dirty();
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -5561,26 +5589,42 @@ impl SirioWorkspace {
 
                 if this
                     .update(cx, |workspace, cx| {
+                        let mut any_transition = false;
                         for (pane_id, shell_pid) in panes {
+                            let activity_pane_id = format!("pane-{pane_id}");
+                            let process_owned_before =
+                                workspace.activity.is_process_owned(&activity_pane_id);
                             match panes::refresh_process_signal_in(
                                 &mut workspace.activity,
                                 &snapshot,
-                                &format!("pane-{pane_id}"),
+                                &activity_pane_id,
                                 shell_pid,
                             ) {
                                 Ok(Some(transition)) => {
+                                    any_transition = true;
                                     workspace.post_activity_notification(&transition);
                                     workspace.request_auto_rename(&transition, cx);
                                 }
-                                Ok(None) => {}
+                                Ok(None) => {
+                                    // `process_gone` clears process-owned
+                                    // identity/status without producing a
+                                    // Transition, so detect that observable
+                                    // removal explicitly for the render gate.
+                                    if process_owned_before
+                                        && !workspace.activity.is_process_owned(&activity_pane_id)
+                                    {
+                                        any_transition = true;
+                                    }
+                                }
                                 Err(error) => eprintln!(
                                     "[activity] process refresh failed for pane-{pane_id}: {error}"
                                 ),
                             }
                         }
-                        // Once per tick rather than once per pane: the sidebar
-                        // reads the same model either way.
-                        workspace.sync_activity(cx);
+                        if any_transition {
+                            workspace.mark_activity_dirty();
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -5757,7 +5801,7 @@ impl SirioWorkspace {
             }
             ReorderScope::Tabs => {
                 self.schedule_save(cx);
-                self.sync_activity(cx);
+                self.mark_activity_dirty();
                 cx.notify();
             }
         }
@@ -5807,7 +5851,7 @@ impl SirioWorkspace {
         }
         if self.reorder_tabs_by_id(drag.id, target_id, before) {
             self.schedule_save(cx);
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             cx.notify();
         }
     }
@@ -5848,7 +5892,7 @@ impl SirioWorkspace {
             .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
         self.rebuild_center_split();
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
         true
     }
@@ -6431,6 +6475,12 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Option<(usize, String)>, String> {
         self.select_worktree(path, window, cx)?;
+        // Rank against the evidence of the tabs the selection just mounted:
+        // pane ids are reused across worktrees, so without this refresh the
+        // sort would read the *previous* surfaces' entity statuses under the
+        // same ids (the reconcile the selection armed has not run yet — this
+        // is the "reads immediately afterwards" exception to the gate).
+        self.sync_entity_evidence(cx);
         let Some(id) = self.worst_status_tab_id(cx) else {
             return Ok(None);
         };
@@ -6797,7 +6847,7 @@ impl SirioWorkspace {
         // rows. Running this after that sequence would rebuild the row tree
         // and drop the highlight the selection just applied.
         self.refresh_worktree_branches(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         self.sidebar.update(cx, |sidebar, cx| {
             // The host has updated its current path, control snapshot, status
             // bar and tab home before answering the click. The row highlight
@@ -7059,7 +7109,7 @@ impl SirioWorkspace {
             return Err(format!("unknown worktree: {selector}"));
         }
         if was_current {
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             self.right_panel
                 .update(cx, |panel, cx| panel.clear_worktree(cx));
             self.schedule_save(cx);
@@ -7127,7 +7177,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
         Ok(vec![
             ("restoredCount".to_string(), restored_count.to_string()),
@@ -7210,11 +7260,10 @@ impl SirioWorkspace {
     fn tab_agent_mark(&self, tab: &OpenTab) -> Option<AgentMark> {
         // `WorkspaceTabIcon`'s order: the tab's own agent, then its panes'.
         // Falling through for the *id* as well as the icon matters for one
-        // frame that really happens: `add_agent_tab` calls `agent_spawned`
-        // (so the pane knows the agent), then `insert_terminal_tab`, which
-        // syncs before the caller has set `OpenTab::agent_id`. Without the
-        // fallback that sync draws the right silhouette in the unknown-agent
-        // grey.
+        // frame that really happens: a pane's identity may be discovered
+        // after its tab exists (a hand-launched or restored agent), so the
+        // fallback keeps the first reconciliation after that discovery from
+        // drawing the generic terminal silhouette.
         let agent_id = tab.agent_id.clone().or_else(|| {
             tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
                 self.activity
@@ -7236,10 +7285,22 @@ impl SirioWorkspace {
         })
     }
 
+    /// Every path that changes what the activity reconcile reads must arm this
+    /// flag; render consumes it and runs the reconcile at most once per frame.
+    fn mark_activity_dirty(&mut self) {
+        self.activity_dirty = true;
+    }
+
+    /// Reconciles the activity model's projected state into the right panel,
+    /// sidebar and worktree rows. It does nothing unless
+    /// [`Self::mark_activity_dirty`] armed it; render owns the call and runs
+    /// it at most once per frame.
     fn sync_activity(&mut self, cx: &mut Context<Self>) {
-        // Layer E first: every view below reads the model, so the surfaces'
-        // own facts have to be in it before any of them ask.
-        self.sync_entity_evidence(cx);
+        if !self.activity_dirty {
+            return;
+        }
+        self.activity_dirty = false;
+        self.reconciles = self.reconciles.wrapping_add(1);
         self.sync_control_panes(cx);
         let activity = self.activity_surfaces(cx);
         // F-CHG-02: keep the Files panel's own selection state honest against
@@ -7255,10 +7316,9 @@ impl SirioWorkspace {
         // in -- the centre pane picks the new selection up immediately since
         // it re-checks every render, the old Files panel did not).
         // `bind_worktree`/`clear_worktree` are both no-ops when the state
-        // already matches, so this costs nothing on the other ~44 call sites
-        // that have nothing to do with worktree selection, and `render`
-        // already calls `sync_activity` unconditionally on every frame, so
-        // no individual mutation handler needs its own extra call for this.
+        // already matches, so this costs nothing on the other call sites that
+        // have nothing to do with worktree selection. Mutation handlers arm
+        // the gate and render performs the next reconciliation.
         let has_worktree = self.has_current_worktree();
         let working_directory = self.working_directory.clone();
         self.right_panel.update(cx, |panel, cx| {
@@ -7584,7 +7644,7 @@ impl SirioWorkspace {
         }
         tab.title = title;
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -7634,7 +7694,7 @@ impl SirioWorkspace {
                 self.focus_active_pane(window, cx);
             }
             self.schedule_save(cx);
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             cx.notify();
         }
     }
@@ -7912,7 +7972,7 @@ impl SirioWorkspace {
             let tab = &self.tabs[index];
             self.center_split.select_tab(tab.id, &self.tabs);
             self.schedule_save(cx);
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             cx.notify();
         }
     }
@@ -8009,7 +8069,7 @@ impl SirioWorkspace {
             self.focus_active_pane(window, cx);
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -8080,7 +8140,7 @@ impl SirioWorkspace {
         }
         self.apply_tab_machinery(machinery, true);
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -8226,7 +8286,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         window.focus(&composer_focus, cx);
         window.on_next_frame(move |window, cx| window.focus(&composer_focus, cx));
         cx.notify();
@@ -8331,7 +8391,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         window.focus(&composer_focus, cx);
         window.on_next_frame(move |window, cx| window.focus(&composer_focus, cx));
         cx.notify();
@@ -8427,7 +8487,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -8477,7 +8537,7 @@ impl SirioWorkspace {
             let tab = &self.tabs[index];
             self.center_split.select_tab(tab.id, &self.tabs);
             self.schedule_save(cx);
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             cx.notify();
             return;
         }
@@ -8512,7 +8572,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -8543,7 +8603,7 @@ impl SirioWorkspace {
                 });
             }
             self.schedule_save(cx);
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             cx.notify();
             return;
         }
@@ -8578,7 +8638,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -8610,7 +8670,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -8648,7 +8708,7 @@ impl SirioWorkspace {
             self.rebuild_center_split();
         }
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
         (surface_id, browser)
     }
@@ -9203,7 +9263,8 @@ impl SirioWorkspace {
             Some(adapter.id().to_string()),
             cx,
         );
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
+        cx.notify();
     }
 
     fn open_action(&mut self, action: NewTabAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -9578,7 +9639,7 @@ impl SirioWorkspace {
             let worktree_id = self.working_directory.to_string_lossy().into_owned();
             self.terminal_pane_cache
                 .focus(&worktree_id, &format!("terminal-{pane_id}"));
-            self.sync_control_panes(cx);
+            self.mark_activity_dirty();
             cx.notify();
         }
     }
@@ -9751,7 +9812,7 @@ impl SirioWorkspace {
             if let Some(window) = window {
                 self.select_pane(pane_id, Some(window), cx);
             }
-            self.sync_control_panes(cx);
+            self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
         }
@@ -9842,7 +9903,7 @@ impl SirioWorkspace {
             if let Some(window) = window {
                 self.select_pane(pane_id, Some(window), cx);
             }
-            self.sync_activity(cx);
+            self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
         }
@@ -9905,7 +9966,7 @@ impl SirioWorkspace {
                     window.focus(&focus_handle, cx);
                 }
             }
-            self.sync_control_panes(cx);
+            self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
         }
@@ -10018,10 +10079,11 @@ impl SirioWorkspace {
                 };
                 // F-TAB-11 (SoleTabInGroup half): only this render pass can
                 // count the pane's tab-group membership -- `sirio_terminal`
-                // has no route to `tab_machinery`. Pushed in on every
-                // render rather than cached, since a tab moving groups (Move
-                // to Other Pane, tab close, …) doesn't itself notify this
-                // pane's own `TerminalView` entity.
+                // has no route to `tab_machinery`. Pushed in on every render
+                // rather than cached, since a tab moving groups (Move to
+                // Other Pane, tab close, …) doesn't itself notify this pane's
+                // own `TerminalView` entity; only a change dirties the
+                // terminal.
                 if let TabContent::Terminal { view } = content {
                     let sole_tab_in_group = self
                         .center_split
@@ -10029,8 +10091,9 @@ impl SirioWorkspace {
                         .len()
                         == 1;
                     view.update(cx, |terminal, cx| {
-                        terminal.set_sole_tab_in_group(sole_tab_in_group);
-                        cx.notify();
+                        if terminal.set_sole_tab_in_group(sole_tab_in_group) {
+                            cx.notify();
+                        }
                     });
                 }
                 let pane_id = *id;
@@ -11203,7 +11266,7 @@ impl SirioWorkspace {
             .unwrap_or(destination_index);
         self.dismiss_tab_menu(cx);
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         cx.notify();
     }
 
@@ -11215,7 +11278,8 @@ impl SirioWorkspace {
         self.apply_tab_machinery(machinery, true);
         self.dismiss_tab_menu(cx);
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
+        cx.notify();
     }
 
     fn begin_tab_rename(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -11258,7 +11322,7 @@ impl SirioWorkspace {
         // false` on manual rename.
         tab.title_is_auto_named = false;
         self.schedule_save(cx);
-        self.sync_activity(cx);
+        self.mark_activity_dirty();
         true
     }
 
@@ -13480,10 +13544,19 @@ impl Render for SirioWorkspace {
         // event this workspace subscribes to. Refreshing here means the
         // frame about to be drawn reads a model that is already current,
         // without any view reaching past it to the entities — and it costs
-        // one map comparison per pane. The sidebar is re-pushed only when
-        // something actually changed, so this cannot loop.
+        // one map comparison per pane. Changed evidence arms the gated
+        // reconciliation below; unchanged evidence does not.
         if self.sync_entity_evidence(cx) {
-            self.sync_worktree_activity(cx);
+            self.mark_activity_dirty();
+        }
+        // F-CHG-02: worktree currency can change passively (the catalog
+        // re-matching `working_directory` with no `select_worktree` call),
+        // so no mutation site arms the gate for it. One bool compare per
+        // frame keeps the right panel's cached selection honest.
+        let has_worktree = self.has_current_worktree();
+        if self.last_seen_has_worktree != Some(has_worktree) {
+            self.last_seen_has_worktree = Some(has_worktree);
+            self.mark_activity_dirty();
         }
         // F-CORE-ACT-20: same "polled, not pushed" reasoning as the comment
         // above -- `Window::is_window_active` is a real, portable GPUI call
@@ -13597,8 +13670,8 @@ impl Render for SirioWorkspace {
         // mutation methods, so the sidebar dot and Activity row would go
         // stale after a turn finished unless this re-derives them every
         // render, same as the tab checkmark already does inline in
-        // `render_open_tab`. `set_activity`/`set_worktree_status` both no-op
-        // on an unchanged value, so this doesn't loop.
+        // `render_open_tab`. Changed evidence arms `sync_activity`; its gate
+        // leaves the unchanged case alone.
         self.drain_browser_events(cx);
         self.sync_activity(cx);
         self.sync_empty_pane_prompts(cx);
@@ -15794,7 +15867,7 @@ mod tests {
         TestAppContext, VisualTestContext,
     };
     use sirio_persistence::{AppSettings, AppearanceMode};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -17169,6 +17242,7 @@ mod tests {
             workspace.activity.agent_spawned("pane-91", "codex", now);
             workspace.activity.agent_spawned("pane-92", "opencode", now);
             workspace.activity.notify("pane-92", AgentStatus::Done, now);
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -17574,6 +17648,7 @@ mod tests {
             workspace
                 .activity
                 .notify("pane-90", AgentStatus::NeedsInput, now);
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -17594,6 +17669,7 @@ mod tests {
             workspace
                 .activity
                 .notify("pane-90", AgentStatus::Running, Instant::now());
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -17667,6 +17743,7 @@ mod tests {
             workspace
                 .activity
                 .notify(&errored_pane, AgentStatus::Error, now);
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -17775,6 +17852,7 @@ mod tests {
                     now,
                 );
             }
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
             let jumped = workspace
                 .select_worktree_and_jump(worktrees[0].clone(), None, cx)
@@ -17838,6 +17916,7 @@ mod tests {
             let pane_id = format!("pane-{background_pane}");
             workspace.activity.agent_spawned(&pane_id, "claude", now);
             workspace.activity.notify(&pane_id, AgentStatus::Error, now);
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
             background_pane
         });
@@ -18117,6 +18196,7 @@ mod tests {
                 None,
                 cx,
             );
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -18590,6 +18670,7 @@ mod tests {
         let before = sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst);
         for _ in 0..3 {
             workspace.update(&mut cx.cx, |workspace, cx| {
+                workspace.mark_activity_dirty();
                 workspace.sync_activity(cx);
                 cx.notify();
             });
@@ -18605,6 +18686,122 @@ mod tests {
         assert!(
             sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst) > before,
             "an explicit registry read must consult the live scrollback source"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Activity reconciliation is armed by changed evidence or an explicit
+    /// activity mutation, then consumed at most once by the next render.
+    /// Repainting an unchanged workspace must not repeat the full reconcile.
+    #[gpui::test]
+    async fn render_reconciles_only_when_evidence_changed(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-render-activity-reconcile-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create reconcile test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn reconcile test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        cx.run_until_parked();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        let reconciles = workspace.read_with(&cx.cx, |workspace, _| workspace.reconciles);
+
+        for _ in 0..3 {
+            workspace.update(&mut cx.cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.reconciles),
+            reconciles,
+            "an unchanged workspace must not reconcile merely because it rendered"
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.mark_activity_dirty();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.reconciles),
+            reconciles + 1,
+            "arming activity must make the next render reconcile"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Rendering a terminal with the same sole-tab membership must not notify
+    /// the terminal entity; a real membership change remains observable.
+    #[gpui::test]
+    async fn render_leaves_an_unchanged_terminal_unnotified(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-render-terminal-notify-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create terminal notify test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn terminal notify test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        cx.run_until_parked();
+
+        let fires = Rc::new(Cell::new(0));
+        let observed_fires = fires.clone();
+        let _subscription = cx.update(|_, app| {
+            app.observe(&terminal, move |_, _| {
+                observed_fires.set(observed_fires.get() + 1);
+            })
+        });
+
+        for _ in 0..3 {
+            workspace.update(&mut cx.cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            fires.get(),
+            0,
+            "rendering an unchanged terminal must not notify its entity"
+        );
+
+        let sole_tab_in_group = terminal.read_with(&cx.cx, |terminal, _| {
+            terminal.sole_tab_in_group()
+        });
+        terminal.update(&mut cx.cx, |terminal, cx| {
+            assert!(terminal.set_sole_tab_in_group(!sole_tab_in_group));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            fires.get() > 0,
+            "a real sole-tab membership change must notify the terminal entity"
         );
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
@@ -19129,6 +19326,7 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             assert!(workspace.tabs[0].agent_icon.is_none());
             assert!(workspace.tab_agent_mark(&workspace.tabs[0]).is_none());
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -19159,6 +19357,7 @@ mod tests {
                 workspace.activity.is_title_owned("pane-0"),
                 "and takes title ownership of the pane, not spawn ownership"
             );
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -19200,6 +19399,7 @@ mod tests {
 
         workspace.update(&mut cx, |workspace, cx| {
             workspace.activity.process_identified("pane-0", "codex");
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
         });
         cx.run_until_parked();
@@ -21157,6 +21357,7 @@ mod tests {
                     view: file_view.clone(),
                 },
             );
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
             cx.notify();
         });
@@ -21206,6 +21407,7 @@ mod tests {
                     view: file_view.clone(),
                 },
             );
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
             cx.notify();
         });
@@ -25918,6 +26120,7 @@ mod tests {
             workspace.tabs = tabs;
             workspace.active_tab = active;
             workspace.rebuild_center_split();
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
             cx.notify();
         });
@@ -26459,6 +26662,7 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.active_tab = 1;
             assert!(workspace.center_split.select_tab(1, &workspace.tabs));
+            workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
             cx.notify();
         });
