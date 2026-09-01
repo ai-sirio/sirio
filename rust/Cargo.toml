@@ -71,6 +71,9 @@ bezel = { version = "=0.1.4", default-features = false, features = [
     "geist-mono",
     "geist-weights",
 ] }
+bezel-markdown = "=0.1.4"
+bezel-editor = "=0.1.4"
+bezel-syntax = "=0.1.4"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
