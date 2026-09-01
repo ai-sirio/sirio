@@ -21,7 +21,7 @@ use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Corners, Element, ElementId, EventEmitter, Font,
     FontStyle, FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParentElement,
-    Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine,
+    Pixels, Point, RenderImage, ScrollDelta, ScrollWheelEvent, ShapedLine, Size,
     StatefulInteractiveElement, StrikethroughStyle, Style, Styled, TextRun, UnderlineStyle, Window,
     anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
@@ -542,14 +542,26 @@ struct TerminalHandle {
     /// Release runs against it every frame (R4.5) and when the pane closes
     /// (its `Drop` parks the images in [`KITTY_DROPPED_IMAGES`]).
     kitty_images: Arc<Mutex<KittyImageCache>>,
-    /// #308 R4.4: the owner thread's Kitty mutation stamp — bumped once per
-    /// poll iteration in which it applied anything to the terminal that
-    /// could change the placement walk (output batch, Feed, scroll, resize;
-    /// content transmits and deletes ride the same bump via `vt_write`).
-    /// `prepaint` re-scans only when this differs: a still pane costs one
-    /// integer comparison per frame, not a channel round trip plus three
-    /// placement walks.
-    kitty_stamp: Arc<AtomicU64>,
+    /// #308 R4.4: the owner thread's mutation stamp — bumped once per poll
+    /// iteration in which it applied anything to the terminal that could
+    /// change the Kitty placement walk or the cell grid (output batch, Feed,
+    /// scroll, resize; content transmits and deletes ride the same bump via
+    /// `vt_write`). `prepaint` gates both retained products on this stamp, so
+    /// a still pane pays one integer comparison per frame.
+    mutation_stamp: Arc<AtomicU64>,
+    /// Retained cell snapshots and assembled draw products for this pane.
+    /// This lives beside the other per-pane state — NOT in
+    /// `TerminalPaintState`, which is rebuilt every prepaint.
+    grid_render_cache: Arc<Mutex<GridRenderCache>>,
+    /// Test-observable count of `Snapshot` builds the owner thread served
+    /// for this pane. Per handle rather than process-wide so a test asserting
+    /// "a still pane costs zero snapshots" cannot be tripped by the other
+    /// tests' panes rendering in parallel in the same process.
+    #[cfg_attr(not(test), allow(dead_code))] // read by the retained-grid view tests
+    snapshot_builds: Arc<AtomicU64>,
+    /// Test-observable count of grid assemblies `prepaint` rebuilt for this
+    /// pane (the assembly-key miss path); per handle for the same reason.
+    grid_assemblies: Arc<AtomicU64>,
     /// #303 R2.6: latched by the owner-thread PNG decoder so a failed ingest
     /// still produces a visible refusal indicator in the pane. PNG failures
     /// do not create a stored placement for `kitty_refused` to inspect.
@@ -561,8 +573,8 @@ struct TerminalHandle {
     mouse_tracking: Arc<AtomicBool>,
     /// #259: the resolved selection, in viewport grid coordinates.
     ///
-    /// Written by the owner thread when a gesture changes it, read by
-    /// `TerminalElement::prepaint` to tint background quads. Plain data by
+    /// Written by the main-thread mouse handlers when a gesture changes it,
+    /// read by `TerminalElement::prepaint` to tint background quads. Plain data by
     /// design -- see [`SelectedRange`] for why the emulator's own `Selection`
     /// cannot be what the paint loop consults.
     selection: Arc<Mutex<Option<SelectedRange>>>,
@@ -716,10 +728,14 @@ struct TerminalThreadInputs {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     mouse_tracking: Arc<AtomicBool>,
-    /// #308 R4.4: the Kitty mutation stamp the view gates its re-scan on;
-    /// bumped in the poll loop whenever this thread mutated the terminal in
-    /// any way that could change the placement walk.
-    kitty_stamp: Arc<AtomicU64>,
+    /// #308 R4.4: the mutation stamp the view gates its Kitty placement
+    /// re-scan and grid render cache on; bumped in the poll loop whenever
+    /// this thread mutated the terminal in any way that could change either
+    /// product.
+    mutation_stamp: Arc<AtomicU64>,
+    /// Shared with the handle's `snapshot_builds`: bumped once per served
+    /// `Snapshot` so tests can prove a still pane never asks for one.
+    snapshot_builds: Arc<AtomicU64>,
     kitty_decode_failed: Arc<AtomicBool>,
 }
 
@@ -1222,7 +1238,8 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             master,
             mut child,
             mouse_tracking,
-            kitty_stamp,
+            mutation_stamp,
+            snapshot_builds,
             kitty_decode_failed,
         } = inputs;
 
@@ -1297,7 +1314,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             }
 
             // 2. Serve queued commands.
-            let mut kitty_mutated = false;
+            let mut mutated = false;
             let mut shutdown = false;
             while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
                 match command {
@@ -1320,7 +1337,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     }
                     TerminalCommand::Feed(bytes) => {
                         terminal.vt_write(&bytes);
-                        kitty_mutated = true;
+                        mutated = true;
                     }
                     TerminalCommand::Resize(columns, lines, cell_width, cell_height) => {
                         let _ = master.resize(PtySize {
@@ -1335,7 +1352,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             u32::from(cell_width),
                             u32::from(cell_height),
                         );
-                        kitty_mutated = true;
+                        mutated = true;
                     }
                     TerminalCommand::Scroll(scroll) => {
                         let page = terminal.rows().unwrap_or(rows) as isize;
@@ -1347,9 +1364,10 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                             SirioScroll::Lines(delta) => ScrollViewport::Delta(delta),
                         };
                         terminal.scroll_viewport(viewport);
-                        kitty_mutated = true;
+                        mutated = true;
                     }
                     TerminalCommand::Snapshot(reply) => {
+                        snapshot_builds.fetch_add(1, Ordering::SeqCst);
                         let frame = build_snapshot(
                             &mut terminal,
                             &mut render,
@@ -1384,17 +1402,18 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             }
             // #308 R4.4: any mutation that can move placements or change
             // their visibility bumps the stamp the view gates its re-scan
-            // on. Content changes (transmits/replaces/placements/deletes)
-            // arrive through `vt_write`, so the output batch and `Feed`
-            // cover them; Scroll/Resize move placement pins without
-            // changing content. A still pane leaves the stamp untouched and
-            // the view pays one integer comparison per frame instead of a
-            // placement walk.
+            // and grid render cache on. Content changes
+            // (transmits/replaces/placements/deletes) arrive through
+            // `vt_write`, so the output batch and `Feed` cover them;
+            // Scroll/Resize move placement pins and change which cells are
+            // visible. A still pane leaves the stamp untouched and the view
+            // pays one integer comparison per frame instead of a placement
+            // walk or snapshot.
             if had_output {
-                kitty_mutated = true;
+                mutated = true;
             }
-            if kitty_mutated {
-                kitty_stamp.fetch_add(1, Ordering::Relaxed);
+            if mutated {
+                mutation_stamp.fetch_add(1, Ordering::Relaxed);
             }
             if shutdown {
                 let _ = child.kill();
@@ -1435,12 +1454,12 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             // 4. Park until a command arrives or the poll tick elapses.
             //
             // This used to be a flat `sleep(EVENT_POLL_INTERVAL)`, which made
-            // every blocking round-trip -- `Snapshot` above all, which the
-            // renderer issues from `prepaint` on *every frame* -- wait for
+            // every blocking round-trip -- especially the `Snapshot` that
+            // the renderer needed before the retained-grid cache -- wait for
             // this thread to finish a nap it had only just started. Measured
             // at 5.9ms per frame for a 200x50 pane, of which 5.3ms was this
-            // wait and 0.6ms was the actual grid rebuild: the main thread
-            // stalled for most of a frame, per visible pane, doing nothing.
+            // wait and 0.6ms was the grid rebuild: the main thread stalled
+            // for most of a frame, per visible pane, doing nothing.
             //
             // Blocking on the channel instead wakes this thread the instant a
             // command lands, while the timeout preserves the tick that drives
@@ -1788,7 +1807,8 @@ impl TerminalHandle {
         // Shared before the thread spawns and handed to both the owner loop
         // (writer) and the handle (reader) below.
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
-        let kitty_stamp = Arc::new(AtomicU64::new(0));
+        let mutation_stamp = Arc::new(AtomicU64::new(0));
+        let snapshot_builds = Arc::new(AtomicU64::new(0));
         let kitty_decode_failed = Arc::new(AtomicBool::new(false));
         spawn_terminal_thread(TerminalThreadInputs {
             cols: COLS,
@@ -1800,7 +1820,8 @@ impl TerminalHandle {
             master: pair.master,
             child,
             mouse_tracking: mouse_tracking_flag.clone(),
-            kitty_stamp: kitty_stamp.clone(),
+            mutation_stamp: mutation_stamp.clone(),
+            snapshot_builds: snapshot_builds.clone(),
             kitty_decode_failed: kitty_decode_failed.clone(),
         });
 
@@ -1814,7 +1835,10 @@ impl TerminalHandle {
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
                 kitty_images: Arc::new(Mutex::new(KittyImageCache::default())),
-                kitty_stamp,
+                mutation_stamp,
+                grid_render_cache: Arc::new(Mutex::new(GridRenderCache::default())),
+                snapshot_builds,
+                grid_assemblies: Arc::new(AtomicU64::new(0)),
                 kitty_decode_failed,
                 mouse_tracking: mouse_tracking_flag,
                 selection: Arc::new(Mutex::new(None)),
@@ -2385,9 +2409,8 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 /// [`REPAINT_FRAME_BUDGET`], not by this.
 const EVENT_COALESCE_CAP: usize = 100;
 /// Floor on the interval between two repaints while output keeps arriving.
-/// `TerminalElement::prepaint` rebuilds every visible cell from scratch, which
-/// costs milliseconds on a maximised pane, so a PTY that never stops writing
-/// must not be allowed to drive that rebuild faster than a frame. It is a
+/// A PTY that never stops writing must not be allowed to drive repeated grid
+/// snapshot/assembly work faster than a frame on a maximised pane. It is a
 /// floor and not a delay: output arriving into a quiet pane -- every
 /// keystroke a user actually types -- repaints on the very next poll tick.
 const REPAINT_FRAME_BUDGET: Duration = Duration::from_millis(16);
@@ -3666,7 +3689,7 @@ struct TerminalPaintState {
     kitty_dropped: Vec<Arc<RenderImage>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct TerminalPalette {
     background: Hsla,
     foreground: Hsla,
@@ -3675,6 +3698,37 @@ struct TerminalPalette {
     /// is the token reserved for text selection, as distinct from the
     /// selected-row fill -- see its doc comment in `sirio_theme`.
     selection: Hsla,
+}
+
+/// Retained products for the terminal grid, split into two levels. The grid
+/// level keeps the owner-thread `Snapshot` result keyed by the shared
+/// mutation stamp. The assembly level keeps shaped lines and absolute
+/// background/cursor quads keyed by `(stamp, selection, palette,
+/// bounds_origin, bounds_size)`, so a pane move or selection change rebuilds
+/// draw products from retained cells without another owner-thread round trip.
+///
+/// `prepaint` loads the stamp before deciding whether to issue `Snapshot`.
+/// If the owner mutates during that round trip, caching content newer than the
+/// loaded stamp is safe because the next frame observes the newer stamp; the
+/// reverse ordering could retain stale content under the current stamp.
+#[derive(Default)]
+struct GridRenderCache {
+    grid_stamp: Option<u64>,
+    cells: Vec<Vec<SnapshotCell>>,
+    cursor: (usize, usize),
+    assembly_key: Option<GridAssemblyKey>,
+    lines: Vec<(ShapedLine, Point<Pixels>)>,
+    background_quads: Vec<PaintQuad>,
+    cursor_quad: Option<PaintQuad>,
+}
+
+#[derive(PartialEq)]
+struct GridAssemblyKey {
+    stamp: u64,
+    selection: Option<SelectedRange>,
+    palette: TerminalPalette,
+    bounds_origin: Point<Pixels>,
+    bounds_size: Size<Pixels>,
 }
 
 impl TerminalPalette {
@@ -3757,102 +3811,195 @@ impl Element for TerminalElement {
             f32::from(LINE_HEIGHT).round().max(1.0) as u16,
         );
 
-        let (cells, cursor) = self.terminal.snapshot();
+        // Load the shared stamp before any blocking Snapshot round trip. If
+        // the owner mutates while Snapshot is in flight, caching newer cells
+        // under the older stamp is safe: the next frame sees the new stamp
+        // and refreshes again. Loading it afterwards could retain stale cells
+        // under the current stamp.
+        let mutation_stamp = self.terminal.mutation_stamp.load(Ordering::Relaxed);
         // #259: read once per frame, not per cell. The range is plain numbers
         // precisely so the inner loop stays arithmetic.
         let selection = *self.terminal.selection.lock();
-        let mut backgrounds = Vec::new();
-        let mut lines = Vec::with_capacity(cells.len());
+        let assembly_key = GridAssemblyKey {
+            stamp: mutation_stamp,
+            selection,
+            palette: self.palette,
+            bounds_origin: bounds.origin,
+            bounds_size: bounds.size,
+        };
+        let mut grid_cache = self.terminal.grid_render_cache.lock();
+        if grid_cache.grid_stamp != Some(mutation_stamp) {
+            // Never hold the cache lock across the blocking owner-thread
+            // round trip.
+            drop(grid_cache);
+            let (cells, cursor) = self.terminal.snapshot();
+            grid_cache = self.terminal.grid_render_cache.lock();
+            grid_cache.grid_stamp = Some(mutation_stamp);
+            grid_cache.cells = cells;
+            grid_cache.cursor = cursor;
+        }
 
-        for (line, cells) in cells.into_iter().enumerate() {
-            let mut text = String::new();
-            let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
-            for (column, cell) in cells.into_iter().enumerate() {
-                let foreground = color_to_hsla(cell.fg, self.palette);
-                // SGR 2 faint has no gpui field; halve the alpha instead (#45).
-                let foreground = if cell.faint {
-                    Hsla {
-                        a: foreground.a * 0.5,
-                        ..foreground
-                    }
-                } else {
-                    foreground
-                };
-                let run = TextRun {
-                    len: cell.byte_len(),
-                    color: foreground,
-                    background_color: None,
-                    font: Font {
-                        weight: if cell.bold {
+        let (backgrounds, lines, cursor) =
+            if grid_cache.assembly_key.as_ref() == Some(&assembly_key) {
+                (
+                    grid_cache.background_quads.clone(),
+                    grid_cache.lines.clone(),
+                    grid_cache.cursor_quad.clone(),
+                )
+            } else {
+                self.terminal.grid_assemblies.fetch_add(1, Ordering::SeqCst);
+                // Quads are per run, not per cell: a row of default background is
+                // one quad, and a selection is one contiguous range in reading
+                // order, so at most one wash per row.
+                let row_count = grid_cache.cells.len();
+                let mut backgrounds = Vec::with_capacity(row_count.saturating_mul(4));
+                let mut selection_washes =
+                    Vec::with_capacity(if selection.is_some() { row_count } else { 0 });
+                let mut lines = Vec::with_capacity(row_count);
+
+                for (line, cells) in grid_cache.cells.iter().enumerate() {
+                    let mut text = String::with_capacity(cells.len());
+                    let mut runs: Vec<TextRun> = Vec::with_capacity(cells.len());
+                    let mut background_run: Option<(usize, Hsla)> = None;
+                    let mut selection_start = None;
+                    let run_bounds = |start_column: usize, column_count: usize| {
+                        Bounds::new(
+                            point(
+                                bounds.origin.x + cell_width * start_column as f32,
+                                bounds.origin.y + LINE_HEIGHT * line as f32,
+                            ),
+                            size(cell_width * column_count as f32, LINE_HEIGHT),
+                        )
+                    };
+
+                    for (column, cell) in cells.iter().enumerate() {
+                        let foreground = color_to_hsla(cell.fg, self.palette);
+                        // SGR 2 faint has no gpui field; halve the alpha instead (#45).
+                        let foreground = if cell.faint {
+                            Hsla {
+                                a: foreground.a * 0.5,
+                                ..foreground
+                            }
+                        } else {
+                            foreground
+                        };
+                        let weight = if cell.bold {
                             FontWeight::BOLD
                         } else {
                             FontWeight::NORMAL
-                        },
-                        style: if cell.italic {
+                        };
+                        let style = if cell.italic {
                             FontStyle::Italic
                         } else {
                             FontStyle::Normal
-                        },
-                        ..terminal_font.clone()
-                    },
-                    underline: underline_style(
-                        cell.underline,
-                        cell.underline_color.map(|c| color_to_hsla(c, self.palette)),
-                    ),
-                    strikethrough: cell.strikethrough.then(StrikethroughStyle::default),
-                };
-                if let Some(previous) = runs.last_mut()
-                    && previous.font == run.font
-                    && previous.color == run.color
-                    && previous.underline == run.underline
-                    && previous.strikethrough == run.strikethrough
-                {
-                    previous.len += run.len;
-                } else {
-                    runs.push(run);
+                        };
+                        let underline = underline_style(
+                            cell.underline,
+                            cell.underline_color.map(|c| color_to_hsla(c, self.palette)),
+                        );
+                        let strikethrough = cell.strikethrough.then(StrikethroughStyle::default);
+                        let len = cell.byte_len();
+                        if let Some(previous) = runs.last_mut()
+                            && previous.font.weight == weight
+                            && previous.font.style == style
+                            && previous.color == foreground
+                            && previous.underline == underline
+                            && previous.strikethrough == strikethrough
+                        {
+                            // The terminal font is unchanged across a row, so a
+                            // merged run needs no new Font value at all.
+                            previous.len += len;
+                        } else {
+                            runs.push(TextRun {
+                                len,
+                                color: foreground,
+                                background_color: None,
+                                font: Font {
+                                    weight,
+                                    style,
+                                    ..terminal_font.clone()
+                                },
+                                underline,
+                                strikethrough,
+                            });
+                        }
+                        text.extend(cell.chars());
+
+                        let background = color_to_hsla(cell.bg, self.palette);
+                        match background_run {
+                            Some((_start, previous)) if previous == background => {}
+                            Some((start, previous)) => {
+                                backgrounds.push(fill(run_bounds(start, column - start), previous));
+                                background_run = Some((column, background));
+                            }
+                            None => background_run = Some((column, background)),
+                        }
+
+                        // #259: a selected cell is *washed*, not repainted -- a
+                        // second translucent quad over the guest's own background
+                        // rather than instead of it. Adjacent selected cells share
+                        // one wash quad just as adjacent equal backgrounds share
+                        // one base quad.
+                        if selection.is_some_and(|range| range.contains(line, column)) {
+                            if selection_start.is_none() {
+                                selection_start = Some(column);
+                            }
+                        } else if let Some(start) = selection_start.take() {
+                            selection_washes.push(fill(
+                                run_bounds(start, column - start),
+                                self.palette.selection,
+                            ));
+                        }
+                    }
+
+                    if let Some((start, background)) = background_run {
+                        backgrounds.push(fill(run_bounds(start, cells.len() - start), background));
+                    }
+                    if let Some(start) = selection_start {
+                        selection_washes.push(fill(
+                            run_bounds(start, cells.len() - start),
+                            self.palette.selection,
+                        ));
+                    }
+
+                    let shaped_line =
+                        window
+                            .text_system()
+                            .shape_line(text.into(), FONT_SIZE, &runs, None);
+                    lines.push((
+                        shaped_line,
+                        point(bounds.origin.x, bounds.origin.y + LINE_HEIGHT * line as f32),
+                    ));
                 }
-                text.extend(cell.chars());
 
-                let cell_bounds = Bounds::new(
-                    point(
-                        bounds.origin.x + cell_width * column as f32,
-                        bounds.origin.y + LINE_HEIGHT * line as f32,
-                    ),
-                    size(cell_width, LINE_HEIGHT),
-                );
-                backgrounds.push(fill(cell_bounds, color_to_hsla(cell.bg, self.palette)));
-                // #259: a selected cell is *washed*, not repainted -- a second
-                // translucent quad over the guest's own background rather than
-                // instead of it. Replacing it outright would erase the
-                // distinction between, say, a diff's red and green lines the
-                // moment they were selected. Only selected cells pay for the
-                // extra quad, and the text still shapes on top of both.
-                if selection.is_some_and(|range| range.contains(line, column)) {
-                    backgrounds.push(fill(cell_bounds, self.palette.selection));
-                }
-            }
+                // Paint every guest background before every translucent selection
+                // wash, matching the old per-cell ordering even when a base
+                // background run spans selected and unselected cells.
+                backgrounds.extend(selection_washes);
 
-            let shaped_line = window
-                .text_system()
-                .shape_line(text.into(), FONT_SIZE, &runs, None);
-            lines.push((
-                shaped_line,
-                point(bounds.origin.x, bounds.origin.y + LINE_HEIGHT * line as f32),
-            ));
-        }
+                let terminal_cursor = grid_cache.cursor;
+                let cursor = (terminal_cursor.0 < rows as usize
+                    && terminal_cursor.1 < columns as usize)
+                    .then(|| {
+                        fill(
+                            Bounds::new(
+                                point(
+                                    bounds.origin.x + cell_width * terminal_cursor.1 as f32,
+                                    bounds.origin.y + LINE_HEIGHT * terminal_cursor.0 as f32,
+                                ),
+                                size(cell_width, LINE_HEIGHT),
+                            ),
+                            self.palette.cursor,
+                        )
+                    });
 
-        let cursor = (cursor.0 < rows as usize && cursor.1 < columns as usize).then(|| {
-            fill(
-                Bounds::new(
-                    point(
-                        bounds.origin.x + cell_width * cursor.1 as f32,
-                        bounds.origin.y + LINE_HEIGHT * cursor.0 as f32,
-                    ),
-                    size(cell_width, LINE_HEIGHT),
-                ),
-                self.palette.cursor,
-            )
-        });
+                grid_cache.assembly_key = Some(assembly_key);
+                grid_cache.background_quads = backgrounds.clone();
+                grid_cache.lines = lines.clone();
+                grid_cache.cursor_quad = cursor.clone();
+                (backgrounds, lines, cursor)
+            };
+        drop(grid_cache);
 
         // #301 + #302 R3.1/#308 R4.4: Kitty placements arrive pre-bucketed
         // by the emulator's own `set_layer` walks (the three z-bands; `All`
@@ -3863,13 +4010,13 @@ impl Element for TerminalElement {
         // state (R4.3). The re-scan is GATED on the owner thread's mutation
         // stamp (R4.4): a still pane reuses the last walk — one integer
         // comparison per frame, not a channel round trip plus three walks.
-        let kitty_stamp = self.terminal.kitty_stamp.load(Ordering::Relaxed);
+        let mutation_stamp = self.terminal.mutation_stamp.load(Ordering::Relaxed);
         let mut kitty_cache = self.terminal.kitty_images.lock();
-        if kitty_cache.last_stamp != kitty_stamp {
+        if kitty_cache.last_stamp != mutation_stamp {
             // Never hold the cache lock across the blocking round trip.
             drop(kitty_cache);
             kitty_cache = self.terminal.kitty_images.lock();
-            kitty_cache.last_stamp = kitty_stamp;
+            kitty_cache.last_stamp = mutation_stamp;
             kitty_cache.last_buckets = self.terminal.kitty_places();
         }
         let kitty_buckets = std::mem::take(&mut kitty_cache.last_buckets);
@@ -5417,13 +5564,14 @@ mod tests {
     }
 
     /// #308 R4.4: the owner-thread mutation stamp that gates the placement
-    /// re-scan must stay flat while the pane is idle — a still pane costs
-    /// one integer comparison per frame, not a channel round trip plus three
-    /// placement walks — and bump the moment anything is written. Driven
+    /// re-scan and grid render cache must stay flat while the pane is idle — a
+    /// still pane costs one integer comparison per frame, not a channel round
+    /// trip plus three placement walks and a snapshot — and bump the moment
+    /// anything is written. Driven
     /// through a real PTY so the owner-thread poll loop is the one under
     /// test, the same shape `pty_output_wakes_the_event_pump` uses.
     #[test]
-    fn kitty_mutation_stamp_stays_flat_while_idle_and_bumps_on_output() {
+    fn mutation_stamp_stays_flat_while_idle_and_bumps_on_output() {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-test-stamp-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).unwrap();
@@ -5434,13 +5582,16 @@ mod tests {
         // traffic in several chunks with gaps between them, so a single
         // `Empty` drain can return before the banner has fully arrived. Settle
         // only when the stamp is unchanged across a quiet gap — more output
-        // would have bumped it.
+        // would have bumped it — and only once it has moved at all: a stamp
+        // still at zero means the shell has not even printed its prompt yet
+        // (it starts late when the test binary spawns many PTYs at once), and
+        // that prompt would land inside the idle window below.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let before = loop {
             while wakeup_rx.try_recv().is_ok() {}
-            let sample = handle.kitty_stamp.load(Ordering::Relaxed);
+            let sample = handle.mutation_stamp.load(Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(100));
-            if handle.kitty_stamp.load(Ordering::Relaxed) == sample {
+            if sample > 0 && handle.mutation_stamp.load(Ordering::Relaxed) == sample {
                 break sample;
             }
             assert!(
@@ -5450,7 +5601,7 @@ mod tests {
         };
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(
-            handle.kitty_stamp.load(Ordering::Relaxed),
+            handle.mutation_stamp.load(Ordering::Relaxed),
             before,
             "R4.4: a still pane must not bump the stamp — the re-scan gate is one integer comparison per frame"
         );
@@ -5460,7 +5611,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut bumped = false;
         while std::time::Instant::now() < deadline {
-            if handle.kitty_stamp.load(Ordering::Relaxed) != before {
+            if handle.mutation_stamp.load(Ordering::Relaxed) != before {
                 bumped = true;
                 break;
             }
@@ -8301,6 +8452,193 @@ mod view_tests {
         drop(events);
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
+    }
+
+    /// Draws a real interactive `/bin/sh`, waits for its prompt output to
+    /// settle, and warms the retained grid after the debounced initial resize
+    /// has reached the owner thread.
+    fn settled_drawn_terminal(
+        terminal: &gpui::Entity<TerminalView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> TerminalHandle {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut previous = Vec::new();
+        let mut stable_samples = 0;
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let scrollback =
+                terminal.read_with(&cx.cx, |terminal, _| terminal.capture_scrollback());
+            if !scrollback.is_empty() && scrollback == previous {
+                stable_samples += 1;
+            } else {
+                stable_samples = 0;
+            }
+            previous = scrollback;
+            if stable_samples >= 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            stable_samples >= 3,
+            "the /bin/sh prompt output never settled"
+        );
+
+        let handle = terminal
+            .read_with(&cx.cx, |terminal, _| terminal.running_terminal().cloned())
+            .expect("drawn terminal must have a running owner");
+        // `prepaint` schedules the initial resize with a debounce. Warm after
+        // it has had time to arrive, and repeat until the shared stamp is
+        // flat so the samples below describe a genuinely still pane.
+        std::thread::sleep(Duration::from_millis(100));
+        let warm_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut previous_stamp = handle.mutation_stamp.load(Ordering::Relaxed);
+        let mut stable_stamps = 0;
+        while std::time::Instant::now() < warm_deadline {
+            terminal.update(&mut cx.cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+            cx.run_until_parked();
+            let stamp = handle.mutation_stamp.load(Ordering::Relaxed);
+            if stamp == previous_stamp {
+                stable_stamps += 1;
+            } else {
+                stable_stamps = 0;
+            }
+            previous_stamp = stamp;
+            if stable_stamps >= 3 {
+                break;
+            }
+        }
+        assert!(
+            stable_stamps >= 3,
+            "the terminal mutation stamp never settled after the initial resize"
+        );
+        handle
+    }
+
+    /// A drawn, idle terminal should reuse both retained levels: three
+    /// explicit repaints must neither ask the owner thread for a snapshot nor
+    /// assemble the grid again. Real output is the positive control for both
+    /// counters.
+    #[gpui::test]
+    async fn a_still_drawn_terminal_reuses_its_retained_grid(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-retained-grid-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-i".to_string()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
+        });
+
+        let handle = settled_drawn_terminal(&terminal, cx);
+        let before_snapshot_builds = handle.snapshot_builds.load(Ordering::SeqCst);
+        let before_assemblies = handle.grid_assemblies.load(Ordering::SeqCst);
+        for _ in 0..3 {
+            terminal.update(&mut cx.cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            handle.snapshot_builds.load(Ordering::SeqCst),
+            before_snapshot_builds,
+            "an idle pane must not rebuild its owner-thread snapshot"
+        );
+        assert_eq!(
+            handle.grid_assemblies.load(Ordering::SeqCst),
+            before_assemblies,
+            "an idle pane must not reassemble retained draw products"
+        );
+
+        let before_input = (
+            handle.snapshot_builds.load(Ordering::SeqCst),
+            handle.grid_assemblies.load(Ordering::SeqCst),
+        );
+        terminal.update(&mut cx.cx, |terminal, _| {
+            terminal.input(b"echo X\n".to_vec());
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut both_moved = false;
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let snapshot_builds = handle.snapshot_builds.load(Ordering::SeqCst);
+            let assemblies = handle.grid_assemblies.load(Ordering::SeqCst);
+            if snapshot_builds > before_input.0 && assemblies > before_input.1 {
+                both_moved = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            both_moved,
+            "terminal output must move both snapshot and assembly counters"
+        );
+        handle.shutdown();
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Selection is an assembly-only invalidation: changing the main-thread
+    /// selection must rebuild the wash quads from retained cells without
+    /// issuing another owner-thread snapshot.
+    #[gpui::test]
+    async fn a_selection_change_reassembles_without_a_snapshot(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-retained-selection-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-i".to_string()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
+        });
+
+        let handle = settled_drawn_terminal(&terminal, cx);
+        let before_snapshot_builds = handle.snapshot_builds.load(Ordering::SeqCst);
+        let before_assemblies = handle.grid_assemblies.load(Ordering::SeqCst);
+        *handle.selection.lock() = Some(SelectedRange::between((0, 0), (0, 1)));
+        terminal.update(&mut cx.cx, |_, cx| cx.notify());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut reassembled = false;
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if handle.grid_assemblies.load(Ordering::SeqCst) > before_assemblies {
+                reassembled = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            reassembled,
+            "changing selection must invalidate the grid assembly"
+        );
+        assert_eq!(
+            handle.snapshot_builds.load(Ordering::SeqCst),
+            before_snapshot_builds,
+            "changing selection must reuse the retained grid"
+        );
+        handle.shutdown();
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// Regression: a keystroke must reach a repaint within one frame.
