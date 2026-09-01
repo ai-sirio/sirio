@@ -1119,7 +1119,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         let mut activity = AgentActivityModel::new();
-        let transition = refresh_process_signal(&mut activity, "pane-process-e2e", child.id())
+        let transition = activity
+            .refresh_process_signal("pane-process-e2e", child.id())
             .expect("refresh process signal");
         assert_eq!(
             transition.map(|transition| transition.new),
@@ -1143,7 +1144,8 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
-        refresh_process_signal(&mut activity, "pane-process-e2e", child.id())
+        activity
+            .refresh_process_signal("pane-process-e2e", child.id())
             .expect("refresh after child exit");
         assert_eq!(activity.status("pane-process-e2e"), None);
         let _ = std::fs::remove_dir_all(root);
