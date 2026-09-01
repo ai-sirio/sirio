@@ -18860,11 +18860,17 @@ mod tests {
         std::fs::create_dir_all(&working_directory).expect("create process test directory");
         let agent = working_directory.join("codex");
         std::fs::copy("/bin/sleep", &agent).expect("create matching agent binary");
+        // The trailing `true` keeps the shell alive as the parent: bash and
+        // dash exec-replace themselves with the last command of a `-c`
+        // script, and the walk reads comm for descendants only.
         let shell = TerminalShell::WithArguments {
             program: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                format!("printf '\\033]0;zsh\\007'; {} 30", agent.to_string_lossy()),
+                format!(
+                    "printf '\\033]0;zsh\\007'; {} 30; true",
+                    agent.to_string_lossy()
+                ),
             ],
         };
         let (terminal, cx) = cx.add_window_view(|_, cx| {

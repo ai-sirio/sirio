@@ -1112,8 +1112,11 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create process fixture");
         let agent = root.join("codex");
         symlink("/bin/sleep", &agent).expect("create matching comm alias");
+        // The trailing `true` keeps the shell alive as the parent: `sh -c`
+        // with a single command exec-replaces itself (bash and dash both do),
+        // and the walk reads comm for descendants only, never for the shell.
         let mut child = Command::new("sh")
-            .args(["-c", &format!("{} 2", agent.display())])
+            .args(["-c", &format!("{} 2; true", agent.display())])
             .spawn()
             .expect("spawn shell with a real matching child");
         std::thread::sleep(Duration::from_millis(50));
