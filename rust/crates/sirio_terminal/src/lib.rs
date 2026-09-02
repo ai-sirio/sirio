@@ -487,22 +487,78 @@ enum SirioScroll {
 /// A cheap, clonable reader for a live terminal's retained scrollback.
 ///
 /// It is `Send` and `Sync` because it only holds a clone of the owner
-/// thread's command sender. A held sender clone keeps that command channel
-/// alive; terminal shutdown remains explicit, and `Shutdown` makes the owner
-/// thread return so later captures fail cleanly when the receiver is dropped.
+/// thread's command sender and a synchronized pending reply. A held sender
+/// clone keeps that command channel alive; terminal shutdown remains explicit,
+/// and `Shutdown` makes the owner thread return so later captures fail cleanly
+/// when the receiver is dropped.
 #[derive(Clone)]
 pub struct ScrollbackCapture {
     commands: std::sync::mpsc::Sender<TerminalCommand>,
+    pending: Arc<Mutex<Option<std::sync::mpsc::Receiver<String>>>>,
 }
 
 impl ScrollbackCapture {
-    /// Captures normalized retained scrollback on the terminal owner thread.
-    pub fn capture(&self) -> Vec<u8> {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
-            return Vec::new();
+    fn new(commands: std::sync::mpsc::Sender<TerminalCommand>) -> Self {
+        Self {
+            commands,
+            pending: Arc::new(Mutex::new(None)),
         }
-        reply_rx.recv().unwrap_or_default().into_bytes()
+    }
+
+    /// Polls normalized retained scrollback from the terminal owner thread.
+    /// `None` means the owner is still busy; the pending request is retained so
+    /// the next poll can collect its reply without enqueueing duplicate work.
+    fn try_capture(&self) -> Option<Vec<u8>> {
+        let mut pending = self.pending.lock();
+        let pending_result = pending.as_ref().map(|reply_rx| reply_rx.try_recv());
+        match pending_result {
+            Some(Ok(text)) => {
+                pending.take();
+                Some(text.into_bytes())
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => None,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                pending.take();
+                Some(Vec::new())
+            }
+            None => {
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
+                    return Some(Vec::new());
+                }
+                match reply_rx.try_recv() {
+                    Ok(text) => Some(text.into_bytes()),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        *pending = Some(reply_rx);
+                        None
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Vec::new()),
+                }
+            }
+        }
+    }
+
+    /// Captures normalized retained scrollback on the terminal owner thread.
+    /// This is the synchronous, fresh-read API used by explicit snapshot and
+    /// control-socket consumers. The terminal event pump uses [`Self::try_capture`]
+    /// instead, so output settling never waits on this reply.
+    pub fn capture(&self) -> Vec<u8> {
+        let reply_rx = {
+            let mut pending = self.pending.lock();
+            if let Some(reply_rx) = pending.take() {
+                reply_rx
+            } else {
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                if self.commands.send(TerminalCommand::Text(reply_tx)).is_err() {
+                    return Vec::new();
+                }
+                reply_rx
+            }
+        };
+        reply_rx
+            .recv()
+            .map(String::into_bytes)
+            .unwrap_or_default()
     }
 }
 
@@ -511,6 +567,7 @@ struct TerminalHandle {
     /// The terminal's dedicated owner thread. All emulator access funnels
     /// through it (see [`TerminalCommand`]).
     commands: std::sync::mpsc::Sender<TerminalCommand>,
+    scrollback: ScrollbackCapture,
     last_size: Arc<Mutex<Option<(u16, u16)>>>,
     shell_pid: u32,
     shutdown_started: Arc<AtomicBool>,
@@ -1809,6 +1866,7 @@ impl TerminalHandle {
         });
 
         let (commands, command_rx) = std::sync::mpsc::channel::<TerminalCommand>();
+        let scrollback = ScrollbackCapture::new(commands.clone());
         // Shared before the thread spawns and handed to both the owner loop
         // (writer) and the handle (reader) below.
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
@@ -1833,6 +1891,7 @@ impl TerminalHandle {
         Ok((
             Self {
                 commands,
+                scrollback,
                 last_size: Arc::new(Mutex::new(None)),
                 shell_pid,
                 shutdown_started: Arc::new(AtomicBool::new(false)),
@@ -2054,13 +2113,15 @@ impl TerminalHandle {
     }
 
     fn capture_scrollback(&self) -> Vec<u8> {
-        self.scrollback_source().capture()
+        self.scrollback.capture()
+    }
+
+    fn try_capture_scrollback(&self) -> Option<Vec<u8>> {
+        self.scrollback.try_capture()
     }
 
     fn scrollback_source(&self) -> ScrollbackCapture {
-        ScrollbackCapture {
-            commands: self.commands.clone(),
-        }
+        self.scrollback.clone()
     }
 
     /// Replays captured output directly into the emulator. It does not write
@@ -2450,6 +2511,18 @@ const EVENT_COALESCE_CAP: usize = 100;
 /// floor and not a delay: output arriving into a quiet pane -- every
 /// keystroke a user actually types -- repaints on the very next poll tick.
 const REPAINT_FRAME_BUDGET: Duration = Duration::from_millis(16);
+/// Once output has settled, keep polling a capture that the owner thread has
+/// not served yet. The owner is allowed to finish parsing the burst first,
+/// but the view must wake again when that final snapshot can be obtained.
+const SCROLLBACK_CAPTURE_RETRY_INTERVAL: Duration = Duration::from_millis(1);
+
+fn terminal_pump_interval(capture_retry_pending: bool) -> Duration {
+    if capture_retry_pending {
+        SCROLLBACK_CAPTURE_RETRY_INTERVAL
+    } else {
+        EVENT_POLL_INTERVAL
+    }
+}
 
 /// #301 R1.3 + #308 R4.6: the Kitty ingest ceilings and the atlas cache cap
 /// are ALL decided together and stated as one coordinated pair of numbers —
@@ -2968,13 +3041,20 @@ impl TerminalView {
             // once; only sustained output is held to the frame floor.
             let mut awaiting_repaint = false;
             let mut since_repaint = REPAINT_FRAME_BUDGET;
+            // A capture request can be queued while the owner is still
+            // parsing the final output batch. Keep this task alive on a short
+            // timer until that request replies; otherwise a burst that ends
+            // between two PTY events can leave the pane on its penultimate
+            // frame forever.
+            let mut capture_retry_pending = false;
             loop {
                 // Do not await the cross-thread channel. Its waker runs on
                 // the PTY reader thread, which violates GPUI's deterministic
                 // TestAppContext scheduler. Polling from this task keeps all
                 // scheduler interaction on its owning executor.
-                cx.background_executor().timer(EVENT_POLL_INTERVAL).await;
-                since_repaint = since_repaint.saturating_add(EVENT_POLL_INTERVAL);
+                let poll_interval = terminal_pump_interval(capture_retry_pending);
+                cx.background_executor().timer(poll_interval).await;
+                since_repaint = since_repaint.saturating_add(poll_interval);
                 let mut exit_status = None;
                 let mut osc_title = None;
                 let mut viewport_changed = false;
@@ -3069,22 +3149,31 @@ impl TerminalView {
                 // settle period, hand the turn to the activity model. The
                 // scrollback capture lives here, and only here, so a flood
                 // costs one capture per turn instead of one per batch.
-                quiet_for += EVENT_POLL_INTERVAL;
+                quiet_for += poll_interval;
                 if unsettled_output && quiet_for >= OUTPUT_SETTLE_DEBOUNCE {
-                    unsettled_output = false;
-                    if this
-                        .update(cx, |view, cx| {
-                            if view.host.generation() != generation {
-                                return;
-                            }
-                            let scrollback = recent_content_window(&String::from_utf8_lossy(
-                                &terminal.capture_scrollback(),
-                            ));
-                            cx.emit(TerminalActivityEvent::OutputSettled { scrollback });
-                        })
-                        .is_err()
-                    {
-                        return;
+                    if let Some(scrollback) = terminal.try_capture_scrollback() {
+                        capture_retry_pending = false;
+                        unsettled_output = false;
+                        if this
+                            .update(cx, |view, cx| {
+                                if view.host.generation() != generation {
+                                    return;
+                                }
+                                let scrollback =
+                                    recent_content_window(&String::from_utf8_lossy(&scrollback));
+                                cx.emit(TerminalActivityEvent::OutputSettled { scrollback });
+                                // The capture may complete after the final
+                                // PTY event and therefore after the last
+                                // output-driven repaint. Schedule the frame
+                                // that contains this fresh terminal state.
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    } else {
+                        capture_retry_pending = true;
                     }
                 }
             }
@@ -7076,6 +7165,62 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_capture_poll_returns_before_the_owner_replies() {
+        let (commands, command_rx) = std::sync::mpsc::channel();
+        let source = ScrollbackCapture::new(commands);
+        assert!(
+            source.try_capture().is_none(),
+            "the poll must return while the owner is still busy"
+        );
+
+        let command = command_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("capture must enqueue one owner request");
+        let TerminalCommand::Text(reply) = command else {
+            panic!("capture must enqueue a text request");
+        };
+        reply
+            .send("CAPTURE_READY".to_string())
+            .expect("the pending capture reply receiver must stay alive");
+
+        assert_eq!(source.capture(), b"CAPTURE_READY");
+    }
+
+    #[test]
+    fn missed_scrollback_capture_is_retried_and_produces_a_later_frame() {
+        let (commands, command_rx) = std::sync::mpsc::channel();
+        let source = ScrollbackCapture::new(commands);
+
+        // The burst has ended, but the owner is still busy. The first poll
+        // queues the capture and must return without a frame.
+        assert!(source.try_capture().is_none());
+        let command = command_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("capture must enqueue one owner request");
+        let TerminalCommand::Text(reply) = command else {
+            panic!("capture must enqueue a text request");
+        };
+        assert!(source.try_capture().is_none());
+
+        // A missed capture selects the short retry timer. Once the owner
+        // finishes, that later pump can obtain and render the final frame.
+        assert_eq!(
+            terminal_pump_interval(true),
+            SCROLLBACK_CAPTURE_RETRY_INTERVAL
+        );
+        reply
+            .send("FINAL_FRAME".to_string())
+            .expect("the pending capture reply receiver must stay alive");
+        let mut rendered_frames = Vec::new();
+        if let Some(frame) = source.try_capture() {
+            rendered_frames.push(frame);
+        }
+
+        assert_eq!(rendered_frames, vec![b"FINAL_FRAME".to_vec()]);
+        assert_eq!(terminal_pump_interval(false), EVENT_POLL_INTERVAL);
+    }
+
+    #[test]
     fn terminal_defaults_follow_the_theme_but_ansi_colors_do_not() {
         let palette = palette();
         assert_eq!(
@@ -7248,7 +7393,8 @@ mod tests {
             output_reached_screen,
             "the command output never reached the terminal grid"
         );
-        let captured = String::from_utf8_lossy(&handle.capture_scrollback()).into_owned();
+        let captured_bytes = handle.capture_scrollback();
+        let captured = String::from_utf8_lossy(&captured_bytes);
         assert!(
             captured.contains("P4_SCROLL_000") && captured.contains("P4_SCROLL_099"),
             "capture should include both retained history and the newest screen output"
@@ -7307,7 +7453,6 @@ mod tests {
         );
 
         let captured = source.capture_scrollback();
-        assert!(!captured.is_empty(), "capture must contain terminal state");
         assert!(
             String::from_utf8_lossy(&captured).contains(&nonce),
             "capture must contain the nonce"
