@@ -3537,7 +3537,6 @@ struct WorktreeContext {
     branch: String,
     path: String,
     activity_label: String,
-    terminal_breadcrumb: String,
 }
 
 /// Resolves the labels shown by the running shell from its selected checkout,
@@ -3575,7 +3574,6 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         branch: branch.clone(),
         path: display_path(working_directory),
         activity_label: format!("{project}/{branch}"),
-        terminal_breadcrumb: shell_breadcrumb(),
     }
 }
 
@@ -3590,19 +3588,6 @@ fn short_head(path: &Path) -> Option<String> {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|commit| !commit.is_empty())
-}
-
-/// The terminal overlay's "in <shell> at <time>".
-///
-/// The shell name comes from `sirio_terminal` rather than being re-derived
-/// here: this used to read `$SHELL` with a hardcoded `"zsh"` fallback and so
-/// named a shell Sirio was not running (#230). The time is read in-process —
-/// it used to shell out to `date`, which does not exist as a program on
-/// Windows, and which cost a fork+exec per worktree selection everywhere else.
-fn shell_breadcrumb() -> String {
-    let shell = sirio_terminal::system_shell_display_name();
-    let time = chrono::Local::now().format("%H:%M:%S");
-    format!("in {shell} at {time}")
 }
 
 #[derive(Clone, Debug)]
@@ -3820,7 +3805,6 @@ struct SirioWorkspace {
     session: SessionStore,
     project_catalog: ProjectCatalog,
     worktree_label: String,
-    terminal_breadcrumb: String,
     launch_snapshot: RestoredSession,
     launch: AgentLaunchState,
     center_split: CenterSplit,
@@ -4086,7 +4070,6 @@ impl SirioWorkspace {
         session: SessionStore,
         project_catalog: ProjectCatalog,
         worktree_label: String,
-        terminal_breadcrumb: String,
         launch_snapshot: RestoredSession,
         activity: AgentActivityModel,
         tray_roster: Option<tray::SharedRoster>,
@@ -4616,7 +4599,6 @@ impl SirioWorkspace {
             session,
             project_catalog,
             worktree_label,
-            terminal_breadcrumb,
             launch_snapshot,
             launch,
             center_split,
@@ -6866,7 +6848,6 @@ impl SirioWorkspace {
         // same way the tabs above just did.
         self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
         self.worktree_label = context.activity_label;
-        self.terminal_breadcrumb = context.terminal_breadcrumb;
         self.rebind_changes_tabs(cx);
         // The old worktree's pane list is NOT wiped here. `sync_control_panes`
         // re-registers this window's own panes under the newly selected path
@@ -11986,24 +11967,6 @@ impl SirioWorkspace {
                 .w_full()
                 .overflow_hidden()
                 .child(self.render_group_surfaces(PaneRole::Primary, *theme, entity.clone(), cx))
-                .when_some(self.tabs.get(self.active_tab), |this, tab| {
-                    this.when(tab_has_terminal(tab), |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top(px(0.0))
-                                .right(px(10.0))
-                                .h(px(24.0))
-                                .px(px(8.0))
-                                .flex()
-                                .items_center()
-                                .bg(theme.surface)
-                                .text_size(px(14.0))
-                                .text_color(theme.text)
-                                .child(self.terminal_breadcrumb.clone()),
-                        )
-                    })
-                })
                 .into_any_element()
         } else {
             div()
@@ -15488,7 +15451,6 @@ fn main() {
             path: context.path.clone(),
         };
         let activity_label = context.activity_label.clone();
-        let terminal_breadcrumb = context.terminal_breadcrumb.clone();
 
         let bounds = Bounds::centered(None, size(px(1470.), px(833.)), cx);
         let pending_actions = Arc::new(Mutex::new(Vec::<WorkspaceAction>::new()));
@@ -15843,7 +15805,6 @@ fn main() {
                         session_store_for_window,
                         project_catalog,
                         activity_label.clone(),
-                        terminal_breadcrumb.clone(),
                         restored.clone(),
                         activity_model,
                         tray_roster.clone(),
@@ -16058,43 +16019,6 @@ mod tests {
         assert!(
             agent_command_for(&source).is_none(),
             "no fallback to another agent's server, and no invented program name"
-        );
-    }
-
-    /// The worktree terminal overlay's breadcrumb names the shell Sirio is
-    /// actually running and a time read in-process. The old body re-derived
-    /// the shell from `$SHELL` with a hardcoded `"zsh"` fallback, and read the
-    /// clock by spawning `date` — not a program that exists on Windows, so
-    /// there the overlay rendered `in zsh at --:--:--` (#230).
-    #[test]
-    fn shell_breadcrumb_names_a_real_shell_and_a_real_time() {
-        let breadcrumb = shell_breadcrumb();
-        assert!(
-            breadcrumb.starts_with("in "),
-            "the breadcrumb must start with \"in \", got: {breadcrumb:?}"
-        );
-        assert!(
-            !breadcrumb.contains("--:--:--"),
-            "the clock must not fall back to the missing-`date` placeholder, \
-             got: {breadcrumb:?}"
-        );
-        // The suffix is the clock read, always exactly `HH:MM:SS`.
-        let time = &breadcrumb[breadcrumb.len() - 8..];
-        for index in [0, 1, 3, 4, 6, 7] {
-            assert!(
-                time.as_bytes()[index].is_ascii_digit(),
-                "the time must read HH:MM:SS, got {time:?} in {breadcrumb:?}"
-            );
-        }
-        assert_eq!(
-            &time[2..3],
-            ":",
-            "the time must read HH:MM:SS, got {time:?}"
-        );
-        assert_eq!(
-            &time[5..6],
-            ":",
-            "the time must read HH:MM:SS, got {time:?}"
         );
     }
 
@@ -16521,7 +16445,6 @@ mod tests {
             session,
             project_catalog,
             "Update Project/main".into(),
-            "in test shell".into(),
             RestoredSession {
                 working_directory,
                 tabs: Vec::new(),
@@ -16917,7 +16840,6 @@ mod tests {
             session,
             project_catalog,
             "Palette Project/main".into(),
-            "in test shell".into(),
             RestoredSession {
                 working_directory,
                 tabs: Vec::new(),
@@ -16993,7 +16915,6 @@ mod tests {
             control_actions,
             session,
             project_catalog,
-            String::new(),
             String::new(),
             RestoredSession {
                 working_directory,
@@ -17131,7 +17052,6 @@ mod tests {
             session,
             project_catalog,
             "Activity Project/main".into(),
-            "in test shell".into(),
             RestoredSession {
                 working_directory,
                 tabs: Vec::new(),
@@ -17148,6 +17068,37 @@ mod tests {
             500,
             cx,
         )
+    }
+
+    #[gpui::test]
+    async fn terminal_pane_does_not_render_a_shell_breadcrumb_overlay(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-breadcrumb-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create breadcrumb test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn breadcrumb test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-breadcrumb").is_none(),
+            "a terminal pane must not paint an app-owned shell breadcrumb over its content"
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| workspace.shutdown_terminals(cx));
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// A workspace whose one project has three worktrees, so the sidebar
@@ -17234,7 +17185,6 @@ mod tests {
             session,
             project_catalog,
             "Urgency Project/branch-0".into(),
-            "in test shell".into(),
             RestoredSession {
                 working_directory,
                 tabs: Vec::new(),
