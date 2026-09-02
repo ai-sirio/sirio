@@ -46,7 +46,10 @@ impl GitClone {
         // canonicalized path (`file://\\?\C:\...`); git resolves that to
         // `//\\?\C:\...` and cannot open it, so it is stripped from the
         // URL's remainder too.
+        #[cfg(windows)]
         let mut url = url.to_string();
+        #[cfg(not(windows))]
+        let url = url.to_string();
         #[cfg(windows)]
         if let Some(rest) = url.strip_prefix("file://") {
             if let Some(stripped) = crate::git::strip_verbatim_prefix(rest) {

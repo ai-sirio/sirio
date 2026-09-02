@@ -139,22 +139,22 @@ const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 /// megabytes of real output.
 const OUTPUT_LIMIT_ENV_VAR: &str = "SIRIO_GIT_OUTPUT_LIMIT_BYTES";
 
-/// A per-thread cap that outranks the environment, for the one test that needs
-/// to prove the limit is really wired into the runner.
-///
-/// It exists because the obvious spelling — `set_var` around the call — is a
-/// **process-global** mutation, and `cargo test` runs this crate's tests as
-/// threads in one process. That test held a 512-byte cap for the duration of a
-/// single `git config --list`, and any other test unlucky enough to shell out
-/// to git inside that window inherited it. `git init` prints roughly 670 bytes
-/// of `init.defaultBranch` advice on a machine where that setting is unset, so
-/// `initializes_a_folder_as_a_git_repository` failed with `OutputTruncated`
-/// — intermittently, more often under load, and in a crate whose code had not
-/// changed. It read exactly like a timing flake and was not one.
-///
-/// A thread-local cannot leak that way: each test owns its own thread, and the
-/// limit is resolved on the calling thread before the reader threads are
-/// spawned, so the value they capture is the right one.
+// A per-thread cap that outranks the environment, for the one test that needs
+// to prove the limit is really wired into the runner.
+//
+// It exists because the obvious spelling — `set_var` around the call — is a
+// **process-global** mutation, and `cargo test` runs this crate's tests as
+// threads in one process. That test held a 512-byte cap for the duration of a
+// single `git config --list`, and any other test unlucky enough to shell out
+// to git inside that window inherited it. `git init` prints roughly 670 bytes
+// of `init.defaultBranch` advice on a machine where that setting is unset, so
+// `initializes_a_folder_as_a_git_repository` failed with `OutputTruncated`
+// — intermittently, more often under load, and in a crate whose code had not
+// changed. It read exactly like a timing flake and was not one.
+//
+// A thread-local cannot leak that way: each test owns its own thread, and the
+// limit is resolved on the calling thread before the reader threads are
+// spawned, so the value they capture is the right one.
 #[cfg(test)]
 thread_local! {
     static OUTPUT_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> =
@@ -871,11 +871,11 @@ mod tests {
         let start_deadline = Instant::now() + Duration::from_secs(5);
         let mut pid: Option<i32> = None;
         while Instant::now() < start_deadline {
-            if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                if let Ok(parsed) = text.trim().parse::<i32>() {
-                    pid = Some(parsed);
-                    break;
-                }
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(parsed) = text.trim().parse::<i32>()
+            {
+                pid = Some(parsed);
+                break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }

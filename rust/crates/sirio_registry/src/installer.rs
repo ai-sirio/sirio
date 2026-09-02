@@ -143,6 +143,7 @@ impl Installer {
 
     /// Points the installer at a stand-in npm. Test-only seam: it exists so
     /// the npx path can be exercised without a live npm on PATH.
+    #[cfg(test)]
     fn with_npm(mut self, argv: Vec<String>) -> Self {
         self.npm_argv = argv;
         self
@@ -919,7 +920,7 @@ mod tests {
         header.set_entry_type(tar::EntryType::Regular);
         header.as_gnu_mut().unwrap().name[..7].copy_from_slice(b"../evil");
         header.set_cksum();
-        builder.append(&mut header, b"bad".as_slice()).unwrap();
+        builder.append(&header, b"bad".as_slice()).unwrap();
         let bytes = builder.into_inner().unwrap().finish().unwrap();
 
         let result = unpack_tar_gz("evil", &bytes, &staging);

@@ -94,7 +94,10 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
 /// and no verbatim prefix (`C:/Users/...`), while the fixtures hold
 /// canonicalized `\\?\C:\...` paths — normalize before comparing.
 fn porcelain_spelling(path: &Path) -> String {
+    #[cfg(windows)]
     let mut spelling = path.display().to_string();
+    #[cfg(not(windows))]
+    let spelling = path.display().to_string();
     #[cfg(windows)]
     if let Some(rest) = spelling.strip_prefix(r"\\?\") {
         spelling = rest.to_string();

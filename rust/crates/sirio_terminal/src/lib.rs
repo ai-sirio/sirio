@@ -433,6 +433,9 @@ impl MouseEncoderState<'static> {
     }
 }
 
+/// Snapshot cells and cursor position returned by the terminal owner thread.
+type SnapshotReply = (Vec<Vec<SnapshotCell>>, (usize, usize));
+
 enum TerminalCommand {
     /// Write bytes to the PTY (paste and programmatic input).
     Input(Vec<u8>),
@@ -445,7 +448,7 @@ enum TerminalCommand {
     Feed(Vec<u8>),
     Resize(u16, u16, u16, u16),
     Scroll(SirioScroll),
-    Snapshot(std::sync::mpsc::Sender<(Vec<Vec<SnapshotCell>>, (usize, usize))>),
+    Snapshot(std::sync::mpsc::Sender<SnapshotReply>),
     /// #301: every visible Kitty placement for this frame as plain owned data
     /// (R2.3 — geometry plus raw pixels; never decoded on the owner thread).
     KittyPlaces(std::sync::mpsc::Sender<KittyPlacementBuckets>),
@@ -865,9 +868,7 @@ fn copy_kitty_placement(
     let Ok(image_id) = placement.image_id() else {
         return None;
     };
-    let Some(image) = graphics.image(image_id) else {
-        return None;
-    };
+    let image = graphics.image(image_id)?;
     let Ok(generation) = image.generation() else {
         return None;
     };
@@ -963,12 +964,12 @@ fn decode_kitty_image(
     let mut bgra = Vec::with_capacity(pixels as usize * 4);
     match format {
         ImageFormat::Rgb => {
-            for px in data.chunks_exact(3) {
+            for px in data.as_chunks::<3>().0 {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
             }
         }
         ImageFormat::Rgba => {
-            for px in data.chunks_exact(4) {
+            for px in data.as_chunks::<4>().0 {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
         }
@@ -978,7 +979,7 @@ fn decode_kitty_image(
             }
         }
         ImageFormat::GrayAlpha => {
-            for px in data.chunks_exact(2) {
+            for px in data.as_chunks::<2>().0 {
                 bgra.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
             }
         }
@@ -1001,6 +1002,7 @@ struct KittyPngDecoder {
 }
 
 impl KittyPngDecoder {
+    #[cfg(test)]
     fn new() -> Self {
         Self::with_failure_flag(Arc::new(AtomicBool::new(false)))
     }
@@ -1368,7 +1370,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     }
                     TerminalCommand::Snapshot(reply) => {
                         snapshot_builds.fetch_add(1, Ordering::SeqCst);
-                        let frame = build_snapshot(
+                        let frame: SnapshotReply = build_snapshot(
                             &mut terminal,
                             &mut render,
                             &mut row_iterator,
@@ -1959,8 +1961,8 @@ impl TerminalHandle {
         let _ = self.commands.send(TerminalCommand::Scroll(scroll));
     }
 
-    fn snapshot(&self) -> (Vec<Vec<SnapshotCell>>, (usize, usize)) {
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    fn snapshot(&self) -> SnapshotReply {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<SnapshotReply>();
         if self
             .commands
             .send(TerminalCommand::Snapshot(reply_tx))
@@ -3157,10 +3159,10 @@ impl TerminalView {
     /// edge the pointer is: a terminal drag aims at a line, and acceleration
     /// is what makes autoscroll overshoot it.
     fn autoscroll_lines(pointer_y: f32, top: f32, bottom: f32) -> isize {
-        /// One row. Measured: a 12px band left a pointer 3px below it
-        /// reporting "inside", which is not a distinction a hand at the edge
-        /// of a pane can make. A row is also the unit being scrolled, so the
-        /// band and the step agree.
+        // One row. Measured: a 12px band left a pointer 3px below it
+        // reporting "inside", which is not a distinction a hand at the edge
+        // of a pane can make. A row is also the unit being scrolled, so the
+        // band and the step agree.
         let edge_band = f32::from(LINE_HEIGHT);
         if pointer_y < top + edge_band {
             -1
@@ -4566,10 +4568,10 @@ enum NamedColor {
     BrightCyan,
     BrightWhite,
     Foreground,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)] // mirrors the emulator's named-colour set; not yet mapped
     BrightForeground,
     Background,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)] // mirrors the emulator's named-colour set; not yet mapped
     Cursor,
 }
 
@@ -5520,8 +5522,12 @@ mod tests {
         let mut term = headless_term(80, 24);
         // `set_apc_max_bytes_kitty` has no getter, so the constants are the
         // readable half of the assertion; the storage getter is live.
-        assert!(KITTY_APC_MAX_BYTES > 0, "APC ceiling explicit");
-        assert!(KITTY_IMAGE_STORAGE_LIMIT > 0, "storage ceiling explicit");
+        const {
+            assert!(KITTY_APC_MAX_BYTES > 0, "APC ceiling explicit");
+        }
+        const {
+            assert!(KITTY_IMAGE_STORAGE_LIMIT > 0, "storage ceiling explicit");
+        }
         term.set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES))
             .expect("re-apply APC override");
         term.set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
