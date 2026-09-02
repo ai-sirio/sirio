@@ -4235,6 +4235,7 @@ impl Render for Sidebar {
             .child(
                 div()
                     .id("sidebar-tree")
+                    .debug_selector(|| "sidebar-tree".to_owned())
                     .key_context(tree::KEY_CONTEXT)
                     .track_focus(&tree_focus)
                     .on_action(cx.listener(|sidebar, _: &tree::SelectPrevious, _, cx| {
@@ -4251,6 +4252,7 @@ impl Render for Sidebar {
                     }))
                     .mt(px(11.0))
                     .flex_1()
+                    .min_h(px(0.0))
                     .h_full()
                     .overflow_y_scroll()
                     // Rows reorder during the drag, so the row originally
@@ -4261,7 +4263,12 @@ impl Render for Sidebar {
                     .on_drop::<RowDrag>(move |_, _, cx| {
                         reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
                     })
-                    .child(tree::tree().gap(px(ROW_V_GAP)).children(rendered_rows)),
+                    .child(
+                        tree::tree()
+                            .flex_none()
+                            .gap(px(ROW_V_GAP))
+                            .children(rendered_rows),
+                    ),
             )
             .when(notice.is_some(), |this| {
                 this.child(
@@ -4523,8 +4530,8 @@ mod tests {
     }
 
     use gpui::{
-        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, VisualTestContext,
-        point,
+        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
+        ScrollWheelEvent, TouchPhase, VisualTestContext, point, size,
     };
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -4656,6 +4663,73 @@ mod tests {
                 (RowKind::NewWorktree, 1, "New Worktree...".to_string()),
             ],
             "row data already contains project roots and depth-one worktree children"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_long_worktree_list_scrolls_inside_the_sidebar_viewport(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let project_root = PathBuf::from("/tmp/sidebar-scroll-project");
+        let worktrees = (0..20)
+            .map(|index| SidebarWorktree {
+                branch: format!("worktree-{index}"),
+                path: project_root.join(format!("worktree-{index}")),
+                is_primary: index == 0,
+                comment: None,
+            })
+            .collect();
+        let window = cx.open_window(size(px(320.0), px(240.0)), |_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "scroll-project".into(),
+                    name: "Scroll Project".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees,
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let last_row_before = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the last sidebar row is rendered");
+        let tree = cx
+            .debug_bounds("sidebar-tree")
+            .expect("the sidebar tree viewport is rendered");
+        assert!(
+            tree.bottom() <= px(240.0),
+            "the sidebar tree viewport must stay inside the short window: tree={tree:?}"
+        );
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(160.0), px(180.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let last_row_after = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the last sidebar row remains in the scrollable tree");
+        assert!(
+            last_row_after.top() < last_row_before.top(),
+            "scrolling down must move the last row into view: before={last_row_before:?}, \
+             after={last_row_after:?}, tree={tree:?}"
+        );
+        assert!(
+            last_row_after.bottom() <= px(240.0),
+            "the last row must be reachable inside the short window: row={last_row_after:?}"
+        );
+        assert!(
+            last_row_after.top() >= tree.top() && last_row_after.bottom() <= tree.bottom(),
+            "the last row must be visible inside the sidebar viewport: row={last_row_after:?}, \
+             tree={tree:?}"
         );
     }
 
