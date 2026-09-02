@@ -2131,8 +2131,27 @@ impl TerminalHandle {
         if bytes.is_empty() {
             return;
         }
-        let _ = self.commands.send(TerminalCommand::Feed(bytes.to_vec()));
+        let _ = self
+            .commands
+            .send(TerminalCommand::Feed(normalize_scrollback_for_replay(
+                bytes,
+            )));
     }
+}
+
+/// Captured scrollback is newline-delimited plain text, while the VT parser
+/// treats LF as a vertical move without returning to column zero. Restore
+/// terminal lines with CRLF semantics, retaining any CR that was already
+/// persisted for compatibility with older or externally supplied snapshots.
+fn normalize_scrollback_for_replay(bytes: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(bytes.len());
+    for &byte in bytes {
+        if byte == b'\n' && normalized.last() != Some(&b'\r') {
+            normalized.push(b'\r');
+        }
+        normalized.push(byte);
+    }
+    normalized
 }
 
 #[cfg_attr(not(unix), allow(dead_code))] // referenced by unix-only teardown
@@ -7473,6 +7492,41 @@ mod tests {
         );
         source.shutdown();
         restored.shutdown();
+    }
+
+    #[test]
+    fn replayed_scrollback_keeps_saved_lines_left_aligned() {
+        let working_directory = test_working_directory("replay-scrollback-columns");
+        std::fs::create_dir_all(&working_directory).unwrap();
+        let (restored, _restored_events) = TerminalHandle::new(
+            &working_directory,
+            &TerminalShell::WithArguments {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+            },
+        )
+        .unwrap();
+        // This is the plain-text format produced by capture_scrollback_text
+        // and stored in session state: rows are newline-delimited, without
+        // terminal control sequences or PTY input semantics.
+        let captured = b"RESTORE_LINE_A\nRESTORE_LINE_B\nRESTORE_LINE_C";
+        restored.replay_scrollback(captured);
+        let (rows, _) = restored.snapshot();
+
+        for marker in ["RESTORE_LINE_A", "RESTORE_LINE_B", "RESTORE_LINE_C"] {
+            let row = rows
+                .iter()
+                .find(|row| frame_row_text(row).contains(marker))
+                .unwrap_or_else(|| panic!("replayed scrollback is missing {marker}"));
+            assert_eq!(
+                frame_row_text(row).find(marker),
+                Some(0),
+                "replayed {marker} must start at column zero"
+            );
+        }
+
+        restored.shutdown();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// The event-driven redraw contract, tested at the mechanism level: PTY
