@@ -234,6 +234,8 @@ struct SpawnParams {
 enum TerminalEvent {
     /// PTY output was fed into the emulator.
     Wakeup,
+    /// The viewport moved in response to local scrolling.
+    ViewportChanged,
     /// The OSC title changed. An empty string is an OSC title reset.
     Title(String),
     /// The PTY child exited after its final output was drained.
@@ -1424,6 +1426,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         };
                         terminal.scroll_viewport(viewport);
                         mutated = true;
+                        let _ = event_tx.unbounded_send(TerminalEvent::ViewportChanged);
                     }
                     TerminalCommand::Snapshot(reply) => {
                         snapshot_builds.fetch_add(1, Ordering::SeqCst);
@@ -2579,6 +2582,23 @@ fn generated_identity() -> TerminalIdentity {
     TerminalIdentity::new(format!("pane-{serial}"), format!("terminal-{serial}"))
 }
 
+fn scroll_lines_from_wheel_delta(delta: ScrollDelta) -> Option<isize> {
+    let (delta_y, line_height) = match delta {
+        ScrollDelta::Pixels(pixels) => (f32::from(pixels.y), f32::from(LINE_HEIGHT)),
+        ScrollDelta::Lines(lines) => (lines.y, 1.0),
+    };
+    if !delta_y.is_finite() || delta_y == 0.0 {
+        return None;
+    }
+
+    let lines = (delta_y / line_height).round() as isize;
+    Some(if lines == 0 {
+        if delta_y > 0.0 { -1 } else { 1 }
+    } else {
+        -lines
+    })
+}
+
 impl TerminalView {
     /// Starts the user's login shell in `working_directory` on first render.
     ///
@@ -3018,6 +3038,7 @@ impl TerminalView {
                 since_repaint = since_repaint.saturating_add(EVENT_POLL_INTERVAL);
                 let mut exit_status = None;
                 let mut osc_title = None;
+                let mut viewport_changed = false;
                 let mut output_seen = false;
                 let mut pending = 0;
                 // Coalesce whatever is *already* queued -- never wait for
@@ -3032,6 +3053,8 @@ impl TerminalView {
                             if let Some(title) = Self::osc_title_from_event(&event) {
                                 osc_title = Some(title);
                             }
+                            viewport_changed |=
+                                matches!(event, TerminalEvent::ViewportChanged);
                             output_seen |= matches!(event, TerminalEvent::Wakeup);
                             pending += 1;
                         }
@@ -3048,7 +3071,8 @@ impl TerminalView {
                     // about itself, is rare, and cannot wait behind a frame
                     // floor meant for a torrent of ordinary output.
                     let structural = exit_status.is_some() || osc_title.is_some();
-                    let repaint = structural || since_repaint >= REPAINT_FRAME_BUDGET;
+                    let repaint =
+                        structural || viewport_changed || since_repaint >= REPAINT_FRAME_BUDGET;
                     if this
                         .update(cx, |view, cx| {
                             if view.host.generation() != generation {
@@ -3598,13 +3622,12 @@ impl TerminalView {
     }
 
     /// #43: wheel ticks encode Button Four/Five presses while the guest has
-    /// tracking on; when tracking is OFF the wheel keeps doing exactly what it
-    /// does today: nothing.
+    /// tracking on; otherwise the wheel moves Sirio's local viewport.
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
         _: &mut Window,
-        _: &mut gpui::Context<Self>,
+        cx: &mut gpui::Context<Self>,
     ) {
         let Some(terminal) = self.running_terminal() else {
             return;
@@ -3615,21 +3638,26 @@ impl TerminalView {
             ScrollDelta::Pixels(pixels) => f32::from(pixels.y),
             ScrollDelta::Lines(lines) => lines.y,
         };
-        let button = if delta_y > 0.0 {
-            mouse::Button::Four
-        } else if delta_y < 0.0 {
-            mouse::Button::Five
-        } else {
-            return;
-        };
-        Self::encode_mouse(
-            terminal,
-            mouse::Action::Press,
-            Some(button),
-            None,
-            event.position,
-            event.modifiers,
-        );
+        if terminal.mouse_tracking.load(Ordering::Relaxed) {
+            let button = if delta_y > 0.0 {
+                mouse::Button::Four
+            } else if delta_y < 0.0 {
+                mouse::Button::Five
+            } else {
+                return;
+            };
+            Self::encode_mouse(
+                terminal,
+                mouse::Action::Press,
+                Some(button),
+                None,
+                event.position,
+                event.modifiers,
+            );
+        } else if let Some(lines) = scroll_lines_from_wheel_delta(event.delta) {
+            terminal.scroll_display(SirioScroll::Lines(lines));
+            cx.notify();
+        }
     }
 
     fn emit_prompt(&mut self, action: TerminalPromptAction, cx: &mut gpui::Context<Self>) {
@@ -5128,6 +5156,26 @@ mod tests {
         assert_eq!(TerminalView::autoscroll_lines(400.0, 100.0, 400.0), 1);
         assert_eq!(TerminalView::autoscroll_lines(-500.0, 100.0, 400.0), -1);
         assert_eq!(TerminalView::autoscroll_lines(5000.0, 100.0, 400.0), 1);
+    }
+
+    #[test]
+    fn wheel_delta_maps_to_terminal_scroll_lines() {
+        assert_eq!(
+            scroll_lines_from_wheel_delta(ScrollDelta::Lines(point(0.0, 3.0))),
+            Some(-3)
+        );
+        assert_eq!(
+            scroll_lines_from_wheel_delta(ScrollDelta::Pixels(point(px(0.0), px(36.0)))),
+            Some(-2)
+        );
+        assert_eq!(
+            scroll_lines_from_wheel_delta(ScrollDelta::Pixels(point(px(0.0), px(-18.0)))),
+            Some(1)
+        );
+        assert_eq!(
+            scroll_lines_from_wheel_delta(ScrollDelta::Lines(point(0.0, 0.0))),
+            None
+        );
     }
 
     /// #259: how many clicks mean what.
@@ -7292,6 +7340,19 @@ mod tests {
         );
 
         handle.scroll_display(SirioScroll::Top);
+        let viewport_changed = (0..100).any(|_| match wakeup_rx.try_recv() {
+            Ok(TerminalEvent::ViewportChanged) => true,
+            Ok(_) => false,
+            Err(TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(1));
+                false
+            }
+            Err(TryRecvError::Closed) => false,
+        });
+        assert!(
+            viewport_changed,
+            "scrolling must notify the view so the new viewport is painted"
+        );
         assert!(
             screen_text(&handle).contains("P4_SCROLL_000"),
             "scrolling to the top should expose the oldest retained line"
