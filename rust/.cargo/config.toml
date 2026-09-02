@@ -10,3 +10,8 @@
 # for no real gain.
 [build]
 rustc-wrapper = "sccache"
+
+# libghostty-vt-sys otherwise selects Zig Debug for Cargo's dev profile. Keep
+# the parser's integrity checks out of the documented dev build loop.
+[env]
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
