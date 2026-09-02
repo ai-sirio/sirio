@@ -15451,18 +15451,6 @@ fn main() {
             path: context.path.clone(),
         };
         let activity_label = context.activity_label.clone();
-        let allowed_file_roots = project_catalog
-            .projects()
-            .iter()
-            .flat_map(|project| {
-                std::iter::once(project.root_path.clone()).chain(
-                    project
-                        .worktrees
-                        .iter()
-                        .map(|worktree| worktree.path.clone()),
-                )
-            })
-            .collect::<Vec<_>>();
 
         let bounds = Bounds::centered(None, size(px(1470.), px(833.)), cx);
         let pending_actions = Arc::new(Mutex::new(Vec::<WorkspaceAction>::new()));
@@ -15801,9 +15789,8 @@ fn main() {
                         status_bar,
                         settings,
                         cx.new(|_| {
-                            RightPanel::with_activity_and_roots(
+                            RightPanel::with_activity(
                                 working_directory.to_string_lossy().into_owned(),
-                                allowed_file_roots,
                                 activity,
                             )
                         }),

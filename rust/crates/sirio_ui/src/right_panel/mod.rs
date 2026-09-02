@@ -184,10 +184,6 @@ impl PanelView {
 /// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
     repo_root: PathBuf,
-    /// Filesystem roots the panel may inspect. Startup supplies the project
-    /// roots and linked worktrees; a panel created for one runtime selection
-    /// uses that worktree as its only root.
-    allowed_roots: Vec<PathBuf>,
     /// A panel is constructed for a selected checkout. Closing that checkout
     /// must explicitly revoke the binding; retaining its path would make the
     /// Files/Changes surface look current while serving stale data.
@@ -277,10 +273,8 @@ pub struct RightPanel {
 impl RightPanel {
     /// Creates the panel for one checkout.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
-        let repo_root = repo_root.into();
         Self {
-            repo_root: repo_root.clone(),
-            allowed_roots: vec![repo_root],
+            repo_root: repo_root.into(),
             worktree_selected: true,
             file_tree: Vec::new(),
             git_markers: files::GitMarkers::default(),
@@ -312,22 +306,6 @@ impl RightPanel {
             activity,
             ..Self::new(repo_root)
         }
-    }
-
-    /// Creates the startup panel with the project catalog's filesystem
-    /// allowlist. A stale restored directory is left unselected until the
-    /// host reconciles it with a current catalog worktree.
-    pub fn with_activity_and_roots(
-        repo_root: impl Into<PathBuf>,
-        allowed_roots: Vec<PathBuf>,
-        activity: Vec<ActivitySurface>,
-    ) -> Self {
-        let repo_root = repo_root.into();
-        let worktree_selected = allowed_roots.iter().any(|root| root == &repo_root);
-        let mut panel = Self::with_activity(repo_root, activity);
-        panel.allowed_roots = allowed_roots;
-        panel.worktree_selected = worktree_selected;
-        panel
     }
 
     /// Replace the host-provided activity rows. The host (`main.rs`) calls
@@ -392,9 +370,6 @@ impl RightPanel {
         let repo_root = repo_root.into();
         if self.worktree_selected && self.repo_root == repo_root {
             return;
-        }
-        if !self.allowed_roots.iter().any(|root| root == &repo_root) {
-            self.allowed_roots.push(repo_root.clone());
         }
         self.worktree_selected = true;
         self.repo_root = repo_root;
