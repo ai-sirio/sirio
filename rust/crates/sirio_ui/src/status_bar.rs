@@ -401,6 +401,7 @@ impl StatusBar {
                 let reason_text = match reason {
                     UsageReason::NotInstalled => "not found",
                     UsageReason::LoggedOut => "logged out",
+                    UsageReason::ApiKey => "API key",
                     // F-CORE-USG-06: a Codex refresh-token failure classified
                     // as reused/revoked/expired gets its own copy instead of
                     // collapsing into the generic "logged out".
@@ -959,6 +960,17 @@ mod tests {
                 &ProviderUsageState::Unavailable(UsageReason::TokenExpired)
             ),
             "Codex token expired"
+        );
+    }
+
+    #[test]
+    fn api_key_reason_renders_distinct_text() {
+        assert_eq!(
+            StatusBar::segment_text(
+                "Codex",
+                &ProviderUsageState::Unavailable(UsageReason::ApiKey)
+            ),
+            "Codex API key"
         );
     }
 

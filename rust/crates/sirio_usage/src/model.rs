@@ -67,6 +67,9 @@ pub enum UsageReason {
     /// The provider needs credentials that are missing or invalid, with no
     /// more specific reason known (e.g. no auth file at all).
     LoggedOut,
+    /// Codex is authenticated with an API key, for which no ChatGPT usage
+    /// window is available.
+    ApiKey,
     /// A Codex OAuth refresh token was rejected because the server saw it
     /// used more than once (`refresh_token_reused`) — the strongest signal
     /// of a compromised or duplicated token store.
