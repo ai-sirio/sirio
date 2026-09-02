@@ -7,3 +7,6 @@ Status bar usage badges: "Codex logged out" shown all session while codex is aut
 
 ## freeze-fix-*
 Retest of #338 on main 9e21dc7d: no freeze (tab click accepted during output), but the pane stays on the frame captured at ~2 s (299958-299995) while the shell had already printed the total and the prompt (sirioctl scrollback). Stale final frame after a burst.
+
+## tcc-*
+Privacy prompt cascade at startup (Documents, Apple Music, Downloads; also Desktop, network volumes, Photos in other launches).
