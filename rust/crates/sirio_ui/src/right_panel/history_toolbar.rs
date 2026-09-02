@@ -136,11 +136,17 @@ pub(super) fn render_search_row(
                 })
                 .flex()
                 .items_center()
-                .child(if draft.is_empty() {
-                    "Text or hash".to_owned()
-                } else {
-                    draft.to_owned()
-                })
+                // A long query is clipped from the start, so the tail being
+                // typed stays in view (`caret::field_value`).
+                .overflow_hidden()
+                .child(
+                    crate::caret::field_value(if draft.is_empty() {
+                        "Text or hash".to_owned()
+                    } else {
+                        draft.to_owned()
+                    })
+                    .debug_selector(|| "history-search-text".to_owned()),
+                )
                 // `caret::bar` and not a `|` appended to the string: the bar
                 // always occupies layout, so text does not shift as it
                 // blinks. It is this repo's one way to draw a caret.
@@ -406,11 +412,15 @@ pub(super) fn render_paths_popup(
                 })
                 .flex()
                 .items_center()
-                .child(if draft.is_empty() {
-                    "Path or glob".to_owned()
-                } else {
-                    draft.to_owned()
-                })
+                .overflow_hidden()
+                .child(
+                    crate::caret::field_value(if draft.is_empty() {
+                        "Path or glob".to_owned()
+                    } else {
+                        draft.to_owned()
+                    })
+                    .debug_selector(|| "history-path-text".to_owned()),
+                )
                 // Same `caret::bar` the search row above uses: it always
                 // occupies layout, so the pathspec does not shift by two
                 // pixels every half second as the bar blinks.

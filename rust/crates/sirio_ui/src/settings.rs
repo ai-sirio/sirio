@@ -2827,21 +2827,18 @@ impl Settings {
             } else {
                 theme.text
             })
-            // #212: shrink and ellipsise inside the field rather than
-            // drawing past its border. Must shrink without growing:
-            // `flex_1` would push the end-of-text caret to the far right.
+            // #212: clip inside the field rather than drawing past its
+            // border. Must shrink without growing: `flex_1` would push
+            // the end-of-text caret to the far right.
             .overflow_hidden()
             .child(
-                div()
-                    .id("settings-text-field-text")
-                    .debug_selector(|| "settings-text-field-text".to_owned())
-                    .min_w_0()
-                    .text_ellipsis()
-                    .child(text!(if is_empty {
-                        placeholder.to_string()
-                    } else {
-                        display_text
-                    })),
+                caret::field_value(text!(if is_empty {
+                    placeholder.to_string()
+                } else {
+                    display_text
+                }))
+                .id("settings-text-field-text")
+                .debug_selector(|| "settings-text-field-text".to_owned()),
             )
             // The field's insertion caret: end-of-text, since these compact
             // single-line fields always append. Invisible (but still laid
@@ -3164,18 +3161,29 @@ impl Settings {
     /// is absent. A badge that claimed a binary not on PATH was installed
     /// would be the exact lie this screen used to tell.
     fn render_provider_status(availability: &AgentAvailability, theme: Theme) -> impl IntoElement {
+        /// Widest the resolved-path pill may grow: room for a typical
+        /// `~/.local/bin/<cli>` whole, while a node-hosted CLI's install
+        /// prefix is clipped instead of the row's identity.
+        const PATH_PILL_MAX_WIDTH: f32 = 240.0;
         let status_id = format!("settings-agent-status-{}", availability.id);
         match &availability.executable {
+            // #334: the path is capped, and clipped from its *start*, so a
+            // deep install prefix gives way before the binary's name does
+            // — and long before the row's own name and description, which
+            // are the only other shrinkable items in the row and used to
+            // collapse to nothing under a max-content pill.
             Some(path) => div()
                 .id(status_id.clone())
                 .debug_selector(move || status_id.clone())
+                .max_w(px(PATH_PILL_MAX_WIDTH))
+                .overflow_hidden()
                 .px(px(8.0))
                 .py(px(3.0))
                 .rounded(theme.radii.row_card)
                 .text_size(theme.typography.caption2)
                 .text_color(theme.text_muted)
                 .bg(theme.surface_raised)
-                .child(text!(sirio_project::display_path(path))),
+                .child(caret::field_value(text!(sirio_project::display_path(path)))),
             None => div()
                 .id(status_id.clone())
                 .debug_selector(move || status_id)
@@ -3497,7 +3505,9 @@ impl Settings {
                             .px(px(10.0))
                             .flex()
                             .items_center()
-                            .gap(px(6.0))
+                            // No `gap`: flex gap goes between *every* pair of
+                            // items, the value and its caret included, and
+                            // held the bar a phantom space off the text.
                             .rounded(theme.radii.control)
                             .bg(theme.input_bg)
                             .border_1()
@@ -3526,16 +3536,13 @@ impl Settings {
                             // #212: see the field above.
                             .overflow_hidden()
                             .child(
-                                div()
-                                    .id("settings-agent-search-text")
-                                    .debug_selector(|| "settings-agent-search-text".to_owned())
-                                    .min_w_0()
-                                    .text_ellipsis()
-                                    .child(text!(if search_text.is_empty() {
-                                        "Search agents".to_string()
-                                    } else {
-                                        search_text
-                                    })),
+                                caret::field_value(text!(if search_text.is_empty() {
+                                    "Search agents".to_string()
+                                } else {
+                                    search_text
+                                }))
+                                .id("settings-agent-search-text")
+                                .debug_selector(|| "settings-agent-search-text".to_owned()),
                             )
                             .when(search_is_focused, |this| {
                                 this.child(caret::bar(
@@ -4901,6 +4908,59 @@ mod tests {
         assert!(
             description.origin.x + description.size.width <= row.origin.x + row.size.width,
             "agent description must stay inside its row: description={description:?} row={row:?}"
+        );
+    }
+
+    /// #334: the status pill carried the resolved binary's full path at its
+    /// max-content width, and the row's label side was the only shrinkable
+    /// flex item — a long install path (Pi under
+    /// `~/.local/share/pi-node/node-v22.23.2-linux-x64/bin/pi`) squeezed
+    /// the agent's name and description down to nothing while the path
+    /// stayed whole. The name is the row's identity; the path is the part
+    /// that gives way.
+    #[gpui::test]
+    async fn a_long_binary_path_never_squeezes_the_agent_name_out_of_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "pi",
+            display_name: "Pi",
+            executable: Some(std::path::PathBuf::from(
+                "/home/user/.local/share/pi-node/node-v22.23.2-linux-x64/lib/node_modules/\
+                 @mariozechner/pi-coding-agent/node_modules/.bin/some-very-deeply-nested/\
+                 vendor/runtime/bin/pi",
+            )),
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Pi row renders");
+        let name = cx
+            .debug_bounds("settings-agent-name-0")
+            .expect("the Pi name renders");
+        let status = cx
+            .debug_bounds("settings-agent-status-pi")
+            .expect("the resolved-path pill renders");
+
+        assert!(
+            name.size.width >= px(7.8 * 2.0),
+            "the agent's name keeps its full width — it is the row's identity: \
+             name={name:?} status={status:?}"
+        );
+        assert!(
+            status.origin.x + status.size.width <= row.origin.x + row.size.width,
+            "the path pill stays inside the row: status={status:?} row={row:?}"
+        );
+        assert!(
+            status.size.width < row.size.width / 2.0,
+            "the path pill gives way before the name does: status={status:?} row={row:?}"
         );
     }
 

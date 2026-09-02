@@ -2743,9 +2743,8 @@ impl Sidebar {
                     cx.notify();
                 });
             })
-            // #208: the text shrinks and ellipsises rather than laying out
-            // at its natural width and spilling past the field's own
-            // border. It must shrink *without* growing -- `flex_1` here
+            // #208: the text is clipped rather than laying out at its
+            // natural width and spilling past the field's own border. It must shrink *without* growing -- `flex_1` here
             // would stretch a short value to the full width and push the
             // end-of-text caret below to the far right, which is the one
             // thing this row's geometry means.
@@ -2756,16 +2755,13 @@ impl Sidebar {
             // so the overflow is bounded only by how deep the path is.
             .overflow_hidden()
             .child(
-                div()
-                    .id("worktree-prompt-field-text")
-                    .debug_selector(move || format!("{id}-text"))
-                    .min_w_0()
-                    .text_ellipsis()
-                    .child(if value.is_empty() {
-                        placeholder.to_owned()
-                    } else {
-                        value.to_owned()
-                    }),
+                caret::field_value(if value.is_empty() {
+                    placeholder.to_owned()
+                } else {
+                    value.to_owned()
+                })
+                .id("worktree-prompt-field-text")
+                .debug_selector(move || format!("{id}-text")),
             )
             // End-of-text insertion caret; these compact single-line fields
             // always append. `caret_shown` already folds in the field being
@@ -3083,19 +3079,16 @@ impl Sidebar {
                             sidebar.on_display_name_key(event, window, cx);
                         });
                     })
-                    // #212: shrink and ellipsise inside the field; must not grow, or the caret leaves the text.
+                    // #212: clip inside the field; must not grow, or the caret leaves the text.
                     .overflow_hidden()
                     .child(
-                        div()
-                            .id("sidebar-display-name-text")
-                            .debug_selector(|| "sidebar-display-name-text".to_owned())
-                            .min_w_0()
-                            .text_ellipsis()
-                            .child(if display_name.trim().is_empty() {
-                                "Display name".to_owned()
-                            } else {
-                                display_name
-                            }),
+                        caret::field_value(if display_name.trim().is_empty() {
+                            "Display name".to_owned()
+                        } else {
+                            display_name
+                        })
+                        .id("sidebar-display-name-text")
+                        .debug_selector(|| "sidebar-display-name-text".to_owned()),
                     )
                     .when(name_focused, |this| {
                         this.child(caret::bar(px(14.0), theme.text, caret_visible))
@@ -3321,16 +3314,13 @@ impl Sidebar {
                     // #212: see the field above.
                     .overflow_hidden()
                     .child(
-                        div()
-                            .id("sidebar-branch-search-text")
-                            .debug_selector(|| "sidebar-branch-search-text".to_owned())
-                            .min_w_0()
-                            .text_ellipsis()
-                            .child(if draft.trim().is_empty() {
-                                "Search branches by name…".to_owned()
-                            } else {
-                                draft
-                            }),
+                        caret::field_value(if draft.trim().is_empty() {
+                            "Search branches by name…".to_owned()
+                        } else {
+                            draft
+                        })
+                        .id("sidebar-branch-search-text")
+                        .debug_selector(|| "sidebar-branch-search-text".to_owned()),
                     )
                     .when(focused, |this| {
                         this.child(caret::bar(px(14.0), theme.text, caret_visible))
@@ -3417,16 +3407,13 @@ impl Sidebar {
                             // #212: this one renders a filesystem path, so it is the likeliest to overflow.
                             .overflow_hidden()
                             .child(
-                                div()
-                                    .id("sidebar-location-override-text")
-                                    .debug_selector(|| "sidebar-location-override-text".to_owned())
-                                    .min_w_0()
-                                    .text_ellipsis()
-                                    .child(if has_override {
-                                        draft
-                                    } else {
-                                        default_location.clone()
-                                    }),
+                                caret::field_value(if has_override {
+                                    draft
+                                } else {
+                                    default_location.clone()
+                                })
+                                .id("sidebar-location-override-text")
+                                .debug_selector(|| "sidebar-location-override-text".to_owned()),
                             )
                             .when(focused, |this| {
                                 this.child(caret::bar(px(14.0), theme.text, caret_visible))
@@ -3973,13 +3960,8 @@ impl Render for Sidebar {
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
         let context_menu = self.context_menu.get().map(|_| {
-            Self::render_context_menu(
-                &self.context_menu,
-                entity.clone(),
-                theme,
-                Painter::of(cx),
-            )
-            .into_any_element()
+            Self::render_context_menu(&self.context_menu, entity.clone(), theme, Painter::of(cx))
+                .into_any_element()
         });
         let project_settings = self.project_settings.clone();
         let add_project_menu = self.add_project_menu.get().map(|_| {
@@ -4098,8 +4080,13 @@ impl Render for Sidebar {
                     )
                     .on_key_down(cx.listener(Self::on_filter_key))
                     .child(div().text_size(px(12.5)).text_color(theme.text_faint).child("⌕"))
+                            .min_w_0()
                     .child(
                         div()
+                            // A long filter is clipped from the start so the
+                            // tail being typed stays in view, and the caret
+                            // stays inside the field (`caret::field_value`).
+                            .overflow_hidden()
                             .flex_1()
                             .flex()
                             .items_center()
@@ -4123,7 +4110,10 @@ impl Render for Sidebar {
                                 )
                             })
                             .when(!filter_is_empty, |this| {
-                                this.child(filter_text)
+                                this.child(
+                                    caret::field_value(filter_text)
+                                        .debug_selector(|| "filter-text".to_owned()),
+                                )
                             })
                             .when(filter_is_focused, |this| {
                                 this.child(caret::bar(px(12.0), theme.text, field_caret_visible))
@@ -7282,12 +7272,8 @@ mod tests {
             "the chevron click reveals the project's tab row"
         );
 
-        let sidebar = cx.update(|window, _| {
-            window
-                .root::<Sidebar>()
-                .flatten()
-                .expect("sidebar root")
-        });
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
         let project_cursor = sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor);
         cx.simulate_keystrokes("down");
         cx.run_until_parked();
