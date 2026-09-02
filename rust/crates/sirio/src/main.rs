@@ -3756,6 +3756,10 @@ struct SirioWorkspace {
     panes: Arc<PaneRegistry>,
     control_state: Arc<Mutex<ControlState>>,
     pending_actions: Arc<Mutex<Vec<WorkspaceAction>>>,
+    /// The terminal renderer's persisted font-size preference. This is kept
+    /// on the host so every terminal entity, including restored and newly
+    /// split panes, receives the same setting.
+    terminal_font_size: i32,
     translucency_enabled: bool,
     /// `None` means this workspace has not itself applied a live window
     /// background yet. That keeps test fixtures able to exercise their first
@@ -4065,6 +4069,7 @@ impl SirioWorkspace {
         center_split_ratio: i64,
         cx: &mut Context<Self>,
     ) -> Self {
+        let terminal_font_size = settings.read(cx).snapshot().terminal_font_size;
         panes::bind_keys(cx);
         Self::start_process_signal_polling(cx);
         cx.bind_keys([
@@ -4457,6 +4462,7 @@ impl SirioWorkspace {
 
         Self::subscribe_right_panel(&right_panel, cx);
         Self::bind_terminal_tabs(&tabs, cx);
+        Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         Self::bind_file_tabs(&tabs, cx);
         for tab in &tabs {
             tab.panes.for_each(&mut |_, content| {
@@ -4538,6 +4544,7 @@ impl SirioWorkspace {
             workspace
                 .status_bar
                 .update(cx, |bar, cx| bar.apply_preferences(prefs, cx));
+            workspace.apply_terminal_font_size(snapshot.terminal_font_size, cx);
         })
         .detach();
         // Task 8: how every agent launches is resolved state, held here and
@@ -4568,6 +4575,7 @@ impl SirioWorkspace {
             panes,
             control_state,
             pending_actions,
+            terminal_font_size,
             translucency_enabled,
             last_applied_translucency: None,
             #[cfg(test)]
@@ -5425,6 +5433,33 @@ impl SirioWorkspace {
                 }
             });
         }
+    }
+
+    fn apply_terminal_font_size_to_tabs(
+        tabs: &[OpenTab],
+        font_size: i32,
+        cx: &mut Context<Self>,
+    ) {
+        for tab in tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    view.update(cx, |terminal, cx| terminal.set_font_size(font_size, cx));
+                }
+            });
+        }
+    }
+
+    fn apply_terminal_font_size(&mut self, font_size: i32, cx: &mut Context<Self>) {
+        let font_size = font_size.clamp(9, 24);
+        if self.terminal_font_size == font_size {
+            return;
+        }
+        self.terminal_font_size = font_size;
+        Self::apply_terminal_font_size_to_tabs(&self.tabs, font_size, cx);
+        for prompt in self.empty_pane_prompts.values() {
+            prompt.update(cx, |terminal, cx| terminal.set_font_size(font_size, cx));
+        }
+        cx.refresh_windows();
     }
 
     fn subscribe_terminal(
@@ -6819,6 +6854,7 @@ impl SirioWorkspace {
                     &saved_session_refs,
                     cx,
                 );
+                Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
                 Self::bind_terminal_tabs(&new_tabs, cx);
                 Self::bind_file_tabs(&new_tabs, cx);
                 for tab in &new_tabs {
@@ -7207,6 +7243,7 @@ impl SirioWorkspace {
                 window,
                 cx,
             );
+            Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             Self::bind_terminal_tabs(&tabs, cx);
         Self::bind_file_tabs(&tabs, cx);
             // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
@@ -7941,6 +7978,9 @@ impl SirioWorkspace {
         }
         self.empty_pane_prompts.clear();
         let prompt = cx.new(TerminalView::empty_prompt);
+        prompt.update(cx, |terminal, cx| {
+            terminal.set_font_size(self.terminal_font_size, cx)
+        });
         cx.subscribe(
             &prompt,
             move |workspace, _, event: &TerminalPromptEvent, cx| {
@@ -8526,6 +8566,9 @@ impl SirioWorkspace {
         let pane_id = self.next_pane_id;
         let title = title.into();
         let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_font_size(self.terminal_font_size, cx)
+        });
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -9840,6 +9883,9 @@ impl SirioWorkspace {
             TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
                 .expect("start split terminal")
         });
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_font_size(self.terminal_font_size, cx)
+        });
         let split = {
             let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                 return;
@@ -9919,6 +9965,9 @@ impl SirioWorkspace {
         let shell = TerminalShell::WithArguments { program, args };
         let terminal = cx.new(|cx| {
             TerminalView::with_shell(&worktree_path, shell, cx).expect("start split agent")
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_font_size(self.terminal_font_size, cx)
         });
         let tab_id = self
             .tabs

@@ -57,6 +57,14 @@ pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
 const LINE_HEIGHT: Pixels = px(18.0);
+const MIN_FONT_SIZE: i32 = 9;
+const MAX_FONT_SIZE: i32 = 24;
+
+fn line_height_for_font_size(font_size: Pixels) -> Pixels {
+    px((f32::from(font_size) * f32::from(LINE_HEIGHT) / f32::from(FONT_SIZE))
+        .round()
+        .max(1.0))
+}
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Test-observable count of scrollback extraction commands served by terminal
@@ -408,11 +416,11 @@ struct MouseInput {
     /// Pane-local surface-space pixels (window position minus pane origin).
     x: f32,
     y: f32,
-    /// Geometry snapshot so the owner thread keeps `EncoderSize` current
-    /// (cell height is the crate's fixed LINE_HEIGHT).
+    /// Geometry snapshot so the owner thread keeps `EncoderSize` current.
     pane_width: f32,
     pane_height: f32,
     cell_width: f32,
+    cell_height: f32,
 }
 
 /// One persistent libghostty mouse encoder plus the state whose setters clear
@@ -597,6 +605,10 @@ struct TerminalHandle {
     /// even though the origin-subtraction half of the same hit-test was
     /// already correct and unit-tested.
     last_cell_width: Arc<Mutex<Option<Pixels>>>,
+    /// The terminal grid's last-measured cell height. This follows the
+    /// configured font size and keeps hit-testing and mouse reporting in step
+    /// with the painted rows.
+    last_cell_height: Arc<Mutex<Option<Pixels>>>,
     /// #301/#308 (R4.3): decoded Kitty images keyed `(image_id, generation)`,
     /// with the eviction bookkeeping (last-painted ticks, last placement
     /// walk, mutation stamp) beside them. Lives beside the other per-pane
@@ -976,12 +988,13 @@ fn copy_kitty_placement(
 fn kitty_image_bounds(
     pane: Bounds<Pixels>,
     cell_width: Pixels,
+    line_height: Pixels,
     place: &KittyPlacement,
 ) -> Bounds<Pixels> {
     Bounds::new(
         point(
             pane.origin.x + cell_width * place.viewport_col as f32,
-            pane.origin.y + LINE_HEIGHT * place.viewport_row as f32,
+            pane.origin.y + line_height * place.viewport_row as f32,
         ),
         size(px(place.pixel_width as f32), px(place.pixel_height as f32)),
     )
@@ -1898,6 +1911,7 @@ impl TerminalHandle {
                 resize_generation: Arc::new(AtomicU64::new(0)),
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
+                last_cell_height: Arc::new(Mutex::new(None)),
                 kitty_images: Arc::new(Mutex::new(KittyImageCache::default())),
                 mutation_stamp,
                 grid_render_cache: Arc::new(Mutex::new(GridRenderCache::default())),
@@ -2462,6 +2476,7 @@ pub struct TerminalView {
     terminal: TerminalState,
     spawn: SpawnParams,
     empty_prompt: bool,
+    font_size: Pixels,
     focus_handle: gpui::FocusHandle,
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
@@ -2613,9 +2628,9 @@ fn generated_identity() -> TerminalIdentity {
     TerminalIdentity::new(format!("pane-{serial}"), format!("terminal-{serial}"))
 }
 
-fn scroll_lines_from_wheel_delta(delta: ScrollDelta) -> Option<isize> {
+fn scroll_lines_from_wheel_delta(delta: ScrollDelta, line_height: Pixels) -> Option<isize> {
     let (delta_y, line_height) = match delta {
-        ScrollDelta::Pixels(pixels) => (f32::from(pixels.y), f32::from(LINE_HEIGHT)),
+        ScrollDelta::Pixels(pixels) => (f32::from(pixels.y), f32::from(line_height)),
         ScrollDelta::Lines(lines) => (lines.y, 1.0),
     };
     if !delta_y.is_finite() || delta_y == 0.0 {
@@ -2664,6 +2679,7 @@ impl TerminalView {
             terminal: TerminalState::Pending,
             spawn,
             empty_prompt: false,
+            font_size: FONT_SIZE,
             focus_handle,
             exit_status: None,
             identity,
@@ -2692,6 +2708,7 @@ impl TerminalView {
                 shell: TerminalShell::System,
             },
             empty_prompt: true,
+            font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
             exit_status: None,
             identity,
@@ -2742,6 +2759,7 @@ impl TerminalView {
                 shell,
             },
             empty_prompt: false,
+            font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
             exit_status: None,
             identity,
@@ -2764,6 +2782,18 @@ impl TerminalView {
     /// child will inherit `SIRIO_PANE_ID`.
     pub fn set_identity(&mut self, identity: TerminalIdentity) {
         self.identity = identity;
+    }
+
+    /// Applies the user-configured terminal font size. The terminal renderer
+    /// owns the derived cell metrics, so notifying this entity invalidates the
+    /// retained element and causes the next prepaint to resize the grid.
+    pub fn set_font_size(&mut self, value: i32, cx: &mut gpui::Context<Self>) {
+        let font_size = px(value.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) as f32);
+        if self.font_size == font_size {
+            return;
+        }
+        self.font_size = font_size;
+        cx.notify();
     }
 
     /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): the host calls
@@ -3249,6 +3279,13 @@ impl TerminalView {
             return;
         };
         let cell_width = px(handle.last_cell_width.lock().map(f32::from).unwrap_or(8.0));
+        let cell_height = px(
+            handle
+                .last_cell_height
+                .lock()
+                .map(f32::from)
+                .unwrap_or(f32::from(LINE_HEIGHT)),
+        );
         if let Some(input) = mouse_input(
             action,
             button,
@@ -3257,6 +3294,7 @@ impl TerminalView {
             modifiers,
             bounds,
             cell_width,
+            cell_height,
         ) {
             let _ = handle.commands.send(TerminalCommand::Mouse(input));
         }
@@ -3290,12 +3328,17 @@ impl TerminalView {
     /// One line per tick rather than a rate proportional to how far past the
     /// edge the pointer is: a terminal drag aims at a line, and acceleration
     /// is what makes autoscroll overshoot it.
-    fn autoscroll_lines(pointer_y: f32, top: f32, bottom: f32) -> isize {
+    fn autoscroll_lines(
+        pointer_y: f32,
+        top: f32,
+        bottom: f32,
+        line_height: Pixels,
+    ) -> isize {
         // One row. Measured: a 12px band left a pointer 3px below it
         // reporting "inside", which is not a distinction a hand at the edge
         // of a pane can make. A row is also the unit being scrolled, so the
         // band and the step agree.
-        let edge_band = f32::from(LINE_HEIGHT);
+        let edge_band = f32::from(line_height);
         if pointer_y < top + edge_band {
             -1
         } else if pointer_y > bottom - edge_band {
@@ -3334,13 +3377,18 @@ impl TerminalView {
             .lock()
             .map(f32::from)
             .unwrap_or(8.0);
+        let cell_height = terminal
+            .last_cell_height
+            .lock()
+            .map(f32::from)
+            .unwrap_or(f32::from(LINE_HEIGHT));
         link_router::resolve_click_cell(
             f32::from(position.x),
             f32::from(position.y),
             f32::from(origin.x),
             f32::from(origin.y),
             cell_width,
-            f32::from(LINE_HEIGHT),
+            cell_height,
         )
     }
 
@@ -3422,13 +3470,18 @@ impl TerminalView {
             .lock()
             .map(f32::from)
             .unwrap_or(8.0);
+        let cell_height = terminal
+            .last_cell_height
+            .lock()
+            .map(f32::from)
+            .unwrap_or(f32::from(LINE_HEIGHT));
         let (row, column) = link_router::resolve_click_cell(
             f32::from(event.position.x),
             f32::from(event.position.y),
             f32::from(origin.x),
             f32::from(origin.y),
             cell_width,
-            f32::from(LINE_HEIGHT),
+            cell_height,
         );
         let link = terminal.link_at(row, column);
         if std::env::var_os("SIRIO_DEBUG_LINK_CLICK").is_some() {
@@ -3500,6 +3553,13 @@ impl TerminalView {
                         f32::from(event.position.y),
                         f32::from(bounds.origin.y),
                         f32::from(bounds.origin.y + bounds.size.height),
+                        px(
+                            terminal
+                                .last_cell_height
+                                .lock()
+                                .map(f32::from)
+                                .unwrap_or(f32::from(LINE_HEIGHT)),
+                        ),
                     )
                 })
                 .unwrap_or(0);
@@ -3530,13 +3590,18 @@ impl TerminalView {
             .lock()
             .map(f32::from)
             .unwrap_or(8.0);
+        let cell_height = terminal
+            .last_cell_height
+            .lock()
+            .map(f32::from)
+            .unwrap_or(f32::from(LINE_HEIGHT));
         let (row, column) = link_router::resolve_click_cell(
             f32::from(event.position.x),
             f32::from(event.position.y),
             f32::from(origin.x),
             f32::from(origin.y),
             cell_width,
-            f32::from(LINE_HEIGHT),
+            cell_height,
         );
         let uri = terminal.link_at(row, column);
         let next = uri.map(|uri| LinkHover {
@@ -3700,7 +3765,16 @@ impl TerminalView {
                 event.position,
                 event.modifiers,
             );
-        } else if let Some(lines) = scroll_lines_from_wheel_delta(event.delta) {
+        } else if let Some(lines) = scroll_lines_from_wheel_delta(
+            event.delta,
+            px(
+                terminal
+                    .last_cell_height
+                    .lock()
+                    .map(f32::from)
+                    .unwrap_or(f32::from(LINE_HEIGHT)),
+            ),
+        ) {
             terminal.scroll_display(SirioScroll::Lines(lines));
             cx.notify();
         }
@@ -3837,6 +3911,7 @@ impl EventEmitter<TerminalPromptEvent> for TerminalView {}
 impl EventEmitter<TerminalLinkEvent> for TerminalView {}
 
 struct TerminalPaintState {
+    line_height: Pixels,
     backgrounds: Vec<PaintQuad>,
     lines: Vec<(ShapedLine, gpui::Point<Pixels>)>,
     cursor: Option<PaintQuad>,
@@ -3899,6 +3974,9 @@ struct GridAssemblyKey {
     palette: TerminalPalette,
     bounds_origin: Point<Pixels>,
     bounds_size: Size<Pixels>,
+    font_size: Pixels,
+    cell_width: Pixels,
+    line_height: Pixels,
 }
 
 impl TerminalPalette {
@@ -3915,6 +3993,7 @@ impl TerminalPalette {
 struct TerminalElement {
     terminal: TerminalHandle,
     palette: TerminalPalette,
+    font_size: Pixels,
 }
 
 impl IntoElement for TerminalElement {
@@ -3959,26 +4038,28 @@ impl Element for TerminalElement {
         window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
+        let line_height = line_height_for_font_size(self.font_size);
         *self.terminal.last_bounds.lock() = Some(bounds);
         let terminal_font = font(sirio_theme::terminal_family());
         let font_id = window.text_system().resolve_font(&terminal_font);
         let cell_width = window
             .text_system()
-            .advance(font_id, FONT_SIZE, 'm')
+            .advance(font_id, self.font_size, 'm')
             .map(|advance| advance.width)
             .unwrap_or(px(8.0));
         *self.terminal.last_cell_width.lock() = Some(cell_width);
+        *self.terminal.last_cell_height.lock() = Some(line_height);
         let columns = (f32::from(bounds.size.width) / f32::from(cell_width))
             .floor()
             .max(1.0) as u16;
-        let rows = (f32::from(bounds.size.height) / f32::from(LINE_HEIGHT))
+        let rows = (f32::from(bounds.size.height) / f32::from(line_height))
             .floor()
             .max(1.0) as u16;
         self.terminal.resize(
             columns,
             rows,
             f32::from(cell_width).round().max(1.0) as u16,
-            f32::from(LINE_HEIGHT).round().max(1.0) as u16,
+            f32::from(line_height).round().max(1.0) as u16,
         );
 
         // #259: read once per frame, not per cell. The range is plain numbers
@@ -3994,6 +4075,9 @@ impl Element for TerminalElement {
             palette: self.palette,
             bounds_origin: bounds.origin,
             bounds_size: bounds.size,
+            font_size: self.font_size,
+            cell_width,
+            line_height,
         };
 
         let (backgrounds, lines, cursor) =
@@ -4023,9 +4107,9 @@ impl Element for TerminalElement {
                         Bounds::new(
                             point(
                                 bounds.origin.x + cell_width * start_column as f32,
-                                bounds.origin.y + LINE_HEIGHT * line as f32,
+                                bounds.origin.y + line_height * line as f32,
                             ),
-                            size(cell_width * column_count as f32, LINE_HEIGHT),
+                            size(cell_width * column_count as f32, line_height),
                         )
                     };
 
@@ -4122,10 +4206,10 @@ impl Element for TerminalElement {
                     let shaped_line =
                         window
                             .text_system()
-                            .shape_line(text.into(), FONT_SIZE, &runs, None);
+                            .shape_line(text.into(), self.font_size, &runs, None);
                     lines.push((
                         shaped_line,
-                        point(bounds.origin.x, bounds.origin.y + LINE_HEIGHT * line as f32),
+                        point(bounds.origin.x, bounds.origin.y + line_height * line as f32),
                     ));
                 }
 
@@ -4142,9 +4226,9 @@ impl Element for TerminalElement {
                             Bounds::new(
                                 point(
                                     bounds.origin.x + cell_width * terminal_cursor.1 as f32,
-                                    bounds.origin.y + LINE_HEIGHT * terminal_cursor.0 as f32,
+                                    bounds.origin.y + line_height * terminal_cursor.0 as f32,
                                 ),
-                                size(cell_width, LINE_HEIGHT),
+                                size(cell_width, line_height),
                             ),
                             self.palette.cursor,
                         )
@@ -4196,7 +4280,7 @@ impl Element for TerminalElement {
                 // can be negative (scrolled partly off the top) — and let
                 // `Window::paint_image` derive the clipped region from the
                 // pane bounds at paint time. Clamping here would squash.
-                let image_bounds = kitty_image_bounds(bounds, cell_width, place);
+                let image_bounds = kitty_image_bounds(bounds, cell_width, line_height, place);
                 match kitty_cache.get_or_decode(place, tick) {
                     Some(image) => layer_bucket.push((image_bounds, image)),
                     None => kitty_refused.push(image_bounds),
@@ -4226,6 +4310,7 @@ impl Element for TerminalElement {
         drop(kitty_cache);
 
         TerminalPaintState {
+            line_height,
             backgrounds,
             lines,
             cursor,
@@ -4271,7 +4356,14 @@ impl Element for TerminalElement {
                     window.paint_image(bounds, image_bounds, Corners::default(), image, 0, false);
             }
             for (line, origin) in state.lines.drain(..) {
-                let _ = line.paint(origin, LINE_HEIGHT, gpui::TextAlign::Left, None, window, cx);
+                let _ = line.paint(
+                    origin,
+                    state.line_height,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
             for (image_bounds, image) in state.kitty_above_text.drain(..) {
                 let _ =
@@ -4519,6 +4611,7 @@ impl gpui::Render for TerminalView {
                 .child(TerminalElement {
                     terminal: terminal.clone(),
                     palette,
+                    font_size: self.font_size,
                 })
                 .when_some(dropped_path, |this, path| {
                     this.child(
@@ -5064,7 +5157,7 @@ fn encode_mouse_input(
         screen_width: input.pane_width as u32,
         screen_height: input.pane_height as u32,
         cell_width: input.cell_width.round().max(1.0) as u32,
-        cell_height: f32::from(LINE_HEIGHT).round().max(1.0) as u32,
+        cell_height: input.cell_height.round().max(1.0) as u32,
         padding_top: 0,
         padding_bottom: 0,
         padding_right: 0,
@@ -5125,6 +5218,7 @@ fn mouse_input(
     modifiers: gpui::Modifiers,
     bounds: Bounds<Pixels>,
     cell_width: Pixels,
+    cell_height: Pixels,
 ) -> Option<MouseInput> {
     if modifiers.shift {
         return None;
@@ -5151,6 +5245,7 @@ fn mouse_input(
         pane_width: bounds.size.width.into(),
         pane_height: bounds.size.height.into(),
         cell_width: cell_width.into(),
+        cell_height: cell_height.into(),
     })
 }
 
@@ -5189,37 +5284,43 @@ mod tests {
     #[test]
     fn autoscroll_runs_only_near_the_panes_edges() {
         // Comfortably inside: nothing moves.
-        assert_eq!(TerminalView::autoscroll_lines(250.0, 100.0, 400.0), 0);
-        assert_eq!(TerminalView::autoscroll_lines(150.0, 100.0, 400.0), 0);
-        assert_eq!(TerminalView::autoscroll_lines(350.0, 100.0, 400.0), 0);
+        assert_eq!(TerminalView::autoscroll_lines(250.0, 100.0, 400.0, LINE_HEIGHT), 0);
+        assert_eq!(TerminalView::autoscroll_lines(150.0, 100.0, 400.0, LINE_HEIGHT), 0);
+        assert_eq!(TerminalView::autoscroll_lines(350.0, 100.0, 400.0, LINE_HEIGHT), 0);
         // Inside but within a row of the edge -- the case that matters, and
         // the one an "outside the bounds" rule could never see, because GPUI
         // stops delivering moves there.
-        assert_eq!(TerminalView::autoscroll_lines(105.0, 100.0, 400.0), -1);
-        assert_eq!(TerminalView::autoscroll_lines(395.0, 100.0, 400.0), 1);
+        assert_eq!(TerminalView::autoscroll_lines(105.0, 100.0, 400.0, LINE_HEIGHT), -1);
+        assert_eq!(TerminalView::autoscroll_lines(395.0, 100.0, 400.0, LINE_HEIGHT), 1);
         // Exactly on each edge, and beyond.
-        assert_eq!(TerminalView::autoscroll_lines(100.0, 100.0, 400.0), -1);
-        assert_eq!(TerminalView::autoscroll_lines(400.0, 100.0, 400.0), 1);
-        assert_eq!(TerminalView::autoscroll_lines(-500.0, 100.0, 400.0), -1);
-        assert_eq!(TerminalView::autoscroll_lines(5000.0, 100.0, 400.0), 1);
+        assert_eq!(TerminalView::autoscroll_lines(100.0, 100.0, 400.0, LINE_HEIGHT), -1);
+        assert_eq!(TerminalView::autoscroll_lines(400.0, 100.0, 400.0, LINE_HEIGHT), 1);
+        assert_eq!(TerminalView::autoscroll_lines(-500.0, 100.0, 400.0, LINE_HEIGHT), -1);
+        assert_eq!(TerminalView::autoscroll_lines(5000.0, 100.0, 400.0, LINE_HEIGHT), 1);
     }
 
     #[test]
     fn wheel_delta_maps_to_terminal_scroll_lines() {
         assert_eq!(
-            scroll_lines_from_wheel_delta(ScrollDelta::Lines(point(0.0, 3.0))),
+            scroll_lines_from_wheel_delta(ScrollDelta::Lines(point(0.0, 3.0)), LINE_HEIGHT),
             Some(-3)
         );
         assert_eq!(
-            scroll_lines_from_wheel_delta(ScrollDelta::Pixels(point(px(0.0), px(36.0)))),
+            scroll_lines_from_wheel_delta(
+                ScrollDelta::Pixels(point(px(0.0), px(36.0))),
+                LINE_HEIGHT,
+            ),
             Some(-2)
         );
         assert_eq!(
-            scroll_lines_from_wheel_delta(ScrollDelta::Pixels(point(px(0.0), px(-18.0)))),
+            scroll_lines_from_wheel_delta(
+                ScrollDelta::Pixels(point(px(0.0), px(-18.0))),
+                LINE_HEIGHT,
+            ),
             Some(1)
         );
         assert_eq!(
-            scroll_lines_from_wheel_delta(ScrollDelta::Lines(point(0.0, 0.0))),
+            scroll_lines_from_wheel_delta(ScrollDelta::Lines(point(0.0, 0.0)), LINE_HEIGHT),
             None
         );
     }
@@ -5481,7 +5582,7 @@ mod tests {
         // The painter feeds this untruncated placement to `paint_image` with
         // the pane rect as the clip: negative origin, full size.
         let pane = Bounds::new(point(px(10.0), px(20.0)), size(px(640.0), px(432.0)));
-        let image_bounds = kitty_image_bounds(pane, px(8.0), half_out);
+        let image_bounds = kitty_image_bounds(pane, px(8.0), LINE_HEIGHT, half_out);
         assert!(
             image_bounds.origin.y < pane.origin.y,
             "origin stays negative"
@@ -6394,6 +6495,7 @@ mod tests {
             pane_width: 640.0,
             pane_height: 360.0,
             cell_width: 8.0,
+            cell_height: 18.0,
         }
     }
 
@@ -6580,6 +6682,7 @@ mod tests {
                 shift,
                 bounds,
                 px(8.0),
+                px(18.0),
             ),
             None
         );
@@ -6592,6 +6695,7 @@ mod tests {
             gpui::Modifiers::default(),
             bounds,
             px(8.0),
+            px(18.0),
         )
         .expect("guest-bound");
         assert_eq!(converted.x, 44.0);
@@ -6607,6 +6711,7 @@ mod tests {
                 gpui::Modifiers::default(),
                 bounds,
                 px(8.0),
+                px(18.0),
             ),
             None
         );
@@ -8880,6 +8985,77 @@ mod view_tests {
         assert!(
             both_moved,
             "terminal output must move both snapshot and assembly counters"
+        );
+        handle.shutdown();
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A Settings font-size update must reach the renderer's cell metrics, not
+    /// stop at the persisted Settings snapshot. The line pitch is the
+    /// observable metric used by the terminal grid for layout and PTY resize.
+    #[gpui::test]
+    async fn terminal_font_size_updates_the_drawn_cell_metrics(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-font-size-metrics-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-i".to_string()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let handle = loop {
+            cx.run_until_parked();
+            if let Some(handle) =
+                terminal.read_with(&cx.cx, |terminal, _| terminal.running_terminal().cloned())
+            {
+                let cell_height = *handle.last_cell_height.lock();
+                if let Some(cell_height) = cell_height {
+                    assert_eq!(cell_height, px(18.0));
+                    break handle;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal did not render its initial cell metrics"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let initial_cell_height =
+            (*handle.last_cell_height.lock()).expect("drawn terminal has measured cell height");
+        terminal.update(&mut cx.cx, |terminal, cx| {
+            terminal.set_font_size(16, cx);
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let updated_cell_height = loop {
+            cx.run_until_parked();
+            if let Some(cell_height) = *handle.last_cell_height.lock()
+                && cell_height > initial_cell_height
+            {
+                break cell_height;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "font-size update did not reach the drawn terminal metrics"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert_eq!(initial_cell_height, px(18.0));
+        assert!(
+            updated_cell_height > initial_cell_height,
+            "font-size change must increase the terminal cell height: {initial_cell_height:?} -> {updated_cell_height:?}"
         );
         handle.shutdown();
         cx.run_until_parked();
