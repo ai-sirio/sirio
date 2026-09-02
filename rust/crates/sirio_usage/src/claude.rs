@@ -560,11 +560,8 @@ impl Pty {
             return Err(io::Error::last_os_error());
         }
 
-        let mut command = Command::new(program);
+        let mut command = probe_command(program, args, envs);
         command
-            .args(args)
-            .env("TERM", "xterm-256color")
-            .envs(envs.iter().copied())
             // SAFETY: these fds are owned by this function and passed to the
             // child as its standard streams.
             .stdin(unsafe { Stdio::from_raw_fd(slave) })
@@ -632,6 +629,17 @@ impl Pty {
 }
 
 #[cfg(unix)]
+fn probe_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(crate::probe_working_directory())
+        .env("TERM", "xterm-256color")
+        .envs(envs.iter().copied());
+    command
+}
+
+#[cfg(unix)]
 impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -646,6 +654,21 @@ impl Drop for Pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_probe_command_has_a_safe_working_directory() {
+        let command = probe_command("/bin/sh", &["-c", "true"], &[]);
+        let cwd = command
+            .get_current_dir()
+            .expect("usage probes must set a working directory");
+
+        assert_ne!(cwd, Path::new("/"));
+        if let Some(home) = user_home_dir() {
+            assert_ne!(cwd, home.as_path());
+        }
+    }
 
     #[test]
     fn strip_ansi_removes_csi_and_osc() {

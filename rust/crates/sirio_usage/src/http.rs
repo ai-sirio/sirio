@@ -54,6 +54,7 @@ fn request(
 ) -> Result<HttpResponse, HttpError> {
     let mut command = Command::new("curl");
     command
+        .current_dir(crate::probe_working_directory())
         .arg("--silent")
         .arg("--show-error")
         .arg("--max-time")

@@ -90,6 +90,14 @@ pub(crate) fn user_home_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Working directory for helper processes used by usage probes. It must not
+/// inherit the app's launch directory: LaunchServices commonly starts Sirio
+/// in `/`, and a CLI launched there may inspect the whole machine. The
+/// temporary directory is outside the user's protected home folders.
+pub(crate) fn probe_working_directory() -> std::path::PathBuf {
+    std::env::temp_dir()
+}
+
 /// The provider identity, matching the Swift `UsageProvider` ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UsageProvider {

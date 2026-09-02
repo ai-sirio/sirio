@@ -3562,11 +3562,8 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         .unwrap_or_else(|| working_directory.to_string_lossy().into_owned());
     let (project, catalog_branch, is_primary) =
         catalog_entry.unwrap_or((fallback_project, String::new(), false));
-    let branch = current_branch(working_directory)
-        .ok()
-        .flatten()
+    let branch = read_head_label(working_directory)
         .or_else(|| (is_primary && !catalog_branch.is_empty()).then_some(catalog_branch.clone()))
-        .or_else(|| short_head(working_directory))
         .or_else(|| (!catalog_branch.is_empty()).then_some(catalog_branch))
         .unwrap_or_else(|| if is_primary { "main" } else { "HEAD" }.to_string());
 
@@ -3575,19 +3572,6 @@ fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> Workt
         path: display_path(working_directory),
         activity_label: format!("{project}/{branch}"),
     }
-}
-
-/// Keeps the sidebar's detached-HEAD convention when the session catalog is
-/// unavailable or stale: a short commit, then the historical primary fallback.
-fn short_head(path: &Path) -> Option<String> {
-    Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(path)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|commit| !commit.is_empty())
 }
 
 #[derive(Clone, Debug)]
