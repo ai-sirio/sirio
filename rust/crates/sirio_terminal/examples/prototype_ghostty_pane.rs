@@ -61,7 +61,7 @@ fn trace(step: &str) {
 // ===========================================================================
 mod pane {
     use std::io::{Read, Write};
-    use std::sync::mpsc::{Receiver, TryRecvError, channel};
+    use std::sync::mpsc::{Receiver, channel};
 
     use libghostty_vt::{
         RenderState, Terminal, TerminalOptions,
@@ -181,6 +181,7 @@ mod pane {
 
         /// Feed bytes straight to the parser, bypassing the pty.
         /// Same entry point real output takes (`pump` calls `vt_write`).
+        #[cfg(test)]
         pub fn feed_vt(&mut self, bytes: &[u8]) {
             self.terminal.vt_write(bytes);
         }
@@ -188,6 +189,7 @@ mod pane {
         /// Test-only: like `frame`, but keeps the raw per-cell `Style`, so
         /// measurements can see attributes `Run` flattens away (faint,
         /// invisible, the five underline styles, colour kinds).
+        #[cfg(test)]
         pub fn raw_cells(
             &mut self,
         ) -> anyhow::Result<Vec<Vec<(String, libghostty_vt::style::Style)>>> {
@@ -219,15 +221,10 @@ mod pane {
         /// thread and break GPUI's deterministic test scheduler.
         pub fn pump(&mut self) -> bool {
             let mut got = false;
-            loop {
-                match self.bytes_rx.try_recv() {
-                    Ok(bytes) => {
-                        self.bytes_seen += bytes.len();
-                        self.terminal.vt_write(&bytes);
-                        got = true;
-                    }
-                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                }
+            while let Ok(bytes) = self.bytes_rx.try_recv() {
+                self.bytes_seen += bytes.len();
+                self.terminal.vt_write(&bytes);
+                got = true;
             }
             // vt_write fires on_pty_write synchronously, so the replies owed
             // to the host are flushed after parsing, not before.

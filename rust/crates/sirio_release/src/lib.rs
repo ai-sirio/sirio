@@ -159,7 +159,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer as _, SigningKey, Verifier as _};
+    use ed25519_dalek::{Signer as _, SigningKey};
     use rand_core::OsRng;
 
     const FIXTURE: &[u8] = b"sirio release artifact bytes";

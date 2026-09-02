@@ -142,6 +142,7 @@ pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
 /// arguments, returns the launch outcome. [`apply`] uses [`real_launch`].
 /// The lifetime parameter keeps the trait object bound to the caller's
 /// region (a bare `dyn` in an alias would default to `'static`).
+#[cfg_attr(not(windows), allow(dead_code))] // referenced by Windows-only applying code and cross-platform tests
 type Launcher<'a> = dyn Fn(&Path, &[&str]) -> Result<(), String> + 'a;
 
 /// The real launcher: spawn the staged installer, detached, and let it run.
