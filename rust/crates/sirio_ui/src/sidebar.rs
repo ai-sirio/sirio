@@ -21,8 +21,8 @@ use bezel::ui::popover::{self, Popup};
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, img,
-    prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, StyleRefinement,
+    Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory};
 use sirio_project::{TabKind, display_absolute_path, display_path};
@@ -519,6 +519,70 @@ pub struct Sidebar {
     /// reason: a view cannot measure its own container, and reading the last
     /// drawn frame would lag a frame behind every drag.
     panel_width: f32,
+    /// One view per visible row, keyed by row id, so each row is a cached
+    /// subtree of its own: the spinner lease of a running worktree notifies
+    /// only that row's view, and the sidebar's own layout becomes a list of
+    /// fixed-height leaves gpui replays. Pruned to the visible rows on every
+    /// render.
+    row_views: std::collections::HashMap<usize, gpui::Entity<RowView>>,
+    /// Whether rows are mounted through `Entity::cached`. On in the app; the
+    /// host turns it off for drawn tests, whose `debug_bounds` probes are not
+    /// carried through a replayed subtree. Only pays off when the host mounts
+    /// the sidebar itself *uncached*: gpui re-renders a cached view's whole
+    /// subtree with `window.refreshing` set, so a cached sidebar — dirty on
+    /// every spinner frame as the spinner's ancestor — would drag every row
+    /// along with it.
+    cache_rows: bool,
+}
+
+/// What one row renders from — a copy the sidebar pushes in, compared before
+/// it notifies, so an unchanged row stays a replayed subtree.
+#[derive(Clone, PartialEq)]
+struct RowInputs {
+    row: SidebarRow,
+    index: usize,
+    cursor: bool,
+    project_id: Option<String>,
+    project_icon: Option<ProjectIcon>,
+    drag: Option<RowDrag>,
+}
+
+/// One sidebar row as its own view. It owns nothing but its inputs; every
+/// handler still targets the sidebar entity it holds, exactly as the row did
+/// when the sidebar rendered it inline. Its render is where the running
+/// spinner's lease lands, so a running worktree re-renders one row.
+struct RowView {
+    sidebar: gpui::Entity<Sidebar>,
+    inputs: RowInputs,
+    /// How many times gpui asked this row to render. Test-observable only.
+    render_count: u64,
+}
+
+impl Render for RowView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_count = self.render_count.wrapping_add(1);
+        let theme = *Theme::get(cx);
+        let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        let inputs = self.inputs.clone();
+        let row_shape = Sidebar::tree_row(&inputs.row);
+        // Boxed here: the opaque return type of `render_row` captures the
+        // borrow of `bezel_theme`, which ends with this frame's render.
+        Sidebar::render_row(
+            inputs.row,
+            inputs.index,
+            row_shape,
+            inputs.cursor,
+            inputs.project_id,
+            inputs.project_icon,
+            inputs.drag,
+            self.sidebar.clone(),
+            theme,
+            &bezel_theme,
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
 }
 
 impl Sidebar {
@@ -644,6 +708,8 @@ impl Sidebar {
             project_form: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
+            row_views: std::collections::HashMap::new(),
+            cache_rows: !cfg!(test),
         }
     }
 
@@ -743,6 +809,8 @@ impl Sidebar {
             project_form: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
+            row_views: std::collections::HashMap::new(),
+            cache_rows: !cfg!(test),
         }
     }
 
@@ -1786,6 +1854,29 @@ impl Sidebar {
 
     /// The structural row handed to bezel. Sirio keeps the data and content;
     /// bezel owns branch/leaf identity, indentation, disclosure and chrome.
+    /// Whether rows are mounted as cached views. The host turns this off for
+    /// drawn tests (see the field's doc); the app leaves it on.
+    pub fn set_cache_rows(&mut self, cache: bool) {
+        self.cache_rows = cache;
+    }
+
+    /// `(row id, kind, render count)` for every row view alive. Test-only:
+    /// it lets the host prove that a spinner frame re-renders the running
+    /// row and replays the others.
+    #[doc(hidden)]
+    pub fn row_render_counts(&self, cx: &App) -> Vec<(usize, RowKind, u64)> {
+        let mut counts = self
+            .row_views
+            .iter()
+            .map(|(id, view)| {
+                let view = view.read(cx);
+                (*id, view.inputs.row.kind, view.render_count)
+            })
+            .collect::<Vec<_>>();
+        counts.sort_by_key(|(id, _, _)| *id);
+        counts
+    }
+
     fn tree_row(row: &SidebarRow) -> tree::Row {
         match row.kind {
             RowKind::Project => tree::Row::branch(0, row.expanded),
@@ -3472,7 +3563,7 @@ impl Sidebar {
         theme: Theme,
         bezel_theme: &bezel::theme::Theme,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> impl IntoElement {
         let row_id = row.id;
         let selected = row.selected;
@@ -3910,7 +4001,6 @@ impl Render for Sidebar {
         if cx.try_global::<bezel::theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let rows = self.visible_rows();
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
@@ -3977,33 +4067,55 @@ impl Render for Sidebar {
         let reorder_drop_entity = entity.clone();
         let panel_width = self.panel_width;
         let tree_cursor = self.tree_cursor.min(rows.len().saturating_sub(1));
-        let rendered_rows = rows
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let project_id = project_ids.get(&row.id).cloned();
-                let project_icon = project_id
-                    .as_ref()
-                    .and_then(|id| project_identities.get(id).cloned());
-                let drag = row_drags.get(&row.id).copied();
-                let row_shape = Self::tree_row(&row);
-                Self::render_row(
-                    row,
-                    index,
-                    row_shape,
-                    index == tree_cursor,
-                    project_id,
-                    project_icon,
-                    drag,
-                    entity.clone(),
-                    theme,
-                    &bezel_theme,
-                    window,
-                    cx,
-                )
-                .into_any_element()
-            })
-            .collect::<Vec<_>>();
+        // Each row is its own view (see `RowView`): push this render's inputs
+        // in, notify only on change, and mount it cached at the height the
+        // row will take, so a still row is replayed rather than laid out
+        // again. Views of rows that are no longer visible are dropped.
+        let cache_rows = self.cache_rows;
+        let mut row_views = std::mem::take(&mut self.row_views);
+        let mut next_views = std::collections::HashMap::with_capacity(rows.len());
+        let mut rendered_rows = Vec::with_capacity(rows.len());
+        for (index, row) in rows.into_iter().enumerate() {
+            let project_id = project_ids.get(&row.id).cloned();
+            let project_icon = project_id
+                .as_ref()
+                .and_then(|id| project_identities.get(id).cloned());
+            let inputs = RowInputs {
+                drag: row_drags.get(&row.id).copied(),
+                cursor: index == tree_cursor,
+                index,
+                project_id,
+                project_icon,
+                row,
+            };
+            let row_id = inputs.row.id;
+            let row_height = Self::row_min_height(&inputs.row);
+            let view = match row_views.remove(&row_id) {
+                Some(view) => {
+                    view.update(cx, |view, cx| {
+                        if view.inputs != inputs {
+                            view.inputs = inputs;
+                            cx.notify();
+                        }
+                    });
+                    view
+                }
+                None => cx.new(|_| RowView {
+                    sidebar: entity.clone(),
+                    inputs,
+                    render_count: 0,
+                }),
+            };
+            rendered_rows.push(if cache_rows {
+                view.clone()
+                    .cached(StyleRefinement::default().w_full().h(px(row_height)))
+                    .into_any_element()
+            } else {
+                view.clone().into_any_element()
+            });
+            next_views.insert(row_id, view);
+        }
+        self.row_views = next_views;
         div()
             .relative()
             .flex()
