@@ -463,10 +463,11 @@ impl Render for StatusBar {
         let codex_dimmed = Self::segment_dimmed(&self.codex);
         let opencode_go_dimmed = Self::segment_dimmed(&self.opencode_go);
         let ollama_cloud_dimmed = Self::segment_dimmed(&self.ollama_cloud);
+        let status_text_color = status_bar_foreground(theme);
         let claude_color = if claude_dimmed {
-            dim(theme.text_faint)
+            dim(status_text_color)
         } else {
-            theme.text_faint
+            status_text_color
         };
         let codex_color = if codex_dimmed {
             dim(theme.text)
@@ -620,7 +621,7 @@ impl Render for StatusBar {
             .items_center()
             .bg(gpui::transparent_black())
             .text_size(theme.typography.caption2)
-            .text_color(theme.text_faint)
+            .text_color(status_text_color)
             .child(left)
             .child(div().flex_1())
             .child(text!(format!("{} · {}", self.data.branch, self.data.path)))
@@ -661,11 +662,31 @@ fn dim(color: Rgba) -> Rgba {
     }
 }
 
+/// Uses Bezel's secondary-text rung for the light status bar, where its
+/// metadata rung is too faint against the light shell surface. Dark keeps the
+/// existing metadata color unchanged.
+fn status_bar_foreground(theme: Theme) -> Rgba {
+    match theme.appearance {
+        sirio_theme::Appearance::Light => theme.text_muted,
+        sirio_theme::Appearance::Dark => theme.text_faint,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
     use sirio_usage::{ProviderUsage, UsageWindow};
+
+    #[test]
+    fn light_status_bar_foreground_uses_muted_text_and_dark_stays_faint() {
+        let light = Theme::light();
+        let dark = Theme::dark();
+
+        assert_eq!(status_bar_foreground(light), light.text_muted);
+        assert_eq!(status_bar_foreground(dark), dark.text_faint);
+        assert_ne!(light.text_muted, light.text_faint);
+    }
 
     /// #199: "not implemented on this platform" is a different fact from
     /// "the provider could not be read", and the bar must not say the
