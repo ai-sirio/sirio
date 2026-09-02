@@ -170,6 +170,7 @@ fn integer_after(text: &str, key: &str) -> Option<u64> {
 pub(crate) fn keychain_cookie(service: &str, account: &str) -> Option<String> {
     let output = Command::new("security")
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+        .current_dir(crate::probe_working_directory())
         .output()
         .ok()?;
     if !output.status.success() {
