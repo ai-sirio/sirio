@@ -12,7 +12,7 @@ use sirio_git::{DirectoryGitStatus, directory_statuses, status};
 use sirio_project::FileIconKey;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::editor::fs_actions;
@@ -98,6 +98,15 @@ impl RightPanel {
     /// render thread. Single-flight on the walk task.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_started || self.walk_task.is_some() {
+            return;
+        }
+        if !self
+            .allowed_roots
+            .iter()
+            .any(|root| normalize_path(root) == normalize_path(&self.repo_root))
+        {
+            self.settled = true;
+            self.refresh_error = Some("worktree is outside the project roots".to_string());
             return;
         }
         self.refresh_started = true;
@@ -895,7 +904,32 @@ fn file_row_glyph(path: &Path, is_dir: bool) -> Option<Icon> {
     Some(file_glyph(path, false))
 }
 
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn path_is_within(root: &Path, path: &Path) -> bool {
+    normalize_path(path).starts_with(normalize_path(root))
+}
+
 fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<FileNode>, String> {
+    if !path_is_within(root, directory) {
+        return Err(format!(
+            "refusing to read {} outside file-tree root {}",
+            directory.display(),
+            root.display()
+        ));
+    }
     let entries = std::fs::read_dir(directory).map_err(|error| error.to_string())?;
     let mut nodes = entries
         .filter_map(Result::ok)
@@ -1802,6 +1836,29 @@ mod tests {
              lowercase sort puts file10 before file2"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_files_tree_does_not_read_a_sibling_outside_its_root() {
+        let fixture = std::env::temp_dir().join(format!(
+            "sirio-files-roots-{}",
+            std::process::id()
+        ));
+        let root = fixture.join("project");
+        let sibling = fixture.join("sibling");
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&root).expect("create project root");
+        std::fs::create_dir_all(&sibling).expect("create sibling");
+        std::fs::write(sibling.join("private.txt"), b"must not be visited")
+            .expect("write sibling fixture");
+
+        let escaped_sibling = root.join("..").join("sibling");
+        for directory in [&sibling, &escaped_sibling] {
+            let error = read_tree(&root, directory, &GitMarkers::default())
+                .expect_err("a tree walk must reject a directory outside its root");
+            assert!(error.contains("outside"), "unexpected error: {error}");
+        }
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 
     /// F-CHG-05: the Files focus path supports arrow selection and Space
