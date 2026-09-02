@@ -61,7 +61,7 @@ pub struct CachedTerminalPane<T> {
 
 #[derive(Debug)]
 pub struct TerminalPaneCache<T> {
-    panes: HashMap<String, CachedTerminalPane<T>>,
+    panes: HashMap<(String, String), CachedTerminalPane<T>>,
     focused_by_worktree: HashMap<String, String>,
 }
 
@@ -79,8 +79,8 @@ impl<T> TerminalPaneCache<T> {
         Self::default()
     }
 
-    /// Inserts by stable terminal content ID, returning a replaced controller
-    /// if the caller accidentally reuses an existing content ID.
+    /// Inserts by worktree and stable terminal content ID, returning a
+    /// replaced controller only when that exact pane is already cached.
     pub fn insert(
         &mut self,
         worktree_id: impl Into<String>,
@@ -88,12 +88,13 @@ impl<T> TerminalPaneCache<T> {
         content_id: impl Into<String>,
         controller: T,
     ) -> Option<T> {
+        let worktree_id = worktree_id.into();
         let content_id = content_id.into();
         self.panes
             .insert(
-                content_id.clone(),
+                (worktree_id.clone(), content_id.clone()),
                 CachedTerminalPane {
-                    worktree_id: worktree_id.into(),
+                    worktree_id,
                     pane_id: pane_id.into(),
                     content_id,
                     controller,
@@ -103,26 +104,69 @@ impl<T> TerminalPaneCache<T> {
     }
 
     pub fn get(&self, content_id: &str) -> Option<&CachedTerminalPane<T>> {
-        self.panes.get(content_id)
+        self.panes
+            .values()
+            .find(|pane| pane.content_id == content_id)
     }
 
     pub fn get_mut(&mut self, content_id: &str) -> Option<&mut CachedTerminalPane<T>> {
-        self.panes.get_mut(content_id)
+        self.panes
+            .values_mut()
+            .find(|pane| pane.content_id == content_id)
+    }
+
+    pub fn get_in_worktree(
+        &self,
+        worktree_id: &str,
+        content_id: &str,
+    ) -> Option<&CachedTerminalPane<T>> {
+        self.panes
+            .get(&(worktree_id.to_owned(), content_id.to_owned()))
+    }
+
+    pub fn get_mut_in_worktree(
+        &mut self,
+        worktree_id: &str,
+        content_id: &str,
+    ) -> Option<&mut CachedTerminalPane<T>> {
+        self.panes
+            .get_mut(&(worktree_id.to_owned(), content_id.to_owned()))
     }
 
     pub fn remove(&mut self, content_id: &str) -> Option<CachedTerminalPane<T>> {
-        let removed = self.panes.remove(content_id);
-        if removed.as_ref().is_some_and(|pane| {
-            self.focused_by_worktree
+        let key = self
+            .panes
+            .iter()
+            .find_map(|(key, pane)| (pane.content_id == content_id).then(|| key.clone()))?;
+        self.remove_by_key(&key)
+    }
+
+    pub fn remove_in_worktree(
+        &mut self,
+        worktree_id: &str,
+        content_id: &str,
+    ) -> Option<CachedTerminalPane<T>> {
+        self.remove_by_key(&(worktree_id.to_owned(), content_id.to_owned()))
+    }
+
+    pub fn remove_worktree(&mut self, worktree_id: &str) {
+        self.panes
+            .retain(|_, pane| pane.worktree_id != worktree_id);
+        self.focused_by_worktree.remove(worktree_id);
+    }
+
+    fn remove_by_key(
+        &mut self,
+        key: &(String, String),
+    ) -> Option<CachedTerminalPane<T>> {
+        let removed = self.panes.remove(key);
+        if let Some(pane) = removed.as_ref()
+            && self
+                .focused_by_worktree
                 .get(&pane.worktree_id)
-                .is_some_and(|focused| focused == content_id)
-        }) {
-            self.focused_by_worktree.remove(
-                &removed
-                    .as_ref()
-                    .expect("checked that a pane was removed")
-                    .worktree_id,
-            );
+                .is_some_and(|focused| focused == &pane.content_id)
+        {
+            self.focused_by_worktree.remove(&pane.worktree_id);
         }
         removed
     }
@@ -134,22 +178,15 @@ impl<T> TerminalPaneCache<T> {
         worktree_id: &str,
         new_pane_id: impl Into<String>,
     ) -> bool {
-        let Some(pane) = self.panes.get_mut(content_id) else {
+        let Some(pane) = self.get_mut_in_worktree(worktree_id, content_id) else {
             return false;
         };
-        if pane.worktree_id != worktree_id {
-            return false;
-        }
         pane.pane_id = new_pane_id.into();
         true
     }
 
     pub fn focus(&mut self, worktree_id: &str, content_id: &str) -> bool {
-        if self
-            .panes
-            .get(content_id)
-            .is_some_and(|pane| pane.worktree_id == worktree_id)
-        {
+        if self.get_in_worktree(worktree_id, content_id).is_some() {
             self.focused_by_worktree
                 .insert(worktree_id.to_owned(), content_id.to_owned());
             true
@@ -166,7 +203,7 @@ impl<T> TerminalPaneCache<T> {
 
     pub fn restore_focus(&self, worktree_id: &str) -> Option<&CachedTerminalPane<T>> {
         self.focused_content_id(worktree_id)
-            .and_then(|content_id| self.panes.get(content_id))
+            .and_then(|content_id| self.get_in_worktree(worktree_id, content_id))
     }
 
     pub fn len(&self) -> usize {
@@ -213,5 +250,47 @@ mod tests {
         cache.insert("worktree-a", "pane-a", "terminal-a", ());
         assert!(!cache.move_within_worktree("terminal-a", "worktree-b", "pane-b"));
         assert_eq!(cache.get("terminal-a").unwrap().pane_id, "pane-a");
+    }
+
+    #[test]
+    fn cache_keeps_same_content_ids_isolated_between_worktrees() {
+        let mut cache = TerminalPaneCache::new();
+        cache.insert("worktree-a", "pane-a", "terminal-0", "pty-a");
+        cache.insert("worktree-b", "pane-b", "terminal-0", "pty-b");
+
+        assert_eq!(
+            cache
+                .get_in_worktree("worktree-a", "terminal-0")
+                .unwrap()
+                .controller,
+            "pty-a"
+        );
+        assert_eq!(
+            cache
+                .get_in_worktree("worktree-b", "terminal-0")
+                .unwrap()
+                .controller,
+            "pty-b"
+        );
+    }
+
+    #[test]
+    fn cache_removes_every_controller_for_a_worktree() {
+        let mut cache = TerminalPaneCache::new();
+        cache.insert("worktree-a", "pane-a", "terminal-a", "pty-a");
+        cache.insert("worktree-b", "pane-b", "terminal-b", "pty-b");
+        cache.focus("worktree-a", "terminal-a");
+
+        cache.remove_worktree("worktree-a");
+
+        assert!(cache.get_in_worktree("worktree-a", "terminal-a").is_none());
+        assert!(cache.restore_focus("worktree-a").is_none());
+        assert_eq!(
+            cache
+                .get_in_worktree("worktree-b", "terminal-b")
+                .unwrap()
+                .controller,
+            "pty-b"
+        );
     }
 }

@@ -3963,8 +3963,9 @@ struct SirioWorkspace {
     /// so it covers every pane-group move) and `select_pane` (which also
     /// records focus) -- moving the *entity* itself already happens by
     /// construction (`OpenTab`/`PaneNode` own it by value, never rebuilt on
-    /// a move), so this is the seam's own durable record of that placement,
-    /// not what makes the PTY/scrollback survive.
+    /// a move). On a worktree switch the cache also owns the entity while it
+    /// is absent from `self.tabs`, which is what keeps its PTY and scrollback
+    /// alive for the next selection.
     terminal_pane_cache: TerminalPaneCache<Entity<TerminalView>>,
 }
 
@@ -5425,10 +5426,21 @@ impl SirioWorkspace {
     }
 
     fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
+        Self::bind_terminal_tabs_with_reused(tabs, None, cx);
+    }
+
+    fn bind_terminal_tabs_with_reused(
+        tabs: &[OpenTab],
+        reused_terminal_panes: Option<&HashSet<usize>>,
+        cx: &mut Context<Self>,
+    ) {
         for tab in tabs {
             let tab_id = tab.id;
             tab.panes.for_each(&mut |pane_id, content| {
-                if let TabContent::Terminal { view } = content {
+                if let TabContent::Terminal { view } = content
+                    && !reused_terminal_panes
+                        .is_some_and(|reused| reused.contains(&pane_id))
+                {
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
             });
@@ -6720,37 +6732,46 @@ impl SirioWorkspace {
         } else {
             0
         };
-        let mut state = self
-            .control_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let open_ids: Vec<String> = state
-            .workspaces
-            .iter()
-            .filter(|workspace| workspace.mounted)
-            .map(|workspace| workspace.path.clone())
-            .collect();
-        let selected_id = selected_path.to_string_lossy().into_owned();
-        let status_of = |id: &String| -> Option<AgentStatus> {
-            let pane_ids: Vec<String> = self
-                .panes
-                .list_for(Path::new(id))
-                .ok()?
-                .into_iter()
-                .map(|pane| pane.id)
+        let evicted = {
+            let mut state = self
+                .control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let open_ids: Vec<String> = state
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.mounted)
+                .map(|workspace| workspace.path.clone())
                 .collect();
-            let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
-            self.activity.status_for_panes(&refs)
+            let selected_id = selected_path.to_string_lossy().into_owned();
+            let status_of = |id: &String| -> Option<AgentStatus> {
+                let pane_ids: Vec<String> = self
+                    .panes
+                    .list_for(Path::new(id))
+                    .ok()?
+                    .into_iter()
+                    .map(|pane| pane.id)
+                    .collect();
+                let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
+                self.activity.status_for_panes(&refs)
+            };
+            let evicted = WorktreeMountPolicy::ids_to_evict(
+                &open_ids,
+                Some(&selected_id),
+                cap,
+                status_of,
+                |_id| false,
+            );
+            for id in &evicted {
+                state.close_worktree(Path::new(id));
+            }
+            evicted
         };
-        let evicted = WorktreeMountPolicy::ids_to_evict(
-            &open_ids,
-            Some(&selected_id),
-            cap,
-            status_of,
-            |_id| false,
-        );
         for id in evicted {
-            state.close_worktree(Path::new(&id));
+            // An evicted worktree is no longer mounted, so release the strong
+            // entity references here. TerminalView::drop then shuts down its
+            // PTY instead of leaving a shell behind in the cache.
+            self.terminal_pane_cache.remove_worktree(&id);
         }
     }
 
@@ -6788,6 +6809,12 @@ impl SirioWorkspace {
             .select_worktree(&selected_path)
         {
             return Err(format!("unknown worktree: {}", selected_path.display()));
+        }
+        if !paths_name_the_same_document(&selected_path, &old_path) {
+            let outgoing_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
+            for tab_id in outgoing_tab_ids {
+                self.track_terminal_panes_in_cache(tab_id);
+            }
         }
         self.evict_over_capacity_worktrees(&selected_path, cx);
 
@@ -6846,16 +6873,21 @@ impl SirioWorkspace {
                 } else {
                     BTreeMap::new()
                 };
-                let (new_tabs, active) = restore_tabs(
+                let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
                     &restored,
                     &selected_path,
                     window,
                     &mut self.activity,
                     &saved_session_refs,
+                    Some(&self.terminal_pane_cache),
+                    cx,
+                );
+                Self::bind_terminal_tabs_with_reused(
+                    &new_tabs,
+                    Some(&reused_terminal_panes),
                     cx,
                 );
                 Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
-                Self::bind_terminal_tabs(&new_tabs, cx);
                 Self::bind_file_tabs(&new_tabs, cx);
                 for tab in &new_tabs {
                     tab.panes.for_each(&mut |_, content| {
@@ -6865,6 +6897,10 @@ impl SirioWorkspace {
                     });
                 }
                 self.tabs = new_tabs;
+                let incoming_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
+                for tab_id in incoming_tab_ids {
+                    self.track_terminal_panes_in_cache_for_worktree(tab_id, &selected_path);
+                }
                 self.next_tab_id = self.tabs.len();
                 self.next_pane_id = next_pane_id(&self.tabs);
                 self.active_tab = active.min(self.tabs.len().saturating_sub(1));
@@ -7177,6 +7213,8 @@ impl SirioWorkspace {
                 path.display()
             );
         }
+        let worktree_id = path.to_string_lossy().into_owned();
+        self.terminal_pane_cache.remove_worktree(&worktree_id);
         if was_current {
             for index in (0..self.tabs.len()).rev() {
                 self.close_tab(index, None, cx);
@@ -7919,11 +7957,20 @@ impl SirioWorkspace {
     /// F-TERM-PTY-08: mirrors every terminal leaf in `tab_id`'s pane tree
     /// into `terminal_pane_cache`, addressed by the same `terminal-{pane_id}`
     /// content id `bind_terminal` stamps into each pane's `TerminalIdentity`.
-    /// Uses `move_within_worktree` when the content id is already tracked
-    /// (the normal case for a real move) and falls back to `insert` the
-    /// first time a given pane is seen -- exercising both halves of the
-    /// cache's own contract rather than only ever inserting.
+    /// Uses `move_within_worktree` when the same entity is already tracked
+    /// (the normal case for a real move); a new or stale entity replaces the
+    /// old entry so a legitimate re-creation does not leave the old PTY
+    /// rooted in the cache.
     fn track_terminal_panes_in_cache(&mut self, tab_id: usize) {
+        let worktree_path = self.working_directory.clone();
+        self.track_terminal_panes_in_cache_for_worktree(tab_id, &worktree_path);
+    }
+
+    fn track_terminal_panes_in_cache_for_worktree(
+        &mut self,
+        tab_id: usize,
+        worktree_path: &Path,
+    ) {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
@@ -7936,7 +7983,7 @@ impl SirioWorkspace {
         if panes.is_empty() {
             return;
         }
-        let worktree_id = self.working_directory.to_string_lossy().into_owned();
+        let worktree_id = worktree_path.to_string_lossy().into_owned();
         for (pane_id, view) in panes {
             let content_id = format!("terminal-{pane_id}");
             let role_str = match tab.kind.pane_role() {
@@ -7944,11 +7991,17 @@ impl SirioWorkspace {
                 PaneRole::Secondary => "secondary",
             };
             let placement = format!("{role_str}-pane-{pane_id}");
-            if !self.terminal_pane_cache.move_within_worktree(
-                &content_id,
-                &worktree_id,
-                placement.clone(),
-            ) {
+            let same_view_is_cached = self
+                .terminal_pane_cache
+                .get_in_worktree(&worktree_id, &content_id)
+                .is_some_and(|pane| pane.controller.entity_id() == view.entity_id());
+            if same_view_is_cached {
+                self.terminal_pane_cache.move_within_worktree(
+                    &content_id,
+                    &worktree_id,
+                    placement,
+                );
+            } else {
                 self.terminal_pane_cache
                     .insert(worktree_id.clone(), placement, content_id, view);
             }
@@ -8101,12 +8154,14 @@ impl SirioWorkspace {
         };
 
         let mut terminals = Vec::new();
+        let mut terminal_pane_ids = Vec::new();
         let mut browsers = Vec::new();
         let mut closed_panes = Vec::new();
         self.tabs[index].panes.for_each(&mut |pane_id, content| {
             closed_panes.push(pane_id);
             if let Some(terminal) = content.terminal() {
                 terminals.push(terminal);
+                terminal_pane_ids.push(pane_id);
             }
             if let TabContent::Browser(surface) = content {
                 browsers.push(surface.clone());
@@ -8128,6 +8183,13 @@ impl SirioWorkspace {
             browser.update(cx, |surface, _| surface.close_native());
         }
         self.tabs.remove(index);
+        let worktree_id = self.working_directory.to_string_lossy().into_owned();
+        for pane_id in terminal_pane_ids {
+            self.terminal_pane_cache.remove_in_worktree(
+                &worktree_id,
+                &format!("terminal-{pane_id}"),
+            );
+        }
         // The model is keyed by pane id and `next_pane_id` is `max + 1` of
         // the tabs that remain, so a closed pane's entry would be inherited
         // by the next pane to get its id. Only explicit closes forget: a
@@ -10035,6 +10097,7 @@ impl SirioWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        let worktree_id = self.working_directory.to_string_lossy().into_owned();
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
@@ -10048,6 +10111,10 @@ impl SirioWorkspace {
                 .push(PaneEvent::Close { id: focused_pane });
             if let Some(terminal) = removed.terminal() {
                 terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+                self.terminal_pane_cache.remove_in_worktree(
+                    &worktree_id,
+                    &format!("terminal-{focused_pane}"),
+                );
             }
             if let TabContent::Browser(surface) = &removed {
                 // F-BRW: a browser leaf closed out of a split leaves the tab
@@ -14262,11 +14329,49 @@ fn restored_agent_shell(
 fn restore_tabs(
     restored: &RestoredSession,
     working_directory: &std::path::Path,
-    mut window: Option<&mut Window>,
+    window: Option<&mut Window>,
     activity: &mut AgentActivityModel,
     saved_session_refs: &BTreeMap<String, String>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
+    let (tabs, active, _) = restore_tabs_with_terminal_cache(
+        restored,
+        working_directory,
+        window,
+        activity,
+        saved_session_refs,
+        None,
+        cx,
+    );
+    (tabs, active)
+}
+
+fn cached_terminal_view(
+    terminal_pane_cache: Option<&TerminalPaneCache<Entity<TerminalView>>>,
+    working_directory: &Path,
+    pane_id: usize,
+    cx: &App,
+) -> Option<Entity<TerminalView>> {
+    let worktree_id = working_directory.to_string_lossy();
+    let content_id = format!("terminal-{pane_id}");
+    terminal_pane_cache
+        .and_then(|cache| cache.get_in_worktree(&worktree_id, &content_id))
+        .filter(|pane| pane.controller.read(cx).is_host_mounted())
+        .map(|pane| pane.controller.clone())
+}
+
+/// Restores tabs and optionally reuses live terminal entities from the
+/// mounted-worktree cache. The third return value tells the caller which
+/// terminal panes already carry their workspace subscriptions.
+fn restore_tabs_with_terminal_cache(
+    restored: &RestoredSession,
+    working_directory: &std::path::Path,
+    mut window: Option<&mut Window>,
+    activity: &mut AgentActivityModel,
+    saved_session_refs: &BTreeMap<String, String>,
+    terminal_pane_cache: Option<&TerminalPaneCache<Entity<TerminalView>>>,
+    cx: &mut App,
+) -> (Vec<OpenTab>, usize, HashSet<usize>) {
     // Chat launch sources resolve here from offline facts; the registry
     // document joins once the startup fetch lands on the workspace.
     let launch = AgentLaunchState::for_startup();
@@ -14289,9 +14394,10 @@ fn restore_tabs(
     let worktree_id = session::persisted_worktree_id(working_directory);
     let mut tabs = Vec::new();
     let mut active = 0usize;
+    let mut reused_terminal_panes = HashSet::new();
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
         let id = tabs.len();
-        let tab_state = restored
+        let mut tab_state = restored
             .tab_states
             .get(tab_index)
             .cloned()
@@ -14374,28 +14480,39 @@ fn restore_tabs(
                 let cwd = working_directory.to_path_buf();
                 let pane_key = format!("pane-{pane_id}");
                 let agent_id = stored_adapter_id.map(str::to_owned);
-                let view = cx.new(|cx| {
-                    match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable) {
-                        Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
-                            Ok(view) => view,
-                            Err(error) => TerminalView::failed(
-                                &cwd,
-                                TerminalShell::System,
-                                format!("{error:#}"),
-                                cx,
-                            ),
-                        },
-                        None => match TerminalView::new(&cwd, cx) {
-                            Ok(view) => view,
-                            Err(error) => TerminalView::failed(
-                                &cwd,
-                                TerminalShell::System,
-                                format!("{error:#}"),
-                                cx,
-                            ),
-                        },
-                    }
-                });
+                let view = if let Some(view) = cached_terminal_view(
+                    terminal_pane_cache,
+                    working_directory,
+                    pane_id,
+                    cx,
+                ) {
+                    reused_terminal_panes.insert(pane_id);
+                    view
+                } else {
+                    cx.new(|cx| {
+                        match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable)
+                        {
+                            Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
+                                Ok(view) => view,
+                                Err(error) => TerminalView::failed(
+                                    &cwd,
+                                    TerminalShell::System,
+                                    format!("{error:#}"),
+                                    cx,
+                                ),
+                            },
+                            None => match TerminalView::new(&cwd, cx) {
+                                Ok(view) => view,
+                                Err(error) => TerminalView::failed(
+                                    &cwd,
+                                    TerminalShell::System,
+                                    format!("{error:#}"),
+                                    cx,
+                                ),
+                            },
+                        }
+                    })
+                };
                 TabContent::Terminal { view }
             }
             "diff" => TabContent::Changes(
@@ -14427,34 +14544,62 @@ fn restore_tabs(
                 pane_id,
                 TabContent::Chat(chat),
                 &tab_state.pane_events,
-                |_| TabContent::Terminal {
-                    view: cx.new(|cx| {
-                        TerminalView::new(working_directory, cx).unwrap_or_else(|error| {
-                            TerminalView::failed(
-                                working_directory,
+                |new_id| {
+                    if let Some(view) = cached_terminal_view(
+                        terminal_pane_cache,
+                        working_directory,
+                        new_id,
+                        cx,
+                    ) {
+                        reused_terminal_panes.insert(new_id);
+                        TabContent::Terminal { view }
+                    } else {
+                        TabContent::Terminal {
+                            view: cx.new(|cx| {
+                                TerminalView::new(working_directory, cx).unwrap_or_else(|error| {
+                                    TerminalView::failed(
+                                        working_directory,
+                                        TerminalShell::System,
+                                        format!("{error:#}"),
+                                        cx,
+                                    )
+                                })
+                            }),
+                        }
+                    }
+                },
+            ),
+            content => replay_pane_events(pane_id, content, &tab_state.pane_events, |new_id| {
+                if let Some(view) = cached_terminal_view(
+                    terminal_pane_cache,
+                    working_directory,
+                    new_id,
+                    cx,
+                ) {
+                    reused_terminal_panes.insert(new_id);
+                    TabContent::Terminal { view }
+                } else {
+                    let cwd = working_directory.to_path_buf();
+                    TabContent::Terminal {
+                        view: cx.new(|cx| match TerminalView::new(&cwd, cx) {
+                            Ok(view) => view,
+                            Err(error) => TerminalView::failed(
+                                &cwd,
                                 TerminalShell::System,
                                 format!("{error:#}"),
                                 cx,
-                            )
-                        })
-                    }),
-                },
-            ),
-            content => replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
-                let cwd = working_directory.to_path_buf();
-                TabContent::Terminal {
-                    view: cx.new(|cx| match TerminalView::new(&cwd, cx) {
-                        Ok(view) => view,
-                        Err(error) => TerminalView::failed(
-                            &cwd,
-                            TerminalShell::System,
-                            format!("{error:#}"),
-                            cx,
-                        ),
-                    }),
+                            ),
+                        }),
+                    }
                 }
             }),
         };
+        for pane_id in &reused_terminal_panes {
+            // The live entity already owns this history. Replaying the
+            // outgoing snapshot into it would duplicate every line when the
+            // worktree is selected again.
+            tab_state.scrollback.remove(pane_id);
+        }
         tabs.push(OpenTab {
             id,
             persistence_id: tab.id.clone(),
@@ -14477,7 +14622,7 @@ fn restore_tabs(
             active = id;
         }
     }
-    (tabs, active)
+    (tabs, active, reused_terminal_panes)
 }
 
 /// #125 (spec R6.5): the address a restored Browser tab opens at.
@@ -17167,21 +17312,28 @@ mod tests {
         cx: &mut Context<SirioWorkspace>,
         root: &Path,
     ) -> SirioWorkspace {
+        worktree_urgency_test_workspace_with_shell(
+            cx,
+            root,
+            TerminalShell::WithArguments {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 60".into()],
+            },
+        )
+    }
+
+    fn worktree_urgency_test_workspace_with_shell(
+        cx: &mut Context<SirioWorkspace>,
+        root: &Path,
+        shell: TerminalShell,
+    ) -> SirioWorkspace {
         let worktrees: Vec<PathBuf> = (0..3)
             .map(|index| root.join(format!("wt-{index}")))
             .collect();
         // A live shell, not `TerminalView::failed`: a failed pane reports
         // `Error`, which outranks every status these tests try to float.
         let terminal = cx.new(|cx| {
-            TerminalView::with_shell(
-                &worktrees[0],
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
-                cx,
-            )
-            .expect("spawn urgency test terminal")
+            TerminalView::with_shell(&worktrees[0], shell, cx).expect("spawn urgency test terminal")
         });
         let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
             id: "urgency-project".into(),
@@ -17404,6 +17556,130 @@ mod tests {
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-TERM-PTY-08: a worktree switch must retain the materialized terminal
+    /// entity, so returning to the worktree does not create a second PTY.
+    #[gpui::test]
+    async fn reselecting_a_worktree_reuses_the_mounted_terminal_handle(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("reselect-terminal");
+        let root_for_window = root.clone();
+        let window = cx.add_window(|_window, cx| {
+            worktree_urgency_test_workspace_with_shell(
+                cx,
+                &root_for_window,
+                TerminalShell::WithArguments {
+                    program: "/bin/sh".into(),
+                    // `exec` makes the command the PTY root, with no child
+                    // process for the switch's safety gate to classify as a
+                    // foreground command.
+                    args: vec!["-c".into(), "printf 'marker\\n'; exec sleep 60".into()],
+                },
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let worktree_a = worktrees[0].clone();
+        let worktree_b = worktrees[1].clone();
+        workspace.update(&mut cx.cx, |workspace, _cx| {
+            // B has its own persisted surface, so switching to it genuinely
+            // replaces the visible tab list before the switch back.
+            workspace.session.save_layout_now(&SessionLayout {
+                working_directory: worktree_b.clone(),
+                branch: "second".into(),
+                tabs: vec![SessionTab {
+                    id: "second-worktree-tab".into(),
+                    title: "Second worktree".into(),
+                    kind: "diff".into(),
+                    agent_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState::default()],
+            });
+        });
+        let original_terminal = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut terminal = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    terminal = Some(view.clone());
+                }
+            });
+            terminal.expect("the fixture terminal")
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let (original_pid, original_scrollback) = loop {
+            cx.run_until_parked();
+            let state = original_terminal.read_with(&cx.cx, |terminal, _| {
+                (
+                    terminal.shell_pid(),
+                    String::from_utf8_lossy(&terminal.snapshot().scrollback).into_owned(),
+                )
+            });
+            if let (Some(pid), true) = (state.0, state.1.contains("marker")) {
+                break (pid, state.1);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fixture shell never mounted"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let original_entity_id = original_terminal.entity_id();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktree_b.clone(), None, cx)
+                .expect("select the second worktree");
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktree_a.clone(), None, cx)
+                .expect("reselect the first worktree");
+        });
+
+        let restored_terminal = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut terminal = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    terminal = Some(view.clone());
+                }
+            });
+            terminal.expect("the mounted terminal is restored")
+        });
+        assert_eq!(
+            restored_terminal.entity_id(),
+            original_entity_id,
+            "reselecting a mounted worktree must reuse its terminal entity"
+        );
+        assert_eq!(
+            restored_terminal
+                .read_with(&cx.cx, |terminal, _| terminal.shell_pid())
+                .expect("the restored terminal shell is running"),
+            original_pid,
+            "reselecting a mounted worktree must not spawn a second shell"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(
+                &restored_terminal
+                    .read_with(&cx.cx, |terminal, _| terminal.snapshot().scrollback)
+            ),
+            original_scrollback,
+            "reselecting a mounted worktree must preserve terminal scrollback"
+        );
+
+        restored_terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
         let _ = std::fs::remove_dir_all(&root);
     }
 
