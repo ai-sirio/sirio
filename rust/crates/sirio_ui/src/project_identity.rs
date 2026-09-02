@@ -921,13 +921,14 @@ impl ProjectIconPicker {
                                 query_focus_entity.update(cx, |picker, cx| {
                                     picker.emoji_grid_focus.focus(window, cx);
                                 });
-                            })
+                            }))
                             .on_key_down(move |event, window, cx| {
                                 query_key_entity.update(cx, |picker, cx| {
                                     picker.on_emoji_grid_query_key(event, window, cx);
                                 });
                             })
-                            .child(if self.emoji_grid_query.is_empty() {
+                            .overflow_hidden()
+                            .child(caret::field_value(if self.emoji_grid_query.is_empty() {
                                 "Search emoji…".to_owned()
                             } else {
                                 self.emoji_grid_query.clone()
@@ -1114,7 +1115,13 @@ impl ProjectIconPicker {
             .on_key_down(move |event, window, cx| {
                 key_entity.update(cx, |picker, cx| on_key(picker, event, window, cx));
             })
-            .child(text!(id = format!("project-icon-{id_prefix}-draft"), shown))
+            // A URL or path easily outgrows 220px: clip from the start so
+            // the tail being typed stays in view (`caret::field_value`).
+            .overflow_hidden()
+            .child(caret::field_value(text!(
+                id = format!("project-icon-{id_prefix}-draft"),
+                shown
+            )))
             .child({
                 let caret_id = format!("project-icon-{id_prefix}-caret");
                 div()
