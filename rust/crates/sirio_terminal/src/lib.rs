@@ -2401,6 +2401,10 @@ pub struct TerminalView {
     /// computed locally — `sirio_terminal` cannot depend on `sirio`'s tab
     /// machinery.
     sole_tab_in_group: bool,
+    /// How many times gpui asked this view to render. Test-observable only:
+    /// the host caches pane views, and a still terminal must not render at
+    /// all while a spinner elsewhere keeps the window drawing.
+    render_count: u64,
     /// F-TERM-PTY-07: this content's own [`TerminalSurfaceHost`], keyed by
     /// the same `terminal_id` its [`TerminalIdentity`] carries. `generation`
     /// bumps on every real respawn after the process is gone (a user
@@ -2555,6 +2559,7 @@ impl TerminalView {
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
+            render_count: 0,
             host,
         })
     }
@@ -2582,6 +2587,7 @@ impl TerminalView {
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
+            render_count: 0,
             host,
         }
     }
@@ -2631,6 +2637,7 @@ impl TerminalView {
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
+            render_count: 0,
             host,
         }
     }
@@ -4157,8 +4164,19 @@ impl Element for TerminalElement {
     }
 }
 
+impl TerminalView {
+    /// How many times this view has rendered. Only a test should read it:
+    /// it exists so the host can prove a cached, still pane is reused across
+    /// frames rather than re-rendered.
+    #[doc(hidden)]
+    pub fn render_count(&self) -> u64 {
+        self.render_count
+    }
+}
+
 impl gpui::Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        self.render_count = self.render_count.wrapping_add(1);
         self.ensure_started(cx);
         let theme = *Theme::get(cx);
         let palette = TerminalPalette::from_theme(&theme);

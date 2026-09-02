@@ -31,10 +31,8 @@ use sirio_theme::Theme;
 #[ignore = "diagnostic: wall-clock measurement of a still pane's per-frame draw cost"]
 async fn still_pane_frame_cost(cx: &mut gpui::TestAppContext) {
     cx.set_global(Theme::light());
-    let working_directory = std::env::temp_dir().join(format!(
-        "sirio-terminal-still-frame-{}",
-        std::process::id()
-    ));
+    let working_directory =
+        std::env::temp_dir().join(format!("sirio-terminal-still-frame-{}", std::process::id()));
     std::fs::create_dir_all(&working_directory).expect("create PTY directory");
     let shell = TerminalShell::WithArguments {
         program: "/bin/sh".to_string(),

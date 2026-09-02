@@ -1,9 +1,9 @@
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
     FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, Modifiers,
-    MouseButton, PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, Task,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred, div, point,
-    prelude::*, px, size,
+    MouseButton, PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement,
+    StyleRefinement, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred,
+    div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use sirio_acp::AgentCommand;
@@ -3708,6 +3708,24 @@ fn delegated_terminal_context_action(
     }
 }
 
+/// The layout a cached child view is given: the whole of the slot its
+/// parent already sized for it.
+///
+/// Every child view of the shell is mounted through `Entity::cached` with
+/// this style. gpui then reuses the view's layout, prepaint and paint from
+/// the previous frame until the view (or an entity its render read) is
+/// notified, its bounds or text style change, or the window refreshes
+/// (focus and hover changes do). The 30 fps a mounted spinner drives while
+/// an agent runs therefore re-renders only the view that owns the spinner;
+/// the terminal, the tab strip, the title and status bars and the opposite
+/// panel are replayed. A cached view is laid out from this style rather than
+/// measured from its contents, so it can only be used inside a slot with a
+/// definite size — which is why the content-sized terminal breadcrumb is
+/// not cached.
+fn cached_full() -> StyleRefinement {
+    StyleRefinement::default().size_full()
+}
+
 fn next_pane_id(tabs: &[OpenTab]) -> usize {
     tabs.iter()
         .flat_map(|tab| tab.panes.leaf_ids())
@@ -3861,6 +3879,18 @@ struct SirioWorkspace {
     /// Number of activity reconciliations performed by this workspace.
     /// Test-observable, like `ChangesTab::renders`.
     reconciles: u64,
+    /// How many frames the shell has rendered. Test-observable only: the
+    /// guard for cached child views counts shell frames against a still
+    /// pane's own render count.
+    #[cfg_attr(not(test), allow(dead_code))]
+    frames_rendered: u64,
+    /// Whether child views are mounted through `Entity::cached` (see
+    /// [`cached_full`]). Always on in the app. Off in tests by default only
+    /// because gpui's `debug_bounds` probes are recorded per frame and not
+    /// carried through a replayed subtree, so a drawn test that reads a probe
+    /// after the second frame would find nothing; the one guard that proves
+    /// the caching turns it on for its own workspace.
+    cache_child_views: bool,
     /// Prevents scheduling restored scrollback more than once before the
     /// first frame mounts the terminal entities.
     ///
@@ -4609,6 +4639,8 @@ impl SirioWorkspace {
             activity_dirty: true,
             last_seen_has_worktree: None,
             reconciles: 0,
+            frames_rendered: 0,
+            cache_child_views: !cfg!(test),
             restored_scrollback_scheduled: OnceGate::default(),
             window_active: true,
             browser_origins,
@@ -10151,17 +10183,22 @@ impl SirioWorkspace {
                         .id("pane-surface")
                         .debug_selector(|| "pane-surface".into())
                         .size_full()
-                        .child(chat.clone())
+                        .child(self.child_view(chat.clone()))
                         .into_any_element(),
-                    TabContent::Terminal { view } => {
-                        div().size_full().child(view.clone()).into_any_element()
-                    }
-                    TabContent::File { view } => {
-                        div().size_full().child(view.clone()).into_any_element()
-                    }
-                    TabContent::Changes(view) => {
-                        div().size_full().child(view.clone()).into_any_element()
-                    }
+                    TabContent::Terminal { view } => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    TabContent::File { view } => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    TabContent::Changes(view) => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
+                        .into_any_element(),
+                    // Not cached: the browser positions a native child window
+                    // from its paint, which a replayed frame would skip.
                     TabContent::Browser(view) => {
                         div().size_full().child(view.clone()).into_any_element()
                     }
@@ -11909,6 +11946,15 @@ impl SirioWorkspace {
 
     /// The three columns. Content entities are mounted selectively, while
     /// their owning entities remain in `tabs` above.
+    /// Mounts a child view, cached when [`Self::cache_child_views`] says so.
+    fn child_view<V: Render>(&self, view: Entity<V>) -> AnyElement {
+        if self.cache_child_views {
+            view.cached(cached_full()).into_any_element()
+        } else {
+            view.into_any_element()
+        }
+    }
+
     fn columns(
         &self,
         theme: &Theme,
@@ -12028,7 +12074,7 @@ impl SirioWorkspace {
                     // The one `+`: it routes a new surface to its own half by
                     // what the surface is, so a second copy in the Secondary
                     // strip would be a button that sends you elsewhere.
-                    .child(self.tab_bar.clone())
+                    .child(self.child_view(self.tab_bar.clone()))
                     .child(self.render_open_tabs(
                         PaneRole::Primary,
                         *theme,
@@ -12234,7 +12280,7 @@ impl SirioWorkspace {
                     shell_chrome::panel("shell-left-panel", &self.left_panel_focus, theme)
                     .w(px(left_width.unwrap_or(0.0)))
                     .flex_none()
-                    .child(self.sidebar.clone())
+                    .child(self.child_view(self.sidebar.clone()))
                     .child(
                         self.render_panel_resize_handle(
                             panel_layout::PanelSide::Left,
@@ -12254,7 +12300,7 @@ impl SirioWorkspace {
                     shell_chrome::panel("shell-right-panel", &self.right_panel_focus, theme)
                     .w(px(right_width.unwrap_or(0.0)))
                     .flex_none()
-                    .child(self.right_panel.clone())
+                    .child(self.child_view(self.right_panel.clone()))
                     .child(
                         self.render_panel_resize_handle(
                             panel_layout::PanelSide::Right,
@@ -13719,6 +13765,7 @@ impl Render for SirioWorkspace {
         // `render_open_tab`. Changed evidence arms `sync_activity`; its gate
         // leaves the unchanged case alone.
         self.drain_browser_events(cx);
+        self.frames_rendered = self.frames_rendered.wrapping_add(1);
         self.sync_activity(cx);
         self.sync_empty_pane_prompts(cx);
         self.hide_offscreen_browsers(self.show_settings, cx);
@@ -13746,7 +13793,7 @@ impl Render for SirioWorkspace {
                     div()
                         .h(theme.browser_chrome.bar_height)
                         .w_full()
-                        .child(self.titlebar.clone()),
+                        .child(self.child_view(self.titlebar.clone())),
                 )
                 .child(
                     div()
@@ -13762,14 +13809,14 @@ impl Render for SirioWorkspace {
                                 &self.settings_panel_focus,
                                 &theme,
                             )
-                            .child(self.settings.clone()),
+                            .child(self.child_view(self.settings.clone())),
                         ),
                 )
                 .child(
                     div()
                         .h(px(STATUS_BAR_HEIGHT))
                         .w_full()
-                        .child(self.status_bar.clone()),
+                        .child(self.child_view(self.status_bar.clone())),
                 )
                 .when(self.palette_open, |this| {
                     this.child(self.render_command_palette(theme, cx.entity()))
@@ -18682,6 +18729,75 @@ mod tests {
         cx: &VisualTestContext,
     ) -> Option<AgentStatus> {
         workspace.read_with(&cx.cx, |workspace, _| workspace.activity.status("pane-0"))
+    }
+
+    /// A running agent mounts the sidebar's spinner, whose lease re-renders
+    /// the sidebar at 30 fps. Every child view of the shell is cached, so
+    /// those frames must replay the still terminal pane rather than render
+    /// it: the shell frame count moves, the terminal's render count does not.
+    #[gpui::test]
+    async fn a_spinner_frame_replays_the_still_terminal_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("sirio-cached-pane-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create cached-pane test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn cached-pane test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // Tests mount child views uncached by default (see the field's
+            // doc); this is the one test that needs the app's behaviour.
+            workspace.cache_child_views = true;
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            cx.notify();
+        });
+        // The spinner's lease refuses to claim frames while no window is
+        // active (`pause_when_inactive`), and a test window is never active
+        // unless activated.
+        cx.update(|window, _| window.activate_window());
+        let tick = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(40));
+            cx.run_until_parked();
+        };
+        // Let the spawn, the debounced resize and the first spinner frames
+        // settle so the counts below describe a genuinely still pane.
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let terminal_renders_before =
+            terminal.read_with(&cx.cx, |terminal, _| terminal.render_count());
+        let frames_before = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let frames = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+        assert!(
+            frames >= frames_before + 5,
+            "the spinner lease must keep the shell drawing ({frames_before} -> {frames})"
+        );
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.render_count()),
+            terminal_renders_before,
+            "a still cached pane must be replayed, not re-rendered, by spinner frames"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// Closing a tab must forget its panes in the activity model: the model
