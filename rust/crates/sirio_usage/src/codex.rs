@@ -8,10 +8,11 @@
 //! load the credentials, call the API with a bounded timeout, and if the
 //! access token is rejected (401), refresh it through OpenAI's token
 //! endpoint — writing the refreshed tokens back into the user's auth file,
-//! merged so `codex`'s own fields survive — and retry once. No credentials
-//! or no account → [`UsageReason::LoggedOut`]; anything else that refuses
-//! → [`UsageReason::Error`]; a fetch that outlives its budget → `TimedOut`,
-//! which the reducer keeps as visibly stale.
+//! merged so `codex`'s own fields survive — and retry once. API-key auth has
+//! no ChatGPT usage window and yields [`UsageReason::ApiKey`]; no OAuth
+//! credentials or no account → [`UsageReason::LoggedOut`]; anything else
+//! that refuses → [`UsageReason::Error`]; a fetch that outlives its budget →
+//! `TimedOut`, which the reducer keeps as visibly stale.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -115,6 +116,19 @@ pub fn codex_auth_file_path() -> PathBuf {
 /// only "has the user signed in".
 pub fn codex_has_credentials_at(path: &std::path::Path) -> bool {
     load_credentials_from(path).is_ok()
+}
+
+fn codex_has_api_key_at(path: &Path) -> bool {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+    let json: Value = match serde_json::from_slice(&data) {
+        Ok(json) => json,
+        Err(_) => return false,
+    };
+    json.get("auth_mode").and_then(Value::as_str) == Some("apikey")
+        && json.get("OPENAI_API_KEY").is_some()
 }
 
 fn auth_file_path() -> PathBuf {
@@ -372,6 +386,9 @@ impl CodexUsageFetcher {
     pub fn fetch() -> UsageFetchOutcome {
         let credentials = match load_credentials() {
             Ok(credentials) => credentials,
+            Err(_) if codex_has_api_key_at(&auth_file_path()) => {
+                return UsageFetchOutcome::Unavailable(UsageReason::ApiKey);
+            }
             Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
         };
 
@@ -748,6 +765,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sirio-codex-missing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(load_credentials_from(&dir.join("auth.json")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detects_api_key_auth_file_without_loading_the_key() {
+        let dir = std::env::temp_dir().join(format!("sirio-codex-api-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-only"}"#,
+        )
+        .unwrap();
+
+        assert!(codex_has_api_key_at(&path));
+        assert!(load_credentials_from(&path).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
