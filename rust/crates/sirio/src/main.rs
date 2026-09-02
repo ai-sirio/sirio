@@ -3885,11 +3885,14 @@ struct SirioWorkspace {
     #[cfg_attr(not(test), allow(dead_code))]
     frames_rendered: u64,
     /// Whether child views are mounted through `Entity::cached` (see
-    /// [`cached_full`]). Always on in the app. Off in tests by default only
-    /// because gpui's `debug_bounds` probes are recorded per frame and not
-    /// carried through a replayed subtree, so a drawn test that reads a probe
-    /// after the second frame would find nothing; the one guard that proves
-    /// the caching turns it on for its own workspace.
+    /// [`cached_full`]), and whether the sidebar caches its rows
+    /// (`Sidebar::set_cache_rows`) — the sidebar itself is the one child
+    /// mounted plain, see the mount site in [`Self::columns`]. Always on in
+    /// the app. Off in tests by default only because gpui's `debug_bounds`
+    /// probes are recorded per frame and not carried through a replayed
+    /// subtree, so a drawn test that reads a probe after the second frame
+    /// would find nothing; the guards that prove the caching turn it on for
+    /// their own workspace.
     cache_child_views: bool,
     /// Prevents scheduling restored scrollback more than once before the
     /// first frame mounts the terminal entities.
@@ -4662,6 +4665,12 @@ impl SirioWorkspace {
             empty_pane_prompts: BTreeMap::new(),
             terminal_pane_cache: TerminalPaneCache::new(),
         };
+        // The sidebar mounts its rows as cached views under the same rule as
+        // the shell's own child views (see `cache_child_views`).
+        let cache_child_views = workspace.cache_child_views;
+        workspace.sidebar.update(cx, move |sidebar, _| {
+            sidebar.set_cache_rows(cache_child_views)
+        });
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
         // so intercept this one chord before GPUI dispatches to the focused
@@ -11944,8 +11953,6 @@ impl SirioWorkspace {
         tabs
     }
 
-    /// The three columns. Content entities are mounted selectively, while
-    /// their owning entities remain in `tabs` above.
     /// Mounts a child view, cached when [`Self::cache_child_views`] says so.
     fn child_view<V: Render>(&self, view: Entity<V>) -> AnyElement {
         if self.cache_child_views {
@@ -11955,6 +11962,8 @@ impl SirioWorkspace {
         }
     }
 
+    /// The three columns. Content entities are mounted selectively, while
+    /// their owning entities remain in `tabs` above.
     fn columns(
         &self,
         theme: &Theme,
@@ -12280,7 +12289,16 @@ impl SirioWorkspace {
                     shell_chrome::panel("shell-left-panel", &self.left_panel_focus, theme)
                     .w(px(left_width.unwrap_or(0.0)))
                     .flex_none()
-                    .child(self.child_view(self.sidebar.clone()))
+                    // Deliberately not `child_view`: the sidebar is an
+                    // ancestor of the running-worktree spinner, so gpui
+                    // marks it dirty on every spinner frame anyway, and a
+                    // cached view re-renders its whole subtree with
+                    // `window.refreshing` set — which would force every
+                    // cached row (`Sidebar::set_cache_rows`) to re-render
+                    // instead of replaying. Mounted plain, the sidebar's
+                    // render is cheap (its rows are fixed-height leaves) and
+                    // only the notified row re-renders.
+                    .child(self.sidebar.clone())
                     .child(
                         self.render_panel_resize_handle(
                             panel_layout::PanelSide::Left,
@@ -18794,6 +18812,83 @@ mod tests {
             terminal_renders_before,
             "a still cached pane must be replayed, not re-rendered, by spinner frames"
         );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// With every sidebar row its own cached view, the spinner lease of a
+    /// running worktree must re-render that row alone: the project row (and
+    /// any other row) is replayed while the running row keeps animating.
+    #[gpui::test]
+    async fn a_spinner_frame_replays_the_other_sidebar_rows(cx: &mut TestAppContext) {
+        use sirio_ui::sidebar::RowKind;
+
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("sirio-cached-rows-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create cached-rows test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec sleep 60".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn cached-rows test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.cache_child_views = true;
+            workspace
+                .sidebar
+                .update(cx, |sidebar, _| sidebar.set_cache_rows(true));
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            cx.notify();
+        });
+        cx.update(|window, _| window.activate_window());
+        let tick = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(40));
+            cx.run_until_parked();
+        };
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let counts = |cx: &VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, app| {
+                workspace.sidebar.read(app).row_render_counts(app)
+            })
+        };
+        let before = counts(cx);
+        assert!(
+            before.iter().any(|(_, kind, _)| *kind == RowKind::Worktree)
+                && before.iter().any(|(_, kind, _)| *kind == RowKind::Project),
+            "the fixture draws a project row and a worktree row: {before:?}"
+        );
+
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let after = counts(cx);
+        for ((id, kind, was), (_, _, now)) in before.iter().zip(after.iter()) {
+            match kind {
+                RowKind::Worktree => assert!(
+                    *now >= was + 5,
+                    "the running worktree row {id} must keep rendering with its spinner ({was} -> {now})"
+                ),
+                _ => assert_eq!(
+                    now, was,
+                    "row {id} ({kind:?}) must be replayed, not re-rendered, by spinner frames"
+                ),
+            }
+        }
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
