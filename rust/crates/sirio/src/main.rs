@@ -13892,6 +13892,7 @@ impl Render for SirioWorkspace {
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .w_full()
                     .child(self.columns(&theme, cx.entity(), cx, window)),
             )
@@ -15943,7 +15944,7 @@ mod tests {
     }
     use gpui::{
         FocusHandle, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
-        TestAppContext, VisualTestContext,
+        ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext,
     };
     use sirio_persistence::{AppSettings, AppearanceMode};
     use std::cell::{Cell, RefCell};
@@ -24576,6 +24577,95 @@ mod tests {
         assert_eq!(work.right() - right.right(), px(4.0));
         assert_eq!(left.top() - work.top(), px(4.0));
         assert_eq!(work.bottom() - left.bottom(), px(4.0));
+    }
+
+    #[gpui::test]
+    async fn workspace_keeps_a_long_sidebar_scrollable_and_status_bar_pinned(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.open_window(size(px(1200.0), px(760.0)), |_window, cx| {
+            palette_test_workspace_with_tab_count_and_translucency(cx, 9, false)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let working_directory = workspace.working_directory.clone();
+            let worktrees = (0..20)
+                .map(|index| session::CatalogWorktree {
+                    branch: format!("worktree-{index}"),
+                    path: working_directory.join(format!("worktree-{index}")),
+                    is_primary: index == 0,
+                })
+                .collect();
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "palette-project".into(),
+                    name: "Palette Project".into(),
+                    root_path: working_directory,
+                    is_git: true,
+                    worktrees,
+                }]);
+            workspace.refresh_sidebar(cx);
+        });
+        cx.run_until_parked();
+
+        let frame = cx.debug_bounds("shell-frame").expect("shell frame");
+        let tree = cx
+            .debug_bounds("sidebar-tree")
+            .expect("real sidebar tree viewport");
+        let status_bar = cx
+            .debug_bounds("sirio-status-bar")
+            .expect("status bar remains mounted");
+        let last_row_before = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the long sidebar renders its final row");
+        assert!(
+            status_bar.bottom() <= frame.bottom(),
+            "the status bar must stay inside the workspace frame: status={status_bar:?}, \
+             frame={frame:?}"
+        );
+        assert_eq!(
+            status_bar.size.height,
+            px(STATUS_BAR_HEIGHT),
+            "the status bar keeps its fixed height"
+        );
+        assert!(
+            tree.bottom() <= status_bar.top(),
+            "the sidebar viewport must finish above the pinned status bar: tree={tree:?}, \
+             status={status_bar:?}"
+        );
+
+        let over = point(px(200.0), px(600.0));
+        cx.simulate_mouse_move(over, None, Modifiers::none());
+        cx.simulate_event(ScrollWheelEvent {
+            position: over,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let last_row_after = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the final sidebar row remains mounted after scrolling");
+        assert!(
+            last_row_after.top() < last_row_before.top(),
+            "wheel-down must move the final row in the real workspace: before={last_row_before:?}, \
+             after={last_row_after:?}, tree={tree:?}"
+        );
+        assert!(
+            last_row_after.top() >= tree.top() && last_row_after.bottom() <= tree.bottom(),
+            "the final row must be reachable inside the real sidebar viewport: row={last_row_after:?}, \
+             tree={tree:?}"
+        );
     }
 
     /// The focus-visible border treatment is gone, but the click-reachability
