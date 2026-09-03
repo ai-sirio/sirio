@@ -50,6 +50,18 @@ objc2-foundation = { version = "0.3", features = [
     "objc2-core-foundation",
 ] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# #369 (Ctrl+L residual): `BrowserSurface::focus_address_bar` must steal Win32
+# thread focus from the WebView2 child, not just `SetFocus` it. Same
+# windows-sys version already used by `sirio`/`sirio_control`, so this adds no
+# new external dependency, only a new edge to the locked 0.61 line.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # B-02 browser surface: WebKitGTK in a native X11 child window. GTK/WebKit
 # development headers are an explicit Linux build prerequisite; no custom
