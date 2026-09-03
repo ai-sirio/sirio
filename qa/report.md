@@ -70,8 +70,8 @@ Agents), status bar, `sirioctl`, notifiche.
 | opencode-go (muse-spark-1.3-contributor) | #364 (2: tent. 1 revertito), #366 (1), #368 (1), #370 (1), #372 (1), #374 (1), #376 (1), #369 (2: tent. 3 revertito, tent. 4 verificato) |
 
 Ogni fix è stata squash-mergiata su `main`, ricompilata e ritestata ripetendo gli step della issue
-prima della chiusura; i worktree dei fix chiusi sono stati rimossi (alcune cartelle vuote
-`fix-365/369/371/373/375/377` restano bloccate da un handle esterno e vanno cancellate a mano).
+prima della chiusura; i worktree dei fix chiusi sono stati rimossi (le cartelle vuote `fix-365/371/373/375/377`
+erano tenute aperte dalle shell dei workspace herdr di pi: chiusi i workspace, sono state cancellate).
 
 Deviazione dichiarata: per #369 il tentativo 1 (percorso via click) **non** è stato revertito quando il
 caso residuo (Ctrl+L) è stato riscontrato, perché il revert avrebbe reintrodotto lo stato peggiore
