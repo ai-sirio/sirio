@@ -22,16 +22,16 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 14 | Terminale | Harness: OpenCode | todo | | | |
 | 15 | Terminale | Harness: Pi | ok |  |  | Pi lanciato dal menu contestuale, risponde; stato tab resta "?" per #370 |
 | 16 | Terminale | Harness: Oh-My-Pi | todo | | | |
-| 17 | Activity | Stato running/idle/needs-input per pane (dot nella tab, sidebar, tray) | bug | #370 | opencode-go | Layer A (sirioctl notify) non raggiunge l'app: stato agente sempre "?" |
+| 17 | Activity | Stato running/idle/needs-input per pane (dot nella tab, sidebar, tray) | ok | #370 (chiusa) | opencode-go | sirioctl raggiunge l'app (elevato↔elevato, non-elevato↔non-elevato); stato agente da riverificare con hook |
 | 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | todo | | | |
 | 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | bug | #373 | pi | apertura/preview/live ok; Code clippato in pane stretto; salvataggio riscrive il file |
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | ok |  |  | toggle da titlebar ok; Ctrl+Shift+I non registrato su Windows (vedi note); Files aggiornato live |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
 | 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | ok | #366 (chiusa) | opencode-go | colonna Date corretta post-merge; filtri/ricerca da testare |
-| 23 | Browser | Tab browser embedded | bug | #368 | opencode-go | crash RefCell all'apertura (race con refresh Files); quando apre, naviga e renderizza |
+| 23 | Browser | Tab browser embedded | ok | #368 (chiusa), #369 | opencode-go / pi | crash risolto (2/2 + 2 restore); barra indirizzi in retest |
 | 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | bug | #371 (aperta), #365 (chiusa) | pi | tema Light/Dark/System e font terminale si applicano; font Interface inerte |
 | 25 | Status bar | Indicatori provider usage (Claude/Codex/...), refresh | ok |  |  | indicatori Claude/Codex presenti; tooltip = etichetta (vedi note) |
-| 26 | Controllo | `sirioctl` / control socket | bug | #370 | opencode-go | sirioctl non raggiunge l'app (pipe da HOME, owner check elevato) |
+| 26 | Controllo | `sirioctl` / control socket | ok | #370 (chiusa) | opencode-go | ping/version/list-workspaces ok da PowerShell e Git Bash |
 | 27 | Notifiche/Tray | Notifica fine agente, icona tray | todo | | | |
 | 28 | Persistenza | Riavvio app: tab, worktree, sessioni ripristinate | ok |  |  | progetto, tab e pane secondario ripristinati (2 riavvii) |
 | 29 | Finestra | Resize continuo, minimizza/ripristina, multi-monitor/DPI | todo | | | |
@@ -45,9 +45,9 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #365 registry agenti / PATH | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-365` (herdr w5, rimosso) | 1 | verificata e chiusa (ae816097) |
 | #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6, rimosso) | 1 | verificata e chiusa (bc846cb1) |
 | #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7, rimosso) | 1 | verificata e chiusa (df0ba45f) |
-| #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` (herdr w8) | 1 | in corso |
+| #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` (herdr w8, rimosso) | 1 | verificata e chiusa (6525bc00) |
 | #369 barra indirizzi browser | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 1 | in corso |
-| #370 sirioctl pipe/owner Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-370` (herdr wA) | 1 | in corso |
+| #370 sirioctl pipe/owner Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-370` (herdr wA, rimosso) | 1 | verificata e chiusa (33e96f85) |
 | #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB) | 1 | in corso |
 | #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC) | 1 | in corso |
 | #373 editor Markdown riscrive il file | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-373` | 1 | in corso |
