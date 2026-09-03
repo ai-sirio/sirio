@@ -319,7 +319,7 @@ fn remove_worktree_removes_it_from_porcelain() {
     create_worktree(repo.path(), "feature-x", &path, None).expect("create");
     assert_eq!(porcelain_worktree_count(repo.path()), 2);
 
-    remove_worktree(repo.path(), &path).expect("remove");
+    remove_worktree(repo.path(), &path, "feature-x").expect("remove");
 
     assert_eq!(
         porcelain_worktree_count(repo.path()),
@@ -330,13 +330,64 @@ fn remove_worktree_removes_it_from_porcelain() {
 }
 
 #[test]
+fn remove_worktree_deletes_its_branch() {
+    let repo = make_repo("remove-branch");
+    let path = repo.path().with_extension("wt-remove-branch");
+    create_worktree(repo.path(), "feature-x", &path, None).expect("create");
+
+    remove_worktree(repo.path(), &path, "feature-x").expect("remove");
+
+    let branches = git_stdout(
+        repo.path(),
+        &["branch", "--list", "--format=%(refname:short)"],
+    );
+    assert!(
+        !branches.lines().any(|branch| branch == "feature-x"),
+        "removing the worktree also deletes its branch: {branches}"
+    );
+}
+
+#[test]
+fn remove_worktree_keeps_branch_when_deletion_is_refused() {
+    let repo = make_repo("remove-branch-refused");
+    let path = repo.path().with_extension("wt-remove-branch-refused");
+    create_worktree(repo.path(), "feature-x", &path, None).expect("create");
+
+    // A second worktree normally cannot check out the same branch. Point its
+    // symbolic HEAD at the branch directly so git branch -D has a real
+    // linked-worktree checkout to refuse after the target is removed.
+    let other = repo.path().with_extension("wt-other");
+    let other_arg = other.to_string_lossy().into_owned();
+    git(repo.path(), &["worktree", "add", "--detach", &other_arg]);
+    git(&other, &["symbolic-ref", "HEAD", "refs/heads/feature-x"]);
+
+    remove_worktree(repo.path(), &path, "feature-x").expect("worktree removal succeeds");
+
+    assert!(!path.exists(), "the target checkout directory is gone");
+    assert_eq!(
+        porcelain_branch(repo.path(), &other).as_deref(),
+        Some("feature-x"),
+        "the second worktree still checks out the branch"
+    );
+    let branches = git_stdout(
+        repo.path(),
+        &["branch", "--list", "--format=%(refname:short)"],
+    );
+    assert!(
+        branches.lines().any(|branch| branch == "feature-x"),
+        "the branch survives git's refusal: {branches}"
+    );
+}
+
+#[test]
 fn remove_refuses_a_worktree_with_uncommitted_changes() {
     let repo = make_repo("dirty");
     let path = repo.path().with_extension("wt-dirty");
     create_worktree(repo.path(), "feature-x", &path, None).expect("create");
     std::fs::write(path.join("uncommitted.txt"), "work in progress\n").expect("write");
 
-    let error = remove_worktree(repo.path(), &path).expect_err("git refuses by default");
+    let error =
+        remove_worktree(repo.path(), &path, "feature-x").expect_err("git refuses by default");
 
     assert!(
         matches!(error, WorktreeError::Git(_)),
