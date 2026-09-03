@@ -123,6 +123,13 @@ Sirio needs no special permission prompts on Linux — it runs with no elevated 
 | Restore previous launch | `Ctrl+Shift+O` |
 | Settings | `Ctrl+,` |
 
+On Windows, three chords differ: Toggle sidebar is `Ctrl+Shift+D`, Toggle
+right panel is `Ctrl+Shift+R`, Restore previous launch is `Ctrl+Shift+H`.
+`Ctrl+Shift+S` / `Ctrl+Shift+I` / `Ctrl+Shift+O` never reach the app there —
+they are already taken as system-wide hotkeys — so the same actions moved
+one family chord over (the command palette always shows the chord that
+works on your platform).
+
 The tray icon is always one click away — it reflects the worst status across every active agent and opens straight into a full roster.
 
 ---

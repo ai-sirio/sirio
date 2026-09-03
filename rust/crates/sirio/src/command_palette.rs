@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use sirio_project::TabKind;
 use sirio_ui::{sidebar::SidebarDisabledReason, tab_bar::NewTabAction};
 
-use crate::{WindowCommand, WindowCommandDisabledReason, panes::SplitDirection};
+use crate::{
+    WindowCommand, WindowCommandDisabledReason, panes::SplitDirection, window_shortcut_hint,
+};
 
 /// A command that the shell can route through an existing typed action or
 /// typed UI event. The palette stores this value; it never stores a closure
@@ -202,31 +204,31 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         window_entry(
             WindowCommand::NewTerminalTab,
             "New Terminal Tab",
-            Some("Ctrl+T"),
+            Some(window_shortcut_hint(WindowCommand::NewTerminalTab)),
             context,
         ),
         window_entry(
             WindowCommand::OpenFile,
             "Open File",
-            Some("Ctrl+O"),
+            Some(window_shortcut_hint(WindowCommand::OpenFile)),
             context,
         ),
         window_entry(
             WindowCommand::SaveFile,
             "Save File",
-            Some("Ctrl+S"),
+            Some(window_shortcut_hint(WindowCommand::SaveFile)),
             context,
         ),
         window_entry(
             WindowCommand::ToggleSidebar,
             "Toggle Sidebar",
-            Some("Ctrl+Shift+S"),
+            Some(window_shortcut_hint(WindowCommand::ToggleSidebar)),
             context,
         ),
         window_entry(
             WindowCommand::ToggleRightPanel,
             "Toggle Right Panel",
-            Some("Ctrl+Shift+I"),
+            Some(window_shortcut_hint(WindowCommand::ToggleRightPanel)),
             context,
         ),
         // F-WIN-07: this app draws no in-window menu bar by design, so the
@@ -237,7 +239,7 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         window_entry(
             WindowCommand::RestoreLaunchSnapshot,
             "History: Restore Previous Launch",
-            Some("Ctrl+Shift+O"),
+            Some(window_shortcut_hint(WindowCommand::RestoreLaunchSnapshot)),
             context,
         ),
         // F-WIN-06: distinct label from the '+' menu's own "New Browser"
@@ -249,13 +251,13 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         window_entry(
             WindowCommand::NewBrowser,
             "New Browser Tab",
-            Some("Ctrl+Shift+L"),
+            Some(window_shortcut_hint(WindowCommand::NewBrowser)),
             context,
         ),
         window_entry(
             WindowCommand::FocusAddressBar,
             "Focus Address Bar",
-            Some("Ctrl+L"),
+            Some(window_shortcut_hint(WindowCommand::FocusAddressBar)),
             context,
         ),
         PaletteEntry::enabled(
@@ -663,5 +665,41 @@ mod tests {
             && entry.command == PaletteCommand::Window(WindowCommand::NewBrowser)));
         assert!(commands.iter().any(|entry| entry.label == "New Browser"
             && entry.command == PaletteCommand::NewTab(NewTabAction::NewBrowser)));
+    }
+
+    /// #374: the three retargeted Windows chords must surface in the
+    /// palette rows themselves, or the documented shortcut and the working
+    /// one disagree again.
+    #[test]
+    fn layout_toggle_rows_show_the_platform_chords() {
+        let commands = entries(&context());
+        let shortcut = |command| {
+            commands
+                .iter()
+                .find(|entry| entry.command == PaletteCommand::Window(command))
+                .expect("window command is always listed")
+                .shortcut
+        };
+        if cfg!(target_os = "windows") {
+            assert_eq!(shortcut(WindowCommand::ToggleSidebar), Some("Ctrl+Shift+D"));
+            assert_eq!(
+                shortcut(WindowCommand::ToggleRightPanel),
+                Some("Ctrl+Shift+R")
+            );
+            assert_eq!(
+                shortcut(WindowCommand::RestoreLaunchSnapshot),
+                Some("Ctrl+Shift+H")
+            );
+        } else {
+            assert_eq!(shortcut(WindowCommand::ToggleSidebar), Some("Ctrl+Shift+S"));
+            assert_eq!(
+                shortcut(WindowCommand::ToggleRightPanel),
+                Some("Ctrl+Shift+I")
+            );
+            assert_eq!(
+                shortcut(WindowCommand::RestoreLaunchSnapshot),
+                Some("Ctrl+Shift+O")
+            );
+        }
     }
 }
