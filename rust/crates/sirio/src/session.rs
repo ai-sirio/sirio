@@ -788,31 +788,46 @@ fn worktree_id(project_id: &str, index: usize) -> String {
     format!("{project_id}-wt-{index}")
 }
 
-/// Resolves a worktree through Git when no persisted catalog row identifies
-/// its path. The persisted catalog is deliberately not consulted here: this
-/// is the fallback used for a path the user has not added to the catalog yet.
-fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
+fn path_derived_catalog_ids(working_directory: &Path) -> (PathBuf, String, String) {
     let working_directory = canonical_path(working_directory);
-    if let Ok(discovered) = discover_project(&working_directory)
-        && discovered.is_git
-        && !discovered.worktrees.is_empty()
-    {
-        let root = catalog_root(&working_directory, &discovered);
-        let project_id = project_id(&root);
-        let index = discovered
-            .worktrees
-            .iter()
-            .position(|worktree| canonical_path(&worktree.path) == working_directory)
-            .unwrap_or(0);
-        return (root, project_id.clone(), worktree_id(&project_id, index));
-    }
-
     let project_id = project_id(&working_directory);
     (
         working_directory,
         project_id.clone(),
         worktree_id(&project_id, 0),
     )
+}
+
+fn catalog_ids_for_discovered_path(
+    working_directory: &Path,
+    discovered: &DiscoveredProject,
+) -> (PathBuf, String, String) {
+    if !discovered.is_git || discovered.worktrees.is_empty() {
+        return path_derived_catalog_ids(working_directory);
+    }
+
+    let working_directory = canonical_path(working_directory);
+    let root = catalog_root(&working_directory, discovered);
+    let project_id = project_id(&root);
+    let Some(index) = discovered
+        .worktrees
+        .iter()
+        .position(|worktree| canonical_path(&worktree.path) == working_directory)
+    else {
+        return path_derived_catalog_ids(&working_directory);
+    };
+    (root, project_id.clone(), worktree_id(&project_id, index))
+}
+
+/// Resolves a worktree through Git when no persisted catalog row identifies
+/// its path. The persisted catalog is deliberately not consulted here: this
+/// is the fallback used for a path the user has not added to the catalog yet.
+fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
+    let working_directory = canonical_path(working_directory);
+    if let Ok(discovered) = discover_project(&working_directory) {
+        return catalog_ids_for_discovered_path(&working_directory, &discovered);
+    }
+    path_derived_catalog_ids(&working_directory)
 }
 
 /// Resolves the stable persisted identity shared by layout readers and
@@ -3510,6 +3525,33 @@ mod tests {
             path,
             dir.0.join("sirio.sqlite"),
             "a git worktree gets its own database"
+        );
+    }
+
+    #[test]
+    fn a_path_absent_from_git_discovery_does_not_alias_the_primary_worktree() {
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let missing = dir.0.join("missing-worktree");
+        let discovered = DiscoveredProject {
+            is_git: true,
+            worktrees: vec![sirio_project::DiscoveredWorktree {
+                path: primary.clone(),
+                head: None,
+                branch: Some("main".into()),
+                is_primary: true,
+                locked: false,
+                prunable: false,
+            }],
+        };
+
+        let (root, project, worktree) = catalog_ids_for_discovered_path(&missing, &discovered);
+        assert_eq!(root, missing);
+        assert_eq!(project, project_id(&missing));
+        assert_ne!(
+            worktree,
+            worktree_id(&project_id(&primary), 0),
+            "a missing discovery entry must not become the primary worktree"
         );
     }
 
