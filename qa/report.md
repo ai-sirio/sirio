@@ -1,6 +1,6 @@
 # QA report — Sirio (Windows, 2026-09-03)
 
-Stato: **in corso** — aggiornato a fine sessione. La checklist operativa con lo stato di ogni voce è in
+Stato: **completata** (tutte le 30 voci della checklist `ok`, 14 issue aperte e chiuse). La checklist operativa con lo stato di ogni voce è in
 `qa/checklist.md`; screenshot e log di evidenza in `qa/screenshots/` e `qa/logs/`.
 
 ## Ambiente reale vs. piano
@@ -52,7 +52,7 @@ Agents), status bar, `sirioctl`, notifiche.
 | #366 | Git log: colonna Date troncata e disallineata | minor | opencode-go | 1 | chiusa, verificata |
 | #367 | Diff: numeri di riga a 5 cifre sovrapposti | minor | pi | 1 | chiusa, verificata |
 | #368 | Windows: New Browser abortisce l'app (`RefCell already borrowed`, anche al restore) | blocker | opencode-go | 1 | chiusa, verificata |
-| #369 | Browser: barra indirizzi senza input, campo URL 60 px | major | pi → opencode-go | 4 | aperta: tent. 1 (click) mergiato; tent. 2 (pi) e 3 (opencode-go) revertiti; tent. 4 in corso |
+| #369 | Browser: barra indirizzi senza input, campo URL 60 px | major | pi → opencode-go | 4 | chiusa, verificata: tent. 1 (pi, click) mergiato; tent. 2 (pi) e 3 (opencode-go) revertiti; tent. 4 (opencode-go, inoltro acceleratori WebView2) verificato |
 | #370 | Windows: `sirioctl` non raggiunge l'app (pipe da HOME, owner elevato) | major | opencode-go | 1 | chiusa, verificata (caso residuo: hook di Claude Code con Sirio elevato) |
 | #371 | Font Interface inerte | minor | pi | 1 | chiusa, verificata |
 | #372 | Remove Worktree senza nome del bersaglio, anche sul primario | major | opencode-go | 1 | chiusa, verificata |
@@ -67,15 +67,18 @@ Agents), status bar, `sirioctl`, notifiche.
 | Agente | Issue (tentativi) |
 |--------|-------------------|
 | pi (gpt-5.6-luna) | #365 (1), #367 (1), #371 (1), #373 (1), #375 (1), #377 (2: tent. 1 revertito), #369 tent. 1 parziale (mergiato) e tent. 2 (revertito) |
-| opencode-go (muse-spark-1.3-contributor) | #364 (2: tent. 1 revertito), #366 (1), #368 (1), #370 (1), #372 (1), #374 (1), #376 (1), #369 tent. 3 (revertito) |
+| opencode-go (muse-spark-1.3-contributor) | #364 (2: tent. 1 revertito), #366 (1), #368 (1), #370 (1), #372 (1), #374 (1), #376 (1), #369 (2: tent. 3 revertito, tent. 4 verificato) |
 
 Ogni fix è stata squash-mergiata su `main`, ricompilata e ritestata ripetendo gli step della issue
 prima della chiusura; i worktree dei fix chiusi sono stati rimossi (alcune cartelle vuote
-`fix-365/369/371/373` restano bloccate da un handle esterno e vanno cancellate a mano).
+`fix-365/369/371/373/375/377` restano bloccate da un handle esterno e vanno cancellate a mano).
 
 Deviazione dichiarata: per #369 il tentativo 1 (percorso via click) **non** è stato revertito quando il
 caso residuo (Ctrl+L) è stato riscontrato, perché il revert avrebbe reintrodotto lo stato peggiore
-(nessun input possibile); il tentativo 2 è stato revertito e la issue passata all'altro agente.
+(nessun input possibile); il tentativo 2 è stato revertito e la issue passata all'altro agente. Il tentativo 4
+(opencode-go) ha risolto il caso residuo inoltrando le chord dell'host da `AcceleratorKeyPressed` di WebView2 e
+riprendendo il focus Win32 a ogni click gpui; la regola di inoltro è stata allineata alle chord Windows della #374
+(Ctrl+Shift+D/R/H) prima del merge, su richiesta dell'orchestratore.
 
 ## Problemi notati ma non classificati come bug
 
@@ -107,3 +110,7 @@ caso residuo (Ctrl+L) è stato riscontrato, perché il revert avrebbe reintrodot
   cross-elevation escluso dalla fix #370): l'indicatore di stato dell'agente resta «?» e non arrivano
   notifiche di fine turno. Non verificato con Sirio non elevato.
 - Multi-monitor/DPI: non testato (secondario non usato).
+- Con la command palette aperta i pane terminale e la pagina del browser appaiono scuri (scrim della palette);
+  al chiudersi tornano normali e il terminale accetta input. Comportamento precedente alla #369, non classificato.
+- Il monitor entra in standby durante le attese lunghe: gli screenshot escono neri finché non si invia un tasto
+  (artefatto dell'harness, non di Sirio).
