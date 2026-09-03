@@ -11,7 +11,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 3 | Sidebar | Aggiungi progetto (`+`), elenco worktree per progetto | ok |  |  | menu Open/Clone/Create Project, picker nativo, worktree elencati |
 | 4 | Sidebar | Filtro progetti/worktree | ok |  |  | filtro per sottostringa ok, ripristino lista ok |
 | 5 | Sidebar | Selezione worktree, cambio worktree rapido, stato `mounted` | ok | #372 (chiusa) | opencode-go | switch, catalogo live, New Worktree, Remove Worktree con dialog nominativo e primario protetto |
-| 6 | Sidebar | Toggle sidebar (icona titlebar, `Ctrl+Shift+S`) | bug | #374 | opencode-go | toggle da titlebar/palette ok; Ctrl+Shift+S inerte |
+| 6 | Sidebar | Toggle sidebar (icona titlebar, `Ctrl+Shift+S`) | ok | #374 (chiusa) | opencode-go | toggle da titlebar/palette ok; su Windows chord ritargate a Ctrl+Shift+D/R/H (S/I/O sono hotkey globali di un altro programma) |
 | 7 | Titlebar | Indietro / avanti (history), `+` nuova tab | ok |  |  | ← → senza effetto visibile con history vuota; + titlebar senza effetto visibile e senza tooltip (#299) |
 | 8 | Titlebar | Caption buttons Windows (min/max/close), doppio click, resize, snap | ok |  |  | max/restore da caption e doppio click (#288 non riprodotta), minimizza/ripristina, resize da bordo |
 | 9 | Tabs | Nuova tab terminale (`Ctrl+T`), chiusura (`Ctrl+W`), riordino, overflow con molte tab | ok |  |  | Ctrl+T ok; Ctrl+W chiude solo tab non-terminale (by design #226, README da allineare); × con conferma "Close dirty tab?" |
@@ -51,7 +51,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB, rimosso) | 1 | verificata e chiusa (5b3bfb28) |
 | #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC, rimosso) | 1 | verificata e chiusa (901f0c2e) |
 | #373 editor Markdown riscrive il file | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-373` (herdr wD, rimosso) | 1 | verificata e chiusa (b3d48c2b) |
-| #374 Ctrl+Shift+S/I inerti | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-374` (herdr wF) | 1 | in corso |
+| #374 Ctrl+Shift+S/I inerti | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-374` (herdr wF, rimosso) | 1 | verificata e chiusa (3b5e23d0) |
 | #375 overflow command palette | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-375` (herdr wG, rimosso) | 1 | verificata e chiusa (31b650a1) |
 | #376 menu popup dietro la webview | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-376` (herdr wH, rimosso) | 1 | verificata e chiusa (d5b7ec5e) |
 | #377 chat ACP OpenCode "program not found" | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-377` (herdr wJ) | 2 | tent. 1 mergiato e **revertito** (nome nudo `opencode` non wrappato); tent. 2 in corso |
