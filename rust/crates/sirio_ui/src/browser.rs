@@ -28,6 +28,10 @@ use gpui::{
 use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "linux")]
 use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
+#[cfg(target_os = "windows")]
+use raw_window_handle::{HandleError, RawWindowHandle, Win32WindowHandle, WindowHandle};
+#[cfg(target_os = "windows")]
+use std::num::NonZeroIsize;
 use sirio_theme::Theme;
 
 use sirio_ui::loading;
@@ -1003,6 +1007,7 @@ fn build_production_webview_for_platform(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn build_production_webview_for_platform(
     window: &Window,
     initial_url: &str,
@@ -1059,6 +1064,7 @@ fn build_webview_for_native_child<W: HasWindowHandle>(parent: &W) -> Result<WebV
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn build_production_webview_for_native_child(
     window: &Window,
     initial_url: &str,
@@ -1074,6 +1080,120 @@ fn build_production_webview_for_native_child(
             "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
              {NATIVE_WINDOW_HANDLE} window handle"
         )),
+    }
+}
+
+/// #368: the HWND a deferred WebView2 build parents to.
+///
+/// Captured synchronously from the GPUI window (cheap, no COM wait, no
+/// message-loop pump) while the App borrow is still held, then used later
+/// from a foreground task with no App borrow held. Passing the raw integer
+/// across is what lets the build run lease-free: the `Window` itself cannot
+/// cross the spawn boundary, and rebuilding from it would re-acquire the
+/// borrow the pump must not see held.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeferredParent {
+    hwnd: isize,
+}
+
+#[cfg(target_os = "windows")]
+impl DeferredParent {
+    fn from_hwnd(hwnd: isize) -> Result<Self, String> {
+        if hwnd == 0 {
+            return Err(format!(
+                "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
+                 {NATIVE_WINDOW_HANDLE} window handle"
+            ));
+        }
+        Ok(Self { hwnd })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl HasWindowHandle for DeferredParent {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let hwnd = NonZeroIsize::new(self.hwnd).ok_or(HandleError::Unavailable)?;
+        // SAFETY: the integer was read from a live GPUI window on the main
+        // thread moments earlier. The deferred build runs on the same main
+        // thread while that window still lives (the surface holding this
+        // parent is mounted in it); wry only reads the integer to parent
+        // the child, and a stale value fails the build rather than
+        // reaching undefined behaviour.
+        let handle = Win32WindowHandle::new(hwnd);
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+    }
+}
+
+/// #368: read the Win32 HWND out of a GPUI window without building anything.
+///
+/// Cheap and pump-free, so it is safe to call while the App is borrowed.
+/// Everything that waits on COM (and therefore pumps `DispatchMessageW`)
+/// happens later, in the deferred build.
+#[cfg(target_os = "windows")]
+fn capture_window_hwnd(window: &Window) -> Result<isize, String> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|error| format!("GPUI window handle unavailable: {error}"))?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get()),
+        raw => Err(format!("GPUI returned unsupported handle: {raw:?}")),
+    }
+}
+
+/// #368: the engine build for a deferred surface, off every GPUI lease.
+///
+/// Runs from a foreground task after `new` has returned, so no `App` borrow
+/// is held while WebView2's `wait_for_async_operation` pumps the message
+/// loop. A queued tick (`ensure_tree_refresh`, `changes::refresh`, any
+/// other) then borrows cleanly instead of panicking on a second
+/// `borrow_mut`.
+#[cfg(target_os = "windows")]
+fn build_deferred_webview(
+    parent_hwnd: isize,
+    initial_url: &str,
+    events: &SharedWebEvents,
+    context: &mut WebContext,
+) -> Result<WebView, String> {
+    let parent = DeferredParent::from_hwnd(parent_hwnd)?;
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_production_webview(&parent, initial_url, events, context)
+    })) {
+        Ok(Ok(webview)) => Ok(webview),
+        Ok(Err(error)) => Err(format!("{NATIVE_ENGINE} child failed: {error}")),
+        Err(_) => Err(format!(
+            "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
+             {NATIVE_WINDOW_HANDLE} window handle"
+        )),
+    }
+}
+
+/// #368: the pending failure a deferred surface carries before its webview
+/// exists. Pure so the rule stays testable without a window: a missing
+/// runtime explains itself immediately, otherwise an invalid initial URL
+/// keeps its fallback error for the later build to preserve.
+fn pending_startup_failure(
+    runtime_missing: bool,
+    startup_error: Option<String>,
+) -> Option<StartupFailure> {
+    if runtime_missing {
+        return Some(StartupFailure::RuntimeMissing);
+    }
+    startup_error.map(StartupFailure::Failed)
+}
+
+/// #368: what a deferred build installs. Pure so the merge stays testable:
+/// a live webview keeps whatever the surface already carried (e.g. the
+/// invalid-URL fallback error), while a failed build replaces it with the
+/// engine error.
+fn deferred_install_failure(
+    existing: Option<StartupFailure>,
+    outcome_failure: Option<StartupFailure>,
+    has_webview: bool,
+) -> Option<StartupFailure> {
+    if has_webview {
+        existing
+    } else {
+        outcome_failure.or(existing)
     }
 }
 
@@ -1152,6 +1272,7 @@ impl RetryAttempt {
     /// `take_retry_attempt` for why that matters). Probes the runtime
     /// first, the same way `new` does: still absent means the explanation
     /// stands, and the context is handed back untouched.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     fn build(self, window: &Window) -> RetryOutcome {
         let RetryAttempt {
             mut web_context,
@@ -1167,6 +1288,38 @@ impl RetryAttempt {
         }
         match build_production_webview_for_platform(window, &address, &web_events, &mut web_context)
         {
+            Ok(webview) => RetryOutcome {
+                webview: Some(webview),
+                failure: None,
+                web_context: Some(web_context),
+            },
+            Err(error) => RetryOutcome {
+                webview: None,
+                failure: Some(StartupFailure::Failed(error)),
+                web_context: Some(web_context),
+            },
+        }
+    }
+
+    /// #368: the same engine build, but parented to a captured HWND instead
+    /// of a live `Window`, so it can run from a foreground task with no App
+    /// borrow held. The pump inside WebView2 init then has no outer
+    /// `borrow_mut` to re-enter.
+    #[cfg(target_os = "windows")]
+    fn build_deferred(self, parent_hwnd: isize) -> RetryOutcome {
+        let RetryAttempt {
+            mut web_context,
+            web_events,
+            address,
+        } = self;
+        if webview_runtime_missing() {
+            return RetryOutcome {
+                webview: None,
+                failure: Some(StartupFailure::RuntimeMissing),
+                web_context: Some(web_context),
+            };
+        }
+        match build_deferred_webview(parent_hwnd, &address, &web_events, &mut web_context) {
             Ok(webview) => RetryOutcome {
                 webview: Some(webview),
                 failure: None,
@@ -1212,40 +1365,104 @@ impl BrowserSurface {
         // R6.3: one shared profile in a Sirio-owned directory. Left unset,
         // WebView2 writes `<exe>.WebView2\EBWebView` beside the binary, which
         // an installed Sirio under Program Files cannot create.
-        let mut web_context = WebContext::new(browser_profile_dir());
-        // #307: a Windows machine without the WebView2 Runtime gets a full
-        // explanation in place of the content, not an engine error it can't
-        // act on. The probe runs before the build: it answers the one
-        // question the build error cannot -- "is the runtime there at all".
-        let (webview, startup_failure) = if webview_runtime_missing() {
-            (None, Some(StartupFailure::RuntimeMissing))
-        } else {
-            match build_production_webview_for_platform(
-                window,
-                state.address(),
-                &web_events,
-                &mut web_context,
-            ) {
-                Ok(webview) => (Some(webview), startup_error.map(StartupFailure::Failed)),
-                Err(error) => (None, Some(StartupFailure::Failed(error))),
-            }
-        };
-        let webview = Rc::new(RefCell::new(webview));
-        // #255: armed on first render, never here -- see `ensure_pump_task`.
-        let pump_task = None;
+        let web_context = WebContext::new(browser_profile_dir());
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut web_context = web_context;
+            // #307: a Windows machine without the WebView2 Runtime gets a full
+            // explanation in place of the content, not an engine error it can't
+            // act on. The probe runs before the build: it answers the one
+            // question the build error cannot -- "is the runtime there at all".
+            let (webview, startup_failure) = if webview_runtime_missing() {
+                (None, Some(StartupFailure::RuntimeMissing))
+            } else {
+                match build_production_webview_for_platform(
+                    window,
+                    state.address(),
+                    &web_events,
+                    &mut web_context,
+                ) {
+                    Ok(webview) => (Some(webview), startup_error.map(StartupFailure::Failed)),
+                    Err(error) => (None, Some(StartupFailure::Failed(error))),
+                }
+            };
+            let webview = Rc::new(RefCell::new(webview));
+            // #255: armed on first render, never here -- see `ensure_pump_task`.
+            let pump_task = None;
 
-        Self {
-            state,
-            address_field,
-            address_focused: false,
-            webview,
-            _web_context: Some(web_context),
-            webview_scale_correction: Rc::new(Cell::new(None)),
-            webview_visible: initial_native_visibility(),
-            web_events,
-            events: Vec::new(),
-            pump_task,
-            startup_failure,
+            return Self {
+                state,
+                address_field,
+                address_focused: false,
+                webview,
+                _web_context: Some(web_context),
+                webview_scale_correction: Rc::new(Cell::new(None)),
+                webview_visible: initial_native_visibility(),
+                web_events,
+                events: Vec::new(),
+                pump_task,
+                startup_failure,
+            };
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // #368: never build WebView2 while the App is borrowed. `new`
+            // runs inside `cx.new` (itself inside the workspace `update`),
+            // and WebView2 init pumps `DispatchMessageW`, which runs any
+            // queued GPUI foreground task (`ensure_tree_refresh`,
+            // `changes::refresh`, ...) straight into a second `borrow_mut`
+            // -> "RefCell already borrowed" -> abort. The same race fires
+            // from session restore, which builds every tab in one update.
+            //
+            // Return a pending surface now (chrome + loading state, no
+            // child) and build the child from a foreground task with no
+            // borrow held. The HWND is captured here -- cheap, pump-free --
+            // because the `Window` cannot cross the spawn boundary.
+            let startup_failure =
+                pending_startup_failure(webview_runtime_missing(), startup_error);
+            let parent_hwnd = capture_window_hwnd(window).ok();
+            let should_defer = !matches!(
+                startup_failure,
+                Some(StartupFailure::RuntimeMissing)
+            ) && parent_hwnd.is_some();
+            // A HWND capture failure without a runtime-missing explanation
+            // still needs words in place of the content.
+            let startup_failure = match (startup_failure, parent_hwnd) {
+                (None, None) => Some(StartupFailure::Failed(format!(
+                    "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
+                     {NATIVE_WINDOW_HANDLE} window handle"
+                ))),
+                (failure, _) => failure,
+            };
+            let surface = Self {
+                state,
+                address_field,
+                address_focused: false,
+                webview: Rc::new(RefCell::new(None)),
+                _web_context: Some(web_context),
+                webview_scale_correction: Rc::new(Cell::new(None)),
+                webview_visible: initial_native_visibility(),
+                web_events,
+                events: Vec::new(),
+                pump_task: None,
+                startup_failure,
+            };
+            if should_defer {
+                let parent_hwnd = parent_hwnd.expect("deferred only when HWND captured");
+                cx.spawn(async move |this, cx| {
+                    let attempt =
+                        this.update(cx, |surface, _| surface.take_retry_attempt()).ok().flatten();
+                    let Some(attempt) = attempt else {
+                        return;
+                    };
+                    let outcome = attempt.build_deferred(parent_hwnd);
+                    let _ = this.update(cx, |surface, cx| {
+                        surface.install_deferred(outcome, cx);
+                    });
+                })
+                .detach();
+            }
+            return surface;
         }
     }
 
@@ -1419,6 +1636,24 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    /// #368: installs a deferred initial build. Unlike a retry, a live
+    /// webview keeps whatever the pending surface already carried (the
+    /// invalid-URL fallback error, if any): clearing it would turn a known
+    /// bad address into a silent success. Only a failed build replaces the
+    /// explanation.
+    #[cfg(target_os = "windows")]
+    fn install_deferred(&mut self, outcome: RetryOutcome, cx: &mut Context<Self>) {
+        self._web_context = outcome.web_context;
+        let has_webview = outcome.webview.is_some();
+        if let Some(webview) = outcome.webview {
+            self.webview_visible = initial_native_visibility();
+            *self.webview.borrow_mut() = Some(webview);
+        }
+        self.startup_failure =
+            deferred_install_failure(self.startup_failure.take(), outcome.failure, has_webview);
+        cx.notify();
+    }
+
     /// #307: the full-content explanation a Windows machine without the
     /// WebView2 Runtime sees, with its one action. Rendered in place of the
     /// webview region — not as a banner — so the pane cannot be mistaken
@@ -1467,14 +1702,54 @@ impl BrowserSurface {
                     // address field — would re-enter the lease and
                     // panic. Take what the build needs out, build lease-free,
                     // then reinstall the outcome.
+                    //
+                    // #368: on Windows the build must additionally run with
+                    // no App borrow held at all. A queued tick for any
+                    // other entity (`ensure_tree_refresh`,
+                    // `changes::refresh`, ...) would otherwise re-enter
+                    // the outer borrow through the same pump and abort
+                    // exactly like a new tab does. Capture the HWND now
+                    // (pump-free) and build from a foreground task.
                     .on_click(move |_, window, cx| {
-                        let Some(attempt) =
-                            entity.update(cx, |surface, _| surface.take_retry_attempt())
-                        else {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let Ok(parent_hwnd) = capture_window_hwnd(window) else {
+                                entity.update(cx, |surface, cx| {
+                                    surface.startup_failure = Some(StartupFailure::Failed(
+                                        format!(
+                                            "{NATIVE_ENGINE} child failed: GPUI did not expose a usable \
+                                             {NATIVE_WINDOW_HANDLE} window handle"
+                                        ),
+                                    ));
+                                    cx.notify();
+                                });
+                                return;
+                            };
+                            let Some(attempt) =
+                                entity.update(cx, |surface, _| surface.take_retry_attempt())
+                            else {
+                                return;
+                            };
+                            let entity_weak = entity.downgrade();
+                            cx.spawn(async move |cx| {
+                                let outcome = attempt.build_deferred(parent_hwnd);
+                                let _ = entity_weak.update(cx, |surface, cx| {
+                                    surface.install_retry(outcome, cx);
+                                });
+                            })
+                            .detach();
                             return;
-                        };
-                        let outcome = attempt.build(window);
-                        entity.update(cx, |surface, cx| surface.install_retry(outcome, cx));
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let Some(attempt) =
+                                entity.update(cx, |surface, _| surface.take_retry_attempt())
+                            else {
+                                return;
+                            };
+                            let outcome = attempt.build(window);
+                            entity.update(cx, |surface, cx| surface.install_retry(outcome, cx));
+                        }
                     })
                     .child("Retry"),
             )
@@ -2776,5 +3051,55 @@ mod tests {
     #[test]
     fn non_windows_platforms_never_classify_the_runtime_as_missing() {
         assert!(!webview_runtime_missing());
+    }
+
+    /// #368: a pending surface explains a missing runtime immediately, so
+    /// the deferred build is never even scheduled; otherwise it preserves
+    /// the invalid-URL fallback error for the later build to keep.
+    #[test]
+    fn pending_failure_prefers_runtime_missing_over_startup_error() {
+        assert_eq!(
+            pending_startup_failure(true, Some("bad url".to_owned())),
+            Some(StartupFailure::RuntimeMissing)
+        );
+        assert_eq!(
+            pending_startup_failure(false, Some("bad url".to_owned())),
+            Some(StartupFailure::Failed("bad url".to_owned()))
+        );
+        assert_eq!(pending_startup_failure(false, None), None);
+    }
+
+    /// #368: a live deferred webview keeps what the pending surface already
+    /// carried (the invalid-URL fallback); only a failed build replaces the
+    /// explanation. Clearing on success would turn a known bad address into
+    /// a silent ok.
+    #[test]
+    fn deferred_install_keeps_pending_error_on_success_replaces_on_failure() {
+        let pending = Some(StartupFailure::Failed("bad url".to_owned()));
+        assert_eq!(
+            deferred_install_failure(pending.clone(), None, true),
+            pending,
+            "success must not clear the pending fallback error"
+        );
+        let engine_error = Some(StartupFailure::Failed("WebView2 child failed: boom".to_owned()));
+        assert_eq!(
+            deferred_install_failure(pending, engine_error.clone(), false),
+            engine_error,
+            "failure must replace the pending explanation"
+        );
+        assert_eq!(deferred_install_failure(None, None, true), None);
+    }
+
+    /// #368: the deferred parent is just the captured HWND. Zero is never a
+    /// window, so it fails here -- cheaply, without touching COM -- instead
+    /// of failing inside the pumped build.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn deferred_parent_rejects_a_null_hwnd() {
+        assert!(DeferredParent::from_hwnd(0).is_err());
+        assert_eq!(
+            DeferredParent::from_hwnd(12345).expect("non-zero HWND"),
+            DeferredParent { hwnd: 12345 }
+        );
     }
 }
