@@ -23,9 +23,10 @@
 //!
 //! Callers hand us the same path they would on Linux/macOS: `$SIRIO_SOCKET`
 //! verbatim when the environment overrides it, otherwise the platform
-//! default from [`crate::protocol::default_socket_path`] (XDG runtime/state
-//! directories). Both are mapped deterministically onto the named-pipe
-//! namespace, because NT pipe names cannot be arbitrary filesystem paths:
+//! default from [`crate::protocol::default_socket_path`] (`%LOCALAPPDATA%`
+//! on Windows, XDG runtime/state directories on Linux). Both are mapped
+//! deterministically onto the named-pipe namespace, because NT pipe names
+//! cannot be arbitrary filesystem paths:
 //!
 //! - a path already under `\.\pipe\` is used as-is;
 //! - anything else becomes `\.\pipe\Sirio\<user-SID>-<sanitized>-<fnv1a64>`,
@@ -36,9 +37,9 @@
 //!   the 256-character NT pipe-name limit.
 //!
 //! The user-SID component is load-bearing, not cosmetic. Without it the
-//! default path (`/tmp/Sirio/control.sock` when no XDG/HOME env is
-//! set — the norm for GUI processes) derives a name that is identical for
-//! every user on the machine and guessable from the source: an attacker
+//! default path would derive a name that is identical for every user on the
+//! machine and guessable from the source (on Linux, `/tmp/Sirio/control.sock`
+//! when no XDG/HOME env is set — the norm for GUI processes): an attacker
 //! could pre-create it and silently harvest every Layer-A hook payload
 //! from victims' `sirioctl notify`, while Sirio itself would fail to
 //! bind and misread the collision as "another instance running". With the
@@ -72,7 +73,7 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetKernelObjectSecurity, GetSecurityDescriptorDacl,
     GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
-    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    SECURITY_ATTRIBUTES, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
@@ -279,6 +280,69 @@ unsafe fn token_user_sid_string(token: HANDLE) -> Result<String, String> {
     Ok(result)
 }
 
+/// The current process token's default-owner SID, rendered as an SDDL string.
+/// Cached: the owner cannot change mid-process.
+///
+/// This is `TokenOwner`, not `TokenUser`: in an elevated (UAC) session Windows
+/// mints new kernel objects owned by `BUILTIN\Administrators` (`S-1-5-32-544`)
+/// instead of the user SID, so a pipe created by an elevated Sirio verifies as
+/// Administrators-owned even though app and `sirioctl` share the same token.
+/// Comparing the pipe owner against the caller's default owner (rather than
+/// its user) accepts that same-token elevated case while still refusing a
+/// genuinely foreign owner (#370).
+fn current_owner_sid_string() -> Result<String, String> {
+    static OWNER_SID: OnceLock<Result<String, String>> = OnceLock::new();
+
+    OWNER_SID
+        .get_or_init(|| unsafe {
+            let process = GetCurrentProcess();
+            let mut token: HANDLE = std::ptr::null_mut();
+            if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+                return Err("OpenProcessToken failed".to_string());
+            }
+            let result = token_owner_sid_string(token);
+            CloseHandle(token);
+            result
+        })
+        .clone()
+}
+
+/// Reads the `TokenOwner` SID out of an already-open token as an SDDL string.
+unsafe fn token_owner_sid_string(token: HANDLE) -> Result<String, String> {
+    let mut needed = 0u32;
+    unsafe {
+        GetTokenInformation(token, TokenOwner, std::ptr::null_mut(), 0, &mut needed);
+    }
+    if needed == 0 {
+        return Err("could not size the token's owner information".to_string());
+    }
+    let mut buffer = vec![0u8; needed as usize];
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenOwner,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err("GetTokenInformation(TokenOwner) failed".to_string());
+    }
+    let owner = unsafe { &*(buffer.as_ptr() as *const TOKEN_OWNER) };
+    if owner.Owner.is_null() {
+        return Err("token carries no owner SID".to_string());
+    }
+
+    let mut string_sid: *mut u16 = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(owner.Owner, &mut string_sid) } == 0 {
+        return Err("ConvertSidToStringSidW failed".to_string());
+    }
+    let result = unsafe { string_from_wide(string_sid) };
+    unsafe { LocalFree(string_sid.cast()) };
+    Ok(result)
+}
+
 unsafe fn string_from_wide(pointer: *const u16) -> String {
     let mut len: usize = 0;
     while unsafe { *pointer.add(len) } != 0 {
@@ -348,11 +412,18 @@ fn ensure_owner_is(actual: &str, expected: &str) -> Result<(), String> {
     }
 }
 
-/// Verifies the pipe we just opened was created by the current user.
+/// Verifies the pipe we just opened was created by our own security context.
 /// Fail closed: unreadable ownership counts as mismatch.
+///
+/// The expected SID is the caller's default owner (`TokenOwner`), not its
+/// user (`TokenUser`): an elevated caller owns new objects as
+/// `BUILTIN\Administrators`, so comparing against the user SID would refuse
+/// our own server whenever both sides run elevated with the same token
+/// (#370). A non-elevated caller still expects its user SID, exactly as
+/// before, so genuinely foreign owners keep failing closed.
 fn verify_pipe_owner(handle: HANDLE) -> Result<(), String> {
     let actual = pipe_owner_sid_string(handle)?;
-    let expected = current_user_sid_string()?;
+    let expected = current_owner_sid_string()?;
     ensure_owner_is(&actual, &expected)
 }
 

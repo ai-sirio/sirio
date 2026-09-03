@@ -9,7 +9,8 @@
 //! matching the Swift encoder's `.sortedKeys`.
 
 use std::collections::BTreeMap;
-#[cfg(not(target_os = "macos"))]
+#[allow(unused_imports)]
+#[cfg(any(test, not(target_os = "macos")))]
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,9 @@ pub mod rows {
 /// The default control socket path: `$SIRIO_SOCKET` if set, otherwise the
 /// platform's private runtime location. Linux uses `$XDG_RUNTIME_DIR` and
 /// falls back to the XDG state directory when no runtime directory exists.
+/// Windows uses `%LOCALAPPDATA%` and never consults `HOME`/`XDG_*`, which
+/// differ between PowerShell/Explorer and Git Bash and would otherwise fork
+/// the pipe name per shell (#370).
 pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
     // `TILLER_SOCKET` is still honoured: agent hooks and shells started before
     // the rebrand carry it in their environment, and the socket is how they
@@ -115,7 +119,12 @@ pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
         return format!("{home}/Library/Application Support/Sirio/control.sock");
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        return windows_default_socket_path(environment);
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let root = absolute_environment_path(environment, "XDG_RUNTIME_DIR")
             .unwrap_or_else(|| xdg_state_home(environment));
@@ -126,7 +135,53 @@ pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows default, extracted pure so the precedence is testable on any
+/// platform: `%LOCALAPPDATA%\Sirio\control.sock`, falling back to `%TEMP%`
+/// / `%TMP%` and finally to a `HOME`-independent constant. `HOME` and every
+/// `XDG_*` variable are ignored entirely: Git Bash exports a POSIX `HOME`
+/// (`/c/Users/...`) while native launches have none, so consulting either
+/// would put the app and `sirioctl` on different pipes (#370).
+#[cfg(any(target_os = "windows", test))]
+fn windows_default_socket_path(environment: &BTreeMap<String, String>) -> String {
+    for key in ["LOCALAPPDATA", "TEMP", "TMP"] {
+        if let Some(root) = environment
+            .get(key)
+            .map(Path::new)
+            .filter(|path| windows_absolute(path))
+            .map(Path::to_path_buf)
+        {
+            return root
+                .join("Sirio")
+                .join("control.sock")
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    "Sirio/control.sock".to_string()
+}
+
+/// Absolute-path check that also recognises drive-letter paths (`C:\...`)
+/// when this helper runs on non-Windows test hosts, where `Path::is_absolute`
+/// only knows POSIX roots and would otherwise misclassify every Windows
+/// sample as relative.
+#[cfg(any(target_os = "windows", test))]
+fn windows_absolute(path: &Path) -> bool {
+    if path.is_absolute() {
+        return true;
+    }
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    text.starts_with(r"\\")
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn absolute_environment_path(environment: &BTreeMap<String, String>, key: &str) -> Option<PathBuf> {
     environment
         .get(key)
@@ -135,7 +190,7 @@ fn absolute_environment_path(environment: &BTreeMap<String, String>, key: &str) 
         .map(Path::to_path_buf)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn xdg_state_home(environment: &BTreeMap<String, String>) -> PathBuf {
     absolute_environment_path(environment, "XDG_STATE_HOME").unwrap_or_else(|| {
         let home =
@@ -555,12 +610,10 @@ pub mod request {
 #[cfg(test)]
 mod tests {
     use super::request;
-    // Only the Linux socket-path test below needs these. Gating the imports
-    // the same way that test is gated keeps other platforms warning-clean
-    // instead of importing names nothing there can use.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     use super::default_socket_path;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "windows", test))]
+    use super::windows_default_socket_path;
     use std::collections::BTreeMap;
 
     #[cfg(target_os = "linux")]
@@ -580,6 +633,81 @@ mod tests {
             default_socket_path(&fallback),
             "/home/alice/.local/state/Sirio/control.sock"
         );
+    }
+
+    #[test]
+    fn windows_default_ignores_home_and_xdg_and_uses_localappdata() {
+        // Native PowerShell/Explorer (no HOME) and Git Bash (POSIX HOME)
+        // must land on the same pipe when LOCALAPPDATA agrees (#370).
+        let native = BTreeMap::from([(
+            "LOCALAPPDATA".to_string(),
+            r"C:\Users\alice\AppData\Local".to_string(),
+        )]);
+        let bash = BTreeMap::from([
+            (
+                "LOCALAPPDATA".to_string(),
+                r"C:\Users\alice\AppData\Local".to_string(),
+            ),
+            ("HOME".to_string(), "/c/Users/alice".to_string()),
+            (
+                "XDG_RUNTIME_DIR".to_string(),
+                "/run/user/1000".to_string(),
+            ),
+            ("XDG_STATE_HOME".to_string(), "/c/Users/alice/.local/state".to_string()),
+        ]);
+        let expected = r"C:\Users\alice\AppData\Local\Sirio\control.sock".replace(r"\", "/");
+        let native_path = windows_default_socket_path(&native).replace(r"\", "/");
+        let bash_path = windows_default_socket_path(&bash).replace(r"\", "/");
+        assert_eq!(native_path, expected);
+        assert_eq!(
+            bash_path, expected,
+            "HOME/XDG_* must not fork the Windows pipe name"
+        );
+    }
+
+    #[test]
+    fn windows_default_falls_back_without_home() {
+        let temp = BTreeMap::from([(
+            "TEMP".to_string(),
+            r"C:\Users\alice\AppData\Local\Temp".to_string(),
+        )]);
+        let fallback = windows_default_socket_path(&temp).replace(r"\", "/");
+        assert_eq!(
+            fallback,
+            "C:/Users/alice/AppData/Local/Temp/Sirio/control.sock"
+        );
+
+        let empty: BTreeMap<String, String> = BTreeMap::new();
+        assert_eq!(windows_default_socket_path(&empty), "Sirio/control.sock");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_socket_path_is_stable_across_shell_environments() {
+        let native = BTreeMap::from([(
+            "LOCALAPPDATA".to_string(),
+            r"C:\Users\alice\AppData\Local".to_string(),
+        )]);
+        let bash = BTreeMap::from([
+            (
+                "LOCALAPPDATA".to_string(),
+                r"C:\Users\alice\AppData\Local".to_string(),
+            ),
+            ("HOME".to_string(), "/c/Users/alice".to_string()),
+        ]);
+        assert_eq!(default_socket_path(&native), default_socket_path(&bash));
+
+        let override_env = BTreeMap::from([
+            (
+                "LOCALAPPDATA".to_string(),
+                r"C:\Users\alice\AppData\Local".to_string(),
+            ),
+            (
+                "SIRIO_SOCKET".to_string(),
+                r"\\.\pipe\custom".to_string(),
+            ),
+        ]);
+        assert_eq!(default_socket_path(&override_env), r"\\.\pipe\custom");
     }
 
     #[test]
