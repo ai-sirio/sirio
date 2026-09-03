@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
     FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, Modifiers,
@@ -16096,6 +16098,40 @@ fn register_fonts(cx: &App) {
     }
 }
 
+/// #364: the binary is a `windows_subsystem = "windows"` GUI app, so it
+/// starts with no console of its own. Reuse the parent console when there
+/// is one (terminal launch) so `eprintln!` logs stay visible; otherwise
+/// (Explorer launch, no parent console) allocate a console and hide it
+/// immediately so console-subsystem children (`git.exe` polled ~1/s by
+/// Changes/Files, `sirioctl`, agent probes) inherit something invisible
+/// instead of each flashing their own `ConsoleWindowClass` window. A
+/// parent console is never hidden — only the console this allocates.
+/// Runs before any logging. Never fails the process.
+#[cfg(target_os = "windows")]
+fn ensure_windows_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, AttachConsole, GetConsoleWindow};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    // SAFETY: plain Win32 console calls with no pointers passed in; the
+    // return values only report whether a console existed/was created.
+    unsafe {
+        // Already have one (e.g. the cargo test harness, a console-subsystem
+        // host): nothing to attach or allocate, and it must stay visible.
+        if !GetConsoleWindow().is_null() {
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) != 0 {
+            return;
+        }
+        if AllocConsole() != 0 {
+            let hwnd = GetConsoleWindow();
+            if !hwnd.is_null() {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+}
+
 fn main() {
     // First statement in the process, and it has to stay first. `gpui`
     // decides X11 vs Wayland by reading the environment
@@ -16134,6 +16170,11 @@ fn main() {
             unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
         }
     }
+
+    // #364: after the env setup above (which must stay single-threaded and
+    // before `application()`), before any logging or window exists.
+    #[cfg(target_os = "windows")]
+    ensure_windows_console();
 
     application().run(|cx: &mut App| {
         // Must land before `Theme::init` — see `register_fonts`'s own doc
@@ -16901,6 +16942,17 @@ mod tests {
         );
         assert_eq!(powershell_single_quote_literal("plain text"), "plain text");
         assert_eq!(powershell_single_quote_literal(""), "");
+    }
+
+    /// #364: the console setup must never fail the process, from any launch
+    /// context. Under `cargo test` the harness already owns a console, so
+    /// this exercises the early-return branch (which must leave that
+    /// console visible); under Explorer it allocates-then-hides, and from a
+    /// terminal it attaches. Every branch simply returns.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ensure_windows_console_never_fails_the_process() {
+        ensure_windows_console();
     }
 
     struct TerminalReplayFixture {

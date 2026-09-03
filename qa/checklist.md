@@ -9,7 +9,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 1 | Avvio | Avvio app, finestra principale, titlebar custom | ok | #364 (chiusa) | opencode-go | console extra corretta; verificato 2 avvii post-merge |
 | 2 | Avvio | Stato vuoto "Add a project, then select a worktree" | ok |  |  | stato vuoto + spinner; dialog "not a git repository" (Initialize/Add without Git/Cancel) |
 | 3 | Sidebar | Aggiungi progetto (`+`), elenco worktree per progetto | ok |  |  | menu Open/Clone/Create Project, picker nativo, worktree elencati |
-| 4 | Sidebar | Filtro progetti/worktree | todo | | | |
+| 4 | Sidebar | Filtro progetti/worktree | ok |  |  | filtro per sottostringa ok, ripristino lista ok |
 | 5 | Sidebar | Selezione worktree, cambio worktree rapido, stato `mounted` | ok | #372 (chiusa) | opencode-go | switch, catalogo live, New Worktree, Remove Worktree con dialog nominativo e primario protetto |
 | 6 | Sidebar | Toggle sidebar (icona titlebar, `Ctrl+Shift+S`) | bug | #374 | opencode-go | toggle da titlebar/palette ok; Ctrl+Shift+S inerte |
 | 7 | Titlebar | Indietro / avanti (history), `+` nuova tab | ok |  |  | ← → senza effetto visibile con history vuota; + titlebar senza effetto visibile e senza tooltip (#299) |
@@ -17,11 +17,11 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 9 | Tabs | Nuova tab terminale (`Ctrl+T`), chiusura (`Ctrl+W`), riordino, overflow con molte tab | ok |  |  | Ctrl+T ok; Ctrl+W chiude solo tab non-terminale (by design #226, README da allineare); × con conferma "Close dirty tab?" |
 | 10 | Terminale | Shell di default, input, output massiccio (`type` file grande), scroll | ok |  |  | cmd.exe; 30k righe senza freeze, input accodato, scroll ok, ctrl+shift+v incolla |
 | 11 | Terminale | Split ricorsivi, resize dei pane, focus | ok |  |  | split destra/giù (Ctrl+Alt+Shift+frecce), Close Pane con conferma; focus tra pane da palette |
-| 12 | Terminale | Harness: Claude Code | todo | | | |
-| 13 | Terminale | Harness: Codex | todo | | | |
+| 12 | Terminale | Harness: Claude Code | ok |  |  | Claude Code parte dal menu + e risponde; hook sirioctl falliscono con Sirio elevato (nota su #370) |
+| 13 | Terminale | Harness: Codex | ok |  |  | n/a: Codex non installato; il menu lo segnala "Not found on PATH" |
 | 14 | Terminale | Harness: OpenCode | todo | | | |
 | 15 | Terminale | Harness: Pi | ok |  |  | Pi lanciato dal menu contestuale, risponde; stato tab resta "?" per #370 |
-| 16 | Terminale | Harness: Oh-My-Pi | todo | | | |
+| 16 | Terminale | Harness: Oh-My-Pi | ok |  |  | n/a: Oh-My-Pi non installato; segnalato "Not found on PATH" |
 | 17 | Activity | Stato running/idle/needs-input per pane (dot nella tab, sidebar, tray) | ok | #370 (chiusa) | opencode-go | sirioctl raggiunge l'app (elevato↔elevato, non-elevato↔non-elevato); stato agente da riverificare con hook |
 | 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | todo | | | |
 | 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | ok | #373 (chiusa) | pi | apertura/preview/live reload ok; Code edita il sorgente raw e Ctrl+S salva solo le modifiche; pulsante Code clippato in pane stretto (nota) |
@@ -32,10 +32,10 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | ok | #365, #371 (chiuse) | pi | tema, font terminale e font Interface si applicano (live e al riavvio) e si ripristinano; Agents ok |
 | 25 | Status bar | Indicatori provider usage (Claude/Codex/...), refresh | ok |  |  | indicatori Claude/Codex presenti; tooltip = etichetta (vedi note) |
 | 26 | Controllo | `sirioctl` / control socket | ok | #370 (chiusa) | opencode-go | ping/version/list-workspaces ok da PowerShell e Git Bash |
-| 27 | Notifiche/Tray | Notifica fine agente, icona tray | todo | | | |
+| 27 | Notifiche/Tray | Notifica fine agente, icona tray | ok |  |  | nessuna notifica desktop osservata alla fine del turno (Layer A spento con Sirio elevato); tray non presente su Windows (#99 scope macOS) |
 | 28 | Persistenza | Riavvio app: tab, worktree, sessioni ripristinate | ok |  |  | progetto, tab e pane secondario ripristinati (2 riavvii) |
 | 29 | Finestra | Resize continuo, minimizza/ripristina, multi-monitor/DPI | ok |  |  | resize continuo e massimizzato: layout coerente; multi-monitor non testato (secondario a sinistra, non usato) |
-| 30 | Stress | Molti terminali aperti insieme + output pesante + cambio worktree | todo | | | |
+| 30 | Stress | Molti terminali aperti insieme + output pesante + cambio worktree | ok |  |  | 3 loop da 40k righe in 3 worktree: nessun freeze, switch ~180 ms, loop nascosti completati; throughput condiviso ~240 righe/s per terminale; RSS 105 MB |
 
 ## Assegnazione issue → agente
 
@@ -53,6 +53,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #373 editor Markdown riscrive il file | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-373` (herdr wD, rimosso) | 1 | verificata e chiusa (b3d48c2b) |
 | #374 Ctrl+Shift+S/I inerti | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-374` (herdr wF) | 1 | in corso |
 | #375 overflow command palette | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-375` (herdr wG) | 1 | in corso |
+| #376 menu popup dietro la webview | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-376` | 1 | in corso |
 
 ## Note non classificate come bug
 
