@@ -3,9 +3,10 @@
 //!
 //! The shell is a single-worktree app: one working directory, one sidebar
 //! project, one tab strip. What must survive a relaunch is that layout —
-//! the project and worktree records (with stable, path-derived ids so
-//! launching in different directories never clobbers each other), the open
-//! tabs in order with the active one, and the sidebar selection. That is
+//! the project and worktree records (with stable project ids and worktree
+//! ids preserved by path so launching in different directories never
+//! clobbers each other's records), the open tabs in order with the active
+//! one, and the sidebar selection. That is
 //! what [`SessionStore`] writes and [`restore`] reads back.
 //!
 //! # Database location
@@ -42,7 +43,7 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, BaseColor, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord,
 };
-use sirio_project::{DiscoveredProject, discover_project};
+use sirio_project::{DiscoveredProject, discover_project, is_git_repository};
 
 /// How long a burst of changes is held before one write. 500 ms is under the
 /// reaction time between discrete user actions (a click then flushes at the
@@ -757,10 +758,10 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Stable, path-derived ids for the shell's single project and worktree.
-/// Different directories get different ids, so several sessions can coexist
-/// in one database without clobbering each other's records; the same
-/// directory always resolves to the same ids across launches.
+/// Stable project identity and the initial Git-derived worktree identity for
+/// the shell's single project and worktree. Once a worktree is persisted,
+/// [`SessionStore::persisted_worktree_id`] preserves its id by path even if
+/// Git changes the worktree list order.
 fn canonical_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -787,9 +788,9 @@ fn worktree_id(project_id: &str, index: usize) -> String {
     format!("{project_id}-wt-{index}")
 }
 
-/// One id convention for every persisted catalog worktree. Existing callers
-/// that only have a working directory are resolved through Git so a linked
-/// worktree still gets the primary project's id and its stable list index.
+/// Resolves a worktree through Git when no persisted catalog row identifies
+/// its path. The persisted catalog is deliberately not consulted here: this
+/// is the fallback used for a path the user has not added to the catalog yet.
 fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
     let working_directory = canonical_path(working_directory);
     if let Ok(discovered) = discover_project(&working_directory)
@@ -814,22 +815,43 @@ fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
     )
 }
 
-/// The stable persisted worktree identity used by tab and chat records.
-pub fn persisted_worktree_id(working_directory: &Path) -> String {
-    catalog_ids_for_path(working_directory).2
+/// Resolves the stable persisted identity shared by layout readers and
+/// writers. A catalog row matched by path wins over Git's current worktree
+/// index, which may change when another worktree is removed or reordered.
+fn worktree_id_for_database(
+    db: &AppDatabase,
+    working_directory: &Path,
+) -> Result<String, PersistenceError> {
+    if let Some((_, _, worktree_id)) = persisted_catalog_ids_for_path(db, working_directory)? {
+        return Ok(worktree_id);
+    }
+    Ok(catalog_ids_for_path(working_directory).2)
 }
 
-/// Allocates a new tab identity. The timestamp prevents reuse after a tab is
-/// closed while the counter keeps same-millisecond allocations distinct.
-pub fn new_tab_id(working_directory: &Path, counter: usize) -> String {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!(
-        "{}-tab-{timestamp:x}-{counter}",
-        persisted_worktree_id(working_directory)
-    )
+/// Resolves a persisted worktree identity using a database path. This is the
+/// bridge for the standalone restore builders, which do not own a
+/// [`SessionStore`] handle. A database/open or query error leaves the same
+/// Git-derived fallback available as before.
+pub fn persisted_worktree_id_for_database(database: &Path, working_directory: &Path) -> String {
+    match AppDatabase::open(database) {
+        Ok(db) => match worktree_id_for_database(&db, working_directory) {
+            Ok(worktree_id) => worktree_id,
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to resolve worktree identity for {}: {error}; using Git fallback",
+                    working_directory.display()
+                );
+                catalog_ids_for_path(working_directory).2
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "[session] failed to open {} for worktree identity: {error}; using Git fallback",
+                database.display()
+            );
+            catalog_ids_for_path(working_directory).2
+        }
+    }
 }
 
 /// Writes one layout to the database: the project and worktree records
@@ -837,7 +859,18 @@ pub fn new_tab_id(working_directory: &Path, counter: usize) -> String {
 /// flag normalized), and the sidebar selection (read-modify-write so other
 /// projects' expansion state survives).
 fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), PersistenceError> {
-    let (project_root, project_id, worktree_id) = catalog_ids_for_path(&layout.working_directory);
+    let ids_from_database = persisted_catalog_ids_for_path(db, &layout.working_directory)?;
+    let (project_root, project_id, worktree_id) = if let Some(ids) = ids_from_database {
+        ids
+    } else if is_git_repository(&layout.working_directory) {
+        eprintln!(
+            "[session] dropping layout for unresolved git worktree: {}",
+            layout.working_directory.display()
+        );
+        return Ok(());
+    } else {
+        catalog_ids_for_path(&layout.working_directory)
+    };
     let name = project_root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -922,6 +955,48 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     Ok(())
 }
 
+/// Allocates a new tab identity from a database-backed worktree identity.
+/// The timestamp prevents reuse after a tab is closed while the counter keeps
+/// same-millisecond allocations distinct.
+fn new_tab_id_for_worktree(worktree_id: &str, counter: usize) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{worktree_id}-tab-{timestamp:x}-{counter}")
+}
+
+/// Resolves a layout path through the durable catalog before asking Git.
+/// Linked worktrees can retain a `.git` file after the main repository has
+/// moved; Git cannot resolve those paths, but the persisted worktree row still
+/// identifies the project that owns them. Returning that identity prevents a
+/// failed discovery from being turned into a new top-level project.
+fn persisted_catalog_ids_for_path(
+    db: &AppDatabase,
+    working_directory: &Path,
+) -> Result<Option<(PathBuf, String, String)>, PersistenceError> {
+    let working_directory = canonical_path(working_directory);
+    let Some(worktree) = db
+        .worktrees()?
+        .into_iter()
+        .find(|worktree| canonical_path(Path::new(&worktree.path)) == working_directory)
+    else {
+        return Ok(None);
+    };
+    let Some(project) = db
+        .projects()?
+        .into_iter()
+        .find(|project| project.id == worktree.project_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        canonical_path(Path::new(&project.root_path)),
+        worktree.project_id,
+        worktree.id,
+    )))
+}
+
 fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), PersistenceError> {
     let desired_ids: std::collections::HashSet<&str> = catalog
         .projects
@@ -950,12 +1025,6 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
         record.worktree_location_override = settings.worktree_location_override;
         db.save_project(&record)?;
 
-        let desired_worktree_ids: std::collections::HashSet<String> = project
-            .worktrees
-            .iter()
-            .enumerate()
-            .map(|(index, _)| worktree_id(&project.id, index))
-            .collect();
         // F-CTRL-WORK-01: this upsert re-derives every worktree row from
         // the in-memory catalog, which carries no `comment` field. Without
         // carrying the existing row's comment/created_at forward, every
@@ -968,6 +1037,33 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
             .into_iter()
             .map(|worktree| (worktree.id.clone(), worktree))
             .collect();
+        let mut existing_by_path = std::collections::HashMap::new();
+        for worktree in existing_by_id.values() {
+            existing_by_path
+                .entry(canonical_path(Path::new(&worktree.path)))
+                .or_insert_with(|| worktree.id.clone());
+        }
+        let mut used_ids: HashSet<String> = existing_by_id.keys().cloned().collect();
+        let mut worktree_ids = Vec::with_capacity(project.worktrees.len());
+        let mut desired_worktree_ids = HashSet::new();
+        for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
+            let id = existing_by_path
+                .get(&canonical_path(&worktree.path))
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut candidate_index = worktree_index;
+                    loop {
+                        let candidate = worktree_id(&project.id, candidate_index);
+                        if used_ids.insert(candidate.clone()) {
+                            break candidate;
+                        }
+                        candidate_index += 1;
+                    }
+                });
+            used_ids.insert(id.clone());
+            desired_worktree_ids.insert(id.clone());
+            worktree_ids.push(id);
+        }
         if project.is_git {
             for worktree in existing_by_id.values() {
                 if !desired_worktree_ids.contains(&worktree.id) {
@@ -975,8 +1071,12 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
                 }
             }
         }
-        for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
-            let id = worktree_id(&project.id, worktree_index);
+        for (worktree_index, (worktree, id)) in project
+            .worktrees
+            .iter()
+            .zip(worktree_ids)
+            .enumerate()
+        {
             let mut record = WorktreeRecord::new(
                 id.clone(),
                 &project.id,
@@ -1015,13 +1115,30 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
     let mut settings = BTreeMap::new();
     let mut diagnostics = Vec::new();
     let mut seen_project_ids = HashSet::new();
-    for record in db.projects().unwrap_or_default() {
+    let project_records = db.projects().unwrap_or_default();
+    let persisted_worktrees = db.worktrees().unwrap_or_default();
+    let persisted_project_ids: HashSet<String> = project_records
+        .iter()
+        .map(|project| project.id.clone())
+        .collect();
+    for record in project_records {
         let root = PathBuf::from(&record.root_path);
         if !root.is_dir() {
             diagnostics.push(format!(
                 "project {} vanished: {}",
                 record.name,
                 root.display()
+            ));
+            continue;
+        }
+        if persisted_worktrees.iter().any(|worktree| {
+            worktree.project_id != record.id
+                && persisted_project_ids.contains(worktree.project_id.as_str())
+                && canonical_path(Path::new(&worktree.path)) == canonical_path(&root)
+        }) {
+            diagnostics.push(format!(
+                "project {} is a linked worktree of another project and was dropped",
+                record.name
             ));
             continue;
         }
@@ -1199,8 +1316,9 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
 }
 
 /// The shared tail of [`restore_from`] and [`SessionStore::restore_tabs_for`]:
-/// given a worktree's own stable id (see [`persisted_worktree_id`]) and the
-/// directory it lives at, reads its persisted tabs and their pane state.
+/// given a worktree's own stable id (see
+/// [`SessionStore::persisted_worktree_id`]) and the directory it lives at,
+/// reads its persisted tabs and their pane state.
 /// Factored out so a runtime worktree switch (CENTER-01) can load a
 /// worktree's own tabs the same way boot already does, rather than only
 /// ever reading whichever worktree the database happens to remember as
@@ -1374,6 +1492,36 @@ impl SessionStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(layout);
     }
 
+    /// Returns the worktree identity used by persisted tabs and chats. A
+    /// path already present in the durable catalog keeps its row id even
+    /// when Git reports the worktree at a different list index.
+    pub fn persisted_worktree_id(&self, working_directory: &Path) -> String {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return catalog_ids_for_path(working_directory).2;
+        };
+        match worktree_id_for_database(db, working_directory) {
+            Ok(worktree_id) => worktree_id,
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to resolve worktree identity for {}: {error}; using Git fallback",
+                    working_directory.display()
+                );
+                catalog_ids_for_path(working_directory).2
+            }
+        }
+    }
+
+    /// Allocates a new tab identity under this store's database-backed
+    /// worktree identity.
+    pub fn new_tab_id(&self, working_directory: &Path, counter: usize) -> String {
+        new_tab_id_for_worktree(&self.persisted_worktree_id(working_directory), counter)
+    }
+
     /// Loads `working_directory`'s own persisted tabs from *this store's*
     /// database (CENTER-01), independent of whatever the database currently
     /// remembers as the last-selected worktree. `select_worktree` (main.rs)
@@ -1400,7 +1548,14 @@ impl SessionStore {
         let Some(db) = db.as_ref() else {
             return default_restored(working_directory);
         };
-        let worktree_id = persisted_worktree_id(working_directory);
+        let worktree_id =
+            worktree_id_for_database(db, working_directory).unwrap_or_else(|error| {
+                eprintln!(
+                    "[session] failed to resolve worktree identity for {}: {error}; using Git fallback",
+                    working_directory.display()
+                );
+                catalog_ids_for_path(working_directory).2
+            });
         match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
             Ok(restored) => restored,
             Err(error) => {
@@ -1923,7 +2078,7 @@ mod tests {
         store.schedule(layout);
         store.flush_now();
         let db = AppDatabase::open(&db_path).expect("reopen state database");
-        let worktree_id = catalog_ids_for_path(&working_directory).2;
+        let worktree_id = store.persisted_worktree_id(&working_directory);
         let written = db
             .tab_states_of_worktree(&worktree_id)
             .expect("dump written tab state");
@@ -1971,7 +2126,7 @@ mod tests {
         store.flush_now();
 
         let db = AppDatabase::open(&db_path).expect("reopen state database");
-        let worktree_id = catalog_ids_for_path(&working_directory).2;
+        let worktree_id = store.persisted_worktree_id(&working_directory);
         let written = db
             .tab_states_of_worktree(&worktree_id)
             .expect("dump written tab state");
@@ -2603,6 +2758,213 @@ mod tests {
                 worktree_id(&projects[0].id, 0),
                 worktree_id(&projects[0].id, 1),
             ]
+        );
+    }
+
+    #[test]
+    fn a_broken_linked_worktree_is_not_promoted_to_a_project() {
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let linked = dir.0.join("repo-linked");
+        std::fs::create_dir_all(&primary).expect("repo dir");
+        run_git(&primary, &["init", "--quiet", "-b", "main"]);
+        run_git(
+            &primary,
+            &["config", "user.email", "sirio-tests@example.com"],
+        );
+        run_git(&primary, &["config", "user.name", "Sirio Tests"]);
+        std::fs::write(primary.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&primary, &["add", "README"]);
+        run_git(&primary, &["commit", "--quiet", "-m", "fixture"]);
+
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", "linked"])
+            .arg(&linked)
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add failed: {status}");
+
+        std::fs::write(
+            linked.join(".git"),
+            format!(
+                "gitdir: {}\n",
+                dir.0.join("missing-worktree-admin").display()
+            ),
+        )
+        .expect("break linked worktree gitdir");
+
+        let database = dir.db_path("broken-linked-worktree");
+        let store = SessionStore::open(&database);
+        let mut catalog = ProjectCatalog::default();
+        assert!(catalog.add(&primary).expect("discover primary repository"));
+        store.schedule_catalog(&catalog);
+
+        // Seed the duplicate rows that the old startup save produced, then
+        // make sure a relaunch drops the stale top-level project again.
+        let db = AppDatabase::open(&database).expect("open database");
+        db.save_project(&ProjectRecord::new(
+            "phantom-project",
+            "repo-linked",
+            linked.to_string_lossy(),
+        ))
+        .expect("save stale project");
+        db.save_worktree(&WorktreeRecord::new(
+            "phantom-worktree",
+            "phantom-project",
+            "main",
+            linked.to_string_lossy(),
+        ))
+        .expect("save stale project worktree");
+        drop(db);
+
+        let restored = restore_catalog(&database);
+        assert_eq!(
+            restored.projects.len(),
+            1,
+            "a stale linked worktree project must be merged away on restore"
+        );
+        assert!(
+            restored
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("worktree")),
+            "dropping the stale project must be logged: {:?}",
+            restored.diagnostics
+        );
+        store.schedule_catalog(&ProjectCatalog::from_restored(
+            restored.projects,
+            restored.settings,
+        ));
+
+        // This is the startup save that used to derive a second project from
+        // the broken linked worktree after discovery failed.
+        store.schedule(layout(&linked, Vec::new()));
+        store.flush_now();
+
+        let db = AppDatabase::open(&database).expect("reopen database");
+        let projects = db.projects().expect("read projects");
+        assert_eq!(
+            projects.len(),
+            1,
+            "broken worktree must not become a project"
+        );
+        assert_eq!(projects[0].root_path, primary.to_string_lossy());
+        let worktrees = db
+            .worktrees_of_project(&projects[0].id)
+            .expect("read project worktrees");
+        assert!(
+            worktrees
+                .iter()
+                .any(|worktree| worktree.path == linked.to_string_lossy()),
+            "the broken checkout remains owned by its repository project"
+        );
+    }
+
+    #[test]
+    fn worktree_ids_and_tabs_survive_a_preceding_worktree_removal() {
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let preceding = dir.0.join("repo-aaa");
+        let linked = dir.0.join("repo-zzz");
+        std::fs::create_dir_all(&primary).expect("repo dir");
+        run_git(&primary, &["init", "--quiet", "-b", "main"]);
+        run_git(
+            &primary,
+            &["config", "user.email", "sirio-tests@example.com"],
+        );
+        run_git(&primary, &["config", "user.name", "Sirio Tests"]);
+        std::fs::write(primary.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&primary, &["add", "README"]);
+        run_git(&primary, &["commit", "--quiet", "-m", "fixture"]);
+
+        for (branch, path) in [("preceding", &preceding), ("linked", &linked)] {
+            let status = std::process::Command::new("git")
+                .args(["worktree", "add", "--quiet", "-b", branch])
+                .arg(path)
+                .current_dir(&primary)
+                .status()
+                .expect("git worktree add");
+            assert!(status.success(), "git worktree add failed: {status}");
+        }
+
+        let database = dir.db_path("worktree-index-shift");
+        let store = SessionStore::open(&database);
+        let mut catalog = ProjectCatalog::default();
+        assert!(catalog.add(&primary).expect("discover primary repository"));
+        store.schedule_catalog(&catalog);
+        store.schedule(layout(
+            &linked,
+            vec![SessionTab {
+                id: "linked-terminal".into(),
+                title: "Linked terminal".into(),
+                kind: "terminal".into(),
+                agent_id: None,
+                active: true,
+            }],
+        ));
+        store.flush_now();
+
+        let before = AppDatabase::open(&database).expect("open database before refresh");
+        let original_id = before
+            .worktrees_of_project(&catalog.projects()[0].id)
+            .expect("read initial worktrees")
+            .into_iter()
+            .find(|worktree| worktree.path == linked.to_string_lossy())
+            .expect("linked worktree row")
+            .id;
+        assert!(original_id.ends_with("-wt-2"), "fixture starts at index 2");
+        assert_eq!(
+            before
+                .tabs_of_worktree(&original_id)
+                .expect("read initial tabs")
+                .len(),
+            1
+        );
+
+        let status = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&preceding)
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree remove");
+        assert!(status.success(), "git worktree remove failed: {status}");
+
+        let mut refreshed = ProjectCatalog::default();
+        assert!(refreshed.add(&primary).expect("rediscover primary repository"));
+        store.schedule_catalog(&refreshed);
+
+        let after = AppDatabase::open(&database).expect("open database after refresh");
+        let refreshed_row = after
+            .worktrees_of_project(&refreshed.projects()[0].id)
+            .expect("read refreshed worktrees")
+            .into_iter()
+            .find(|worktree| worktree.path == linked.to_string_lossy())
+            .expect("refreshed linked worktree row");
+        assert_eq!(
+            refreshed_row.id, original_id,
+            "refresh must preserve a worktree id when an earlier row disappears"
+        );
+
+        let restored = store.restore_tabs_for(&linked);
+        assert_eq!(
+            restored.tabs,
+            vec![SessionTab {
+                id: "linked-terminal".into(),
+                title: "Linked terminal".into(),
+                kind: "terminal".into(),
+                agent_id: None,
+                active: true,
+            }],
+            "the linked worktree must restore its own tabs after its Git index shifts"
+        );
+        assert_eq!(
+            after
+                .tabs_of_worktree(&original_id)
+                .expect("read preserved tabs")
+                .len(),
+            1,
+            "refresh must not cascade-delete tabs under the preserved worktree id"
         );
     }
 
