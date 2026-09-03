@@ -4578,6 +4578,15 @@ impl SirioWorkspace {
         // Task 8: how every agent launches is resolved state, held here and
         // refreshed off the UI thread.
         let launch = AgentLaunchState::for_startup();
+        let persisted_secondary_pane_open = session.secondary_pane_open_for(&working_directory);
+        let restored_active_secondary = tabs
+            .get(active_tab)
+            .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary);
+        if restored_active_secondary && !persisted_secondary_pane_open {
+            // Keep the restored active surface visible and make the repaired
+            // state survive the next restart as well.
+            session.save_secondary_pane_open(&working_directory, true);
+        }
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -4591,7 +4600,7 @@ impl SirioWorkspace {
             right_panel_width,
             dragging_panel: None,
             center_split_ratio,
-            secondary_pane_open: session.secondary_pane_open_for(&working_directory),
+            secondary_pane_open: persisted_secondary_pane_open || restored_active_secondary,
             center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
@@ -7079,6 +7088,7 @@ impl SirioWorkspace {
         } else {
             None
         };
+        let mut restored_secondary_pane_open = None;
         self.evict_over_capacity_worktrees(&selected_path, cx);
 
         // CENTER-01: `self.tabs` is this window's single, un-scoped-to-worktree
@@ -7192,15 +7202,31 @@ impl SirioWorkspace {
                 self.next_tab_id = self.tabs.len();
                 self.next_pane_id = next_pane_id(&self.tabs);
                 self.active_tab = active.min(self.tabs.len().saturating_sub(1));
+                // `rebuild_center_split` can reveal a restored Secondary
+                // tab. Point the workspace at the destination before that
+                // side effect so its persisted flag is written to the right
+                // worktree.
+                self.working_directory = selected_path.clone();
+                self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
                 self.rebuild_center_split();
+                restored_secondary_pane_open = Some(self.secondary_pane_open);
             }
         }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
         // #323: the pane flag is per worktree, so it follows the switch the
-        // same way the tabs above just did.
-        self.secondary_pane_open = self.session.secondary_pane_open_for(&selected_path);
+        // same way the tabs above just did. The safe restore branch above
+        // preserves a newly revealed active Secondary tab; an unsafe switch
+        // still reads only the selected worktree's persisted flag.
+        let restored_secondary_pane_was_loaded = restored_secondary_pane_open.is_some();
+        self.secondary_pane_open = restored_secondary_pane_open
+            .unwrap_or_else(|| self.session.secondary_pane_open_for(&selected_path));
+        if restored_secondary_pane_was_loaded
+            || paths_name_the_same_document(&selected_path, &old_path)
+        {
+            self.reveal_secondary_for_active_tab();
+        }
         self.worktree_label = context.activity_label;
         self.rebind_changes_tabs(cx);
         // The old worktree's pane list is NOT wiped here. `sync_control_panes`
@@ -7575,6 +7601,7 @@ impl SirioWorkspace {
             self.next_pane_id = next_pane_id(&self.tabs);
             self.rebuild_center_split();
         }
+        self.reveal_secondary_for_active_tab();
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
@@ -8094,6 +8121,7 @@ impl SirioWorkspace {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
             self.active_tab = index;
             self.center_split.select_tab(id, &self.tabs);
+            self.reveal_secondary_for_active_tab();
             if let Some(window) = window {
                 self.focus_active_pane(window, cx);
             }
@@ -8162,6 +8190,7 @@ impl SirioWorkspace {
         if self.center_split.focused() == PaneRole::Secondary && secondary_ids.is_empty() {
             self.center_split.set_focused(PaneRole::Primary);
         }
+        self.reveal_secondary_for_active_tab();
     }
 
     /// F-CORE-WSP-05: every "Insert" affordance (the tab-bar "+" menu's
@@ -8221,6 +8250,7 @@ impl SirioWorkspace {
         } else {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
+        self.reveal_secondary_for_active_tab();
         if !rebuild_pane_cache {
             return;
         }
@@ -8526,12 +8556,8 @@ impl SirioWorkspace {
 
     fn select_activity(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
-            self.active_tab = index;
-            let tab = &self.tabs[index];
-            self.center_split.select_tab(tab.id, &self.tabs);
-            self.schedule_save(cx);
-            self.mark_activity_dirty();
-            cx.notify();
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
         }
     }
 
@@ -9125,9 +9151,8 @@ impl SirioWorkspace {
                 matches_path
             })
         {
-            self.active_tab = index;
-            let tab = &self.tabs[index];
-            self.center_split.select_tab(tab.id, &self.tabs);
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
             self.schedule_save(cx);
             self.mark_activity_dirty();
             cx.notify();
@@ -9186,9 +9211,8 @@ impl SirioWorkspace {
             });
             matches_worktree
         }) {
-            self.active_tab = index;
-            let tab = &self.tabs[index];
-            self.center_split.select_tab(tab.id, &self.tabs);
+            let tab_id = self.tabs[index].id;
+            self.select_tab(tab_id, None, cx);
             if let Some(path) = focus_path.as_deref() {
                 self.tabs[index].panes.for_each(&mut |_, content| {
                     if let TabContent::Changes(changes) = content {
@@ -12229,6 +12253,16 @@ impl SirioWorkspace {
         self.secondary_pane_open = true;
         self.session
             .save_secondary_pane_open(&self.working_directory, true);
+    }
+
+    fn reveal_secondary_for_active_tab(&mut self) {
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.kind.pane_role() == PaneRole::Secondary)
+        {
+            self.open_secondary_pane();
+        }
     }
 
     fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
@@ -28318,7 +28352,11 @@ mod tests {
             let mut workspace = test_workspace_for_repo(cx, repo, false);
             workspace.add_changes_tab(None, cx);
             let first_count = workspace.tabs.len();
-            workspace.active_tab = 0;
+            workspace.toggle_secondary_pane(cx);
+            assert!(
+                !workspace.secondary_pane_visible(),
+                "the regression starts with an existing Changes tab in a closed Secondary"
+            );
 
             workspace.add_changes_tab(None, cx);
 
@@ -28335,6 +28373,10 @@ mod tests {
             assert_eq!(
                 workspace.active_tab, changes_index,
                 "reopening Changes must reveal the existing tab"
+            );
+            assert!(
+                workspace.secondary_pane_visible(),
+                "reopening an existing Changes tab must reveal the Secondary pane"
             );
             workspace
         });
@@ -28469,7 +28511,7 @@ mod tests {
         let repo = changed_test_repo("right-panel-open-diff");
         let window = cx.add_window({
             let repo = repo.clone();
-            move |_window, cx| test_workspace_for_repo(cx, repo, false)
+            move |_window, cx| test_workspace_for_repo(cx, repo, true)
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let workspace = cx.update(|window, _| {
@@ -28479,16 +28521,70 @@ mod tests {
                 .expect("workspace root")
         });
 
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(
+                !workspace.secondary_pane_visible(),
+                "the regression starts with an existing Changes tab in a closed Secondary"
+            );
+        });
+        cx.run_until_parked();
+
         let open_diff = wait_for_drawn(&mut cx, "file-open-diff");
         cx.simulate_click(open_diff.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(
-            workspace.read_with(&cx.cx, |workspace, _| {
-                workspace.tabs.iter().any(|tab| tab.kind == TabKind::Diff)
-            }),
-            "the right-panel action subscriber opens a Diff tab"
-        );
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.kind == TabKind::Diff)
+                    .count(),
+                1,
+                "Open diff must reuse the existing Changes tab"
+            );
+            assert!(
+                workspace.secondary_pane_visible(),
+                "Open diff on an existing Changes tab must reveal the Secondary pane"
+            );
+        });
+    }
+
+    /// Restoring a layout can select a Secondary tab while its per-worktree
+    /// visibility flag is still closed. The active surface wins: reopening
+    /// the pane preserves the user's restored tab instead of silently
+    /// changing the active tab to an unrelated Primary surface.
+    #[gpui::test]
+    async fn restoring_an_active_secondary_tab_reopens_the_secondary_pane(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.tabs[1].kind = TabKind::Editor;
+            workspace.active_tab = 1;
+            workspace.secondary_pane_open = false;
+            workspace.rebuild_center_split();
+            workspace
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.active_tab, 1,
+                "restore keeps the tab selected by the saved layout"
+            );
+            assert_eq!(
+                workspace.center_split.focused(),
+                PaneRole::Secondary,
+                "restore keeps focus on the selected Secondary tab"
+            );
+            assert!(
+                workspace.secondary_pane_visible(),
+                "restoring an active Secondary tab must reopen its pane"
+            );
+        });
     }
 
     /// F-SID-18: an otherwise selected worktree with no tabs must offer a
