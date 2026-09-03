@@ -1541,6 +1541,7 @@ impl Sidebar {
             .get(project_id)
             .cloned()
             .unwrap_or_default();
+        self.project_form = None;
         self.project_settings = Some(ProjectSettingsCard {
             id: project_id.to_string(),
             name: base_name,
@@ -1559,6 +1560,22 @@ impl Sidebar {
             worktree_location_focus: cx.focus_handle(),
         });
         cx.notify();
+    }
+
+    /// Whether one of the mutually-exclusive project-entry surfaces is open.
+    /// The shell uses this for Escape handling even when keyboard focus still
+    /// belongs to a terminal outside the sidebar.
+    pub fn has_open_project_surface(&self) -> bool {
+        self.project_settings.is_some() || self.project_form.is_some()
+    }
+
+    /// Dismisses whichever project-entry surface is open.
+    pub fn close_project_surface(&mut self, cx: &mut Context<Self>) {
+        let closed_settings = self.project_settings.take().is_some();
+        let closed_form = self.project_form.take().is_some();
+        if closed_settings || closed_form {
+            cx.notify();
+        }
     }
 
     pub fn set_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
@@ -1729,6 +1746,7 @@ impl Sidebar {
 
     fn start_clone_project(&mut self, cx: &mut Context<Self>) {
         self.add_project_menu.close();
+        self.project_settings = None;
         let form = cx.new(|cx| CloneForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
@@ -1752,6 +1770,7 @@ impl Sidebar {
 
     fn start_create_project(&mut self, cx: &mut Context<Self>) {
         self.add_project_menu.close();
+        self.project_settings = None;
         let form = cx.new(|cx| CreateForm::new(Self::project_form_parent(), cx));
         cx.subscribe(
             &form,
@@ -3048,6 +3067,7 @@ impl Sidebar {
             ProjectFormSurface::Create(form) => div().child(form).into_any_element(),
         };
         let close_entity = entity.clone();
+        let backdrop_close_entity = entity.clone();
         div()
             .id("project-form-overlay")
             .debug_selector(|| "project-form-overlay".to_owned())
@@ -3070,6 +3090,11 @@ impl Sidebar {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.surface)
+                    .on_mouse_down_out(move |_, _, cx| {
+                        backdrop_close_entity.update(cx, |sidebar, cx| {
+                            sidebar.close_project_surface(cx);
+                        });
+                    })
                     .child(form_view)
                     .child(
                         div()
@@ -3109,6 +3134,7 @@ impl Sidebar {
             display_name.clone()
         };
         let close_entity = entity.clone();
+        let backdrop_close_entity = entity.clone();
         let name_entity = entity.clone();
         let focus_entity = entity.clone();
         let display_name_focus = card.display_name_focus.clone();
@@ -3128,6 +3154,11 @@ impl Sidebar {
             .right(px(0.0))
             .top(px(0.0))
             .bottom(px(0.0))
+            .on_mouse_down_out(move |_, _, cx| {
+                backdrop_close_entity.update(cx, |sidebar, cx| {
+                    sidebar.close_project_surface(cx);
+                });
+            })
             // F-PRJ-13: without this, GPUI's hit test (`Frame::hit_test`)
             // walks every hitbox under the pointer back-to-front and only
             // stops at one with `HitboxBehavior::BlockMouse` -- absent that,
@@ -4143,8 +4174,24 @@ impl Render for Sidebar {
         }
         self.row_views = next_views;
         let context_menu_entity = entity.clone();
+        let project_surface_entity = entity.clone();
         div()
             .track_focus(&self.context_menu_focus)
+            .capture_key_down(move |event, _, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                let mut closed = false;
+                project_surface_entity.update(cx, |sidebar, cx| {
+                    if sidebar.has_open_project_surface() {
+                        sidebar.close_project_surface(cx);
+                        closed = true;
+                    }
+                });
+                if closed {
+                    cx.stop_propagation();
+                }
+            })
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
                     context_menu_entity
@@ -6925,6 +6972,256 @@ mod tests {
         assert!(
             cx.debug_bounds("create-name-field").is_some(),
             "create form is mounted"
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_closes_project_settings_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "Project".into(),
+                    is_git: false,
+                    root_path: PathBuf::from("/tmp/project"),
+                    worktrees: Vec::new(),
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+        });
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("project-display-name-field")
+            .expect("project settings field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-settings-sheet").is_none(),
+            "Escape closes the Project Settings card"
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_closes_clone_repository_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("add-project").expect("add project control");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        let clone = cx
+            .debug_bounds("add-project-clone")
+            .expect("clone project choice");
+        cx.simulate_click(clone.center(), Modifiers::none());
+        cx.run_until_parked();
+        let field = cx.debug_bounds("clone-url-field").expect("clone URL field");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-form-overlay").is_none(),
+            "Escape closes the Clone Repository card"
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_closes_create_project_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("add-project").expect("add project control");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        let create = cx
+            .debug_bounds("add-project-create")
+            .expect("create project choice");
+        cx.simulate_click(create.center(), Modifiers::none());
+        cx.run_until_parked();
+        let field = cx
+            .debug_bounds("create-name-field")
+            .expect("create project name field");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-form-overlay").is_none(),
+            "Escape closes the Create Project card"
+        );
+    }
+
+    #[gpui::test]
+    async fn backdrop_click_closes_project_settings_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "Project".into(),
+                    is_git: false,
+                    root_path: PathBuf::from("/tmp/project"),
+                    worktrees: Vec::new(),
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+        });
+        cx.run_until_parked();
+
+        let sheet = cx
+            .debug_bounds("project-settings-sheet")
+            .expect("project settings card is drawn");
+        cx.simulate_click(
+            point(sheet.right() + px(40.0), sheet.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-settings-sheet").is_none(),
+            "clicking outside Project Settings closes the card"
+        );
+    }
+
+    #[gpui::test]
+    async fn backdrop_click_closes_clone_repository_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("add-project").expect("add project control");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        let clone = cx
+            .debug_bounds("add-project-clone")
+            .expect("clone project choice");
+        cx.simulate_click(clone.center(), Modifiers::none());
+        cx.run_until_parked();
+        let card = cx
+            .debug_bounds("project-form-card")
+            .expect("clone card is drawn");
+        cx.simulate_click(
+            point(card.left() - px(4.0), card.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-form-overlay").is_none(),
+            "clicking outside Clone Repository closes the card"
+        );
+    }
+
+    #[gpui::test]
+    async fn backdrop_click_closes_create_project_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("add-project").expect("add project control");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        let create = cx
+            .debug_bounds("add-project-create")
+            .expect("create project choice");
+        cx.simulate_click(create.center(), Modifiers::none());
+        cx.run_until_parked();
+        let card = cx
+            .debug_bounds("project-form-card")
+            .expect("create card is drawn");
+        cx.simulate_click(
+            point(card.left() - px(4.0), card.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-form-overlay").is_none(),
+            "clicking outside Create Project closes the card"
+        );
+    }
+
+    #[gpui::test]
+    async fn opening_project_cards_replaces_the_existing_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "Project".into(),
+                    is_git: false,
+                    root_path: PathBuf::from("/tmp/project"),
+                    worktrees: Vec::new(),
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("project-settings-sheet").is_some());
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.start_clone_project(cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-form-overlay").is_some()
+                && cx.debug_bounds("clone-url-field").is_some(),
+            "Clone Repository replaces Project Settings instead of stacking"
+        );
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-settings-sheet").is_some()
+                && cx.debug_bounds("project-form-overlay").is_none(),
+            "Project Settings replaces Clone Repository instead of stacking"
+        );
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.start_create_project(cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-settings-sheet").is_none()
+                && cx.debug_bounds("create-name-field").is_some(),
+            "Create Project replaces Project Settings instead of stacking"
         );
     }
 

@@ -13264,6 +13264,16 @@ impl SirioWorkspace {
         }
 
         let key = event.keystroke.key.as_str();
+        // Project-entry cards live in the sidebar, but Escape must dismiss one
+        // even when a terminal still owns keyboard focus. Keep this capture-
+        // phase guard at the shell boundary so the key cannot reach the PTY.
+        if key == "escape" && self.sidebar.read(cx).has_open_project_surface() {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.close_project_surface(cx);
+            });
+            cx.stop_propagation();
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
         // GPUI's platform modifier is the cross-platform spelling of ⌘ on
         // macOS and the Super key on Linux. The universal palette chord is
