@@ -27,7 +27,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | ok | #373 (chiusa) | pi | apertura/preview/live reload ok; Code edita il sorgente raw e Ctrl+S salva solo le modifiche; pulsante Code clippato in pane stretto (nota) |
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | ok |  |  | toggle da titlebar ok; Ctrl+Shift+I non registrato su Windows (vedi note); Files aggiornato live |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
-| 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | ok | #366 (chiusa) | opencode-go | colonna Date corretta post-merge; filtri/ricerca da testare |
+| 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | ok | #366 (chiusa) | opencode-go | colonna Date corretta; ricerca testo ok; filtri Branch/User/Date/Paths non esercitati |
 | 23 | Browser | Tab browser embedded | ok | #368 (chiusa), #369 | opencode-go / pi | crash risolto (2/2 + 2 restore); barra indirizzi in retest |
 | 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | ok | #365, #371 (chiuse) | pi | tema, font terminale e font Interface si applicano (live e al riavvio) e si ripristinano; Agents ok |
 | 25 | Status bar | Indicatori provider usage (Claude/Codex/...), refresh | ok |  |  | indicatori Claude/Codex presenti; tooltip = etichetta (vedi note) |
