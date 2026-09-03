@@ -53,7 +53,7 @@ use sirio_git::{
     commit_files, diff_entry, discard, discard_all, stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -389,6 +389,8 @@ enum ChangesSource {
     Commit(String),
 }
 
+type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
+
 /// The full-width git changes surface.
 pub struct ChangesTab {
     repo_root: PathBuf,
@@ -405,6 +407,9 @@ pub struct ChangesTab {
     /// Expanded collapsed-context bands, keyed by (section, path, run key).
     expanded_bands: HashSet<(ChangeSection, PathBuf, usize)>,
     git_task: Option<Task<()>>,
+    /// Mutations requested while a refresh or another mutation is running.
+    /// They are started in click order as each task completes.
+    pending_operations: VecDeque<GitOperation>,
     /// Whether a snapshot load has ever completed, successfully or not.
     ///
     /// The full-surface loader is a *first-load* treatment: once the panel has
@@ -503,6 +508,7 @@ impl ChangesTab {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            pending_operations: VecDeque::new(),
             has_loaded: false,
             git_error: None,
             diff_errors: HashMap::new(),
@@ -613,6 +619,9 @@ impl ChangesTab {
                     }
                     Err(error) => tab.git_error = Some(error),
                 }
+                if let Some(operation) = tab.pending_operations.pop_front() {
+                    tab.start_operation_boxed(operation, cx);
+                }
                 cx.notify();
             });
         }));
@@ -661,7 +670,12 @@ impl ChangesTab {
     where
         F: FnOnce(&Path) -> Result<(), GitError> + Send + 'static,
     {
+        self.start_operation_boxed(Box::new(operation), cx);
+    }
+
+    fn start_operation_boxed(&mut self, operation: GitOperation, cx: &mut Context<Self>) {
         if self.git_task.is_some() {
+            self.pending_operations.push_back(operation);
             return;
         }
         let repo_root = self.repo_root.clone();
@@ -680,8 +694,12 @@ impl ChangesTab {
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
                 tab.has_loaded = true;
+                let next_operation = tab.pending_operations.pop_front();
                 match outcome {
-                    (Ok(()), Some(Ok(snapshot))) => tab.apply_snapshot(snapshot),
+                    (Ok(()), Some(Ok(snapshot))) => {
+                        tab.apply_snapshot(snapshot);
+                        tab.git_error = None;
+                    }
                     (Err(error), _) => tab.git_error = Some(error.to_string()),
                     (Ok(()), Some(Err(error))) => {
                         tab.git_error = Some(format!(
@@ -691,6 +709,9 @@ impl ChangesTab {
                     (Ok(()), None) => {
                         unreachable!("a successful operation always loads a snapshot")
                     }
+                }
+                if let Some(operation) = next_operation {
+                    tab.start_operation_boxed(operation, cx);
                 }
                 cx.notify();
             });
@@ -713,9 +734,6 @@ impl ChangesTab {
 
     fn section_action(&mut self, section: ChangeSection, cx: &mut Context<Self>) {
         if !self.allows_staging() {
-            return;
-        }
-        if self.git_task.is_some() {
             return;
         }
         let snapshot = StatusSnapshot {
@@ -760,9 +778,6 @@ impl ChangesTab {
         if !self.allows_staging() {
             return;
         }
-        if self.git_task.is_some() {
-            return;
-        }
         let display_path = sirio_project::display_path(&path);
         let detail = format!(
             "This will throw away the worktree changes to {display_path}. This cannot be undone."
@@ -787,9 +802,6 @@ impl ChangesTab {
 
     fn confirm_discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.allows_staging() {
-            return;
-        }
-        if self.git_task.is_some() {
             return;
         }
         let paths = self
@@ -2801,6 +2813,34 @@ mod tests {
         (cx, tab)
     }
 
+    fn settled_changes_tab(repo_root: PathBuf) -> ChangesTab {
+        let entries = status(&repo_root).expect("status for settled Changes tab").entries;
+        ChangesTab {
+            repo_root,
+            source: ChangesSource::WorkingTree,
+            entries,
+            diffs: HashMap::new(),
+            stats: HashMap::new(),
+            expanded_changes: HashSet::new(),
+            collapsed_sections: HashSet::new(),
+            expanded_bands: HashSet::new(),
+            git_task: None,
+            pending_operations: VecDeque::new(),
+            has_loaded: true,
+            git_error: None,
+            diff_errors: HashMap::new(),
+            refresh_started: false,
+            embedded_in_panel: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
+            pending_focus: None,
+            selected_change: None,
+            list_focus: None,
+        }
+    }
+
     fn wait_for_tab(
         cx: &VisualTestContext,
         tab: &gpui::Entity<ChangesTab>,
@@ -3511,6 +3551,47 @@ mod tests {
         );
     }
 
+    /// A failed mutation must reach the same visible error state as a failed
+    /// refresh, and a later refresh must clear it once the repository is
+    /// usable again.
+    #[gpui::test]
+    async fn a_failed_stage_surfaces_the_git_error_and_recovers_after_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        let tab = cx.new(|_| settled_changes_tab(dir.0.clone()));
+        assert_eq!(
+            tab.read_with(cx, |tab, _| section_count(tab, "Changed")),
+            1,
+            "the settled test tab contains the modified file"
+        );
+
+        std::fs::write(dir.0.join(".git/index.lock"), b"").expect("create index lock");
+        tab.update(cx, |tab, cx| {
+            tab.refresh(cx);
+            assert!(tab.git_task.is_some(), "the refresh must be in flight");
+            tab.stage_path(PathBuf::from("tracked.txt"), cx);
+        });
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.git_error.is_some()));
+
+        let error = tab
+            .read_with(cx, |tab, _| tab.git_error.clone())
+            .expect("the failed stage reaches the Changes surface");
+        assert!(
+            error.contains("index.lock"),
+            "the visible error keeps git's actionable lock detail: {error}"
+        );
+        std::fs::remove_file(dir.0.join(".git/index.lock")).expect("remove index lock");
+        tab.update(cx, |tab, cx| {
+            let _ = tab.git_task.take();
+            tab.refresh(cx);
+        });
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.git_error.is_none()));
+    }
+
     /// F-CHG-08/F-CHG-12: section and file expansion are behavior. The
     /// elements are found in the drawn frame, clicked at their laid-out
     /// bounds, and their state changes through GPUI dispatch. The diff line
@@ -3610,6 +3691,38 @@ mod tests {
     /// row controls against a real checkout, rather than calling either
     /// operation directly.
     #[gpui::test]
+    async fn a_stage_requested_during_refresh_runs_after_refresh_finishes(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        let tab = cx.new(|_| settled_changes_tab(dir.0.clone()));
+        assert_eq!(
+            tab.read_with(cx, |tab, _| section_count(tab, "Changed")),
+            1,
+            "the settled test tab contains the modified file"
+        );
+
+        tab.update(cx, |tab, cx| {
+            let _ = tab.git_task.take();
+            tab.refresh(cx);
+            assert!(tab.git_task.is_some(), "the refresh must be in flight");
+            tab.stage_path(PathBuf::from("tracked.txt"), cx);
+        });
+
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| section_count(tab, "Staged") == 1)
+        });
+        assert_eq!(
+            status(&dir.0).expect("status after queued stage").staged().len(),
+            1,
+            "a Stage request made during refresh is executed after the refresh"
+        );
+    }
+
+    #[gpui::test]
     async fn drawn_stage_and_unstage_buttons_mutate_the_real_checkout(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
@@ -3695,6 +3808,52 @@ mod tests {
                 .entries
                 .is_empty(),
             "the confirmed Discard click restores the real checkout"
+        );
+    }
+
+    /// A Discard click must still open its confirmation dialog when a refresh
+    /// is in flight; after confirmation, the mutation follows that refresh.
+    #[gpui::test]
+    async fn discard_during_refresh_keeps_confirmation_and_applies_afterward(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "discard me\n").expect("modify tracked file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let discard = cx
+            .debug_bounds("changes-discard")
+            .expect("Discard is drawn after expanding the row");
+
+        cx.update(|_, app| {
+            tab.update(app, |tab, cx| tab.refresh(cx));
+        });
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| tab.git_task.is_some()),
+            "the refresh must be in flight before Discard is clicked"
+        );
+        cx.simulate_click(discard.center(), Modifiers::none());
+        assert!(
+            cx.cx.has_pending_prompt(),
+            "Discard still asks for confirmation during a refresh"
+        );
+        cx.cx.simulate_prompt_answer("Discard");
+
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 0);
+        assert!(
+            status(&dir.0)
+                .expect("status after deferred discard")
+                .entries
+                .is_empty(),
+            "the confirmed Discard runs after the refresh"
         );
     }
 
@@ -4050,6 +4209,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            pending_operations: VecDeque::new(),
             has_loaded: false,
             git_error: None,
             refresh_started: false,
@@ -4113,6 +4273,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            pending_operations: VecDeque::new(),
             has_loaded: false,
             git_error: None,
             refresh_started: false,
@@ -4397,6 +4558,7 @@ mod tests {
             collapsed_sections: HashSet::new(),
             expanded_bands: HashSet::new(),
             git_task: None,
+            pending_operations: VecDeque::new(),
             has_loaded: false,
             git_error: None,
             diff_errors: HashMap::new(),
