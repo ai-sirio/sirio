@@ -11,11 +11,13 @@ use sirio_agents::{
     PrepareError, SKILL_MANAGED_MARKER, discover_availability, find_executable_in_path,
     install_skill, json_string_literal, shell_quote,
 };
-#[cfg(not(windows))]
+#[cfg(unix)]
 use sirio_agents::{
     AgentAvailability, DiscoveryError, find_executable_in_path_checked,
     try_discover_availability_in,
 };
+#[cfg(windows)]
+use sirio_agents::try_discover_availability_in;
 
 const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
 const SIRIOCTL: &str = "/usr/local/bin/sirioctl";
@@ -276,6 +278,60 @@ fn path_lookup_takes_an_explicit_extension_verbatim() {
         find_executable_in_path("demo-agent.EXE", &path).is_some(),
         "PATHEXT membership is case-insensitive, so .EXE is explicit too"
     );
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+/// A malformed Windows PATH component must not make the complete availability
+/// sweep fail. This is the shape produced by an installer that leaves leading
+/// whitespace on one PATH entry: the invalid candidate is a clean miss, while
+/// valid entries still resolve their agents.
+#[cfg(windows)]
+#[test]
+fn try_discover_ignores_invalid_name_from_whitespace_path_entry() {
+    let root = std::env::temp_dir().join(format!(
+        "sirio-agent-invalid-path-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let good = root.join("good");
+    std::fs::create_dir_all(&good).expect("create fixture directory");
+    for name in ["opencode.cmd", "pi.cmd"] {
+        std::fs::write(good.join(name), b"@echo off").expect("write shim fixture");
+    }
+
+    let malformed = std::ffi::OsString::from(format!("   {}", good.display()));
+    let search = std::env::join_paths([malformed, good.as_os_str().to_os_string()])
+        .expect("join PATH");
+    let discovered = try_discover_availability_in(&search)
+        .expect("an invalid PATH component must not fail the availability sweep");
+
+    assert_eq!(
+        discovered.iter().map(|agent| agent.id).collect::<Vec<_>>(),
+        vec!["claude", "codex", "opencode", "pi", "omp"]
+    );
+    assert!(discovered
+        .iter()
+        .find(|agent| agent.id == "claude")
+        .expect("claude row")
+        .executable
+        .is_none());
+    assert_eq!(
+        discovered
+            .iter()
+            .find(|agent| agent.id == "opencode")
+            .expect("opencode row")
+            .executable,
+        Some(good.join("opencode.cmd"))
+    );
+    assert_eq!(
+        discovered
+            .iter()
+            .find(|agent| agent.id == "pi")
+            .expect("pi row")
+            .executable,
+        Some(good.join("pi.cmd"))
+    );
+
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 
