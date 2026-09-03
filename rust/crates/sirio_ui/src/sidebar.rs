@@ -2452,21 +2452,28 @@ impl Sidebar {
         let Some(repo_root) = self.project_root(row_id) else {
             return;
         };
-        let Some(worktree_path) = self
+        let Some((worktree_path, branch)) = self
             .rows
             .iter()
             .find(|row| row.id == row_id)
-            .and_then(|row| row.path.clone())
+            .and_then(|row| row.path.clone().map(|path| (path, row.title.clone())))
         else {
             return;
         };
 
         let repo_root_for_task = repo_root.clone();
         let worktree_path_for_task = worktree_path.clone();
+        let branch_for_task = branch.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { remove_worktree(&repo_root_for_task, &worktree_path_for_task) })
+                .spawn(async move {
+                    remove_worktree(
+                        &repo_root_for_task,
+                        &worktree_path_for_task,
+                        &branch_for_task,
+                    )
+                })
                 .await;
             this.update(cx, |sidebar, cx| match result {
                 Ok(()) => {

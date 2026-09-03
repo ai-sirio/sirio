@@ -107,14 +107,19 @@ pub fn create_worktree(
     Ok(())
 }
 
-/// Removes a worktree at `path` from `repo`.
+/// Removes a worktree at `path` from `repo`, then deletes its `branch`.
 ///
 /// Deliberately without `--force`: git refuses to remove a worktree with
 /// uncommitted changes, and that refusal is surfaced to the user rather
-/// than silently discarding their work.
-pub fn remove_worktree(repo: &Path, path: &Path) -> Result<(), WorktreeError> {
+/// than silently discarding their work. Branch deletion is best-effort after
+/// the worktree has been removed: a refusal there is logged, but does not
+/// turn the already-completed worktree removal into an error.
+pub fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), WorktreeError> {
     let path = git::path_arg(path);
     git::run_accepting(&["worktree", "remove", path.as_str()], repo, &[0])?;
+    if let Err(error) = git::run_accepting(&["branch", "-D", branch], repo, &[0]) {
+        eprintln!("[git] failed to delete branch '{branch}' after removing worktree: {error}");
+    }
     Ok(())
 }
 
