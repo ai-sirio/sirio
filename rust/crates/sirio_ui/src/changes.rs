@@ -1218,7 +1218,10 @@ impl ChangesTab {
                 )
                 .child(
                     div()
+                        .flex_1()
                         .min_w(px(0.0))
+                        .debug_selector(|| "changes-hunk-header".into())
+                        .truncate()
                         .text_color(theme.text_faint)
                         .child(header),
                 )
@@ -4582,6 +4585,112 @@ mod tests {
         assert_eq!(f32::from(old.size.width), 30.0);
         assert_eq!(f32::from(new.size.width), 30.0);
         assert_eq!(f32::from(marker.size.width), 12.0);
+    }
+
+    /// A long trailing-context header must stay on its own fixed-height row:
+    /// the following collapsed context band is the first visible row that
+    /// exposed the old wrap-without-height behavior.
+    #[gpui::test]
+    async fn drawn_long_hunk_header_stays_inside_its_row_above_hidden_lines(
+        cx: &mut TestAppContext,
+    ) {
+        let path = PathBuf::from("README.md");
+        let diff = FileDiff {
+            path: path.clone(),
+            hunks: vec![sirio_git::Hunk {
+                header: "@@ -1,24 +1,26 @@ # Sirio — a native app for macOS, Linux, and Windows with a deliberately long trailing context description".to_owned(),
+                old_start: 1,
+                old_lines: 24,
+                new_start: 1,
+                new_lines: 26,
+                lines: (1..=24)
+                    .map(|line| DiffLine {
+                        origin: DiffOrigin::Context,
+                        old_line_number: Some(line),
+                        new_line_number: Some(line),
+                        content: format!("unchanged-{line}"),
+                    })
+                    .chain(std::iter::once(DiffLine {
+                        origin: DiffOrigin::Addition,
+                        old_line_number: None,
+                        new_line_number: Some(25),
+                        content: "first change".to_owned(),
+                    }))
+                    .collect(),
+            }],
+            additions: 1,
+            deletions: 0,
+            is_binary: false,
+            is_submodule: false,
+        };
+        cx.update(Theme::init);
+        let window = cx.open_window(gpui::size(px(330.0), px(600.0)), move |_window, _cx| {
+            ChangesTab {
+                repo_root: PathBuf::from("/repo"),
+                source: ChangesSource::WorkingTree,
+                entries: vec![StatusEntry {
+                    path: path.clone(),
+                    original_path: None,
+                    index_status: None,
+                    worktree_status: Some(StatusKind::Modified),
+                }],
+                diffs: HashMap::from([(path.clone(), diff)]),
+                stats: HashMap::from([(
+                    path,
+                    DiffStat {
+                        additions: 1,
+                        deletions: 0,
+                        is_binary: false,
+                    },
+                )]),
+                expanded_changes: HashSet::from([(
+                    ChangeSection::Changed,
+                    PathBuf::from("README.md"),
+                )]),
+                collapsed_sections: HashSet::new(),
+                expanded_bands: HashSet::new(),
+                git_task: None,
+                pending_operations: VecDeque::new(),
+                has_loaded: true,
+                git_error: None,
+                diff_errors: HashMap::new(),
+                refresh_started: false,
+                embedded_in_panel: false,
+                renders: 0,
+                renders_at_last_tick: 0,
+                refresh_suspended: false,
+                suspended_ticks: 0,
+                pending_focus: None,
+                selected_change: None,
+                list_focus: None,
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            window.refresh();
+            window.simulate_next_frame(app);
+        });
+
+        let pane = cx
+            .debug_bounds("changes-surface")
+            .expect("the narrow Changes pane is drawn");
+        let header = cx
+            .debug_bounds("changes-hunk-header")
+            .expect("the hunk header text is drawn");
+        let hidden = cx
+            .debug_bounds("changes-context-band")
+            .expect("the collapsed hidden-lines row is drawn");
+        assert!(
+            !header.intersects(&hidden),
+            "the hunk header must not overlap the hidden-lines row: \
+             header={header:?} hidden={hidden:?}"
+        );
+        assert!(
+            header.left() >= pane.left() && header.right() <= pane.right(),
+            "the hunk header must stay inside the narrow pane: \
+             pane={pane:?} header={header:?}"
+        );
     }
 
     /// F-GIT-DIFF-03. The whole clause, in one drawn frame reached by real
