@@ -14481,6 +14481,17 @@ impl Render for SirioWorkspace {
                 .key_context("Workspace")
                 .track_focus(&self.root_focus)
                 .capture_key_down(cx.listener(Self::handle_root_key_down))
+                // #369 follow-up: any GPUI click must take Win32 keyboard
+                // focus back from the native WebView2 child, which otherwise
+                // keeps it across sidebar/tab-strip/toolbar clicks, so the
+                // next chord reaches Edge (e.g. `Ctrl+Shift+P` printing)
+                // instead of the app. Capture phase so no child handler can
+                // pre-empt it; strictly a focus reclaim — never stops
+                // propagation, never touches GPUI focus.
+                .capture_any_mouse_down(|_, _window, _| {
+                    #[cfg(target_os = "windows")]
+                    sirio_ui::browser::steal_win32_focus_from_webview_child(_window);
+                })
                 .on_action(cx.listener(Self::handle_close_settings_surface))
                 .child(
                     div()
@@ -14550,6 +14561,13 @@ impl Render for SirioWorkspace {
             .key_context("Workspace")
             .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::handle_root_key_down))
+            // #369 follow-up: any GPUI click must take Win32 keyboard focus
+            // back from the native WebView2 child (see the settings branch
+            // above for why capture phase, and why reclaim only).
+            .capture_any_mouse_down(|_, _window, _| {
+                #[cfg(target_os = "windows")]
+                sirio_ui::browser::steal_win32_focus_from_webview_child(_window);
+            })
             .on_action(cx.listener(Self::handle_new_terminal_tab))
             .on_action(cx.listener(Self::handle_open_file))
             .on_action(cx.listener(Self::handle_restore_launch_snapshot))

@@ -1156,6 +1156,151 @@ fn capture_window_hwnd(window: &Window) -> Result<isize, String> {
     }
 }
 
+/// #369 (Ctrl+L residual): steal Win32 thread focus from the WebView2 child.
+///
+/// wry's `focus_parent()` is `SetFocus(parent)` alone. That is a no-op when
+/// the parent already has thread focus (the click path, which is why the
+/// first fix worked there), but it cannot steal thread focus when the child
+/// still holds it (the `Ctrl+L` path after a page click: GPUI shows a caret
+/// via `window.focus`, yet the first keystrokes still go to the page).
+/// Attach the two threads, foreground the parent top-level, and focus it.
+/// Best-effort with fallback to the plain `focus_parent()` below, so a
+/// failure here can only leave the previous behaviour, never break it.
+///
+/// Pump-safe: `SetFocus`/`SetForegroundWindow` deliver `WM_SETFOCUS`/
+/// `WM_ACTIVATE` synchronously, and GPUI's Windows backend holds no borrow
+/// across those (focus messages fall through to `DefWindowProc`, activation
+/// only resets modifiers and spawns) — unlike WebView2 creation (#255, #368),
+/// which must stay off every GPUI lease.
+///
+/// `pub` so the host's shell root can reclaim focus on any GPUI click
+/// (sidebar, tab strip, toolbar): the same stolen-focus state survives a
+/// click outside the page, and only a Win32 reclaim fixes the next chord.
+#[cfg(target_os = "windows")]
+pub fn steal_win32_focus_from_webview_child(window: &Window) {
+    let Ok(parent_isize) = capture_window_hwnd(window) else {
+        return;
+    };
+    steal_win32_focus_to_parent(parent_isize);
+}
+
+/// Raw-HWND core of [`steal_win32_focus_from_webview_child`], split out so
+/// the WebView2 accelerator handler (which already holds the parent HWND,
+/// with no `Window` in reach) can steal before reposting a chord.
+#[cfg(target_os = "windows")]
+fn steal_win32_focus_to_parent(parent_isize: isize) {
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        System::Threading::{AttachThreadInput, GetCurrentThreadId},
+        UI::{
+            Input::KeyboardAndMouse::{GetFocus, SetFocus},
+            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow},
+        },
+    };
+    let parent = parent_isize as HWND;
+    unsafe {
+        let focused = GetFocus();
+        if focused == parent {
+            return;
+        }
+        let current_tid = GetCurrentThreadId();
+        let mut focused_pid = 0u32;
+        let focused_tid = if focused.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(focused, &mut focused_pid)
+        };
+        let foreground = GetForegroundWindow();
+        let mut foreground_pid = 0u32;
+        let foreground_tid = if foreground.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, &mut foreground_pid)
+        };
+        let mut attached_focused = false;
+        let mut attached_foreground = false;
+        if focused_tid != 0 && focused_tid != current_tid {
+            attached_focused = AttachThreadInput(current_tid, focused_tid, 1) != 0;
+        }
+        if foreground_tid != 0 && foreground_tid != current_tid && foreground_tid != focused_tid {
+            attached_foreground = AttachThreadInput(current_tid, foreground_tid, 1) != 0;
+        }
+        let _ = SetForegroundWindow(parent);
+        let _ = SetFocus(parent);
+        if attached_focused {
+            AttachThreadInput(current_tid, focused_tid, 0);
+        }
+        if attached_foreground {
+            AttachThreadInput(current_tid, foreground_tid, 0);
+        }
+    }
+}
+
+/// #369 follow-up: which Win32 virtual-key chords belong to the Sirio host
+/// and must be forwarded from the WebView2 accelerator handler.
+///
+/// Pure so the rule stays testable without a window: the handler can only
+/// run while a live page holds native focus. Forwards exactly the chords the
+/// host handles globally — window commands (`Ctrl+L/T/O/S`, `Ctrl+Shift+`
+/// `P/L/D/R/H/B/W`, `Ctrl+,`, `Escape`), pane/tab chords (`Ctrl+Tab`,
+/// `Ctrl+Shift+Tab`, `Ctrl+1..9`, `Ctrl(+Shift)+W`, `Ctrl+Alt` arrows/`W`,
+/// `Ctrl+Alt+Shift` right/down) and the universal palette (`Ctrl+Shift+P`,
+/// `Ctrl+K` outside a terminal, decided by the host at dispatch). Everything
+/// else stays in the page: typing, `Ctrl+A/C/V/X/Z`, arrows, `F5`/`Ctrl+R`
+/// reload, `Ctrl+P` print, `Ctrl+F` find, `Alt+Left/Right` history — stealing
+/// any of those would break the page to deliver keys the host ignores.
+///
+/// `D`/`R`/`H` (not `S`/`I`/`O`) because #374 retargeted the Windows layout
+/// chords: `Ctrl+Shift+S/I/O` are OS hotkeys that never reach the window, so
+/// on Windows sidebar is `Ctrl+Shift+D`, right panel `Ctrl+Shift+R`, restore
+/// is `Ctrl+Shift+H`. This rule only runs on Windows (the handler is
+/// Windows-only), hence only the Windows letters.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn should_forward_accelerator_to_host(ctrl: bool, shift: bool, alt: bool, vk: u32) -> bool {
+    // Win32 virtual keys (no dependency needed for the pure rule).
+    const VK_TAB: u32 = 0x09;
+    const VK_ESCAPE: u32 = 0x1B;
+    const VK_B: u32 = 0x42;
+    const VK_D: u32 = 0x44;
+    const VK_H: u32 = 0x48;
+    const VK_K: u32 = 0x4B;
+    const VK_L: u32 = 0x4C;
+    const VK_O: u32 = 0x4F;
+    const VK_P: u32 = 0x50;
+    const VK_R: u32 = 0x52;
+    const VK_S: u32 = 0x53;
+    const VK_T: u32 = 0x54;
+    const VK_W: u32 = 0x57;
+    const VK_LEFT: u32 = 0x25;
+    const VK_UP: u32 = 0x26;
+    const VK_RIGHT: u32 = 0x27;
+    const VK_DOWN: u32 = 0x28;
+    const VK_OEM_COMMA: u32 = 0xBC;
+    if alt {
+        // Only the pane chords use Alt; `Alt+Left/Right` (history), `Alt+D`
+        // (location) and `AltGr` typing must keep reaching the page.
+        return ctrl && matches!(vk, VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN | VK_W);
+    }
+    if !ctrl {
+        // Plain `Escape` closes settings/palette; every other bare key is
+        // typing or page navigation. (`Ctrl+Esc` opens Start, `Shift+Esc`
+        // is untouched — no arm below lists them — so the OS and the page
+        // keep them.)
+        return vk == VK_ESCAPE && !shift;
+    }
+    if shift {
+        matches!(
+            vk,
+            VK_P | VK_L | VK_D | VK_R | VK_H | VK_B | VK_W | VK_TAB
+        )
+    } else {
+        matches!(
+            vk,
+            VK_L | VK_T | VK_O | VK_S | VK_W | VK_K | VK_TAB | VK_OEM_COMMA
+        ) || (0x31..=0x39).contains(&vk)
+    }
+}
+
 /// #368: the engine build for a deferred surface, off every GPUI lease.
 ///
 /// Runs from a foreground task after `new` has returned, so no `App` borrow
@@ -1478,6 +1623,8 @@ impl BrowserSurface {
                     let outcome = attempt.build_deferred(parent_hwnd);
                     let _ = this.update(cx, |surface, cx| {
                         surface.install_deferred(outcome, cx);
+                        #[cfg(target_os = "windows")]
+                        surface.attach_host_accelerators(parent_hwnd);
                     });
                 })
                 .detach();
@@ -1575,6 +1722,8 @@ impl BrowserSurface {
     /// native window and can keep the operating system focus after a page
     /// click, so hand focus back to its parent before focusing the TextField.
     pub fn focus_address_bar(&self, window: &mut Window, cx: &mut App) {
+        #[cfg(target_os = "windows")]
+        steal_win32_focus_from_webview_child(window);
         if let Some(webview) = self.webview.borrow().as_ref() {
             let _ = webview.focus_parent();
         }
@@ -1586,6 +1735,100 @@ impl BrowserSurface {
     // "Focus Address Bar" command) a way to move keyboard focus into the
     // address field without going through a synthetic click, the same way
     // `Chat::focus_handle` hands out its composer's handle.
+
+    /// #369 follow-up: forward host chords pressed while the page holds
+    /// Win32 focus.
+    ///
+    /// Stealing focus inside `focus_address_bar` cannot suffice on its own:
+    /// after a page click the WebView2 child owns Win32 focus and consumes
+    /// its accelerators (`Ctrl+L`, `Ctrl+Shift+P`, …), so the chord never
+    /// reaches the GPUI window and the steal never runs. This hooks
+    /// `ICoreWebView2Controller::add_AcceleratorKeyPressed`: chords in
+    /// [`should_forward_accelerator_to_host`] are marked handled (the page
+    /// and Edge never see them — no print dialog on `Ctrl+Shift+P`) and
+    /// reposted to the parent top-level, stealing Win32 focus first so the
+    /// redelivered key — and every key after it — lands in GPUI. All other
+    /// keys are left to the page untouched.
+    ///
+    /// Runs on the UI thread that owns the controller (the same foreground
+    /// task that built it, #368); the closure captures only the parent HWND
+    /// integer, touches no GPUI lease, and uses `PostMessage` (never `Send`),
+    /// so it cannot re-enter a borrow the way synchronous creation pumps do
+    /// (#255). The registration is fire-and-forget like wry's own handlers:
+    /// COM holds its reference, and destroying the webview (`close_native`)
+    /// releases it with the controller.
+    #[cfg(target_os = "windows")]
+    fn attach_host_accelerators(&self, parent_hwnd: isize) {
+        use webview2_com::{
+            AcceleratorKeyPressedEventHandler,
+            Microsoft::Web::WebView2::Win32::{
+                COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+                COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+            },
+        };
+        use wry::WebViewExtWindows;
+        let controller = {
+            let borrowed = self.webview.borrow();
+            let Some(webview) = borrowed.as_ref() else {
+                return;
+            };
+            webview.controller()
+        };
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+            use windows_sys::Win32::UI::{
+                Input::KeyboardAndMouse::GetKeyState,
+                WindowsAndMessaging::PostMessageW,
+            };
+            let Some(args) = args else {
+                return Ok(());
+            };
+            let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+            let mut vk = 0u32;
+            let mut lparam = 0i32;
+            unsafe {
+                args.KeyEventKind(&mut kind)?;
+                args.VirtualKey(&mut vk)?;
+                args.KeyEventLParam(&mut lparam)?;
+            }
+            // Key releases need no forwarding: the steal below already moved
+            // Win32 focus to the parent, so releases arrive there naturally;
+            // reposting them would only double-deliver what the host ignores
+            // anyway (actions fire on key-down).
+            if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+                && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+            {
+                return Ok(());
+            }
+            const VK_SHIFT: i32 = 0x10;
+            const VK_CONTROL: i32 = 0x11;
+            const VK_MENU: i32 = 0x12;
+            let held = |vk: i32| unsafe { (GetKeyState(vk) as u16 & 0x8000) != 0 };
+            if !should_forward_accelerator_to_host(held(VK_CONTROL), held(VK_SHIFT), held(VK_MENU), vk)
+            {
+                return Ok(());
+            }
+            steal_win32_focus_to_parent(parent_hwnd);
+            const WM_KEYDOWN: u32 = 0x0100;
+            const WM_SYSKEYDOWN: u32 = 0x0104;
+            let message = if kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN {
+                WM_SYSKEYDOWN
+            } else {
+                WM_KEYDOWN
+            };
+            unsafe {
+                args.SetHandled(true)?;
+                PostMessageW(
+                    parent_hwnd as windows_sys::Win32::Foundation::HWND,
+                    message,
+                    vk as usize,
+                    lparam as isize,
+                );
+            }
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let _ = unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) };
+    }
 
     /// Map or unmap the native child window.
     ///
@@ -1788,6 +2031,8 @@ impl BrowserSurface {
                                 let outcome = attempt.build_deferred(parent_hwnd);
                                 let _ = entity_weak.update(cx, |surface, cx| {
                                     surface.install_retry(outcome, cx);
+                                    #[cfg(target_os = "windows")]
+                                    surface.attach_host_accelerators(parent_hwnd);
                                 });
                             })
                             .detach();
@@ -2694,6 +2939,78 @@ mod tests {
             initial_native_visibility().get(),
             "wry maps the child window on creation, so our mirror must start mapped"
         );
+    }
+
+    /// #369 follow-up: the forwarding rule is the whole fix for chords
+    /// pressed while the page holds native focus, so it is pinned here —
+    /// forwarding too little strands host chords in Edge (the `Ctrl+L` /
+    /// `Ctrl+Shift+P` reports), forwarding too much breaks the page (reload,
+    /// find, print, history, `AltGr` typing).
+    #[test]
+    fn host_chords_are_forwarded_from_the_page() {
+        // Window commands, palette, settings, pane/tab chords.
+        for (ctrl, shift, alt, vk) in [
+            (true, false, false, 0x4C), // Ctrl+L — Focus Address Bar
+            (true, true, false, 0x50), // Ctrl+Shift+P — palette
+            (true, true, false, 0x4C), // Ctrl+Shift+L — New Browser
+            (true, true, false, 0x44), // Ctrl+Shift+D — sidebar (#374 Windows)
+            (true, true, false, 0x52), // Ctrl+Shift+R — right panel (#374 Windows)
+            (true, true, false, 0x48), // Ctrl+Shift+H — restore launch (#374 Windows)
+            (true, true, false, 0x42), // Ctrl+Shift+B — secondary pane
+            (true, true, false, 0x57), // Ctrl+Shift+W — close tab
+            (true, false, false, 0x54), // Ctrl+T — new terminal
+            (true, false, false, 0x4F), // Ctrl+O — open file
+            (true, false, false, 0x53), // Ctrl+S — save file
+            (true, false, false, 0x57), // Ctrl+W — close tab
+            (true, false, false, 0x4B), // Ctrl+K — palette fallback
+            (true, false, false, 0xBC), // Ctrl+, — settings
+            (false, false, false, 0x1B), // Escape — close settings/palette
+            (true, false, false, 0x09), // Ctrl+Tab — cycle tab
+            (true, true, false, 0x09), // Ctrl+Shift+Tab — cycle back
+            (true, false, false, 0x31), // Ctrl+1 — jump to tab
+            (true, false, false, 0x39), // Ctrl+9 — jump to tab
+            (true, false, true, 0x25), // Ctrl+Alt+Left — focus pane
+            (true, false, true, 0x28), // Ctrl+Alt+Down — focus pane
+            (true, false, true, 0x57), // Ctrl+Alt+W — close pane
+            (true, true, true, 0x27), // Ctrl+Alt+Shift+Right — split pane
+        ] {
+            assert!(
+                should_forward_accelerator_to_host(ctrl, shift, alt, vk),
+                "host chord must be forwarded: ctrl={ctrl} shift={shift} alt={alt} vk={vk:#X}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_keys_stay_in_the_page() {
+        for (ctrl, shift, alt, vk) in [
+            (false, false, false, 0x41), // typing
+            (true, false, false, 0x41), // Ctrl+A — page select-all
+            (true, false, false, 0x43), // Ctrl+C — copy
+            (true, false, false, 0x56), // Ctrl+V — paste
+            (true, false, false, 0x58), // Ctrl+X — cut
+            (true, false, false, 0x5A), // Ctrl+Z — undo
+            (false, false, false, 0x25), // arrows — page scroll/caret
+            (false, false, false, 0x74), // F5 — reload
+            (true, false, false, 0x52), // Ctrl+R — reload
+            (true, false, false, 0x50), // Ctrl+P — print
+            (true, false, false, 0x46), // Ctrl+F — find
+            (true, false, false, 0x4E), // Ctrl+N — no host binding
+            (true, false, false, 0x44), // Ctrl+D — no host binding
+            (true, true, false, 0x53), // Ctrl+Shift+S — OS hotkey, never arrives (#374)
+            (true, true, false, 0x49), // Ctrl+Shift+I — OS hotkey, never arrives (#374)
+            (true, true, false, 0x4F), // Ctrl+Shift+O — OS hotkey, never arrives (#374)
+            (false, false, true, 0x25), // Alt+Left — history back
+            (true, false, true, 0x51), // AltGr+Q typing — must not steal
+            (true, false, false, 0x1B), // Ctrl+Esc — Start menu, never swallow
+            (false, true, false, 0x1B), // Shift+Esc — never swallow
+            (false, false, false, 0x7B), // F12 — devtools
+        ] {
+            assert!(
+                !should_forward_accelerator_to_host(ctrl, shift, alt, vk),
+                "page key must not be forwarded: ctrl={ctrl} shift={shift} alt={alt} vk={vk:#X}"
+            );
+        }
     }
 
     #[test]
