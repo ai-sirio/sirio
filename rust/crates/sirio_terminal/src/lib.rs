@@ -447,8 +447,10 @@ impl MouseEncoderState<'static> {
 type SnapshotReply = (Vec<Vec<SnapshotCell>>, (usize, usize));
 
 enum TerminalCommand {
-    /// Write bytes to the PTY (paste and programmatic input).
+    /// Write bytes to the PTY (file drops and programmatic input).
     Input(Vec<u8>),
+    /// Write clipboard bytes to the PTY, using bracketed paste when enabled.
+    Paste(Vec<u8>),
     /// Encode a keyboard event against the guest-controlled terminal state.
     Key(KeyInput),
     /// Encode a mouse event against the guest-controlled terminal state.
@@ -1396,6 +1398,18 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         let _ = writer.write_all(&bytes);
                         let _ = writer.flush();
                     }
+                    TerminalCommand::Paste(bytes) => {
+                        if terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false) {
+                            let mut bracketed = Vec::with_capacity(bytes.len() + 12);
+                            bracketed.extend_from_slice(b"\x1b[200~");
+                            bracketed.extend_from_slice(&bytes);
+                            bracketed.extend_from_slice(b"\x1b[201~");
+                            let _ = writer.write_all(&bracketed);
+                        } else {
+                            let _ = writer.write_all(&bytes);
+                        }
+                        let _ = writer.flush();
+                    }
                     TerminalCommand::Key(input) => {
                         if let Ok(bytes) = encode_key_input(&terminal, &mut key_encoder, input) {
                             let _ = writer.write_all(&bytes);
@@ -1983,6 +1997,10 @@ impl TerminalHandle {
 
     fn write(&self, bytes: Vec<u8>) {
         let _ = self.commands.send(TerminalCommand::Input(bytes));
+    }
+
+    fn paste(&self, bytes: Vec<u8>) {
+        let _ = self.commands.send(TerminalCommand::Paste(bytes));
     }
 
     fn write_key(&self, input: KeyInput) {
@@ -3821,7 +3839,9 @@ impl TerminalView {
             TerminalContextAction::Copy => self.copy_text(cx, false),
             TerminalContextAction::Paste => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.input(text.into_bytes());
+                    if let Some(terminal) = self.running_terminal() {
+                        terminal.paste(text.into_bytes());
+                    }
                 }
             }
             TerminalContextAction::CopyContext => self.copy_text(cx, true),
@@ -3872,6 +3892,27 @@ impl TerminalView {
             self.context_menu = Some(Point::new(px(20.0), px(20.0)));
             cx.notify();
             return;
+        }
+        let is_clipboard_shortcut = {
+            #[cfg(target_os = "macos")]
+            {
+                event.keystroke.modifiers.platform
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                event.keystroke.modifiers.control && event.keystroke.modifiers.shift
+            }
+        };
+        if is_clipboard_shortcut {
+            let action = match key.as_str() {
+                "c" => Some(TerminalContextAction::Copy),
+                "v" => Some(TerminalContextAction::Paste),
+                _ => None,
+            };
+            if let Some(action) = action {
+                self.handle_context_action(action, window, cx);
+                return;
+            }
         }
         if let TerminalState::Running(terminal) = &self.terminal {
             let scroll = (!event.keystroke.modifiers.modified())
@@ -10015,6 +10056,151 @@ mod view_tests {
             captured.contains(&clipboard_text),
             "Paste did not feed the clipboard's pane id back into the terminal: {captured:?}"
         );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    fn clipboard_keystroke(key: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("cmd-{key}")
+        } else {
+            format!("ctrl-shift-{key}")
+        }
+    }
+
+    #[gpui::test]
+    async fn keyboard_paste_round_trips_through_the_terminal(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-keyboard-paste-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '\\033[?2004h'; exec cat".to_string(),
+            ],
+        };
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let terminal = cx.update(|window, _cx| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+                .clone()
+        });
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is drawn");
+        let pasted = "keyboard-paste-351";
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(pasted.to_string()));
+        });
+        cx.simulate_click(target.center(), Modifiers::none());
+        cx.simulate_keystrokes(&clipboard_keystroke("v"));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut captured = String::new();
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            captured = terminal.read_with(&cx.cx, |terminal, _| {
+                String::from_utf8_lossy(&terminal.capture_scrollback()).into_owned()
+            });
+            if captured.contains(pasted) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            captured.contains(pasted),
+            "keyboard paste did not reach the PTY: {captured:?}"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    #[gpui::test]
+    async fn keyboard_copy_writes_the_selected_terminal_text_to_clipboard(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-keyboard-copy-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'COPY-351'; exec sleep 60".to_string(),
+            ],
+        };
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let terminal = cx.update(|window, _cx| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+                .clone()
+        });
+        let handle = terminal
+            .read_with(&cx.cx, |terminal, _| terminal.running_terminal().cloned())
+            .expect("terminal must be running");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            let captured = terminal.read_with(&cx.cx, |terminal, _| {
+                String::from_utf8_lossy(&terminal.capture_scrollback()).into_owned()
+            });
+            if captured.contains("COPY-351") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is drawn");
+        let cell_width = (*handle.last_cell_width.lock()).expect("terminal cell width");
+        let cell_height = (*handle.last_cell_height.lock()).expect("terminal cell height");
+        let start = point(
+            target.origin.x + px(f32::from(cell_width) * 0.5),
+            target.origin.y + px(f32::from(cell_height) * 0.5),
+        );
+        let end = point(
+            target.origin.x + px(f32::from(cell_width) * 7.5),
+            target.origin.y + px(f32::from(cell_height) * 0.5),
+        );
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        assert_eq!(handle.selected_text().as_deref(), Some("COPY-351"));
+
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("sentinel".to_string()));
+        });
+        cx.simulate_keystrokes(&clipboard_keystroke("c"));
+        let copied = cx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .expect("keyboard copy must write a clipboard entry");
+        assert_eq!(copied, "COPY-351");
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
