@@ -182,11 +182,6 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 pub(crate) const ROW_V_GAP: f32 = 2.0;
 /// Two-line card height: 7 + 18 + 4 + 15 + 7 — waku's session-card math.
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
-/// Maximum title lines rendered for a row. The row sizes itself from the
-/// content, so this is a guard against pathological branch names rather than
-/// a prediction of how many lines a title needs.
-const MAX_TITLE_LINES: usize = 3;
-
 /// A visible row in the flattened sidebar tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarRow {
@@ -3805,17 +3800,9 @@ impl Sidebar {
                 div()
                     .min_w_0()
                     .flex_1()
-                    .whitespace_normal()
-                    // The row sizes itself from this title's content, so
-                    // its height and the rendered lines cannot disagree. The
-                    // clamp is only a floor on absurdity (a pathological
-                    // branch name), not a prediction of how many lines it
-                    // needs.
+                    .whitespace_nowrap()
+                    .overflow_hidden()
                     .debug_selector(move || format!("sidebar-row-title-{row_id}"))
-                    .line_clamp(MAX_TITLE_LINES)
-                    // `line_clamp` implies `overflow_hidden`, but the "…"
-                    // affix comes only from `TextOverflow::Truncate` — with
-                    // no `text_ellipsis` the clamp would cut the title dead.
                     .text_ellipsis()
                     .line_height(px(ROW_TITLE_LINE_HEIGHT))
                     .font_weight(if is_project {
@@ -4762,6 +4749,74 @@ mod tests {
             last_row_after.top() >= tree.top() && last_row_after.bottom() <= tree.bottom(),
             "the last row must be visible inside the sidebar viewport: row={last_row_after:?}, \
              tree={tree:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn narrow_sidebar_truncates_long_row_labels_without_overlap(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let project_root = PathBuf::from("/tmp/sidebar-narrow-labels");
+        cx.update(Theme::init);
+        let window = cx.open_window(size(px(320.0), px(240.0)), |_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "narrow-labels".into(),
+                    name: "Project".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees: vec![
+                        SidebarWorktree {
+                            branch: "worktree/green-meadow-592b".into(),
+                            path: project_root.join("green-meadow"),
+                            is_primary: false,
+                            comment: None,
+                        },
+                        SidebarWorktree {
+                            branch: "worktree/green-valley-a9fb".into(),
+                            path: project_root.join("green-valley"),
+                            is_primary: false,
+                            comment: None,
+                        },
+                    ],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.set_panel_width(180.0, cx));
+        });
+        cx.run_until_parked();
+
+        let first_row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the first worktree row is drawn");
+        let second_row = cx
+            .debug_bounds("sidebar-row-2")
+            .expect("the second worktree row is drawn");
+        let first_title = cx
+            .debug_bounds("sidebar-row-title-1")
+            .expect("the first worktree title is drawn");
+        let second_title = cx
+            .debug_bounds("sidebar-row-title-2")
+            .expect("the second worktree title is drawn");
+
+        assert!(
+            first_title.size.height <= px(ROW_TITLE_LINE_HEIGHT),
+            "a narrow row title must stay one line: title={first_title:?}"
+        );
+        assert!(
+            second_title.size.height <= px(ROW_TITLE_LINE_HEIGHT),
+            "a narrow row title must stay one line: title={second_title:?}"
+        );
+        assert!(
+            first_row.bottom() <= second_row.top(),
+            "long labels must not paint into the next row: first={first_row:?}, second={second_row:?}"
         );
     }
 
