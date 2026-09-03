@@ -1,0 +1,26 @@
+# sirio.sqlite after relaunch 06:03, queried 06:10
+
+## worktree
+p-f5f4cb784569c14a-wt-0|~/Desktop/Progetti/sirio
+p-f5f4cb784569c14a-wt-1|/private/tmp/qa-evidence
+p-f5f4cb784569c14a-wt-10|~/Desktop/Progetti/worktrees/tiller-rust-gpui/glad-cairn/tiller-rust-gpui
+p-f5f4cb784569c14a-wt-2|~/.herdr/worktrees/sirio/fix-356
+p-f5f4cb784569c14a-wt-3|~/.herdr/worktrees/sirio/fix-358
+p-f5f4cb784569c14a-wt-4|~/.herdr/worktrees/sirio/fix-359
+p-f5f4cb784569c14a-wt-5|~/.herdr/worktrees/sirio/fix-360
+p-f5f4cb784569c14a-wt-6|~/.herdr/worktrees/sirio/worktree-green-meadow-592b
+p-f5f4cb784569c14a-wt-7|~/.herdr/worktrees/sirio/worktree-green-valley-a9fb
+p-f5f4cb784569c14a-wt-8|~/Desktop/Progetti/worktrees/sirio/nimble-ravine/sirio
+p-f5f4cb784569c14a-wt-9|~/Desktop/Progetti/worktrees/tiller-rust-gpui/fix-next
+
+## tabs per worktree_id
+worktree_id|n|titles
+p-f5f4cb784569c14a-wt-0|3|Terminal | Terminal | Terminal
+p-f5f4cb784569c14a-wt-10|1|Terminal
+p-f5f4cb784569c14a-wt-3|9|Chat | Terminal | Claude Code | Codex | Claude Code | Codex | OpenCode | Pi | Changes
+p-f5f4cb784569c14a-wt-7|4|Terminal | OpenCode | Pi | Oh-My-Pi
+p-f5f4cb784569c14a-wt-8|1|CONTEXT.md
+p-f5f4cb784569c14a-wt-9|1|Terminal
+
+## sirioctl list-workspaces 05:24 (before relaunch, after herdr created fix-356/fix-358)
+wt-0 main | wt-1 qa-evidence | wt-2 fix/356 | wt-3 fix/358 | wt-2 green-meadow | wt-3 green-valley | wt-4 ddb1a22 (mounted) | wt-5 fix/next | wt-6 8f60f62
