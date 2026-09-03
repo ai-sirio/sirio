@@ -41,6 +41,10 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 
 | Issue | Agente | Worktree | Tentativi | Esito |
 |-------|--------|----------|-----------|-------|
+| #364 console Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-364` (herdr w4) | 1 | in corso |
+| #365 registry agenti / PATH | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-365` (herdr w5) | 1 | in corso |
+| #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6) | 1 | in corso |
+| #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7) | 1 | in corso |
 
 ## Note non classificate come bug
 
