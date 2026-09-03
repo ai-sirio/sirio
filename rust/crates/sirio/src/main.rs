@@ -243,18 +243,42 @@ enum WindowCommandAvailability {
 }
 
 fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
+    // #374: `ctrl-shift-s`, `ctrl-shift-i` and `ctrl-shift-o` never reach
+    // the app on Windows — they are already taken there as system-wide
+    // hotkeys (a `RegisterHotKey` probe for exactly those chords fails
+    // while `ctrl-shift-l`/`ctrl-shift-b` succeed, and physical presses of
+    // the former never arrive at the window while the latter dispatch).
+    // Windows therefore slides those three one family chord over to free
+    // letters that do arrive: sidebar S->D (next to S), right panel I->R
+    // (Right), restore O->H (the palette row is "History: ..."). Every
+    // other platform keeps the documented chords.
+    let sidebar = if cfg!(target_os = "windows") {
+        "ctrl-shift-d"
+    } else {
+        "ctrl-shift-s"
+    };
+    let right_panel = if cfg!(target_os = "windows") {
+        "ctrl-shift-r"
+    } else {
+        "ctrl-shift-i"
+    };
+    let restore = if cfg!(target_os = "windows") {
+        "ctrl-shift-h"
+    } else {
+        "ctrl-shift-o"
+    };
     [
         (WindowCommand::NewTerminalTab, "ctrl-t"),
         (WindowCommand::OpenFile, "ctrl-o"),
         (WindowCommand::SaveFile, "ctrl-s"),
-        (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
-        (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+        (WindowCommand::ToggleSidebar, sidebar),
+        (WindowCommand::ToggleRightPanel, right_panel),
         // #324: B is what Zed and VS Code both settled on for the secondary
         // panel, and `ctrl-shift-` is the family the two toggles above use.
         (WindowCommand::ToggleSecondaryPane, "ctrl-shift-b"),
         // F-WIN-07: Linux stand-in for macOS's `⇧⌘O` "History > Restore
         // Previous Launch" chord.
-        (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
+        (WindowCommand::RestoreLaunchSnapshot, restore),
         // F-WIN-06: Linux stand-in for macOS's `⇧⌘L` "New Browser" and `⌘L`
         // "Focus Address Bar" chords (App/SirioApp.swift:73-81). The port
         // draws no menu bar (see F-WIN-07 above), so both live only as
@@ -262,6 +286,27 @@ fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 9] {
         (WindowCommand::NewBrowser, "ctrl-shift-l"),
         (WindowCommand::FocusAddressBar, "ctrl-l"),
     ]
+}
+
+/// Display form of a window command's chord, for the command palette rows.
+/// Kept beside [`linux_window_shortcuts`] (the binding source of truth) so
+/// the two stay in sync — including the three #374 Windows variants — and
+/// `window_shortcut_hints_match_bindings` below pins that agreement.
+pub(crate) fn window_shortcut_hint(command: WindowCommand) -> &'static str {
+    match command {
+        WindowCommand::NewTerminalTab => "Ctrl+T",
+        WindowCommand::OpenFile => "Ctrl+O",
+        WindowCommand::SaveFile => "Ctrl+S",
+        WindowCommand::ToggleSidebar if cfg!(target_os = "windows") => "Ctrl+Shift+D",
+        WindowCommand::ToggleSidebar => "Ctrl+Shift+S",
+        WindowCommand::ToggleRightPanel if cfg!(target_os = "windows") => "Ctrl+Shift+R",
+        WindowCommand::ToggleRightPanel => "Ctrl+Shift+I",
+        WindowCommand::ToggleSecondaryPane => "Ctrl+Shift+B",
+        WindowCommand::RestoreLaunchSnapshot if cfg!(target_os = "windows") => "Ctrl+Shift+H",
+        WindowCommand::RestoreLaunchSnapshot => "Ctrl+Shift+O",
+        WindowCommand::NewBrowser => "Ctrl+Shift+L",
+        WindowCommand::FocusAddressBar => "Ctrl+L",
+    }
 }
 
 fn window_command_availability(
@@ -969,8 +1014,9 @@ enum WorkspaceAction {
     /// opens Sirio's internal browser tab instead of the system browser.
     OpenBrowserLink(String),
     /// F-WIN-07: the titlebar's History entry point (and the `ctrl-shift-o`
-    /// chord) both funnel here -- re-invoke the same `session.restore`
-    /// control-door path `ControlAction::RestoreSession` already drives.
+    /// chord, `ctrl-shift-h` on Windows per #374) both funnel here --
+    /// re-invoke the same `session.restore` control-door path
+    /// `ControlAction::RestoreSession` already drives.
     RestoreLaunchSnapshot,
     /// F-TERM-02: the empty-pane prompt's "New…" action -- the Linux
     /// equivalent of the Swift reference's `Menu("New…") { newTabMenu() }`,
@@ -13154,9 +13200,10 @@ impl SirioWorkspace {
         }
     }
 
-    /// F-WIN-07: `ctrl-shift-o`, the Linux stand-in for `⇧⌘O`'s "History >
-    /// Restore Previous Launch" -- the same path the titlebar's History
-    /// button and the `session.restore` control door both drive.
+    /// F-WIN-07: `ctrl-shift-o` (`ctrl-shift-h` on Windows per #374), the
+    /// Linux stand-in for `⇧⌘O`'s "History > Restore Previous Launch" --
+    /// the same path the titlebar's History button and the
+    /// `session.restore` control door both drive.
     fn handle_restore_launch_snapshot(
         &mut self,
         _: &RestoreLaunchSnapshot,
@@ -23797,9 +23844,16 @@ mod tests {
         cx.update(|window, app| focus_handle.focus(window, app));
         cx.run_until_parked();
 
-        cx.simulate_keystrokes(
-            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l",
-        );
+        // #374: on Windows the s/i/o chords are bound as d/r/h instead
+        // (system-wide hotkeys swallow the former before they ever reach
+        // the window), so the same nine actions are driven through the
+        // platform chords there, in the same order.
+        let chords = if cfg!(target_os = "windows") {
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-d ctrl-shift-r ctrl-shift-b ctrl-shift-h ctrl-shift-l ctrl-l"
+        } else {
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-b ctrl-shift-o ctrl-shift-l ctrl-l"
+        };
+        cx.simulate_keystrokes(chords);
         cx.run_until_parked();
 
         assert_eq!(
@@ -23821,20 +23875,79 @@ mod tests {
 
     #[test]
     fn linux_shell_commands_use_linux_primary_and_secondary_chords() {
+        // #374: Windows slides the three OS-swallowed chords over to d/r/h.
+        let sidebar = if cfg!(target_os = "windows") {
+            "ctrl-shift-d"
+        } else {
+            "ctrl-shift-s"
+        };
+        let right_panel = if cfg!(target_os = "windows") {
+            "ctrl-shift-r"
+        } else {
+            "ctrl-shift-i"
+        };
+        let restore = if cfg!(target_os = "windows") {
+            "ctrl-shift-h"
+        } else {
+            "ctrl-shift-o"
+        };
         assert_eq!(
             linux_window_shortcuts(),
             [
                 (WindowCommand::NewTerminalTab, "ctrl-t"),
                 (WindowCommand::OpenFile, "ctrl-o"),
                 (WindowCommand::SaveFile, "ctrl-s"),
-                (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
-                (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+                (WindowCommand::ToggleSidebar, sidebar),
+                (WindowCommand::ToggleRightPanel, right_panel),
                 (WindowCommand::ToggleSecondaryPane, "ctrl-shift-b"),
-                (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
+                (WindowCommand::RestoreLaunchSnapshot, restore),
                 (WindowCommand::NewBrowser, "ctrl-shift-l"),
                 (WindowCommand::FocusAddressBar, "ctrl-l"),
             ]
         );
+    }
+
+    /// #374: the palette hint is derived from the same platform table as
+    /// the binding, so the two can never disagree — each hint lowercases
+    /// back to its own binding chord.
+    #[test]
+    fn window_shortcut_hints_match_bindings() {
+        for (command, binding) in linux_window_shortcuts() {
+            assert_eq!(
+                window_shortcut_hint(command)
+                    .to_ascii_lowercase()
+                    .replace('+', "-"),
+                binding,
+                "palette hint must name the bound chord"
+            );
+        }
+    }
+
+    /// #374: on Windows the sidebar/right-panel/restore chords must stay
+    /// off `ctrl-shift-s/i/o` — those never reach the window (held as
+    /// system-wide hotkeys elsewhere), which is exactly the reported
+    /// "no effect" failure. Everywhere else they stay put.
+    #[test]
+    fn windows_toggles_avoid_os_swallowed_chords() {
+        let hint = |command| window_shortcut_hint(command);
+        if cfg!(target_os = "windows") {
+            assert_eq!(hint(WindowCommand::ToggleSidebar), "Ctrl+Shift+D");
+            assert_eq!(hint(WindowCommand::ToggleRightPanel), "Ctrl+Shift+R");
+            assert_eq!(
+                hint(WindowCommand::RestoreLaunchSnapshot),
+                "Ctrl+Shift+H"
+            );
+        } else {
+            assert_eq!(hint(WindowCommand::ToggleSidebar), "Ctrl+Shift+S");
+            assert_eq!(hint(WindowCommand::ToggleRightPanel), "Ctrl+Shift+I");
+            assert_eq!(
+                hint(WindowCommand::RestoreLaunchSnapshot),
+                "Ctrl+Shift+O"
+            );
+        }
+        // The untouched family members keep their chords on every platform.
+        assert_eq!(hint(WindowCommand::ToggleSecondaryPane), "Ctrl+Shift+B");
+        assert_eq!(hint(WindowCommand::NewBrowser), "Ctrl+Shift+L");
     }
 
     #[test]
