@@ -28,7 +28,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | ok |  |  | toggle da titlebar ok; Ctrl+Shift+I non registrato su Windows (vedi note); Files aggiornato live |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
 | 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | ok | #366 (chiusa) | opencode-go | colonna Date corretta; ricerca testo ok; filtri Branch/User/Date/Paths non esercitati |
-| 23 | Browser | Tab browser embedded | ok | #368 (chiusa), #369 | opencode-go / pi | crash risolto (2/2 + 2 restore); barra indirizzi in retest |
+| 23 | Browser | Tab browser embedded | ok | #368, #369 (chiuse) | opencode-go / pi→opencode-go | crash risolto (2/2 + 2 restore); Ctrl+L dopo click nella pagina naviga (2/2), Ctrl+Shift+P dopo click sidebar apre la palette (2/2), nessun dialogo di stampa |
 | 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | ok | #365, #371 (chiuse) | pi | tema, font terminale e font Interface si applicano (live e al riavvio) e si ripristinano; Agents ok |
 | 25 | Status bar | Indicatori provider usage (Claude/Codex/...), refresh | ok |  |  | indicatori Claude/Codex presenti; tooltip = etichetta (vedi note) |
 | 26 | Controllo | `sirioctl` / control socket | ok | #370 (chiusa) | opencode-go | ping/version/list-workspaces ok da PowerShell e Git Bash |
@@ -46,7 +46,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6, rimosso) | 1 | verificata e chiusa (bc846cb1) |
 | #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7, rimosso) | 1 | verificata e chiusa (df0ba45f) |
 | #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` (herdr w8, rimosso) | 1 | verificata e chiusa (6525bc00) |
-| #369 barra indirizzi browser | pi → opencode-go | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 4 | pi: tent. 1 mergiato (click ok), tent. 2 revertito; opencode-go: tent. 3 revertito (focus non rubato: WebView2 consuma le chord), tent. 4 in corso |
+| #369 barra indirizzi browser | pi → opencode-go | `~/.herdr/worktrees/sirio/fix-369` (herdr w9, rimosso) | 4 | pi: tent. 1 mergiato (click ok), tent. 2 revertito; opencode-go: tent. 3 revertito (focus non rubato: WebView2 consuma le chord), tent. 4 verificato e chiuso (9d06afe9: inoltro AcceleratorKeyPressed + reclaim focus su click gpui) |
 | #370 sirioctl pipe/owner Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-370` (herdr wA, rimosso) | 1 | verificata e chiusa (33e96f85) |
 | #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB, rimosso) | 1 | verificata e chiusa (5b3bfb28) |
 | #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC, rimosso) | 1 | verificata e chiusa (901f0c2e) |
