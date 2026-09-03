@@ -23,7 +23,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 15 | Terminale | Harness: Pi | ok |  |  | Pi lanciato dal menu contestuale, risponde; stato tab resta "?" per #370 |
 | 16 | Terminale | Harness: Oh-My-Pi | ok |  |  | n/a: Oh-My-Pi non installato; segnalato "Not found on PATH" |
 | 17 | Activity | Stato running/idle/needs-input per pane (dot nella tab, sidebar, tray) | ok | #370 (chiusa) | opencode-go | sirioctl raggiunge l'app (elevato↔elevato, non-elevato↔non-elevato); stato agente da riverificare con hook |
-| 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | bug | #377 | pi | New Chat › OpenCode: ACP "program not found" (shim .cmd); chat legacy mostra banner agente sconosciuto |
+| 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | ok | #377 (chiusa, 2 tentativi) | pi | New Chat › OpenCode online, prompt/risposta ok; chat legacy mostra banner agente sconosciuto |
 | 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | ok | #373 (chiusa) | pi | apertura/preview/live reload ok; Code edita il sorgente raw e Ctrl+S salva solo le modifiche; pulsante Code clippato in pane stretto (nota) |
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | ok |  |  | toggle da titlebar ok; Ctrl+Shift+I non registrato su Windows (vedi note); Files aggiornato live |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
@@ -54,7 +54,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #374 Ctrl+Shift+S/I inerti | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-374` (herdr wF, rimosso) | 1 | verificata e chiusa (3b5e23d0) |
 | #375 overflow command palette | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-375` (herdr wG, rimosso) | 1 | verificata e chiusa (31b650a1) |
 | #376 menu popup dietro la webview | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-376` (herdr wH, rimosso) | 1 | verificata e chiusa (d5b7ec5e) |
-| #377 chat ACP OpenCode "program not found" | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-377` (herdr wJ) | 2 | tent. 1 mergiato e **revertito** (nome nudo `opencode` non wrappato); tent. 2 in corso |
+| #377 chat ACP OpenCode "program not found" | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-377` (herdr wJ, rimosso) | 2 | tent. 1 mergiato e **revertito** (nome nudo `opencode` non wrappato); tent. 1+2 verificati e chiusi (0463934c) |
 
 ## Note non classificate come bug
 
