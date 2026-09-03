@@ -21,8 +21,8 @@ use bezel::ui::popover::{self, Popup};
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, StyleRefinement,
-    Window, div, img, prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba,
+    StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory};
 use sirio_project::{TabKind, display_absolute_path, display_path};
@@ -333,6 +333,7 @@ pub struct SidebarContextItem {
 #[derive(Clone)]
 struct OpenContextMenu {
     target: SidebarContextTarget,
+    position: Point<gpui::Pixels>,
 }
 
 #[derive(Clone)]
@@ -510,6 +511,7 @@ pub struct Sidebar {
     /// bottom of the sidebar.
     notice: Option<String>,
     context_menu: Popup<OpenContextMenu>,
+    context_menu_focus: FocusHandle,
     project_settings: Option<ProjectSettingsCard>,
     add_project_menu: Popup<()>,
     project_form: Option<ProjectFormSurface>,
@@ -703,6 +705,7 @@ impl Sidebar {
             prompt: None,
             notice: None,
             context_menu: Popup::default(),
+            context_menu_focus: cx.focus_handle().tab_stop(true),
             project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
@@ -804,6 +807,7 @@ impl Sidebar {
             prompt: None,
             notice: None,
             context_menu: Popup::default(),
+            context_menu_focus: cx.focus_handle().tab_stop(true),
             project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
@@ -1134,10 +1138,17 @@ impl Sidebar {
         }
     }
 
-    fn open_context_menu(&mut self, row_id: usize, cx: &mut Context<Self>) {
+    fn open_context_menu(
+        &mut self,
+        row_id: usize,
+        position: Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(target) = self.context_target(row_id) {
-            self.context_menu.open(OpenContextMenu { target });
+            self.context_menu.open(OpenContextMenu { target, position });
             self.project_settings = None;
+            self.context_menu_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -1145,6 +1156,13 @@ impl Sidebar {
     fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.begin_close() {
             popover::reap_popup(cx, |sidebar| &mut sidebar.context_menu);
+            cx.notify();
+        }
+    }
+
+    fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.get().is_some() {
+            self.context_menu.close();
             cx.notify();
         }
     }
@@ -2871,6 +2889,7 @@ impl Sidebar {
         let menu = popup.get().expect("mounted context menu").clone();
         let closing = popup.closing_since();
         let target = menu.target;
+        let position = menu.position;
         let bezel_theme = theme.to_bezel_theme();
         let mut card = popover::popover_card(&bezel_theme)
             .id("sidebar-context-menu")
@@ -2931,7 +2950,7 @@ impl Sidebar {
         });
         popover::menu_at(
             "sidebar-context-menu-layer",
-            gpui::point(px(18.0), px(54.0)),
+            position,
             card.into_any_element(),
             closing,
         )
@@ -3686,10 +3705,15 @@ impl Sidebar {
                 });
             });
 
-        row_view = row_view.on_mouse_down(MouseButton::Right, move |_: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-            context_entity.update(cx, |sidebar, cx| sidebar.open_context_menu(row_id, cx));
-        });
+        row_view = row_view.on_mouse_down(
+            MouseButton::Right,
+            move |event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                context_entity.update(cx, |sidebar, cx| {
+                    sidebar.open_context_menu(row_id, event.position, window, cx)
+                });
+            },
+        );
 
         if let Some(drag) = drag {
             let drag_entity = entity.clone();
@@ -4116,7 +4140,15 @@ impl Render for Sidebar {
             next_views.insert(row_id, view);
         }
         self.row_views = next_views;
+        let context_menu_entity = entity.clone();
         div()
+            .track_focus(&self.context_menu_focus)
+            .on_key_down(move |event, _, cx| {
+                if event.keystroke.key == "escape" {
+                    context_menu_entity
+                        .update(cx, |sidebar, cx| sidebar.dismiss_context_menu(cx));
+                }
+            })
             .relative()
             .flex()
             .flex_col()
@@ -5094,6 +5126,72 @@ mod tests {
                 action: SidebarContextAction::NewTab(NewTabAction::NewTerminal),
             }
         )));
+    }
+
+    #[gpui::test]
+    async fn right_click_context_menu_follows_pointer_and_escape_dismisses(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("context-menu-pointer");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn");
+        let click = point(row.origin.x + px(100.0), row.origin.y + px(10.0));
+        cx.simulate_event(MouseDownEvent {
+            position: click,
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: click,
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let menu = cx
+            .debug_bounds("sidebar-context-menu")
+            .expect("right-click draws the context menu");
+        assert!(
+            menu.left() >= click.x - px(8.0) && menu.left() <= click.x + px(8.0),
+            "context menu left edge should follow the pointer: menu={:?}, click={click:?}",
+            menu
+        );
+        assert!(
+            menu.top() >= click.y - px(8.0) && menu.top() <= click.y + px(8.0),
+            "context menu top edge should follow the pointer: menu={:?}, click={click:?}",
+            menu
+        );
+        let context_menu_focus = cx.update(|window, cx| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+                .read(cx)
+                .context_menu_focus
+                .clone()
+        });
+        let focused = cx.update(|window, cx| window.focused(cx));
+        assert_eq!(
+            focused,
+            Some(context_menu_focus),
+            "the context menu focus handle owns keyboard focus"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-context-menu").is_none(),
+            "Escape closes the context menu"
+        );
     }
 
     /// F-SID-15: the context menu's "Remove Worktree" is confirm-gated the
