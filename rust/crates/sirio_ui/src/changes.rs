@@ -4941,6 +4941,7 @@ mod tests {
                 pending_operations: VecDeque::new(),
                 has_loaded: true,
                 git_error: None,
+                git_error_from_mutation: false,
                 diff_errors: HashMap::new(),
                 refresh_started: false,
                 embedded_in_panel: false,
