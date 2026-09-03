@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The stable identity of a terminal surface host.
 ///
@@ -133,6 +133,15 @@ impl<T> TerminalPaneCache<T> {
             .get_mut(&(worktree_id.to_owned(), content_id.to_owned()))
     }
 
+    pub fn iter_in_worktree(
+        &self,
+        worktree_id: &str,
+    ) -> impl Iterator<Item = &CachedTerminalPane<T>> {
+        self.panes
+            .values()
+            .filter(move |pane| pane.worktree_id == worktree_id)
+    }
+
     pub fn remove(&mut self, content_id: &str) -> Option<CachedTerminalPane<T>> {
         let key = self
             .panes
@@ -153,6 +162,32 @@ impl<T> TerminalPaneCache<T> {
         self.panes
             .retain(|_, pane| pane.worktree_id != worktree_id);
         self.focused_by_worktree.remove(worktree_id);
+    }
+
+    /// Drops cached controllers that were not attached to the restored tab
+    /// tree. This is the cleanup boundary for a legitimate re-creation: a
+    /// stale `TerminalView` leaves the cache and its `Drop` closes the PTY.
+    pub fn remove_unkept_in_worktree(
+        &mut self,
+        worktree_id: &str,
+        keep_content_ids: &HashSet<String>,
+    ) {
+        self.panes.retain(|(cached_worktree, content_id), _| {
+            cached_worktree != worktree_id || keep_content_ids.contains(content_id)
+        });
+        if self
+            .focused_by_worktree
+            .get(worktree_id)
+            .is_some_and(|focused| !keep_content_ids.contains(focused))
+        {
+            self.focused_by_worktree.remove(worktree_id);
+        }
+    }
+
+    pub fn has_in_worktree(&self, worktree_id: &str) -> bool {
+        self.panes
+            .keys()
+            .any(|(cached_worktree, _)| cached_worktree == worktree_id)
     }
 
     fn remove_by_key(
@@ -292,5 +327,22 @@ mod tests {
                 .controller,
             "pty-b"
         );
+    }
+
+    #[test]
+    fn cache_drops_unkept_controllers_after_a_restore() {
+        let mut cache = TerminalPaneCache::new();
+        cache.insert("worktree-a", "pane-a", "terminal-a", "pty-a");
+        cache.insert("worktree-a", "pane-b", "terminal-b", "pty-b");
+        cache.focus("worktree-a", "terminal-b");
+
+        cache.remove_unkept_in_worktree(
+            "worktree-a",
+            &HashSet::from(["terminal-a".to_string()]),
+        );
+
+        assert!(cache.get_in_worktree("worktree-a", "terminal-b").is_none());
+        assert_eq!(cache.focused_content_id("worktree-a"), None);
+        assert_eq!(cache.len(), 1);
     }
 }
