@@ -4663,7 +4663,10 @@ impl SirioWorkspace {
         })
         .detach();
         workspace.seed_browser_origins(cx);
-        workspace.schedule_save(cx);
+        // Construction is not a user action. When the catalog is empty,
+        // `working_directory` can be `initial_working_directory()`'s cwd
+        // fallback (often `/` under LaunchServices); snapshotting here would
+        // silently create that directory as a project.
         // F-CHG-02: `right_panel` is always constructed bound to
         // `working_directory` -- on a genuinely empty catalog that is
         // `initial_working_directory()`'s git-repo-walking fallback (real,
@@ -5090,6 +5093,13 @@ impl SirioWorkspace {
     /// Records the current layout; the session store's debounce collapses a
     /// burst of changes into one database write.
     fn schedule_save(&self, cx: &App) {
+        if !self.project_catalog.projects().iter().any(|project| {
+            project.worktrees.iter().any(|worktree| {
+                paths_name_the_same_document(&worktree.path, &self.working_directory)
+            })
+        }) {
+            return;
+        }
         self.session.schedule(self.layout(cx));
     }
 
@@ -7139,7 +7149,6 @@ impl SirioWorkspace {
         }
 
         let mut projects = self.project_catalog.projects().to_vec();
-        let project_id = projects[project_index].id.clone();
         projects[project_index]
             .worktrees
             .push(session::CatalogWorktree {
@@ -7165,15 +7174,9 @@ impl SirioWorkspace {
         self.refresh_sidebar(cx);
         cx.notify();
 
-        let worktree_index = self.project_catalog.projects()[project_index]
-            .worktrees
-            .len()
-            - 1;
+        let persisted_worktree_id = self.session.persisted_worktree_id(&path);
         Ok(vec![
-            (
-                "id".to_string(),
-                format!("{}-wt-{worktree_index}", project_id),
-            ),
+            ("id".to_string(), persisted_worktree_id),
             ("branch".to_string(), branch),
             ("path".to_string(), display_absolute_path(&path)),
         ])
@@ -8344,13 +8347,15 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         let (title, agent_icon, agent_id) = chat_tab_identity(adapter);
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let persistence_id = self
+            .session
+            .new_tab_id(&self.working_directory, self.next_tab_id);
         // F-CHAT-34/F-PER-01: every chat tab is launched with durable
         // transcript persistence (database path + this tab's own id + its
         // worktree id) so completed turns are saved as they settle and the
         // Chat History menu has real sessions to list.
         let database_path = session::database_path();
-        let worktree_id = session::persisted_worktree_id(&self.working_directory);
+        let worktree_id = self.session.persisted_worktree_id(&self.working_directory);
         let agent_name = agent_id.as_deref().and_then(|agent_id| {
             AGENT_CATALOG
                 .iter()
@@ -8488,7 +8493,9 @@ impl SirioWorkspace {
         let is_unavailable = unavailable.is_some();
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let persistence_id = self
+            .session
+            .new_tab_id(&self.working_directory, self.next_tab_id);
         let chat = cx.new(|cx| match unavailable {
             // No transcript: the box is the whole point, and a conversation
             // shown above an explanation of why it cannot continue invites
@@ -8617,7 +8624,7 @@ impl SirioWorkspace {
         let tab_id = self.next_tab_id;
         let pane_id = self.next_pane_id;
         let title = title.into();
-        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
@@ -8702,7 +8709,7 @@ impl SirioWorkspace {
         let view = cx.new(|cx| FileView::new(path, cx));
         Self::subscribe_file_view(&view, cx);
         let tab_id = self.next_tab_id;
-        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
@@ -8771,7 +8778,7 @@ impl SirioWorkspace {
             changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
         }
         let tab_id = self.next_tab_id;
-        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
@@ -8803,7 +8810,7 @@ impl SirioWorkspace {
         let changes = cx.new(|cx| ChangesTab::for_commit(self.working_directory.clone(), sha, cx));
         Self::subscribe_changes_tab(&changes, cx);
         let tab_id = self.next_tab_id;
-        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
@@ -8841,7 +8848,7 @@ impl SirioWorkspace {
         let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
         browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
         let tab_id = self.next_tab_id;
-        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
@@ -14381,7 +14388,8 @@ fn restore_tabs_with_terminal_cache(
     // `add_chat_tab` computes for a freshly created chat, so restored and
     // freshly-opened chats persist under the same key convention.
     let database_path = session::database_path();
-    let worktree_id = session::persisted_worktree_id(working_directory);
+    let worktree_id =
+        session::persisted_worktree_id_for_database(&database_path, working_directory);
     let mut tabs = Vec::new();
     let mut active = 0usize;
     let mut reused_terminal_panes = HashSet::new();
@@ -14698,7 +14706,8 @@ fn restore_tabs_in_workspace(
     // this is the same restore path taken by restore_launch_snapshot when a
     // worktree without a mounted host gets pane-only tabs replayed in.
     let database_path = session::database_path();
-    let worktree_id = session::persisted_worktree_id(working_directory);
+    let worktree_id =
+        session::persisted_worktree_id_for_database(&database_path, working_directory);
     let mut tabs = Vec::new();
     let mut active = 0usize;
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
@@ -28896,7 +28905,9 @@ browser  profile  "
                 .persistence_id
                 .clone()
         });
-        let worktree_b_id = session::persisted_worktree_id(&path_b);
+        let worktree_b_id = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.session.persisted_worktree_id(&path_b)
+        });
         assert!(
             new_tab_persistence_id.starts_with(&worktree_b_id),
             "the agent-panel tab must be created under the right-clicked \
