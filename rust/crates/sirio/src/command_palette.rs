@@ -84,6 +84,9 @@ impl PaletteDisabledReason {
             Self::Window(WindowCommandDisabledReason::NoActiveFile) => "No active file",
             Self::Window(WindowCommandDisabledReason::NoActiveBrowser) => "No active browser",
             Self::Sidebar(SidebarDisabledReason::AlreadyGitProject) => "Git is already initialized",
+            Self::Sidebar(SidebarDisabledReason::PrimaryWorktree) => {
+                "The primary worktree cannot be removed"
+            }
             Self::NoActiveTab => "No active tab",
             Self::NoRetainedChat => "No retained chat sessions",
             Self::NoSelectedProject => "No selected project",

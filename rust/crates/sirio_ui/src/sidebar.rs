@@ -308,12 +308,18 @@ pub enum SidebarContextAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarDisabledReason {
     AlreadyGitProject,
+    /// #372: the primary checkout cannot be `git worktree remove`d —
+    /// deleting its directory would destroy the repository itself.
+    PrimaryWorktree,
 }
 
 impl std::fmt::Display for SidebarDisabledReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyGitProject => formatter.write_str("Git is already initialized"),
+            Self::PrimaryWorktree => {
+                formatter.write_str("The primary worktree cannot be removed")
+            }
         }
     }
 }
@@ -1118,11 +1124,14 @@ impl Sidebar {
                     // The context menu route is confirm-gated in
                     // dispatch_context_action; the hover-x button now goes
                     // through the same gate instead of bypassing it.
+                    // #372: the primary checkout cannot be removed —
+                    // `git worktree remove` refuses the main worktree and
+                    // deleting its directory would destroy the repository.
                     item(
                         "Remove Worktree",
                         SidebarContextAction::RemoveWorktree,
-                        true,
-                        None,
+                        !is_primary,
+                        is_primary.then_some(SidebarDisabledReason::PrimaryWorktree),
                     ),
                 ]);
                 items
@@ -2448,6 +2457,21 @@ impl Sidebar {
         self.notice = None;
     }
 
+    /// #372: the confirm dialog names its target — branch and checkout
+    /// path — like the Changes panel's "Discard changes?" names its file,
+    /// so a reorder between right-click and confirm cannot silently retarget
+    /// a destructive, irreversible deletion.
+    fn remove_worktree_prompt(branch: &str, path: &Path) -> (String, String) {
+        (
+            format!("Remove worktree `{branch}`?"),
+            format!(
+                "This permanently deletes the worktree at `{}` and its branch \
+                 `{branch}` on disk. This cannot be undone.",
+                path.display()
+            ),
+        )
+    }
+
     /// F-SID-15: confirm-gated entry point for worktree removal. Both the
     /// context menu's "Remove Worktree" and the row's hover-x button route
     /// through this instead of calling `remove_worktree_row` (a real
@@ -2458,13 +2482,32 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some((branch, worktree_path, is_primary)) = self
+            .rows
+            .iter()
+            .find(|row| row.id == row_id && row.kind == RowKind::Worktree)
+            .map(|row| {
+                (
+                    row.title.clone(),
+                    row.path.clone().unwrap_or_default(),
+                    row.is_primary,
+                )
+            })
+        else {
+            return;
+        };
+        // #372: the primary checkout is not removable — the menu item and
+        // the hover-x button already hide it, so reaching here means a
+        // stale row id; do nothing rather than prompt for the repository
+        // itself.
+        if is_primary {
+            return;
+        }
+        let (title, detail) = Self::remove_worktree_prompt(&branch, &worktree_path);
         let receiver = window.prompt(
             PromptLevel::Warning,
-            "Remove worktree?",
-            Some(
-                "This permanently deletes the worktree's directory and branch on disk. \
-                 This cannot be undone.",
-            ),
+            &title,
+            Some(&detail),
             &["Remove Worktree", "Cancel"],
             cx,
         );
@@ -2481,14 +2524,23 @@ impl Sidebar {
         let Some(repo_root) = self.project_root(row_id) else {
             return;
         };
-        let Some((worktree_path, branch)) = self
+        let Some((worktree_path, branch, is_primary)) = self
             .rows
             .iter()
             .find(|row| row.id == row_id)
-            .and_then(|row| row.path.clone().map(|path| (path, row.title.clone())))
+            .and_then(|row| {
+                row.path
+                    .clone()
+                    .map(|path| (path, row.title.clone(), row.is_primary))
+            })
         else {
             return;
         };
+        // #372: defensive — the primary checkout must never reach
+        // `git worktree remove`; see `request_remove_worktree_row`.
+        if is_primary {
+            return;
+        }
         let project_id = self
             .enclosing_project_index(row_id)
             .and_then(|index| self.project_ids.get(&self.rows[index].id).cloned());
@@ -3653,6 +3705,9 @@ impl Sidebar {
         let worktree_path = path.clone();
         let is_project = kind == RowKind::Project;
         let is_worktree = kind == RowKind::Worktree;
+        // #372: the primary checkout offers no hover-x — like its disabled
+        // context-menu item, it cannot be `git worktree remove`d.
+        let is_removable_worktree = is_worktree && !row.is_primary;
         // waku's card rhythm: a project or worktree row becomes a two-line
         // card (13.5px title over an 11.5px context line) only when it has
         // something for that second line; every other row is single-line at
@@ -3947,7 +4002,7 @@ impl Sidebar {
                         })),
                 )
             })
-            .when(is_worktree, |this| {
+            .when(is_removable_worktree, |this| {
                 let remove_entity = entity.clone();
                 this.child(
                     div()
@@ -5057,6 +5112,70 @@ mod tests {
             Sidebar::row_min_height(&row),
             ROW_HEIGHT,
             "a long leaf title must keep the action-row height as its minimum"
+        );
+    }
+
+    /// #372: the confirm dialog must name its target — branch and checkout
+    /// path — so a reorder between right-click and confirm cannot silently
+    /// retarget a destructive, irreversible deletion.
+    #[test]
+    fn remove_worktree_prompt_names_the_branch_and_path() {
+        let (title, detail) = Sidebar::remove_worktree_prompt(
+            "qa-test-wt",
+            &PathBuf::from("/tmp/sirio-qa-test-wt"),
+        );
+        assert!(
+            title.contains("qa-test-wt"),
+            "the title must name the branch, got {title:?}"
+        );
+        assert!(
+            detail.contains("qa-test-wt"),
+            "the detail must name the branch, got {detail:?}"
+        );
+        assert!(
+            detail.contains("/tmp/sirio-qa-test-wt"),
+            "the detail must name the checkout path, got {detail:?}"
+        );
+    }
+
+    /// #372: the primary checkout cannot be `git worktree remove`d, so its
+    /// context-menu entry stays visible but disabled with a reason instead
+    /// of offering the destructive dialog; any other worktree stays enabled.
+    #[test]
+    fn only_a_non_primary_worktree_offers_removal() {
+        let primary = Sidebar::context_menu_items(&SidebarContextTarget::Worktree {
+            path: PathBuf::from("/tmp/sirio"),
+            is_primary: true,
+        });
+        let primary_item = primary
+            .iter()
+            .find(|item| item.action == SidebarContextAction::RemoveWorktree)
+            .expect("the primary worktree still exposes Remove Worktree");
+        assert!(
+            !primary_item.enabled,
+            "Remove Worktree must be disabled on the primary checkout"
+        );
+        assert_eq!(
+            primary_item.disabled_reason,
+            Some(SidebarDisabledReason::PrimaryWorktree),
+            "the disabled primary entry must say why"
+        );
+
+        let secondary = Sidebar::context_menu_items(&SidebarContextTarget::Worktree {
+            path: PathBuf::from("/tmp/sirio-qa-test-wt"),
+            is_primary: false,
+        });
+        let secondary_item = secondary
+            .iter()
+            .find(|item| item.action == SidebarContextAction::RemoveWorktree)
+            .expect("a secondary worktree exposes Remove Worktree");
+        assert!(
+            secondary_item.enabled,
+            "Remove Worktree stays enabled off the primary checkout"
+        );
+        assert_eq!(
+            secondary_item.disabled_reason, None,
+            "an enabled entry carries no disabled reason"
         );
     }
 
