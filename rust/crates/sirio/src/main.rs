@@ -13928,6 +13928,8 @@ impl SirioWorkspace {
                     workspace.palette_focus.focus(window, cx);
                 });
             })
+            .flex()
+            .flex_col()
             .absolute()
             .top(px(56.0))
             .left(px(220.0))
@@ -13984,7 +13986,16 @@ impl SirioWorkspace {
                     .text_color(theme.text_faint)
                     .child("Commands · substring filter"),
             )
-            .child(div().flex_1().child(body))
+            .child(
+                div()
+                    .id("command-palette-rows-viewport")
+                    .debug_selector(|| "command-palette-rows-viewport".to_owned())
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -20551,6 +20562,58 @@ mod tests {
         assert!(
             !workspace.read_with(&cx.cx, |workspace, _| workspace.palette_caret_visible),
             "one interval later it is dark — the bar blinks rather than sitting solid"
+        );
+    }
+
+    #[gpui::test]
+    async fn command_palette_rows_scroll_inside_the_panel(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        open_palette_for_test(&mut cx, &workspace);
+
+        let palette = cx
+            .debug_bounds("command-palette")
+            .expect("the command palette is drawn");
+        let viewport = cx
+            .debug_bounds("command-palette-rows-viewport")
+            .expect("the command rows have a scroll viewport");
+        assert!(
+            viewport.top() >= palette.top() && viewport.bottom() <= palette.bottom(),
+            "the rows viewport must stay inside the palette: viewport {:?}, palette {:?}",
+            viewport,
+            palette
+        );
+        let before = cx
+            .debug_bounds("command-palette-row-new-terminal-tab")
+            .expect("the first command row is drawn");
+
+        let over = viewport.center();
+        cx.simulate_mouse_move(over, None, Modifiers::none());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+
+        let after = cx
+            .debug_bounds("command-palette-row-new-terminal-tab")
+            .expect("the first command row stays drawn after scrolling");
+        assert!(
+            after.origin.y < before.origin.y - px(50.0),
+            "the palette rows must scroll inside the panel: first row sat at {:?} before the wheel and {:?} after",
+            before.origin.y,
+            after.origin.y
         );
     }
 
