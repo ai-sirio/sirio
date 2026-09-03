@@ -274,6 +274,19 @@ impl TabBar {
         self
     }
 
+    /// #376: whether the `+` new-tab menu is currently mounted (open or
+    /// playing its exit animation). The host reads this every frame to hide
+    /// the native browser child while the menu is up: on Windows the WebView2
+    /// HWND sits above GPUI's surface, so a GPUI menu overlapping the page
+    /// would otherwise paint behind it and stop being clickable.
+    ///
+    /// `get()` (mounted) rather than `is_open()` (open and interactive) is
+    /// deliberate: during the exit phase the card still paints its fade-out
+    /// over the same rectangle and still needs the page out of the way.
+    pub fn is_menu_open(&self) -> bool {
+        self.menu_open.get().is_some()
+    }
+
     fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu_open.take_press_was_open() {
             self.close_menu(cx);
@@ -1190,6 +1203,66 @@ mod tests {
             "and inside its left edge: hint left {:?} vs menu left {:?}",
             hint.left(),
             menu.left()
+        );
+    }
+
+    /// #376: the host-visible mirror of the `+` menu. The workspace hides the
+    /// native browser child while this reads open, so it must track the drawn
+    /// menu: closed before the first click, open while the card is up, closed
+    /// again once a row is picked.
+    #[gpui::test]
+    async fn new_tab_menu_open_state_tracks_the_drawn_menu(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let tab_bar_cell: Rc<RefCell<Option<gpui::Entity<TabBar>>>> =
+            Rc::new(RefCell::new(None));
+        let tab_bar_cell_for_window = tab_bar_cell.clone();
+        let window = cx.add_window(move |_window, cx| {
+            let tab_bar = cx.new(TabBar::new);
+            *tab_bar_cell_for_window.borrow_mut() = Some(tab_bar.clone());
+            ResizeHost { tab_bar }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let tab_bar = tab_bar_cell
+            .borrow_mut()
+            .take()
+            .expect("the window build captured the tab bar entity");
+        assert!(
+            !tab_bar.read_with(&cx.cx, |bar, _| bar.is_menu_open()),
+            "the menu starts closed"
+        );
+
+        let plus = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("new-tab-menu").is_some(),
+            "clicking + draws the menu"
+        );
+        assert!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.is_menu_open()),
+            "the mirror must read open while the card is up"
+        );
+
+        let item = cx
+            .debug_bounds("new-tab-item-new-terminal")
+            .expect("the first menu row is drawn");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("new-tab-menu").is_none(),
+            "picking a row closes the menu"
+        );
+        assert!(
+            !tab_bar.read_with(&cx.cx, |bar, _| bar.is_menu_open()),
+            "the mirror must read closed again afterwards"
         );
     }
 

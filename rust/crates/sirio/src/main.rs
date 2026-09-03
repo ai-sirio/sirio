@@ -9385,6 +9385,62 @@ impl SirioWorkspace {
         }
     }
 
+    /// #376: whether any GPUI overlay that paints above the page is open.
+    ///
+    /// The WebView2 child HWND on Windows (and the X11 child on Linux) sits
+    /// above GPUI's own surface and takes no part in its paint, clip or
+    /// z-order, so a menu, popover, palette or modal overlapping the browser
+    /// rectangle paints behind the page and stops being clickable. Pure so
+    /// the rule stays testable without a window: every open overlay obscures,
+    /// and a quiet frame obscures nothing. Toasts are deliberately not here:
+    /// they are small, non-modal root notices, and blanking the page for
+    /// their four seconds would be worse than the overlap.
+    fn overlay_obscures_browsers(
+        overflow_menu_open: bool,
+        tab_menu_open: bool,
+        palette_open: bool,
+        title_prompt_open: bool,
+        pane_close_open: bool,
+        tab_rename_open: bool,
+        new_tab_menu_open: bool,
+    ) -> bool {
+        overflow_menu_open
+            || tab_menu_open
+            || palette_open
+            || title_prompt_open
+            || pane_close_open
+            || tab_rename_open
+            || new_tab_menu_open
+    }
+
+    /// #376: marks every browser surface as covered (or not) by a GPUI
+    /// overlay, so [`BrowserSurface::prepaint`] unmaps the native child while
+    /// the overlay is up and maps it again once it closes.
+    ///
+    /// Runs every frame next to [`Self::hide_offscreen_browsers`]. Hiding
+    /// here instead of there is load-bearing: that one hides only off-screen
+    /// surfaces precisely because an on-screen hide issued from `render`
+    /// would lose to the prepaint that runs right after it. The mark does
+    /// not: prepaint itself reads it and stays unmapped.
+    fn sync_browser_overlay_obscured(&self, cx: &App) {
+        let obscured = Self::overlay_obscures_browsers(
+            self.overflow_menu_open,
+            self.tab_menu_open,
+            self.palette_open,
+            self.pending_title_prompt.is_some(),
+            self.pending_pane_close.is_some(),
+            self.tab_rename.is_some(),
+            self.tab_bar.read(cx).is_menu_open(),
+        );
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Browser(surface) = content {
+                    surface.read(cx).set_overlay_obscured(obscured);
+                }
+            });
+        }
+    }
+
     fn browser_surface(&self) -> Option<Entity<BrowserSurface>> {
         let mut browser = None;
         for tab in &self.tabs {
@@ -14353,6 +14409,7 @@ impl Render for SirioWorkspace {
         self.sync_activity(cx);
         self.sync_empty_pane_prompts(cx);
         self.hide_offscreen_browsers(self.show_settings, cx);
+        self.sync_browser_overlay_obscured(cx);
 
         if self.show_settings {
             return div()
@@ -16758,6 +16815,40 @@ mod tests {
         assert_eq!(
             AgentBrandColor::for_agent_id("something-new"),
             AgentBrandColor::Unknown
+        );
+    }
+
+    /// #376: every GPUI overlay that can land over the browser rectangle
+    /// hides the native child while it is up. The child HWND sits above
+    /// GPUI's surface, so a menu behind the page is not just dimmed — its
+    /// rows stop being clickable. Each arm is one overlay; a quiet frame
+    /// obscures nothing so the page stays put when no menu is open.
+    #[test]
+    fn any_open_overlay_obscures_browsers_a_quiet_frame_obscures_nothing() {
+        assert!(
+            !SirioWorkspace::overlay_obscures_browsers(false, false, false, false, false, false, false),
+            "a quiet frame must leave the page mapped"
+        );
+        for (name, args) in [
+            ("overflow menu", (true, false, false, false, false, false, false)),
+            ("tab context menu", (false, true, false, false, false, false, false)),
+            ("command palette", (false, false, true, false, false, false, false)),
+            ("set-title prompt", (false, false, false, true, false, false, false)),
+            ("pane close confirm", (false, false, false, false, true, false, false)),
+            ("tab rename", (false, false, false, false, false, true, false)),
+            ("+ new-tab menu", (false, false, false, false, false, false, true)),
+        ] {
+            let (overflow, tab_menu, palette, title, close, rename, new_tab) = args;
+            assert!(
+                SirioWorkspace::overlay_obscures_browsers(
+                    overflow, tab_menu, palette, title, close, rename, new_tab
+                ),
+                "an open {name} must hide the page so its rows stay clickable"
+            );
+        }
+        assert!(
+            SirioWorkspace::overlay_obscures_browsers(true, true, true, true, true, true, true),
+            "overlapping overlays still obscure"
         );
     }
     use gpui::{

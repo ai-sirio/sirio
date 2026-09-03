@@ -702,6 +702,22 @@ type SharedScaleCorrection = Rc<Cell<Option<f64>>>;
 /// flag.
 type SharedNativeVisibility = Rc<Cell<bool>>;
 
+/// #376: whether a GPUI overlay that paints above the page (the `+` new-tab
+/// menu, a tab context menu, the command palette, a modal) is currently open
+/// somewhere over this surface's rectangle.
+///
+/// The webview is a native child HWND on Windows (and an X11 child on Linux),
+/// layered above GPUI's own surface: it takes no part in GPUI paint, clip or
+/// z-order, so a menu drawn by GPUI lands *behind* the page and its rows stop
+/// being clickable. Hiding the child while the overlay is open is the same
+/// contract [`BrowserSurface::set_native_visible`] already keeps for
+/// off-screen surfaces, only scoped to "on screen but covered".
+///
+/// Shared by cell with the element for the same reason as the visibility
+/// mirror: the host sets it from `read` during `render`, and `prepaint` reads
+/// it after. Starts `false`: no overlay is open for a fresh surface.
+type SharedOverlayObscured = Rc<Cell<bool>>;
+
 /// The state a freshly built webview is actually in. Named rather than written
 /// inline so the reason above has somewhere to be tested; see
 /// `the_visibility_mirror_starts_where_wry_leaves_the_window`.
@@ -1223,6 +1239,8 @@ pub struct BrowserSurface {
     webview_scale_correction: SharedScaleCorrection,
     /// F-BRW: whether the native child is mapped; see [`SharedNativeVisibility`].
     webview_visible: SharedNativeVisibility,
+    /// #376: whether a covering GPUI overlay is open; see [`SharedOverlayObscured`].
+    overlay_obscured: SharedOverlayObscured,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
     /// Load-bearing by existing, not by being read. A GPUI [`Task`] is
@@ -1398,6 +1416,7 @@ impl BrowserSurface {
                 _web_context: Some(web_context),
                 webview_scale_correction: Rc::new(Cell::new(None)),
                 webview_visible: initial_native_visibility(),
+                overlay_obscured: Rc::new(Cell::new(false)),
                 web_events,
                 events: Vec::new(),
                 pump_task,
@@ -1442,6 +1461,7 @@ impl BrowserSurface {
                 _web_context: Some(web_context),
                 webview_scale_correction: Rc::new(Cell::new(None)),
                 webview_visible: initial_native_visibility(),
+                overlay_obscured: Rc::new(Cell::new(false)),
                 web_events,
                 events: Vec::new(),
                 pump_task: None,
@@ -1585,6 +1605,26 @@ impl BrowserSurface {
     /// offers no read-back, so this reports our mirror of it.
     pub fn native_visible(&self) -> bool {
         self.webview_visible.get()
+    }
+
+    /// #376: marks this surface as covered by a GPUI overlay (menu, popover,
+    /// palette, modal) that the native child would otherwise paint over.
+    ///
+    /// Takes `&self` like [`Self::set_native_visible`] so the host can sync
+    /// it every frame from `read` during `render`. The flag itself hides
+    /// nothing: [`NativeWebViewElement::prepaint`] reads it after `render`
+    /// and unmaps instead of mapping, which is what keeps the hide from
+    /// being undone the same frame (the element stays mounted for layout,
+    /// so an unconditional `set_native_visible(false)` here would lose to
+    /// the prepaint that runs right after). Clearing the flag lets the next
+    /// prepaint map the child again, so no explicit re-show call is needed.
+    pub fn set_overlay_obscured(&self, obscured: bool) {
+        self.overlay_obscured.set(obscured);
+    }
+
+    /// Whether this surface is currently marked as covered by a GPUI overlay.
+    pub fn overlay_obscured(&self) -> bool {
+        self.overlay_obscured.get()
     }
 
     /// Tear the native child down for good, on the close path.
@@ -2231,6 +2271,7 @@ impl Render for BrowserSurface {
             self.webview.clone(),
             self.webview_scale_correction.clone(),
             self.webview_visible.clone(),
+            self.overlay_obscured.clone(),
         );
 
         div()
@@ -2479,6 +2520,8 @@ struct NativeWebViewElement {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     scale_correction: SharedScaleCorrection,
     visible: SharedNativeVisibility,
+    /// #376: when set, a GPUI menu/popover/modal is open above the page.
+    obscured: SharedOverlayObscured,
 }
 
 impl NativeWebViewElement {
@@ -2486,11 +2529,13 @@ impl NativeWebViewElement {
         webview: SharedWebView,
         scale_correction: SharedScaleCorrection,
         visible: SharedNativeVisibility,
+        obscured: SharedOverlayObscured,
     ) -> Self {
         Self {
             webview,
             scale_correction,
             visible,
+            obscured,
         }
     }
 }
@@ -2542,6 +2587,18 @@ impl Element for NativeWebViewElement {
         // Settings branch returns before building the pane tree at all. The
         // host is responsible for the matching hide — see
         // [`BrowserSurface::set_native_visible`].
+        //
+        // #376: an open GPUI overlay inverts that signal. The child HWND sits
+        // above GPUI's own surface, so a menu that overlaps the page would
+        // paint behind it and stop being clickable. The host marks covering
+        // overlays through `set_overlay_obscured`; while marked, unmap here
+        // instead of mapping and skip the move, so the hide survives the very
+        // frame that requested it. Clearing the mark lets the next prepaint
+        // map again with no explicit re-show.
+        if self.obscured.get() {
+            apply_native_visible(&self.webview, &self.visible, false);
+            return;
+        }
         apply_native_visible(&self.webview, &self.visible, true);
 
         if let Some(webview) = self.webview.borrow().as_ref() {
@@ -2669,6 +2726,93 @@ mod tests {
 
         apply_native_visible(&webview, &flag, true);
         assert!(flag.get(), "a hidden child can be shown again");
+    }
+
+    /// #376: the overlay mark a fresh surface carries. No overlay is open for
+    /// a surface nobody has told about one, so prepaint must map on its first
+    /// frame; starting obscured would leave every new browser blank until
+    /// some unrelated menu opened and closed.
+    ///
+    /// The cell part (not the surface) is what is pinned here: the surface
+    /// needs a window to build, the rule does not.
+    #[test]
+    fn overlay_obscured_starts_clear() {
+        let obscured: SharedOverlayObscured = Rc::new(Cell::new(false));
+        assert!(
+            !obscured.get(),
+            "a fresh surface is not covered by any overlay"
+        );
+    }
+
+    /// #376: the mark the host syncs every frame. Setting it twice is not an
+    /// error (render syncs unconditionally), and clearing it is what lets the
+    /// next prepaint map the child again with no explicit re-show call.
+    #[test]
+    fn overlay_obscured_mark_round_trips() {
+        let obscured: SharedOverlayObscured = Rc::new(Cell::new(false));
+        obscured.set(true);
+        assert!(obscured.get(), "marking a covered surface stays marked");
+        obscured.set(true);
+        assert!(obscured.get(), "marking twice is idempotent");
+        obscured.set(false);
+        assert!(!obscured.get(), "closing the overlay clears the mark");
+    }
+
+    /// #376: the mark round-trips through the surface's own accessors. The
+    /// host syncs it from `read` every frame while `prepaint` reads the
+    /// clone the element was built with — if those were two cells, the mark
+    /// would never reach the paint path and the menu would stay behind the
+    /// page exactly as before. No window is needed: the methods only touch
+    /// the shared cell.
+    #[gpui::test]
+    async fn overlay_mark_round_trips_through_the_surface(cx: &mut gpui::TestAppContext) {
+        let surface = cx.update(|cx| {
+            Theme::init(cx);
+            bezel::ui::input::init(cx);
+            cx.new(|cx| {
+                let state = BrowserState::new("https://example.com").expect("valid URL");
+                let address_field = cx.new(|cx| {
+                    let mut field = TextField::new(cx);
+                    field.set_content(state.address(), cx);
+                    field
+                });
+                BrowserSurface {
+                    state,
+                    address_field,
+                    address_focused: false,
+                    webview: Rc::new(RefCell::new(None)),
+                    _web_context: None,
+                    webview_scale_correction: Rc::new(Cell::new(None)),
+                    webview_visible: initial_native_visibility(),
+                    overlay_obscured: Rc::new(Cell::new(false)),
+                    web_events: Rc::new(RefCell::new(Vec::new())),
+                    events: Vec::new(),
+                    pump_task: None,
+                    startup_failure: None,
+                }
+            })
+        });
+        surface.update(cx, |surface, _| {
+            assert!(
+                !surface.overlay_obscured(),
+                "a fresh surface carries no overlay mark"
+            );
+            surface.set_overlay_obscured(true);
+            assert!(
+                surface.overlay_obscured(),
+                "the host mark must be readable back"
+            );
+            surface.set_overlay_obscured(true);
+            assert!(
+                surface.overlay_obscured(),
+                "syncing every frame must be idempotent"
+            );
+            surface.set_overlay_obscured(false);
+            assert!(
+                !surface.overlay_obscured(),
+                "closing the overlay must clear the mark so prepaint maps again"
+            );
+        });
     }
 
     /// The two properties `close_tab` leans on. Not the flush — that one needs
@@ -3052,6 +3196,7 @@ mod tests {
                 _web_context: None,
                 webview_scale_correction: Rc::new(Cell::new(None)),
                 webview_visible: initial_native_visibility(),
+                overlay_obscured: Rc::new(Cell::new(false)),
                 web_events: Rc::new(RefCell::new(Vec::new())),
                 events: Vec::new(),
                 pump_task: None,
