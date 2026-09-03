@@ -506,6 +506,11 @@ fn probe_executable(path: &Path) -> Result<bool, std::io::Error> {
         Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
             return Ok(false);
         }
+        #[cfg(windows)]
+        // Windows reports ERROR_INVALID_NAME from a malformed PATH entry as
+        // InvalidFilename. That candidate is unusable, not an unknowable
+        // filesystem state, so it must not poison the whole registry sweep.
+        Err(error) if error.kind() == ErrorKind::InvalidFilename => return Ok(false),
         Err(error) => return Err(error),
     };
     if !metadata.is_file() {
