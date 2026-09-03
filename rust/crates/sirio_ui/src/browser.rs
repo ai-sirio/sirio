@@ -1549,6 +1549,19 @@ impl BrowserSurface {
         &self.state
     }
 
+    /// Moves focus from the native page child back to GPUI's address field.
+    ///
+    /// `Window::focus` only updates GPUI's focus tree. A wry child is a real
+    /// native window and can keep the operating system focus after a page
+    /// click, so hand focus back to its parent before focusing the TextField.
+    pub fn focus_address_bar(&self, window: &mut Window, cx: &mut App) {
+        if let Some(webview) = self.webview.borrow().as_ref() {
+            let _ = webview.focus_parent();
+        }
+        let focus = self.address_field.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    }
+
     // `impl Focusable for BrowserSurface` below gives the host (F-WIN-06's
     // "Focus Address Bar" command) a way to move keyboard focus into the
     // address field without going through a synthetic click, the same way
@@ -2021,7 +2034,7 @@ impl BrowserSurface {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let address_field = self.address_field.clone();
-        let address_focus = address_field.read(cx).focus_handle(cx);
+        let focus_address = entity.clone();
         let address_entity = entity.clone();
         let back = entity.clone();
         let forward = entity.clone();
@@ -2083,9 +2096,14 @@ impl BrowserSurface {
                     .id("browser-address-field")
                     .debug_selector(|| "browser-address-field".to_owned())
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .on_click(move |_, window, cx| window.focus(&address_focus, cx))
+                    .on_click(move |_, window, cx| {
+                        focus_address.update(cx, |surface, cx| {
+                            surface.focus_address_bar(window, cx);
+                        });
+                    })
                     .on_key_down(move |event, _, cx| {
                         address_entity.update(cx, |surface, cx| {
                             surface.on_address_key(event, cx);
@@ -2098,12 +2116,16 @@ impl BrowserSurface {
                             .text_color(theme.text_faint)
                             .child("◎"),
                     )
-                    .child(div().flex_1().child(address_field)),
+                    .child(div().flex_1().min_w_0().child(address_field)),
             )
             .child(
                 div()
                     .id("browser-page-title")
                     .debug_selector(|| "browser-page-title".to_owned())
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .max_w(px(220.0))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_muted)
@@ -3004,6 +3026,52 @@ mod tests {
             let field = field.read(cx);
             assert_eq!(field.cursor(), field.content().len());
         });
+    }
+
+    #[gpui::test]
+    async fn address_bar_gets_priority_over_the_page_title_in_a_narrow_pane(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            bezel::ui::input::init(cx);
+        });
+        let window = cx.open_window(gpui::size(px(390.0), px(200.0)), |_, cx| {
+            let mut state = BrowserState::new("https://example.com").expect("valid URL");
+            state.did_finish_navigation("https://example.com", "Example Domain");
+            let address_field = cx.new(|cx| {
+                let mut field = TextField::new(cx);
+                field.set_content(state.address(), cx);
+                field
+            });
+            BrowserSurface {
+                state,
+                address_field,
+                address_focused: false,
+                webview: Rc::new(RefCell::new(None)),
+                _web_context: None,
+                webview_scale_correction: Rc::new(Cell::new(None)),
+                webview_visible: initial_native_visibility(),
+                web_events: Rc::new(RefCell::new(Vec::new())),
+                events: Vec::new(),
+                pump_task: None,
+                startup_failure: None,
+            }
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let address = cx
+            .debug_bounds("browser-address-field")
+            .expect("the address field is drawn");
+        let title = cx
+            .debug_bounds("browser-page-title")
+            .expect("the page title is drawn");
+        assert!(
+            address.size.width >= title.size.width,
+            "the address bar must not be narrower than the page title: \
+             address={address:?} title={title:?}"
+        );
     }
 
     /// #307: on a Windows machine without the WebView2 Runtime the browser

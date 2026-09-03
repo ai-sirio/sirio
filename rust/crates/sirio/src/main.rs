@@ -13094,8 +13094,7 @@ impl SirioWorkspace {
             return;
         }
         if let Some(browser) = self.active_browser_surface() {
-            let focus = browser.focus_handle(cx);
-            window.focus(&focus, cx);
+            browser.update(cx, |surface, cx| surface.focus_address_bar(window, cx));
         }
     }
 
