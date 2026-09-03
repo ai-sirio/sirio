@@ -45,7 +45,8 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #365 registry agenti / PATH | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-365` (herdr w5, rimosso) | 1 | verificata e chiusa (ae816097) |
 | #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6) | 1 | in corso |
 | #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7, rimosso) | 1 | verificata e chiusa (df0ba45f) |
-| #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` | 1 | in corso |
+| #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` (herdr w8) | 1 | in corso |
+| #369 barra indirizzi browser | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 1 | in corso |
 
 ## Note non classificate come bug
 
