@@ -1156,76 +1156,6 @@ fn capture_window_hwnd(window: &Window) -> Result<isize, String> {
     }
 }
 
-/// #369 (Ctrl+L residual): steal Win32 thread focus from the WebView2 child.
-///
-/// wry's `focus_parent()` is `SetFocus(parent)` alone. That is a no-op when
-/// the parent already has thread focus (the click path, which is why the
-/// first fix worked there), but it cannot steal thread focus when the child
-/// still holds it (the `Ctrl+L` path after a page click: GPUI shows a caret
-/// via `window.focus`, yet the first keystrokes still go to the page).
-/// Attach the two threads, foreground the parent top-level, and focus it.
-/// Best-effort with fallback to the plain `focus_parent()` below, so a
-/// failure here can only leave the previous behaviour, never break it.
-///
-/// Pump-safe: `SetFocus`/`SetForegroundWindow` deliver `WM_SETFOCUS`/
-/// `WM_ACTIVATE` synchronously, and GPUI's Windows backend holds no borrow
-/// across those (focus messages fall through to `DefWindowProc`, activation
-/// only resets modifiers and spawns) — unlike WebView2 creation (#255, #368),
-/// which must stay off every GPUI lease.
-#[cfg(target_os = "windows")]
-fn steal_win32_focus_from_webview_child(window: &Window) {
-    use windows_sys::Win32::{
-        Foundation::HWND,
-        System::Threading::{AttachThreadInput, GetCurrentThreadId},
-        UI::{
-            Input::KeyboardAndMouse::{GetFocus, SetFocus},
-            WindowsAndMessaging::{
-                GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-            },
-        },
-    };
-    let Ok(parent_isize) = capture_window_hwnd(window) else {
-        return;
-    };
-    let parent = parent_isize as HWND;
-    unsafe {
-        let focused = GetFocus();
-        if focused == parent {
-            return;
-        }
-        let current_tid = GetCurrentThreadId();
-        let mut focused_pid = 0u32;
-        let focused_tid = if focused.is_null() {
-            0
-        } else {
-            GetWindowThreadProcessId(focused, &mut focused_pid)
-        };
-        let foreground = GetForegroundWindow();
-        let mut foreground_pid = 0u32;
-        let foreground_tid = if foreground.is_null() {
-            0
-        } else {
-            GetWindowThreadProcessId(foreground, &mut foreground_pid)
-        };
-        let mut attached_focused = false;
-        let mut attached_foreground = false;
-        if focused_tid != 0 && focused_tid != current_tid {
-            attached_focused = AttachThreadInput(current_tid, focused_tid, 1) != 0;
-        }
-        if foreground_tid != 0 && foreground_tid != current_tid && foreground_tid != focused_tid {
-            attached_foreground = AttachThreadInput(current_tid, foreground_tid, 1) != 0;
-        }
-        let _ = SetForegroundWindow(parent);
-        let _ = SetFocus(parent);
-        if attached_focused {
-            AttachThreadInput(current_tid, focused_tid, 0);
-        }
-        if attached_foreground {
-            AttachThreadInput(current_tid, foreground_tid, 0);
-        }
-    }
-}
-
 /// #368: the engine build for a deferred surface, off every GPUI lease.
 ///
 /// Runs from a foreground task after `new` has returned, so no `App` borrow
@@ -1645,8 +1575,6 @@ impl BrowserSurface {
     /// native window and can keep the operating system focus after a page
     /// click, so hand focus back to its parent before focusing the TextField.
     pub fn focus_address_bar(&self, window: &mut Window, cx: &mut App) {
-        #[cfg(target_os = "windows")]
-        steal_win32_focus_from_webview_child(window);
         if let Some(webview) = self.webview.borrow().as_ref() {
             let _ = webview.focus_parent();
         }

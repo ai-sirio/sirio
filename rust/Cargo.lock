@@ -7273,7 +7273,6 @@ dependencies = [
  "sirio_usage",
  "smallvec",
  "unicode-segmentation",
- "windows-sys 0.61.2",
  "wry",
 ]
 
