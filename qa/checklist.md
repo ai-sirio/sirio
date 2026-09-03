@@ -28,7 +28,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | todo | | | |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
 | 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | bug | #366 | opencode-go | colonna Date troncata/disallineata |
-| 23 | Browser | Tab browser embedded | todo | | | |
+| 23 | Browser | Tab browser embedded | bug | #368 | opencode-go | crash RefCell all'apertura (race con refresh Files); quando apre, naviga e renderizza |
 | 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | todo | #365 (chiusa) | pi | Agents ok post-merge; modifica/applicazione/ripristino settings ancora da testare |
 | 25 | Status bar | Indicatori provider usage (Claude/Codex/...), refresh | todo | | | |
 | 26 | Controllo | `sirioctl` / control socket | todo | | | |
@@ -45,6 +45,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #365 registry agenti / PATH | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-365` (herdr w5, rimosso) | 1 | verificata e chiusa (ae816097) |
 | #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6) | 1 | in corso |
 | #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7, rimosso) | 1 | verificata e chiusa (df0ba45f) |
+| #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` | 1 | in corso |
 
 ## Note non classificate come bug
 
