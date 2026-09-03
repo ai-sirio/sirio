@@ -20,7 +20,9 @@ use sirio_control::{
 use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
-use sirio_persistence::{AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor};
+use sirio_persistence::{
+    AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, stable_worktree_id,
+};
 use sirio_project::{
     OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
     display_path, is_git_repository, numeric_tab_selection, read_head_label,
@@ -1020,13 +1022,13 @@ impl ControlState {
         let mut workspaces = Vec::new();
         let mut selected_path_claimed = false;
         for project in catalog.projects() {
-            for (index, worktree) in project.worktrees.iter().enumerate() {
+            for worktree in &project.worktrees {
                 let path = worktree.path.to_string_lossy().into_owned();
                 let selected = !selected_path_claimed
                     && paths_name_the_same_document(&worktree.path, &working_directory);
                 selected_path_claimed |= selected;
                 workspaces.push(ControlWorkspace {
-                    id: format!("{}-wt-{index}", project.id),
+                    id: stable_worktree_id(&project.id, &worktree.path),
                     project: project.name.clone(),
                     branch: worktree.branch.clone(),
                     selected,
@@ -1080,6 +1082,19 @@ impl ControlState {
         }
     }
 
+    fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        for workspace in &mut self.workspaces {
+            let Some(previous) = previous.workspaces.iter().find(|previous| {
+                paths_name_the_same_document(Path::new(&previous.path), Path::new(&workspace.path))
+            }) else {
+                continue;
+            };
+            workspace.mounted |= previous.mounted;
+            workspace.comment = previous.comment.clone();
+            workspace.session = previous.session.clone();
+        }
+    }
+
     fn project_rows(&self) -> Vec<BTreeMap<String, String>> {
         self.projects
             .iter()
@@ -1087,8 +1102,7 @@ impl ControlState {
                 let worktrees: Vec<BTreeMap<String, String>> = project
                     .worktrees
                     .iter()
-                    .enumerate()
-                    .map(|(index, worktree)| {
+                    .map(|worktree| {
                         let id = self
                             .workspaces
                             .iter()
@@ -1099,7 +1113,7 @@ impl ControlState {
                                 )
                             })
                             .map(|workspace| workspace.id.clone())
-                            .unwrap_or_else(|| format!("{}-wt-{index}", project.id));
+                            .unwrap_or_else(|| stable_worktree_id(&project.id, &worktree.path));
                         BTreeMap::from([
                             ("id".to_string(), id),
                             ("branch".to_string(), worktree.branch.clone()),
@@ -3813,6 +3827,11 @@ struct SirioWorkspace {
     /// dropped. Cleared on a real drop (`render_open_tabs`'s
     /// `on_drop::<RowDrag>`) and on Escape (`cancel_tab_drag`).
     tab_drag_snapshot: Option<TabDragSnapshot>,
+    /// The worktree that owns each live tab. `tabs` is intentionally shared
+    /// by mounted worktrees while an unsafe switch keeps an agent tab alive;
+    /// deriving ownership from `working_directory` would then relabel the
+    /// old tab under the newly selected worktree.
+    tab_worktree_paths: BTreeMap<usize, PathBuf>,
     next_tab_id: usize,
     next_retained_chat_id: usize,
     retained_chats: Vec<RetainedChat>,
@@ -4529,6 +4548,10 @@ impl SirioWorkspace {
 
         let tabs_len = tabs.len();
         let next_pane_id = next_pane_id(&tabs);
+        let tab_worktree_paths = tabs
+            .iter()
+            .map(|tab| (tab.id, working_directory.clone()))
+            .collect();
         let active_tab_id = tabs.get(active_tab).map(|tab| tab.id);
         let mut center_split = CenterSplit::new(&tabs);
         // `CenterSplit::new` takes each role's *first* tab, which is right for
@@ -4588,6 +4611,7 @@ impl SirioWorkspace {
             tabs,
             active_tab,
             tab_drag_snapshot: None,
+            tab_worktree_paths,
             next_tab_id: tabs_len,
             next_retained_chat_id: 0,
             retained_chats: Vec::new(),
@@ -5025,17 +5049,26 @@ impl SirioWorkspace {
 
     /// The shell's current layout, in the shape persistence understands.
     fn layout(&self, cx: &App) -> SessionLayout {
+        let owned_tabs: Vec<&OpenTab> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                paths_name_the_same_document(
+                    &self.tab_worktree_path(tab.id),
+                    &self.working_directory,
+                )
+            })
+            .collect();
+        let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         SessionLayout {
             working_directory: self.working_directory.clone(),
             branch: current_branch(&self.working_directory)
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "main".to_string()),
-            tabs: self
-                .tabs
+            tabs: owned_tabs
                 .iter()
-                .enumerate()
-                .map(|(index, tab)| SessionTab {
+                .map(|tab| SessionTab {
                     id: tab.persistence_id.clone(),
                     title: tab.title.clone(),
                     kind: match tab.kind {
@@ -5050,11 +5083,10 @@ impl SirioWorkspace {
                     // with; the persisted form is qualified, so wrap it at
                     // the persistence boundary.
                     agent_id: tab.agent_id.clone().map(AgentRef::adapter),
-                    active: index == self.active_tab,
+                    active: active_tab_id == Some(tab.id),
                 })
                 .collect(),
-            tab_states: self
-                .tabs
+            tab_states: owned_tabs
                 .iter()
                 .map(|tab| {
                     let mut state = tab.session_state.clone();
@@ -5156,17 +5188,7 @@ impl SirioWorkspace {
             .map(|workspace| PathBuf::from(&workspace.path))
             .unwrap_or_else(|| self.working_directory.clone());
         let mut next = ControlState::from_catalog(&self.project_catalog, &state_path);
-        for workspace in &mut next.workspaces {
-            let Some(previous) = previous.workspaces.iter().find(|previous| {
-                paths_name_the_same_document(Path::new(&previous.path), Path::new(&workspace.path))
-            }) else {
-                continue;
-            };
-            workspace.id = previous.id.clone();
-            workspace.mounted |= previous.mounted;
-            workspace.comment = previous.comment.clone();
-            workspace.session = previous.session.clone();
-        }
+        next.preserve_runtime_state_from(&previous);
         *self
             .control_state
             .lock()
@@ -6720,6 +6742,12 @@ impl SirioWorkspace {
         let ranked: Vec<(usize, ActivityStatus)> = self
             .tabs
             .iter()
+            .filter(|tab| {
+                paths_name_the_same_document(
+                    &self.tab_worktree_path(tab.id),
+                    &self.working_directory,
+                )
+            })
             .filter_map(|tab| self.tab_status(tab, cx).map(|status| (tab.id, status)))
             .collect();
         sirio_activity::AttentionSort::sorted(&ranked, |(_, status)| {
@@ -6778,6 +6806,12 @@ impl SirioWorkspace {
     fn activity_surfaces(&self, cx: &App) -> Vec<ActivitySurface> {
         self.tabs
             .iter()
+            .filter(|tab| {
+                paths_name_the_same_document(
+                    &self.tab_worktree_path(tab.id),
+                    &self.working_directory,
+                )
+            })
             .map(|tab| {
                 let icon = tab_icon(
                     tab.kind,
@@ -6790,18 +6824,52 @@ impl SirioWorkspace {
             .collect()
     }
 
+    fn tab_worktree_path(&self, tab_id: usize) -> PathBuf {
+        self.tab_worktree_paths
+            .get(&tab_id)
+            .cloned()
+            .unwrap_or_else(|| self.working_directory.clone())
+    }
+
+    fn tab_ids_for_worktree(
+        &self,
+        worktree_path: &Path,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let worktree_path = worktree_path.to_path_buf();
+        self.tabs.iter().filter_map(move |tab| {
+            paths_name_the_same_document(&self.tab_worktree_path(tab.id), &worktree_path)
+                .then_some(tab.id)
+        })
+    }
+
+    fn sidebar_tabs_for_worktree(&self, worktree_path: &Path) -> Vec<SidebarTab> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| {
+                paths_name_the_same_document(&self.tab_worktree_path(tab.id), worktree_path)
+                    && tab.kind.appears_in_sidebar()
+            })
+            .map(|(index, tab)| SidebarTab {
+                id: tab.id,
+                title: tab.title.clone(),
+                selected: index == self.active_tab,
+                kind: tab.kind,
+                agent: self.tab_agent_mark(tab),
+            })
+            .collect()
+    }
+
     /// Publishes this window's live panes to the control registry.
     ///
-    /// Each pane is filed under **the directory it is actually running in**
-    /// (a terminal's own `working_directory`, fixed at spawn), not under
+    /// Each pane is filed under its tab's owning worktree, not under
     /// whichever worktree happens to be selected. Those are the same
-    /// directory in the ordinary case, and differ in exactly one situation:
-    /// this port keeps a single, un-scoped-to-worktree tab list
-    /// (F-CHG-19's single-open-worktree model), so selecting a different
-    /// worktree leaves the previous worktree's terminals mounted. Filing
-    /// them under the new selection re-homed live panes on every click,
-    /// which is how selecting an untouched worktree could inherit another
-    /// one's failing agent and show up red.
+    /// directory in the ordinary case, and differ when this port keeps a
+    /// single, un-scoped-to-worktree tab list while an unsafe switch leaves
+    /// the previous worktree's terminals mounted. Filing them under the new
+    /// selection re-homed live panes on every click, which is how selecting
+    /// an untouched worktree could inherit another one's failing agent and
+    /// show up red.
     ///
     /// This publishes cheap pane facts and live scrollback sources. It does
     /// not capture terminal contents: a source is consulted by the control
@@ -6817,13 +6885,14 @@ impl SirioWorkspace {
             BTreeMap<PathBuf, Vec<(PaneInfo, PaneStateSnapshot, Option<ScrollbackSource>)>> =
             BTreeMap::new();
         for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let tab_worktree_path = self.tab_worktree_path(tab.id);
             tab.panes.for_each(&mut |pane_id, content| {
                 let (title, agent, state, scrollback_source) = match content {
                     TabContent::Chat(_) => (
                         "Chat".to_string(),
                         String::new(),
                         PaneStateSnapshot {
-                            working_directory: self.working_directory.clone(),
+                            working_directory: tab_worktree_path.clone(),
                             exit_status: None,
                         },
                         None,
@@ -6832,7 +6901,7 @@ impl SirioWorkspace {
                         let agent = self.pane_agent_id(tab, pane_id).unwrap_or_default();
                         let terminal = view.read(cx);
                         let state = PaneStateSnapshot {
-                            working_directory: terminal.working_directory().to_path_buf(),
+                            working_directory: tab_worktree_path.clone(),
                             exit_status: pane_exit_status(terminal.exit_status()),
                         };
                         let scrollback_source = terminal.scrollback_source().map(|source| {
@@ -6845,14 +6914,14 @@ impl SirioWorkspace {
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
-                            working_directory: self.working_directory.clone(),
+                            working_directory: tab_worktree_path.clone(),
                             exit_status: None,
                         },
                         None,
                     ),
                 };
                 by_directory
-                    .entry(state.working_directory.clone())
+                    .entry(tab_worktree_path.clone())
                     .or_default()
                     .push((
                         PaneInfo {
@@ -6860,7 +6929,12 @@ impl SirioWorkspace {
                             tab: tab.title.clone(),
                             title,
                             agent,
-                            active: tab_index == self.active_tab && pane_id == tab.focused_pane,
+                            active: tab_index == self.active_tab
+                                && pane_id == tab.focused_pane
+                                && paths_name_the_same_document(
+                                    &tab_worktree_path,
+                                    &self.working_directory,
+                                ),
                         },
                         state,
                         scrollback_source,
@@ -7107,6 +7181,10 @@ impl SirioWorkspace {
                     });
                 }
                 self.tabs = new_tabs;
+                for tab in &self.tabs {
+                    self.tab_worktree_paths
+                        .insert(tab.id, selected_path.clone());
+                }
                 let incoming_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
                 for tab_id in incoming_tab_ids {
                     self.track_terminal_panes_in_cache_for_worktree(tab_id, &selected_path);
@@ -7369,18 +7447,7 @@ impl SirioWorkspace {
         self.project_catalog.replace_projects(projects);
         self.session.schedule_catalog(&self.project_catalog);
 
-        let current_path = self
-            .control_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .current_workspace()
-            .map(|workspace| PathBuf::from(&workspace.path));
-        let state_path = current_path.as_deref().unwrap_or_else(|| Path::new(""));
-        *self
-            .control_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ControlState::from_catalog(&self.project_catalog, state_path);
+        self.sync_control_state();
         self.refresh_sidebar(cx);
         cx.notify();
 
@@ -7500,6 +7567,10 @@ impl SirioWorkspace {
                 });
             }
             self.next_tab_id += tabs.len();
+            for tab in &tabs {
+                self.tab_worktree_paths
+                    .insert(tab.id, self.working_directory.clone());
+            }
             self.tabs.extend(tabs);
             self.next_pane_id = next_pane_id(&self.tabs);
             self.rebuild_center_split();
@@ -7666,34 +7737,31 @@ impl SirioWorkspace {
             }
         });
 
-        // The sidebar's tab rows under this worktree are the same `tabs`
-        // the tab bar and the Activity panel just rendered from above —
-        // one collection, three views, so they cannot disagree the way the
-        // sidebar's own fixture rows used to.
+        // The sidebar receives each tab under its in-memory owner. During an
+        // unsafe switch `self.tabs` can still contain mounted tabs from the
+        // old worktree, so assigning the whole collection to the selected
+        // row would make the old tabs appear to belong to the new row.
         //
-        // #125/#130: filtered by `TabKind::appears_in_sidebar`, because a
-        // Browser tab is a tab like any other up there and never a row down
-        // here. `enumerate` runs *before* the filter so `selected` keeps
-        // comparing against `self.active_tab`'s real index — filtering first
-        // would renumber the rows and mark the wrong one.
-        let sidebar_tabs: Vec<SidebarTab> = self
-            .tabs
+        // #125/#130: each owner list is filtered by
+        // `TabKind::appears_in_sidebar`, because a Browser tab is a tab like
+        // any other up there and never a row down here. Selection is still
+        // compared against the tab's real index in `self.tabs`, not its
+        // position in the filtered owner list.
+        let sidebar_updates: Vec<(usize, Vec<SidebarTab>)> = self
+            .project_catalog
+            .projects()
             .iter()
-            .enumerate()
-            .filter(|(_, tab)| tab.kind.appears_in_sidebar())
-            .map(|(index, tab)| SidebarTab {
-                id: tab.id,
-                title: tab.title.clone(),
-                selected: index == self.active_tab,
-                kind: tab.kind,
-                agent: self.tab_agent_mark(tab),
+            .flat_map(|project| project.worktrees.iter())
+            .filter_map(|worktree| {
+                self.sidebar_worktree_id(&worktree.path)
+                    .map(|id| (id, self.sidebar_tabs_for_worktree(&worktree.path)))
             })
             .collect();
-        if let Some(worktree_id) = self.sidebar_worktree_id(&self.working_directory) {
-            self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_worktree_tabs(worktree_id, sidebar_tabs, cx);
-            });
-        }
+        self.sidebar.update(cx, |sidebar, cx| {
+            for (worktree_id, tabs) in sidebar_updates {
+                sidebar.set_worktree_tabs(worktree_id, tabs, cx);
+            }
+        });
         self.sync_worktree_activity(cx);
     }
 
@@ -8174,7 +8242,7 @@ impl SirioWorkspace {
     /// old entry so a legitimate re-creation does not leave the old PTY
     /// rooted in the cache.
     fn track_terminal_panes_in_cache(&mut self, tab_id: usize) {
-        let worktree_path = self.working_directory.clone();
+        let worktree_path = self.tab_worktree_path(tab_id);
         self.track_terminal_panes_in_cache_for_worktree(tab_id, &worktree_path);
     }
 
@@ -8222,9 +8290,16 @@ impl SirioWorkspace {
 
     fn park_current_worktree_tabs(&mut self, cx: &App) -> SessionLayout {
         let layout = self.layout(cx);
+        let current_path = self.working_directory.clone();
         let terminal_panes_by_tab = self
             .tabs
             .iter()
+            .filter(|tab| {
+                paths_name_the_same_document(
+                    &self.tab_worktree_path(tab.id),
+                    &current_path,
+                )
+            })
             .map(|tab| {
                 let mut pane_ids = HashSet::new();
                 tab.panes.for_each(&mut |pane_id, content| {
@@ -8235,7 +8310,7 @@ impl SirioWorkspace {
                 pane_ids
             })
             .collect();
-        let worktree_id = self.working_directory.to_string_lossy().into_owned();
+        let worktree_id = current_path.to_string_lossy().into_owned();
         self.parked_worktree_tabs.insert(
             worktree_id,
             ParkedWorktreeTabs {
@@ -8435,8 +8510,11 @@ impl SirioWorkspace {
 
     fn rebind_changes_tabs(&mut self, cx: &mut Context<Self>) {
         let working_directory = self.working_directory.clone();
+        let current_tab_ids: HashSet<usize> = self
+            .tab_ids_for_worktree(&working_directory)
+            .collect();
         for tab in &mut self.tabs {
-            if tab.kind != TabKind::Diff {
+            if tab.kind != TabKind::Diff || !current_tab_ids.contains(&tab.id) {
                 continue;
             }
             let pane_id = tab.focused_pane;
@@ -8520,8 +8598,10 @@ impl SirioWorkspace {
             // it walks `self.tabs`, and a closed tab is no longer in it.
             browser.update(cx, |surface, _| surface.close_native());
         }
+        let worktree_path = self.tab_worktree_path(tab_id);
         self.tabs.remove(index);
-        let worktree_id = self.working_directory.to_string_lossy().into_owned();
+        self.tab_worktree_paths.remove(&tab_id);
+        let worktree_id = worktree_path.to_string_lossy().into_owned();
         for pane_id in terminal_pane_ids {
             self.terminal_pane_cache.remove_in_worktree(
                 &worktree_id,
@@ -8780,6 +8860,8 @@ impl SirioWorkspace {
             focused_pane: self.next_pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -8887,6 +8969,8 @@ impl SirioWorkspace {
             focused_pane: pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -8986,6 +9070,8 @@ impl SirioWorkspace {
             focused_pane: pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -9070,6 +9156,8 @@ impl SirioWorkspace {
             focused_pane: self.next_pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -9136,6 +9224,8 @@ impl SirioWorkspace {
             focused_pane: self.next_pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -9168,6 +9258,8 @@ impl SirioWorkspace {
             focused_pane: self.next_pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -9206,6 +9298,8 @@ impl SirioWorkspace {
             focused_pane: pane_id,
             title_is_auto_named: true,
         });
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
@@ -10142,7 +10236,7 @@ impl SirioWorkspace {
             // the very first click, and the cache's `restore_focus` would
             // never have anything to return for a pane nobody ever moved.
             self.track_terminal_panes_in_cache(tab_id);
-            let worktree_id = self.working_directory.to_string_lossy().into_owned();
+            let worktree_id = self.tab_worktree_path(tab_id).to_string_lossy().into_owned();
             self.terminal_pane_cache
                 .focus(&worktree_id, &format!("terminal-{pane_id}"));
             self.mark_activity_dirty();
@@ -10434,7 +10528,10 @@ impl SirioWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        let worktree_id = self.working_directory.to_string_lossy().into_owned();
+        let worktree_id = self
+            .tab_worktree_path(tab_id)
+            .to_string_lossy()
+            .into_owned();
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
@@ -11738,6 +11835,7 @@ impl SirioWorkspace {
         };
         let moved_terminal = moved.terminal();
         if source_will_be_empty {
+            self.tab_worktree_paths.remove(&source_tab_id);
             self.tabs.remove(source_index);
         } else {
             self.tabs[source_index]
@@ -17145,6 +17243,9 @@ mod tests {
     ) -> SirioWorkspace {
         let mut workspace = palette_test_workspace(cx);
         workspace.working_directory = repo.clone();
+        for tab in &workspace.tabs {
+            workspace.tab_worktree_paths.insert(tab.id, repo.clone());
+        }
         workspace.right_panel = cx.new(|_| RightPanel::new(repo));
         let right_panel = workspace.right_panel.clone();
         SirioWorkspace::subscribe_right_panel(&right_panel, cx);
@@ -24860,6 +24961,70 @@ mod tests {
     }
 
     #[test]
+    fn control_state_refresh_does_not_duplicate_path_ids() {
+        let paths = [
+            PathBuf::from("/tmp/sirio-control-id-main"),
+            PathBuf::from("/tmp/sirio-control-id-preceding"),
+            PathBuf::from("/tmp/sirio-control-id-survivor"),
+        ];
+        let worktree = |path: &Path, branch: &str, is_primary: bool| {
+            session::CatalogWorktree {
+                branch: branch.into(),
+                path: path.to_path_buf(),
+                is_primary,
+            }
+        };
+        let initial = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "control-id-project".into(),
+            name: "Control Id Project".into(),
+            root_path: paths[0].clone(),
+            is_git: true,
+            worktrees: vec![
+                worktree(&paths[0], "main", true),
+                worktree(&paths[2], "survivor", false),
+            ],
+        }]);
+        let refreshed = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "control-id-project".into(),
+            name: "Control Id Project".into(),
+            root_path: paths[0].clone(),
+            is_git: true,
+            worktrees: vec![
+                worktree(&paths[0], "main", true),
+                worktree(&paths[1], "preceding", false),
+                worktree(&paths[2], "survivor", false),
+            ],
+        }]);
+
+        let previous = ControlState::from_catalog(&initial, &paths[0]);
+        let survivor_before = previous
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.path == paths[2].to_string_lossy())
+            .expect("initial survivor row")
+            .id
+            .clone();
+        let mut next = ControlState::from_catalog(&refreshed, &paths[0]);
+        next.preserve_runtime_state_from(&previous);
+
+        let ids: Vec<String> = next
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect();
+        let unique_ids: HashSet<String> = ids.iter().cloned().collect();
+        assert_eq!(unique_ids.len(), ids.len(), "refresh must not duplicate workspace ids");
+        let survivor_after = next
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.path == paths[2].to_string_lossy())
+            .expect("refreshed survivor row")
+            .id
+            .clone();
+        assert_eq!(survivor_after, survivor_before);
+    }
+
+    #[test]
     fn selecting_a_worktree_updates_current_and_row_flags() {
         let main_path = PathBuf::from("/tmp/sirio-selection-main");
         let feature_path = PathBuf::from("/tmp/sirio-selection-feature");
@@ -24979,6 +25144,115 @@ mod tests {
                 Some(created_path.to_string_lossy().into_owned())
             );
         });
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                created_path.to_str().expect("fixture path is utf-8"),
+            ],
+        );
+    }
+
+    #[gpui::test]
+    async fn runtime_worktree_refresh_keeps_live_tabs_with_their_original_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("sidebar-create-runtime-tabs");
+        let branch = "sidebar-created-runtime";
+        let created_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-sidebar-create-runtime-worktree");
+        let _ = std::fs::remove_dir_all(&created_path);
+        sirio_git::create_worktree(&repo, branch, &created_path, None)
+            .expect("create the fixture worktree");
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        workspace.update(cx, |workspace, cx| {
+            let terminal = cx.new(|cx| {
+                TerminalView::failed(
+                    &repo,
+                    TerminalShell::System,
+                    "runtime worktree test terminal",
+                    cx,
+                )
+            });
+            workspace.insert_terminal_tab("Original", terminal, None, cx);
+            workspace
+                .activity
+                .notify("pane-0", AgentStatus::Running, Instant::now());
+            let original_id = workspace
+                .control_state
+                .lock()
+                .expect("control state")
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.path == repo.to_string_lossy())
+                .expect("original worktree row")
+                .id
+                .clone();
+
+            workspace.handle_sidebar_event(
+                &SidebarEvent::WorktreeCreated {
+                    project_id: "worktree-state-project".into(),
+                    path: created_path.clone(),
+                },
+                cx,
+            );
+            workspace.sync_activity(cx);
+
+            let state = workspace.control_state.lock().expect("control state");
+            let ids: Vec<String> = state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect();
+            assert_eq!(ids.len(), 2);
+            assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+            assert_eq!(
+                state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.path == repo.to_string_lossy())
+                    .map(|workspace| workspace.id.as_str()),
+                Some(original_id.as_str()),
+                "a runtime catalog refresh must preserve the existing path identity"
+            );
+            drop(state);
+
+            assert_eq!(
+                workspace
+                    .tab_ids_for_worktree(&repo)
+                    .collect::<Vec<_>>(),
+                vec![0],
+                "a live tab must remain assigned to the worktree it came from"
+            );
+            assert_eq!(
+                workspace
+                    .tab_ids_for_worktree(&created_path)
+                    .collect::<Vec<_>>(),
+                Vec::<usize>::new(),
+                "the newly created worktree must not inherit the selected worktree's tabs"
+            );
+            assert!(
+                workspace.layout(cx).tabs.is_empty(),
+                "a runtime switch must not snapshot the old worktree's tabs under the new path"
+            );
+        });
+
         git_test(
             &repo,
             &[
@@ -25464,7 +25738,11 @@ mod tests {
         let mut state = ControlState::from_catalog(&catalog, &path);
 
         let workspace = state
-            .set_worktree("project-wt-0", Some("agent pane"), Some("pane-1"))
+            .set_worktree(
+                &stable_worktree_id("project", &path),
+                Some("agent pane"),
+                Some("pane-1"),
+            )
             .expect("worktree selector");
 
         assert_eq!(workspace.comment, "agent pane");
