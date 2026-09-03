@@ -507,6 +507,10 @@ impl Default for CatalogProjectSettings {
 pub struct ProjectCatalog {
     projects: Vec<CatalogProject>,
     settings: BTreeMap<String, CatalogProjectSettings>,
+    /// Worktrees retained after Git removed them while a terminal was still
+    /// mounted. The path remains in `projects` until that terminal is gone,
+    /// but is no longer treated as a selectable checkout by the sidebar.
+    missing_worktrees: HashSet<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -522,7 +526,11 @@ impl ProjectCatalog {
             .iter()
             .map(|project| (project.id.clone(), CatalogProjectSettings::default()))
             .collect();
-        Self { projects, settings }
+        Self {
+            projects,
+            settings,
+            missing_worktrees: HashSet::new(),
+        }
     }
 
     pub fn from_restored(
@@ -540,6 +548,10 @@ impl ProjectCatalog {
 
     pub fn projects(&self) -> &[CatalogProject] {
         &self.projects
+    }
+
+    pub fn is_worktree_missing(&self, path: &Path) -> bool {
+        self.missing_worktrees.contains(&canonical_path(path))
     }
 
     pub fn project_settings(&self, id: &str) -> CatalogProjectSettings {
@@ -564,6 +576,14 @@ impl ProjectCatalog {
     pub fn replace_projects(&mut self, projects: Vec<CatalogProject>) {
         let old_settings = std::mem::take(&mut self.settings);
         self.projects = projects;
+        self.missing_worktrees.retain(|path| {
+            self.projects.iter().any(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| canonical_path(&worktree.path) == *path)
+            })
+        });
         self.settings = self
             .projects
             .iter()
@@ -625,7 +645,11 @@ impl ProjectCatalog {
         let Some(index) = self.projects.iter().position(|project| project.id == id) else {
             return false;
         };
-        self.projects.remove(index);
+        let removed = self.projects.remove(index);
+        for worktree in removed.worktrees {
+            self.missing_worktrees
+                .remove(&canonical_path(&worktree.path));
+        }
         self.settings.remove(id);
         true
     }
@@ -633,16 +657,60 @@ impl ProjectCatalog {
     /// Re-discovers one project after an external repository transition such
     /// as `git init`, preserving its stable catalog identity.
     pub fn refresh_project(&mut self, id: &str) -> Result<(), String> {
+        self.refresh_project_with_mounted_worktrees(id, &[])
+    }
+
+    /// Re-discovers one project while retaining Git rows whose terminals are
+    /// still mounted. Git no longer reports those paths after an external
+    /// `worktree remove`, but dropping the rows would orphan the live
+    /// terminal entities. They are kept in the catalog and marked missing;
+    /// ordinary refreshes without mounted paths drop them completely.
+    pub fn refresh_project_with_mounted_worktrees(
+        &mut self,
+        id: &str,
+        mounted_paths: &[PathBuf],
+    ) -> Result<(), String> {
         let index = self
             .projects
             .iter()
             .position(|project| project.id == id)
             .ok_or_else(|| format!("unknown project: {id}"))?;
         let root = self.projects[index].root_path.clone();
+        let previous = self.projects[index].worktrees.clone();
         let discovered = discover_project(&root).map_err(|error| error.to_string())?;
         let mut replacement = catalog_project(&root, discovered);
         replacement.id = id.to_string();
+
+        let discovered_paths: HashSet<PathBuf> = replacement
+            .worktrees
+            .iter()
+            .map(|worktree| canonical_path(&worktree.path))
+            .collect();
+        let mounted_paths: HashSet<PathBuf> = mounted_paths
+            .iter()
+            .map(|path| canonical_path(path))
+            .collect();
+        let mut missing_worktrees = std::mem::take(&mut self.missing_worktrees);
+        for worktree in &previous {
+            missing_worktrees.remove(&canonical_path(&worktree.path));
+        }
+        for worktree in &mut replacement.worktrees {
+            if let Some(previous) = previous.iter().find(|previous| {
+                canonical_path(&previous.path) == canonical_path(&worktree.path)
+            }) {
+                worktree.is_primary = previous.is_primary;
+            }
+            missing_worktrees.remove(&canonical_path(&worktree.path));
+        }
+        for worktree in previous {
+            let path = canonical_path(&worktree.path);
+            if !discovered_paths.contains(&path) && mounted_paths.contains(&path) {
+                missing_worktrees.insert(path);
+                replacement.worktrees.push(worktree);
+            }
+        }
         self.projects[index] = replacement;
+        self.missing_worktrees = missing_worktrees;
         Ok(())
     }
 
@@ -3033,6 +3101,123 @@ mod tests {
             1,
             "refresh must not cascade-delete tabs under the preserved worktree id"
         );
+    }
+
+    #[test]
+    fn refreshing_a_project_tracks_external_worktrees_and_preserves_path_ids() {
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let removed = dir.0.join("repo-removed");
+        let mounted = dir.0.join("repo-mounted");
+        let survivor = dir.0.join("repo-survivor");
+        let added = dir.0.join("repo-added");
+        std::fs::create_dir_all(&primary).expect("repo dir");
+        run_git(&primary, &["init", "--quiet", "-b", "main"]);
+        run_git(
+            &primary,
+            &["config", "user.email", "sirio-tests@example.com"],
+        );
+        run_git(&primary, &["config", "user.name", "Sirio Tests"]);
+        std::fs::write(primary.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&primary, &["add", "README"]);
+        run_git(&primary, &["commit", "--quiet", "-m", "fixture"]);
+
+        for (branch, path) in [
+            ("removed", &removed),
+            ("mounted", &mounted),
+            ("survivor", &survivor),
+        ] {
+            let status = std::process::Command::new("git")
+                .args(["worktree", "add", "--quiet", "-b", branch])
+                .arg(path)
+                .current_dir(&primary)
+                .status()
+                .expect("git worktree add");
+            assert!(status.success(), "git worktree add failed: {status}");
+        }
+
+        let database = dir.db_path("runtime-refresh");
+        let store = SessionStore::open(&database);
+        let mut catalog = ProjectCatalog::default();
+        assert!(catalog.add(&primary).expect("discover primary repository"));
+        let project_id = catalog.projects()[0].id.clone();
+        store.schedule_catalog(&catalog);
+
+        let before = AppDatabase::open(&database).expect("open database before refresh");
+        let survivor_id = before
+            .worktrees_of_project(&project_id)
+            .expect("read initial worktrees")
+            .into_iter()
+            .find(|worktree| worktree.path == survivor.to_string_lossy())
+            .expect("survivor worktree row")
+            .id;
+
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", "added"])
+            .arg(&added)
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add failed: {status}");
+        catalog
+            .refresh_project(&project_id)
+            .expect("refresh after external add");
+        assert!(catalog.projects()[0]
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.path == added));
+        store.schedule_catalog(&catalog);
+
+        let status = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&removed)
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree remove");
+        assert!(status.success(), "git worktree remove failed: {status}");
+        catalog
+            .refresh_project(&project_id)
+            .expect("refresh after external removal");
+
+        let worktrees = &catalog.projects()[0].worktrees;
+        assert!(worktrees.iter().any(|worktree| worktree.path == added));
+        assert!(!worktrees.iter().any(|worktree| worktree.path == removed));
+        let survivor_row = worktrees
+            .iter()
+            .find(|worktree| worktree.path == survivor)
+            .expect("survivor remains in the refreshed catalog");
+        assert!(
+            !catalog.is_worktree_missing(&survivor_row.path),
+            "the surviving checkout is not missing"
+        );
+
+        // A second refresh receives the path of the terminal that was mounted
+        // before Git removed its worktree. The row is retained and marked so
+        // the running terminal can finish without making the stale checkout
+        // selectable as if it still existed.
+        let status = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&mounted)
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree remove");
+        assert!(status.success(), "git worktree remove failed: {status}");
+        catalog
+            .refresh_project_with_mounted_worktrees(&project_id, std::slice::from_ref(&mounted))
+            .expect("refresh while the removed terminal remains mounted");
+        assert!(catalog.is_worktree_missing(&mounted));
+        assert!(!catalog.is_worktree_missing(&survivor));
+
+        store.schedule_catalog(&catalog);
+        let after = AppDatabase::open(&database).expect("open database after refresh");
+        let persisted_survivor_id = after
+            .worktrees_of_project(&project_id)
+            .expect("read refreshed worktrees")
+            .into_iter()
+            .find(|worktree| worktree.path == survivor.to_string_lossy())
+            .expect("persisted survivor worktree row")
+            .id;
+        assert_eq!(persisted_survivor_id, survivor_id);
     }
 
     /// F-PRJ-17/F-PRJ-18: `default_worktree_base` and

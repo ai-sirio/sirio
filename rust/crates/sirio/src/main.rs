@@ -1089,8 +1089,19 @@ impl ControlState {
                     .iter()
                     .enumerate()
                     .map(|(index, worktree)| {
+                        let id = self
+                            .workspaces
+                            .iter()
+                            .find(|workspace| {
+                                paths_name_the_same_document(
+                                    Path::new(&workspace.path),
+                                    &worktree.path,
+                                )
+                            })
+                            .map(|workspace| workspace.id.clone())
+                            .unwrap_or_else(|| format!("{}-wt-{index}", project.id));
                         BTreeMap::from([
-                            ("id".to_string(), format!("{}-wt-{index}", project.id)),
+                            ("id".to_string(), id),
                             ("branch".to_string(), worktree.branch.clone()),
                             ("path".to_string(), display_absolute_path(&worktree.path)),
                             ("primary".to_string(), worktree.is_primary.to_string()),
@@ -5157,18 +5168,98 @@ impl SirioWorkspace {
     }
 
     fn sync_control_state(&self) {
-        let state_path = self
+        let previous = self
             .control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let state_path = previous
             .current_workspace()
             .map(|workspace| PathBuf::from(&workspace.path))
             .unwrap_or_else(|| self.working_directory.clone());
+        let mut next = ControlState::from_catalog(&self.project_catalog, &state_path);
+        for workspace in &mut next.workspaces {
+            let Some(previous) = previous.workspaces.iter().find(|previous| {
+                paths_name_the_same_document(Path::new(&previous.path), Path::new(&workspace.path))
+            }) else {
+                continue;
+            };
+            workspace.id = previous.id.clone();
+            workspace.mounted |= previous.mounted;
+            workspace.comment = previous.comment.clone();
+            workspace.session = previous.session.clone();
+        }
         *self
             .control_state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            ControlState::from_catalog(&self.project_catalog, &state_path);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    }
+
+    fn mounted_worktree_paths(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.working_directory.clone()];
+        let state = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        paths.extend(
+            state
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.mounted)
+                .map(|workspace| PathBuf::from(&workspace.path)),
+        );
+        paths.extend(
+            self.parked_worktree_tabs
+                .keys()
+                .filter(|path| self.terminal_pane_cache.has_in_worktree(path))
+                .map(PathBuf::from),
+        );
+        paths
+    }
+
+    fn refresh_catalog_project(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let before = self.project_catalog.clone();
+        let mounted_paths = self.mounted_worktree_paths();
+        let refreshed = if mounted_paths.is_empty() {
+            self.project_catalog.refresh_project(id)
+        } else {
+            self.project_catalog
+                .refresh_project_with_mounted_worktrees(id, &mounted_paths)
+        };
+        if let Err(error) = refreshed {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
+            return false;
+        }
+        if self.project_catalog == before {
+            return false;
+        }
+        self.session.schedule_catalog(&self.project_catalog);
+        self.sync_control_state();
+        self.refresh_sidebar(cx);
+        cx.notify();
+        true
+    }
+
+    fn refresh_project_for_path(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
+        let Some((project_id, is_git_root)) = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| paths_name_the_same_document(&worktree.path, path))
+            })
+            .map(|project| (project.id.clone(), is_git_repository(&project.root_path)))
+        else {
+            return false;
+        };
+        if !is_git_root {
+            return false;
+        }
+        self.refresh_catalog_project(&project_id, cx)
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -6058,6 +6149,9 @@ impl SirioWorkspace {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
             }
+            (SidebarContextTarget::Project { id, .. }, SidebarContextAction::RefreshProject) => {
+                self.refresh_catalog_project(id, cx);
+            }
             (
                 SidebarContextTarget::Project { id, path, is_git },
                 SidebarContextAction::InitializeGit,
@@ -6068,7 +6162,6 @@ impl SirioWorkspace {
                 let project_id = id.clone();
                 let path = path.clone();
                 let sidebar = self.sidebar.clone();
-                let session = self.session.clone();
                 cx.spawn(async move |this, cx| {
                     let result =
                         cx.background_executor()
@@ -6078,15 +6171,7 @@ impl SirioWorkspace {
                             .await;
                     let _ = this.update(cx, |workspace, cx| match result {
                         Ok(()) => {
-                            if let Err(error) =
-                                workspace.project_catalog.refresh_project(&project_id)
-                            {
-                                sidebar.update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
-                                return;
-                            }
-                            session.schedule_catalog(&workspace.project_catalog);
-                            workspace.sync_control_state();
-                            workspace.refresh_sidebar(cx);
+                            workspace.refresh_catalog_project(&project_id, cx);
                         }
                         Err(error) => {
                             sidebar.update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
@@ -6146,6 +6231,7 @@ impl SirioWorkspace {
             (
                 _,
                 SidebarContextAction::ProjectSettings
+                | SidebarContextAction::RefreshProject
                 | SidebarContextAction::InitializeGit
                 | SidebarContextAction::RevealInFileManager,
             ) => {}
@@ -6805,6 +6891,7 @@ impl SirioWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.refresh_project_for_path(&requested_path, cx);
         let Some(selected_path) = self
             .project_catalog
             .projects()
@@ -13923,6 +14010,8 @@ impl Render for SirioWorkspace {
         self.window_active = window.is_window_active();
         self.keep_active_tab_visible(window, *Theme::get(cx));
         if !was_window_active && self.window_active {
+            let working_directory = self.working_directory.clone();
+            self.refresh_project_for_path(&working_directory, cx);
             self.refresh_worktree_branches(cx);
         }
         // F-TERM-05: the "Set Title" modal's field claims focus on the first
@@ -14209,7 +14298,11 @@ fn sidebar_projects_with_comments(
                 .worktrees
                 .iter()
                 .map(|worktree| SidebarWorktree {
-                    branch: worktree.branch.clone(),
+                    branch: if catalog.is_worktree_missing(&worktree.path) {
+                        format!("{} (missing)", worktree.branch)
+                    } else {
+                        worktree.branch.clone()
+                    },
                     path: worktree.path.clone(),
                     is_primary: worktree.is_primary,
                     comment: comments
