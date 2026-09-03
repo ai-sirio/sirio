@@ -11276,7 +11276,7 @@ impl SirioWorkspace {
             .px(px(10.0))
             .overflow_hidden()
             .rounded_t(px(6.0))
-            .text_size(px(13.0))
+            .text_size(theme.typography.scaled(13.0))
             .text_color(if active { theme.text } else { theme.text_muted })
             .hover(|style| style.bg(theme.element_hover))
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
@@ -11409,7 +11409,7 @@ impl SirioWorkspace {
                             div()
                                 .id(format!("workspace-tab-exit-{id}"))
                                 .debug_selector(move || format!("workspace-tab-exit-{id}"))
-                                .text_size(px(10.0))
+                                .text_size(theme.typography.scaled(10.0))
                                 .text_color(theme.text_faint)
                                 .child(label),
                         )
@@ -11426,7 +11426,7 @@ impl SirioWorkspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(14.0))
+                        .text_size(theme.typography.scaled(14.0))
                         .text_color(theme.text_muted)
                         .hover(|style| style.bg(theme.element_hover).rounded(px(4.0)))
                         .on_click(move |_, window, cx| {
@@ -16205,6 +16205,7 @@ fn main() {
             settings_snapshot_from_app_settings(saved_settings.clone()).theme,
             cx,
         );
+        Theme::set_interface_font_size(saved_settings.ui_font_size as i32, cx);
         let context = worktree_context(&project_catalog, &working_directory);
         let status_data = UsageBarData {
             branch: context.branch.clone(),
