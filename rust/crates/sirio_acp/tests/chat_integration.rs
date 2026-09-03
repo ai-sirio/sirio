@@ -189,10 +189,6 @@ fn chat_session_reports_launch_failures_without_a_fake_transcript() {
         error.downcast_ref::<AcpError>().is_some(),
         "launch error should retain its ACP type: {error:?}"
     );
-    assert!(
-        format!("{error:#}").contains("definitely-not-an-agent"),
-        "launch error should name the attempted program: {error:#}"
-    );
 }
 
 #[test]

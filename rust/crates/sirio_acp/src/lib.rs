@@ -869,33 +869,6 @@ struct Startup {
     model_catalog: Option<ModelCatalog>,
 }
 
-/// Make a resolved command launchable by `CreateProcess` on every platform.
-/// Windows does not execute `.cmd` or `.bat` files directly, while npm puts
-/// those shims in the registry as the executable path.
-fn command_for_process(command: AgentCommand) -> AgentCommand {
-    #[cfg(windows)]
-    {
-        let is_batch = command.program.extension().is_some_and(|extension| {
-            let extension = extension.to_string_lossy();
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        });
-        if is_batch {
-            let shell = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
-            let mut args = vec![
-                "/d".to_string(),
-                "/c".to_string(),
-                command.program.to_string_lossy().into_owned(),
-            ];
-            args.extend(command.args);
-            return AgentCommand {
-                program: PathBuf::from(shell),
-                args,
-            };
-        }
-    }
-    command
-}
-
 // Pre-existing wiring, not a J4-ci change: bundling these into a params struct is a real
 // refactor of the connection's call sites and out of scope for the CI-gate slice that found
 // this lint newly enforced. Silencing it here is the minimal, behavior-preserving fix.
@@ -922,8 +895,6 @@ fn run_connection(
     // REQUIRED error handled below needs the advertised methods on hand.
     let auth_methods: Arc<Mutex<Vec<AuthMethodInfo>>> = Arc::new(Mutex::new(Vec::new()));
     let shutdown_ack: Arc<Mutex<Option<mpsc::SyncSender<()>>>> = Arc::new(Mutex::new(None));
-    let attempted_program = command.program.clone();
-    let command = command_for_process(command);
     let agent = AcpAgent::new(
         AcpAgentConfig::new(command.program)
             .args(command.args)
@@ -934,7 +905,7 @@ fn run_connection(
         Ok(process) => process,
         Err(error) => {
             let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(
-                format!("could not launch `{}`: {error}", attempted_program.display()),
+                error.to_string(),
             ))));
             return;
         }
@@ -2529,36 +2500,6 @@ mod tests {
     fn prompt_blocks_omits_whitespace_only_text() {
         let blocks = prompt_blocks("   ", &[], &[], &std::env::temp_dir());
         assert!(blocks.is_empty());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_batch_commands_are_run_through_cmd() {
-        let command = command_for_process(
-            AgentCommand::new(r"C:\Program Files\OpenCode.CMD").args(["acp", "--stdio"]),
-        );
-
-        assert_eq!(
-            command.program.file_name().and_then(|name| name.to_str()),
-            Some("cmd.exe")
-        );
-        assert_eq!(
-            command.args,
-            vec![
-                "/d",
-                "/c",
-                r"C:\Program Files\OpenCode.CMD",
-                "acp",
-                "--stdio"
-            ]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn non_batch_commands_are_not_wrapped() {
-        let command = AgentCommand::new(r"C:\Program Files\node.exe").arg("agent.js");
-        assert_eq!(command_for_process(command.clone()), command);
     }
 
     #[cfg(unix)]
