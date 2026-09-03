@@ -2666,6 +2666,11 @@ fn parse_settings_category(value: &str) -> Result<SettingsCategory, String> {
 fn agent_command_for(source: &sirio_registry::LaunchSource) -> Option<AgentCommand> {
     match source {
         sirio_registry::LaunchSource::Builtin { program, args } => {
+            // `BuiltinAcp` is a static claim (`opencode`), but ACP bypasses
+            // the shell. Resolve it again so Windows selects the PATHEXT
+            // entry (`opencode.cmd`) that `CreateProcess` cannot infer.
+            let program = sirio_agents::find_executable_on_path(program)
+                .unwrap_or_else(|| PathBuf::from(program));
             Some(AgentCommand::new(program).args(args.iter().cloned()))
         }
         sirio_registry::LaunchSource::Installed(agent) => {
@@ -16960,7 +16965,9 @@ mod tests {
         let command = agent_command_for(&source).expect("a builtin source launches");
         // `AgentCommand`'s fields are public (`sirio_acp/src/lib.rs:141-146`);
         // there are no accessor methods.
-        assert_eq!(command.program, std::path::PathBuf::from("opencode"));
+        let expected_program = sirio_agents::find_executable_on_path("opencode")
+            .unwrap_or_else(|| std::path::PathBuf::from("opencode"));
+        assert_eq!(command.program, expected_program);
         assert_eq!(command.args, vec!["acp".to_string()]);
     }
 
