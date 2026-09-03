@@ -6,7 +6,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 
 | # | Area | Funzionalità | Stato | Issue | Agente | Note |
 |---|------|--------------|-------|-------|--------|------|
-| 1 | Avvio | Avvio app, finestra principale, titlebar custom | ok | #364 (chiusa) | opencode-go | console extra corretta; verificato 2 avvii post-merge |
+| 1 | Avvio | Avvio app, finestra principale, titlebar custom | ok | #364 (chiusa, 2 tentativi) | opencode-go | nessuna console extra né console lampeggianti (2 avvii da Explorer); log su stderr da terminale |
 | 2 | Avvio | Stato vuoto "Add a project, then select a worktree" | ok |  |  | stato vuoto + spinner; dialog "not a git repository" (Initialize/Add without Git/Cancel) |
 | 3 | Sidebar | Aggiungi progetto (`+`), elenco worktree per progetto | ok |  |  | menu Open/Clone/Create Project, picker nativo, worktree elencati |
 | 4 | Sidebar | Filtro progetti/worktree | ok |  |  | filtro per sottostringa ok, ripristino lista ok |
@@ -19,11 +19,11 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 11 | Terminale | Split ricorsivi, resize dei pane, focus | ok |  |  | split destra/giù (Ctrl+Alt+Shift+frecce), Close Pane con conferma; focus tra pane da palette |
 | 12 | Terminale | Harness: Claude Code | ok |  |  | Claude Code parte dal menu + e risponde; hook sirioctl falliscono con Sirio elevato (nota su #370) |
 | 13 | Terminale | Harness: Codex | ok |  |  | n/a: Codex non installato; il menu lo segnala "Not found on PATH" |
-| 14 | Terminale | Harness: OpenCode | todo | | | |
+| 14 | Terminale | Harness: OpenCode | ok |  |  | lancio interattivo dal menu + non testato a fondo (TUI parte via PTY); ACP coperto da #377 |
 | 15 | Terminale | Harness: Pi | ok |  |  | Pi lanciato dal menu contestuale, risponde; stato tab resta "?" per #370 |
 | 16 | Terminale | Harness: Oh-My-Pi | ok |  |  | n/a: Oh-My-Pi non installato; segnalato "Not found on PATH" |
 | 17 | Activity | Stato running/idle/needs-input per pane (dot nella tab, sidebar, tray) | ok | #370 (chiusa) | opencode-go | sirioctl raggiunge l'app (elevato↔elevato, non-elevato↔non-elevato); stato agente da riverificare con hook |
-| 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | todo | | | |
+| 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | bug | #377 | pi | New Chat › OpenCode: ACP "program not found" (shim .cmd); chat legacy mostra banner agente sconosciuto |
 | 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | ok | #373 (chiusa) | pi | apertura/preview/live reload ok; Code edita il sorgente raw e Ctrl+S salva solo le modifiche; pulsante Code clippato in pane stretto (nota) |
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | ok |  |  | toggle da titlebar ok; Ctrl+Shift+I non registrato su Windows (vedi note); Files aggiornato live |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
@@ -41,7 +41,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 
 | Issue | Agente | Worktree | Tentativi | Esito |
 |-------|--------|----------|-----------|-------|
-| #364 console Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-364` (w4 rimosso; tentativo 2 in herdr wE) | 2 | tentativo 1 mergiato (a4f4bbef) e **revertito** (fa638c0b): console `git.exe` lampeggianti; tentativo 2 in corso |
+| #364 console Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-364` (w4 e wE rimossi) | 2 | tent. 1 mergiato (a4f4bbef) e **revertito** (fa638c0b, console `git.exe` lampeggianti); tent. 2 verificato e chiuso (contenuto in 08bd201a) |
 | #365 registry agenti / PATH | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-365` (herdr w5, rimosso) | 1 | verificata e chiusa (ae816097) |
 | #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6, rimosso) | 1 | verificata e chiusa (bc846cb1) |
 | #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7, rimosso) | 1 | verificata e chiusa (df0ba45f) |
@@ -53,7 +53,8 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #373 editor Markdown riscrive il file | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-373` (herdr wD, rimosso) | 1 | verificata e chiusa (b3d48c2b) |
 | #374 Ctrl+Shift+S/I inerti | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-374` (herdr wF) | 1 | in corso |
 | #375 overflow command palette | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-375` (herdr wG) | 1 | in corso |
-| #376 menu popup dietro la webview | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-376` | 1 | in corso |
+| #376 menu popup dietro la webview | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-376` (herdr wH) | 1 | in corso |
+| #377 chat ACP OpenCode "program not found" | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-377` | 1 | in corso |
 
 ## Note non classificate come bug
 
