@@ -46,7 +46,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #366 git log colonna Date | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-366` (herdr w6, rimosso) | 1 | verificata e chiusa (bc846cb1) |
 | #367 gutter diff 5 cifre | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-367` (herdr w7, rimosso) | 1 | verificata e chiusa (df0ba45f) |
 | #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` (herdr w8, rimosso) | 1 | verificata e chiusa (6525bc00) |
-| #369 barra indirizzi browser | pi → opencode-go | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 3 | pi: tent. 1 mergiato (click ok), tent. 2 revertito (e3bc7d94, Ctrl+L peggiorato); passata a opencode-go, tent. 3 in corso |
+| #369 barra indirizzi browser | pi → opencode-go | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 4 | pi: tent. 1 mergiato (click ok), tent. 2 revertito; opencode-go: tent. 3 revertito (focus non rubato: WebView2 consuma le chord), tent. 4 in corso |
 | #370 sirioctl pipe/owner Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-370` (herdr wA, rimosso) | 1 | verificata e chiusa (33e96f85) |
 | #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB, rimosso) | 1 | verificata e chiusa (5b3bfb28) |
 | #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC, rimosso) | 1 | verificata e chiusa (901f0c2e) |
