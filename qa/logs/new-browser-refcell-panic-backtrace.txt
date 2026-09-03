@@ -1,0 +1,176 @@
+thread 'main' (22164) panicked at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\async_context.rs:65:27:
+RefCell already borrowed
+stack backtrace:
+   0: std::panicking::panic_handler
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panicking.rs:679
+   1: core::panicking::panic_fmt
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\panicking.rs:80
+   2: core::cell::panic_already_borrowed
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\panic.rs:177
+   3: core::cell::RefCell::borrow_mut<gpui::app::App>
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\cell.rs:1224
+   4: gpui::app::AppCell::borrow_mut
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:104
+   5: gpui::app::async_context::impl$1::update_entity<sirio_ui::right_panel::RightPanel,tuple$<>,sirio_ui::right_panel::files::impl$1::ensure_tree_refresh::closure$0::async_closure$0::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\async_context.rs:65
+   6: gpui::app::entity_map::WeakEntity::update<sirio_ui::right_panel::RightPanel,gpui::app::async_context::AsyncApp,tuple$<>,sirio_ui::right_panel::files::impl$1::ensure_tree_refresh::closure$0::async_closure$0::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\entity_map.rs:786
+   7: sirio_ui::right_panel::files::impl$1::ensure_tree_refresh::closure$0::async_closure$0
+             at .\rust\crates\sirio_ui\src\right_panel\files.rs:191
+   8: gpui::app::context::impl$2::spawn::closure$0::async_closure$0<sirio_ui::right_panel::RightPanel,sirio_ui::right_panel::files::impl$1::ensure_tree_refresh::closure_env$0,tuple$<> >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\context.rs:244
+   9: gpui::app::impl$9::spawn::async_block$0<gpui::app::context::impl$2::spawn::closure_env$0<sirio_ui::right_panel::RightPanel,sirio_ui::right_panel::files::impl$1::ensure_tree_refresh::closure_env$0,tuple$<> >,tuple$<> >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:1971
+  10: core::future::future::impl$1::poll<alloc::boxed::Box<dyn$<core::future::future::Future<assoc$<Output,tuple$<> > > >,alloc::alloc::Global> >
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\future\future.rs:133
+  11: core::future::future::impl$1::poll<alloc::boxed::Box<dyn$<core::future::future::Future<assoc$<Output,tuple$<> > > >,alloc::alloc::Global> >
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\future\future.rs:133
+  12: scheduler::executor::spawn_local_with_source_location::impl$1::poll<core::pin::Pin<alloc::boxed::Box<dyn$<core::future::future::Future<assoc$<Output,tuple$<> > > >,alloc::alloc::Global> > >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-zed-scheduler-0.3.8+zed.82aeef\src\executor.rs:782
+  13: async_task::raw::RawTask::run<scheduler::executor::spawn_local_with_source_location::Checked<core::pin::Pin<alloc::boxed::Box<dyn$<core::future::future::Future<assoc$<Output,tuple$<> > > >,alloc::alloc::Global> > >,tuple$<>,scheduler::executor::impl$0::spa
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\async-task-4.7.1\src\raw.rs:557
+  14: async_task::runnable::Runnable::run<scheduler::RunnableMeta>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\async-task-4.7.1\src\runnable.rs:781
+  15: gpui_windows::dispatcher::WindowsDispatcher::execute_runnable
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\dispatcher.rs:96
+  16: gpui_windows::platform::WindowsPlatformInner::run_foreground_task
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:1117
+  17: gpui_windows::platform::WindowsPlatformInner::handle_gpui_events
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:1030
+  18: gpui_windows::platform::WindowsPlatformInner::handle_msg
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:1009
+  19: gpui_windows::platform::window_procedure::closure$0
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:1547
+  20: std::panicking::catch_unwind::do_call<gpui_windows::platform::window_procedure::closure_env$0,windows::Win32::Foundation::LRESULT>
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panicking.rs:576
+  21: itertools::Itertools::collect_vec<core::iter::adapters::chain::Chain<core::str::iter::EncodeUtf16,core::option::IntoIter<u16> > >
+  22: std::panicking::catch_unwind
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panicking.rs:544
+  23: std::panic::catch_unwind<gpui_windows::platform::window_procedure::closure_env$0,windows::Win32::Foundation::LRESULT>
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panic.rs:359
+  24: gpui_windows::platform::window_procedure
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:1547
+  25: CallWindowProcW
+  26: DispatchMessageW
+  27: windows::Win32::UI::WindowsAndMessaging::DispatchMessageA
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-0.61.3\src\Windows\Win32\UI\WindowsAndMessaging\mod.rs:572
+  28: webview2_com::wait_with_pump<enum2$<core::result::Result<tuple$<>,enum2$<webview2_com::Error> > > >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.2\src\lib.rs:76
+  29: webview2_com::callback::AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.2\src\callback.rs:289
+  30: wry::webview2::InnerWebView::add_script_to_execute_on_document_created
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wry-0.56.1\src\webview2\mod.rs:1372
+  31: wry::webview2::InnerWebView::attach_ipc_handler
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wry-0.56.1\src\webview2\mod.rs:947
+  32: wry::webview2::InnerWebView::init_webview
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wry-0.56.1\src\webview2\mod.rs:481
+  33: wry::webview2::InnerWebView::new_in_hwnd
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wry-0.56.1\src\webview2\mod.rs:145
+  34: wry::webview2::InnerWebView::new_as_child<gpui::window::Window>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wry-0.56.1\src\webview2\mod.rs:105
+  35: wry::WebViewBuilder::build_as_child<gpui::window::Window>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wry-0.56.1\src\lib.rs:1574
+  36: sirio_ui::browser::build_production_webview<gpui::window::Window>
+             at .\rust\crates\sirio_ui\src\browser.rs:975
+  37: sirio_ui::browser::build_production_webview_for_native_child::closure$0
+             at .\rust\crates\sirio_ui\src\browser.rs:1069
+  38: core::ops::function::FnOnce::call_once<sirio_ui::browser::build_production_webview_for_native_child::closure_env$0,tuple$<> >
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\ops\function.rs:250
+  39: core::panic::unwind_safe::impl$25::call_once<enum2$<core::result::Result<wry::WebView,enum2$<wry::error::Error> > >,sirio_ui::browser::build_production_webview_for_native_child::closure_env$0>
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\panic\unwind_safe.rs:275
+  40: std::panicking::catch_unwind::do_call<core::panic::unwind_safe::AssertUnwindSafe<sirio_ui::browser::build_production_webview_for_native_child::closure_env$0>,enum2$<core::result::Result<wry::WebView,enum2$<wry::error::Error> > > >
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panicking.rs:576
+  41: std::panic::catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<sirio_ui::browser::build_production_webview_for_native_child::closure_env$0>,enum2$<core::result::Result<wry::WebView,enum2$<wry::error::Error> > > >
+  42: std::panicking::catch_unwind
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panicking.rs:544
+  43: std::panic::catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<sirio_ui::browser::build_production_webview_for_native_child::closure_env$0>,enum2$<core::result::Result<wry::WebView,enum2$<wry::error::Error> > > >
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\panic.rs:359
+  44: sirio_ui::browser::build_production_webview_for_native_child
+             at .\rust\crates\sirio_ui\src\browser.rs:1068
+  45: sirio_ui::browser::build_production_webview_for_platform
+             at .\rust\crates\sirio_ui\src\browser.rs:1012
+  46: sirio_ui::browser::BrowserSurface::new
+             at .\rust\crates\sirio_ui\src\browser.rs:1223
+  47: sirio::impl$6::add_browser_tab::closure$0<ref$<str$> >
+             at .\rust\crates\sirio\src\main.rs:9310
+  48: gpui::app::impl$10::new::closure$0<sirio_ui::browser::BrowserSurface,sirio::impl$6::add_browser_tab::closure_env$0<ref$<str$> > >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:2778
+  49: gpui::app::App::update<gpui::app::entity_map::Entity<sirio_ui::browser::BrowserSurface>,gpui::app::impl$10::new::closure_env$0<sirio_ui::browser::BrowserSurface,sirio::impl$6::add_browser_tab::closure_env$0<ref$<str$> > > >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:1073
+  50: gpui::app::impl$10::new<sirio_ui::browser::BrowserSurface,sirio::impl$6::add_browser_tab::closure_env$0<ref$<str$> > >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:2775
+  51: gpui::app::context::impl$4::new<sirio::SirioWorkspace,sirio_ui::browser::BrowserSurface,sirio::impl$6::add_browser_tab::closure_env$0<ref$<str$> > >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\context.rs:785
+  52: sirio::SirioWorkspace::add_browser_tab<ref$<str$> >
+             at .\rust\crates\sirio\src\main.rs:9310
+  53: sirio::SirioWorkspace::open_action
+             at .\rust\crates\sirio\src\main.rs:9928
+  54: sirio::SirioWorkspace::handle_new_browser
+             at .\rust\crates\sirio\src\main.rs:13066
+  55: core::ops::function::Fn::call<void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_mut$<gpui::window::Window>,ref_mut$<gpui::app::context::Context<sirio::SirioWorkspace> >),tuple$<ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\ops\function.rs:79
+  56: gpui::app::context::impl$2::listener::closure$0::closure$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_mut$<gpui::window::Window>,ref_mut$<gpui::app::context::Context<sirio::SirioWorkspace> >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\context.rs:258
+  57: gpui::app::impl$10::update_entity::closure$0<sirio::SirioWorkspace,tuple$<>,gpui::app::context::impl$2::listener::closure$0::closure_env$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_mut$<gpu
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:2815
+  58: gpui::app::App::update<tuple$<>,gpui::app::impl$10::update_entity::closure_env$0<sirio::SirioWorkspace,tuple$<>,gpui::app::context::impl$2::listener::closure$0::closure_env$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:1073
+  59: gpui::app::impl$10::update_entity<sirio::SirioWorkspace,tuple$<>,gpui::app::context::impl$2::listener::closure$0::closure_env$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_mut$<gpui::window::
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:2813
+  60: gpui::app::entity_map::WeakEntity::update<sirio::SirioWorkspace,gpui::app::App,tuple$<>,gpui::app::context::impl$2::listener::closure$0::closure_env$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\entity_map.rs:786
+  61: gpui::app::context::impl$2::listener::closure$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_mut$<gpui::window::Window>,ref_mut$<gpui::app::context::Context<sirio::SirioWorkspace> >)>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\context.rs:258
+  62: gpui::elements::div::impl$1::on_action::closure$0<sirio::NewBrowser,gpui::app::context::impl$2::listener::closure_env$0<sirio::SirioWorkspace,sirio::NewBrowser,void (*)(ref_mut$<sirio::SirioWorkspace>,ref$<sirio::NewBrowser>,ref_mut$<gpui::window::Window>,
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\elements\div.rs:441
+  63: alloc::boxed::impl$33::call<tuple$<ref$<dyn$<core::any::Any> >,gpui::window::DispatchPhase,ref_mut$<gpui::window::Window>,ref_mut$<gpui::app::App> >,dyn$<core::ops::function::Fn<tuple$<ref$<dyn$<core::any::Any> >,gpui::window::DispatchPhase,ref_mut$<gpui::
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\alloc\src\boxed.rs:2333
+  64: gpui::window::Window::dispatch_action_on_node_inner
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:6058
+  65: gpui::window::Window::dispatch_action_on_node
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:5973
+  66: gpui::window::Window::dispatch_key_event
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:5781
+  67: gpui::window::Window::dispatch_event
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:5468
+  68: gpui::window::impl$26::new::closure$17::closure$0
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:1809
+  69: gpui::app::impl$9::update_window_id::closure$0<gpui::window::DispatchEventResult,gpui::window::impl$26::new::closure$17::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:1879
+  70: gpui::app::App::update<enum2$<core::option::Option<gpui::window::DispatchEventResult> >,gpui::app::impl$9::update_window_id::closure_env$0<gpui::window::DispatchEventResult,gpui::window::impl$26::new::closure$17::closure_env$0> >
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:1073
+  71: gpui::app::App::update_window_id<gpui::window::DispatchEventResult,gpui::window::impl$26::new::closure$17::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:1873
+  72: gpui::app::impl$10::update_window<gpui::window::DispatchEventResult,gpui::window::impl$26::new::closure$17::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:2843
+  73: gpui::app::async_context::impl$1::update_window<gpui::window::DispatchEventResult,gpui::window::impl$26::new::closure$17::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app\async_context.rs:94
+  74: gpui::window::AnyWindowHandle::update<gpui::app::async_context::AsyncApp,gpui::window::DispatchEventResult,gpui::window::impl$26::new::closure$17::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:7004
+  75: gpui::window::impl$26::new::closure$17
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\window.rs:1809
+  76: alloc::boxed::impl$32::call_mut<tuple$<enum2$<gpui::interactive::PlatformInput> >,dyn$<core::ops::function::FnMut<tuple$<enum2$<gpui::interactive::PlatformInput> >,assoc$<Output,gpui::window::DispatchEventResult> > >,alloc::alloc::Global>
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\alloc\src\boxed.rs:2326
+  77: gpui_windows::window::WindowsWindowInner::handle_keydown_msg
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\events.rs:449
+  78: gpui_windows::window::WindowsWindowInner::handle_msg
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\events.rs:154
+  79: gpui_windows::window::window_procedure
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\window.rs:1422
+  80: CallWindowProcW
+  81: EnumWindows
+  82: SendMessageW
+  83: SendMessageW
+  84: windows::Win32::UI::WindowsAndMessaging::SendMessageW
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-0.61.3\src\Windows\Win32\UI\WindowsAndMessaging\mod.rs:2046
+  85: gpui_windows::platform::translate_accelerator
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:365
+  86: gpui_windows::platform::impl$2::run
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-windows-0.3.8+zed.82aeef\src\platform.rs:456
+  87: gpui::app::Application::run<sirio::main::closure_env$0>
+             at C:\Users\enzop\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bezel-gpui-0.3.8+zed.82aeef\src\app.rs:239
+  88: sirio::main
+             at .\rust\crates\sirio\src\main.rs:16162
+  89: core::ops::function::FnOnce::call_once<void (*)(),tuple$<> >
+             at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\ops\function.rs:250
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
