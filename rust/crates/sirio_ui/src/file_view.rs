@@ -3,8 +3,8 @@
 //! The editor's I/O substance — load, save, conflict detection, dirty state,
 //! and language detection — lives in [`crate::editor`] as pure synchronous
 //! code, tested without a display. This view owns the pixels and the
-//! shell-facing surface: bezel-editor for Markdown, and Sirio's no-wrap code
-//! editor with bezel-syntax highlighting for source files.
+//! shell-facing surface: Sirio's no-wrap source editor with bezel-syntax
+//! highlighting, plus the rendered Markdown preview.
 //!
 //! - it loads the path into an [`Editor`] on GPUI's background executor
 //!   (the same split the old read-only viewer used: no filesystem work
@@ -20,10 +20,10 @@
 
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
-    ElementId, FocusHandle, Focusable, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
+    ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
     InspectorElementId, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, Rgba, ScrollHandle, StyledText, Subscription, Task,
-    UnderlineStyle, Window, div, point, prelude::*, px, quad, size, transparent_black,
+    MouseUpEvent, Pixels, Render, Rgba, StyledText, Subscription, Task, UnderlineStyle, Window,
+    div, point, prelude::*, px, quad, size, transparent_black,
 };
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::{display_absolute_path, resolve_file_link};
@@ -32,8 +32,6 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
-
-use ::editor::Editor as BezelEditor;
 
 use crate::caret;
 use crate::chat::{Chat, LinkClickOverride};
@@ -92,16 +90,6 @@ pub struct FileView {
     /// Focus target for the source surface. GPUI sends raw key events to the
     /// focused element, so this is the missing input tier over `Editor`.
     editor_focus: FocusHandle,
-    /// Markdown's pixel half is bezel-editor. The headless [`Editor`] above
-    /// remains the I/O and conflict authority; this entity owns only the live
-    /// block document, selection, keys, mouse, and undo history.
-    markdown_editor: Option<gpui::Entity<BezelEditor>>,
-    markdown_scroll: ScrollHandle,
-    /// The last serialized document observed from `markdown_editor`. Bezel
-    /// notifies for caret motion too; comparing the wire form prevents a mere
-    /// selection change from marking the headless model dirty.
-    markdown_wire: Option<String>,
-    markdown_focus_subscription: Option<Subscription>,
     /// Re-check the disk snapshot whenever this tab's editor focus is
     /// regained after another surface owned it.
     focus_subscription: Option<Subscription>,
@@ -151,7 +139,6 @@ impl FileView {
             let _ = this.update(cx, |view, cx| {
                 view.markdown_mode = Self::initial_markdown_mode(&editor);
                 view.state = ViewState::Ready(editor);
-                view.rebuild_markdown_editor(cx);
                 view.load_task = None;
                 cx.notify();
             });
@@ -184,10 +171,6 @@ impl FileView {
             caret: 0,
             selection_anchor: None,
             editor_focus: cx.focus_handle().tab_stop(true),
-            markdown_editor: None,
-            markdown_scroll: ScrollHandle::new(),
-            markdown_wire: None,
-            markdown_focus_subscription: None,
             focus_subscription: None,
             dragging: false,
             editor_blink: caret::Blink::new(),
@@ -217,40 +200,6 @@ impl FileView {
         }
     }
 
-    fn rebuild_markdown_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(source) = self.editor().and_then(|editor| {
-            (editor.status() == &LoadStatus::Loaded && editor.language() == Language::Markdown)
-                .then(|| editor.buffer().to_owned())
-        }) else {
-            self.markdown_editor = None;
-            self.markdown_wire = None;
-            self.markdown_focus_subscription = None;
-            return;
-        };
-
-        let scroll = ScrollHandle::new();
-        let editor_scroll = scroll.clone();
-        let markdown_editor = cx.new(|cx| BezelEditor::new(&source, cx).with_scroll(editor_scroll));
-        let wire = markdown::serialize(markdown_editor.read(cx).doc());
-        cx.observe(&markdown_editor, |view, markdown_editor, cx| {
-            let wire = markdown::serialize(markdown_editor.read(cx).doc());
-            if view.markdown_wire.as_deref() == Some(wire.as_str()) {
-                return;
-            }
-            if let Some(editor) = view.editor_mut() {
-                editor.sync_serialized_markdown(wire.clone());
-            }
-            view.markdown_wire = Some(wire);
-            cx.notify();
-        })
-        .detach();
-
-        self.markdown_scroll = scroll;
-        self.markdown_wire = Some(wire);
-        self.markdown_editor = Some(markdown_editor);
-        self.markdown_focus_subscription = None;
-    }
-
     // ── Shell-facing surface ───────────────────────────────────────────
 
     /// The dirty flag F-TAB-16's close confirmation reads. False while the
@@ -278,13 +227,8 @@ impl FileView {
     /// (F-EDIT-05/06). The shell calls this when a file tab is activated —
     /// "modify externally, return to Sirio" — and on window focus.
     pub fn check_external(&mut self, cx: &mut Context<Self>) {
-        let previous = self.editor().map(|editor| editor.buffer().to_owned());
         if let Some(editor) = self.editor_mut() {
             editor.check_external();
-            let changed = previous.as_deref() != Some(editor.buffer());
-            if changed {
-                self.rebuild_markdown_editor(cx);
-            }
             cx.notify();
         }
     }
@@ -344,9 +288,6 @@ impl FileView {
             Some(editor) => editor.reload(),
             None => Err("the file is still loading".to_string()),
         };
-        if result.is_ok() {
-            self.rebuild_markdown_editor(cx);
-        }
         cx.notify();
         result
     }
@@ -355,7 +296,6 @@ impl FileView {
     pub fn keep(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = self.editor_mut() {
             editor.keep();
-            self.rebuild_markdown_editor(cx);
             cx.notify();
         }
     }
@@ -460,6 +400,22 @@ impl FileView {
     ) {
         if event.keystroke.modifiers.control && event.keystroke.key == "a" {
             self.select_all();
+            cx.notify();
+            return;
+        }
+        if (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+            && event.keystroke.key == "end"
+        {
+            let Some(editor) = self.editor() else {
+                return;
+            };
+            if editor.status() != &LoadStatus::Loaded
+                || self.effective_mode() != MarkdownMode::Code
+            {
+                return;
+            }
+            let buffer = editor.buffer().to_owned();
+            self.move_caret(buffer.len(), event.keystroke.modifiers.shift, &buffer);
             cx.notify();
             return;
         }
@@ -647,6 +603,25 @@ impl FileView {
         cx.notify();
     }
 
+    fn apply_markdown_format(&mut self, operation: MarkdownFormatOp, cx: &mut Context<Self>) {
+        let Some(selection) = self.editor().map(|editor| self.current_selection(editor)) else {
+            return;
+        };
+        let Some(editor) = self.editor_mut() else {
+            return;
+        };
+        let selection = match operation {
+            MarkdownFormatOp::Bold => editor.format_bold(selection),
+            MarkdownFormatOp::Italic => editor.format_italic(selection),
+            MarkdownFormatOp::Heading => editor.toggle_heading(selection),
+            MarkdownFormatOp::List => editor.toggle_list(selection),
+            MarkdownFormatOp::Link { url } => editor.make_link(selection, &url),
+        };
+        self.caret = selection.end;
+        self.source_selection = Some(selection);
+        cx.notify();
+    }
+
     /// The active Markdown mode (F-EDIT-01).
     pub fn markdown_mode(&self) -> MarkdownMode {
         self.markdown_mode
@@ -778,20 +753,18 @@ impl FileView {
                     let editor_focus = self.editor_focus.clone();
                     div()
                         .id("file-editor")
-                        .when(!markdown_editing, move |this| {
-                            this.key_context("FileEditor")
-                                .track_focus(&editor_focus)
-                                .focusable()
-                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                    editor_entity.update(cx, |view, cx| {
-                                        view.editor_focus.focus(window, cx);
-                                    });
-                                })
-                                .on_key_down(move |event, window, cx| {
-                                    key_entity.update(cx, |view, cx| {
-                                        view.on_editor_key(event, window, cx);
-                                    });
-                                })
+                        .key_context("FileEditor")
+                        .track_focus(&editor_focus)
+                        .focusable()
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            editor_entity.update(cx, |view, cx| {
+                                view.editor_focus.focus(window, cx);
+                            });
+                        })
+                        .on_key_down(move |event, window, cx| {
+                            key_entity.update(cx, |view, cx| {
+                                view.on_editor_key(event, window, cx);
+                            });
                         })
                         .size_full()
                         .flex()
@@ -800,17 +773,13 @@ impl FileView {
                             this.child(render_conflict_banner(conflict, theme, entity.clone()))
                         })
                         .when(markdown_editing, |this| {
-                            this.children(self.markdown_editor.clone().map(|markdown_editor| {
-                                render_markdown_toolbar(theme, markdown_editor)
-                            }))
+                            this.child(render_markdown_toolbar(theme, entity.clone()))
                         })
                         .child(render_content(
                             editor,
                             mode,
                             theme,
                             entity.clone(),
-                            self.markdown_editor.clone(),
-                            self.markdown_scroll.clone(),
                             self.source_selection,
                             caret_visible,
                             caret_offset,
@@ -844,15 +813,6 @@ impl Render for FileView {
                     view.check_external(cx)
                 }));
         }
-        if self.markdown_focus_subscription.is_none()
-            && let Some(markdown_editor) = &self.markdown_editor
-        {
-            let markdown_focus = markdown_editor.read(cx).focus_handle(cx);
-            self.markdown_focus_subscription =
-                Some(cx.on_focus(&markdown_focus, window, |view, _window, cx| {
-                    view.check_external(cx)
-                }));
-        }
         let theme = *Theme::get(cx);
         // Production installs bezel alongside Sirio's theme. Some isolated
         // shell fixtures set only the Sirio global, so establish the same
@@ -875,8 +835,7 @@ impl Render for FileView {
             self.editor_blink.wake();
             self.editor_caret_sig = caret_sig;
         }
-        let caret_active =
-            editor_focused && !self.is_markdown() && self.effective_mode() != MarkdownMode::Preview;
+        let caret_active = editor_focused && self.effective_mode() != MarkdownMode::Preview;
         caret::schedule(
             &mut self.editor_blink,
             caret_active,
@@ -1041,7 +1000,7 @@ fn render_conflict_banner(
 /// deterministic placeholder until the view has a text prompt seam of its own.
 fn render_markdown_toolbar(
     theme: Theme,
-    markdown_editor: gpui::Entity<BezelEditor>,
+    file_view: gpui::Entity<FileView>,
 ) -> impl IntoElement {
     div()
         .id("file-format-toolbar")
@@ -1059,28 +1018,28 @@ fn render_markdown_toolbar(
             "B",
             "file-format-bold",
             MarkdownFormatOp::Bold,
-            markdown_editor.clone(),
+            file_view.clone(),
             theme,
         ))
         .child(render_format_button(
             "I",
             "file-format-italic",
             MarkdownFormatOp::Italic,
-            markdown_editor.clone(),
+            file_view.clone(),
             theme,
         ))
         .child(render_format_button(
             "H",
             "file-format-heading",
             MarkdownFormatOp::Heading,
-            markdown_editor.clone(),
+            file_view.clone(),
             theme,
         ))
         .child(render_format_button(
             "List",
             "file-format-list",
             MarkdownFormatOp::List,
-            markdown_editor.clone(),
+            file_view.clone(),
             theme,
         ))
         .child(render_format_button(
@@ -1089,7 +1048,7 @@ fn render_markdown_toolbar(
             MarkdownFormatOp::Link {
                 url: "https://example.com".to_owned(),
             },
-            markdown_editor,
+            file_view,
             theme,
         ))
 }
@@ -1098,7 +1057,7 @@ fn render_format_button(
     label: &'static str,
     selector: &'static str,
     operation: MarkdownFormatOp,
-    markdown_editor: gpui::Entity<BezelEditor>,
+    file_view: gpui::Entity<FileView>,
     theme: Theme,
 ) -> impl IntoElement {
     div()
@@ -1114,7 +1073,7 @@ fn render_format_button(
         .text_color(theme.text)
         .hover(|style| style.bg(theme.element_hover))
         .on_click(move |_, _, cx| {
-            operation.clone().apply(&markdown_editor, cx);
+            operation.clone().apply(&file_view, cx);
         })
         .child(label)
 }
@@ -1124,8 +1083,6 @@ fn render_content(
     mode: MarkdownMode,
     theme: Theme,
     entity: gpui::Entity<FileView>,
-    markdown_editor: Option<gpui::Entity<BezelEditor>>,
-    markdown_scroll: ScrollHandle,
     selection: Option<Selection>,
     caret_visible: bool,
     caret_offset: usize,
@@ -1181,62 +1138,6 @@ fn render_content(
             .into_any_element();
     }
 
-    if is_markdown && mode == MarkdownMode::Code {
-        let Some(markdown_editor) = markdown_editor else {
-            return notice("The Markdown editor is not ready yet.", theme);
-        };
-        return div()
-            .id("file-bezel-editor")
-            .debug_selector(|| "file-bezel-editor".into())
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&markdown_scroll)
-            .p(px(24.0))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(MARKDOWN_COLUMN_WIDTH))
-                    .mx_auto()
-                    .when(editor.preview_locked(), |this| {
-                        let preview_entity = entity.clone();
-                        this.child(
-                            div()
-                                .id("file-manual-preview")
-                                .debug_selector(|| "file-manual-preview".into())
-                                .w_full()
-                                .mb(px(8.0))
-                                .px(px(10.0))
-                                .py(px(6.0))
-                                .rounded(theme.radii.control)
-                                .bg(theme.surface_raised)
-                                .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
-                                .flex()
-                                .items_center()
-                                .gap(px(10.0))
-                                .child(div().flex_1().child("Large file — manual preview"))
-                                .child(
-                                    div()
-                                        .id("file-manual-preview-render")
-                                        .debug_selector(|| "file-manual-preview-render".into())
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded(theme.radii.control)
-                                        .hover(|style| style.bg(theme.element_hover))
-                                        .on_click(move |_, _, cx| {
-                                            preview_entity.update(cx, |view, cx| {
-                                                view.set_markdown_mode(MarkdownMode::Preview, cx);
-                                            });
-                                        })
-                                        .child("Render preview"),
-                                ),
-                        )
-                    })
-                    .child(markdown_editor),
-            )
-            .into_any_element();
-    }
-
     let mut offset = 0;
     let mut lines: Vec<(usize, String, Selection)> = editor
         .buffer()
@@ -1263,13 +1164,49 @@ fn render_content(
             Selection::new(editor.buffer(), 0, 0).expect("empty range is valid"),
         ));
     }
-    div()
+    let mut source = div()
         .id("file-text-scroll")
         .debug_selector(|| "file-text-scroll".into())
         .size_full()
         .overflow_x_scroll()
         .overflow_y_scroll()
-        .p(px(16.0))
+        .p(px(16.0));
+    if is_markdown && mode == MarkdownMode::Code && editor.preview_locked() {
+        let preview_entity = entity.clone();
+        source = source.child(
+            div()
+                .id("file-manual-preview")
+                .debug_selector(|| "file-manual-preview".into())
+                .w_full()
+                .mb(px(8.0))
+                .px(px(10.0))
+                .py(px(6.0))
+                .rounded(theme.radii.control)
+                .bg(theme.surface_raised)
+                .text_size(theme.typography.footnote)
+                .text_color(theme.text_muted)
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(div().flex_1().child("Large file — manual preview"))
+                .child(
+                    div()
+                        .id("file-manual-preview-render")
+                        .debug_selector(|| "file-manual-preview-render".into())
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(theme.radii.control)
+                        .hover(|style| style.bg(theme.element_hover))
+                        .on_click(move |_, _, cx| {
+                            preview_entity.update(cx, |view, cx| {
+                                view.set_markdown_mode(MarkdownMode::Preview, cx);
+                            });
+                        })
+                        .child("Render preview"),
+                ),
+        );
+    }
+    source
         .child(
             div()
                 .flex()
@@ -1685,8 +1622,7 @@ impl IntoElement for EditableLine {
 }
 
 /// The Markdown formatting operations the toolbar offers (F-EDIT-02). Every
-/// button calls bezel-editor's public operation, the same entry point its key
-/// bindings use, so the toolbar and keyboard cannot produce divergent docs.
+/// button calls the same headless operation as the source editor's model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MarkdownFormatOp {
     Bold,
@@ -1697,42 +1633,8 @@ pub enum MarkdownFormatOp {
 }
 
 impl MarkdownFormatOp {
-    fn apply(self, editor: &gpui::Entity<BezelEditor>, cx: &mut App) {
-        editor.update(cx, |editor, cx| match self {
-            MarkdownFormatOp::Bold => editor.toggle_mark(markdown::Mark::Bold, cx),
-            MarkdownFormatOp::Italic => editor.toggle_mark(markdown::Mark::Italic, cx),
-            MarkdownFormatOp::Link { url } => editor.toggle_mark(markdown::Mark::Link(url), cx),
-            MarkdownFormatOp::Heading => {
-                let block = editor.selection().head.block;
-                let is_heading =
-                    editor.doc().blocks.get(block).is_some_and(|block| {
-                        matches!(block.kind, markdown::BlockKind::Heading { .. })
-                    });
-                let kind = if is_heading {
-                    markdown::BlockKind::Paragraph(markdown::Text::default())
-                } else {
-                    markdown::BlockKind::Heading {
-                        level: 1,
-                        text: markdown::Text::default(),
-                    }
-                };
-                editor.set_block(block, kind, cx);
-            }
-            MarkdownFormatOp::List => {
-                let block = editor.selection().head.block;
-                let is_list = editor
-                    .doc()
-                    .blocks
-                    .get(block)
-                    .is_some_and(|block| matches!(block.kind, markdown::BlockKind::Bullet(_)));
-                let kind = if is_list {
-                    markdown::BlockKind::Paragraph(markdown::Text::default())
-                } else {
-                    markdown::BlockKind::Bullet(markdown::Text::default())
-                };
-                editor.set_block(block, kind, cx);
-            }
-        });
+    fn apply(self, file_view: &gpui::Entity<FileView>, cx: &mut App) {
+        file_view.update(cx, |view, cx| view.apply_markdown_format(self, cx));
     }
 }
 
@@ -2319,107 +2221,41 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn markdown_edit_mode_hosts_bezel_editor_and_syncs_serialized_edits(
+    async fn markdown_code_mode_edits_and_saves_the_raw_source(
         cx: &mut gpui::TestAppContext,
     ) {
-        let file = TempFile::with_extension("md", "# Note\n");
+        let original = "<p align=\"center\">\r\n  *A fork with its own terms.*\r\n</p>\r\n";
+        let file = TempFile::with_extension("md", original);
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
 
         let code = cx
             .debug_bounds("file-mode-code")
-            .expect("the edit mode control is drawn");
+            .expect("the Code option is drawn");
         cx.simulate_click(code.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);
             window.simulate_next_frame(cx);
         });
-
-        let editor_bounds = cx
-            .debug_bounds("file-bezel-editor")
-            .expect("Markdown edit mode hosts bezel-editor");
-        assert!(editor_bounds.size.width > px(0.0));
-        let markdown_editor = view.read_with(&cx.cx, |view, _| {
-            view.markdown_editor
-                .clone()
-                .expect("the Markdown editor entity is installed")
-        });
-        cx.update(|window, app| {
-            markdown_editor
-                .read(app)
-                .focus_handle(app)
-                .focus(window, app)
-        });
-        cx.update(|window, app| {
-            window.simulate_next_frame(app);
-            window.simulate_next_frame(app);
-        });
-        cx.simulate_input("X");
-        cx.run_until_parked();
-
-        let buffer = view.read_with(&cx.cx, |view, _| {
-            view.editor()
-                .expect("headless editor loaded")
-                .buffer()
-                .to_owned()
-        });
         assert!(
-            buffer.contains('X'),
-            "a bezel-editor edit must flow back to the headless model: {buffer:?}"
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "Code mode edits the raw source surface"
         );
-        assert_eq!(
-            buffer,
-            markdown::serialize(&markdown::parse(&buffer)),
-            "the wire form stored in the headless editor is bezel-markdown serialization"
-        );
-    }
 
-    #[gpui::test]
-    async fn markdown_reload_and_keep_rebuild_the_bezel_editor_from_the_headless_buffer(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let file = TempFile::with_extension("md", "original\n");
-        let (_cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-        let mut cx = _cx;
-
-        let initial = view.read_with(&cx.cx, |view, _| {
-            view.markdown_editor
-                .as_ref()
-                .expect("bezel editor")
-                .entity_id()
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            window.simulate_next_frame(cx);
         });
+        cx.simulate_keystrokes("ctrl-end");
+        cx.run_until_parked();
+        cx.simulate_input("qa-edit-probe");
+        cx.run_until_parked();
         view.update(&mut cx.cx, |view, cx| {
-            let model = view.editor_mut().expect("headless editor");
-            model.insert(model.buffer().len(), "local\n").expect("edit");
-            std::fs::write(file.path(), "reloaded\n").expect("external edit");
-            view.check_external(cx);
-            view.reload(cx).expect("reload external text");
+            view.save(cx).expect("raw Markdown source saves");
         });
-        let after_reload = view.read_with(&cx.cx, |view, cx| {
-            let editor = view.markdown_editor.as_ref().expect("rebuilt editor");
-            assert_eq!(markdown::serialize(editor.read(cx).doc()), "reloaded");
-            editor.entity_id()
-        });
-        assert_ne!(initial, after_reload, "Reload replaces the editor entity");
 
-        view.update(&mut cx.cx, |view, cx| {
-            let model = view.editor_mut().expect("headless editor");
-            model
-                .insert(model.buffer().len(), "\nkept local")
-                .expect("edit");
-            std::fs::write(file.path(), "second external\n").expect("external edit");
-            view.check_external(cx);
-            view.keep(cx);
-        });
-        let after_keep = view.read_with(&cx.cx, |view, cx| {
-            let editor = view.markdown_editor.as_ref().expect("rebuilt editor");
-            assert_eq!(
-                markdown::serialize(editor.read(cx).doc()),
-                "reloaded\n\nkept local"
-            );
-            editor.entity_id()
-        });
-        assert_ne!(after_reload, after_keep, "Keep replaces the editor entity");
+        let expected = format!("{original}qa-edit-probe");
+        assert_eq!(std::fs::read(file.path()).expect("saved file"), expected.as_bytes());
     }
 
     /// Drives one blink cycle of the source surface's insertion bar.
@@ -2496,8 +2332,8 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-bezel-editor").is_some(),
-            "Code mode renders the bezel document editor"
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "Code mode renders the raw source editor"
         );
         assert!(
             cx.debug_bounds("file-markdown-scroll").is_none(),
@@ -2566,8 +2402,8 @@ mod tests {
 
         // The large file opens as source with the manual-preview notice.
         assert!(
-            cx.debug_bounds("file-bezel-editor").is_some(),
-            "a large Markdown file opens in the bezel editor"
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "a large Markdown file opens in the raw source editor"
         );
         assert!(
             cx.debug_bounds("file-manual-preview").is_some(),
@@ -2604,8 +2440,8 @@ mod tests {
         let file = TempFile::with_extension("md", "word\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
 
-        // Formatting belongs to Code mode and routes through the same public
-        // bezel-editor operations as its key bindings.
+        // Formatting belongs to Code mode and routes through the same
+        // headless operations as the source editor.
         let code = cx
             .debug_bounds("file-mode-code")
             .expect("the Code option is drawn");
@@ -2616,16 +2452,8 @@ mod tests {
             window.simulate_next_frame(cx);
         });
 
-        let markdown_editor = view.read_with(&cx.cx, |view, _| {
-            view.markdown_editor
-                .clone()
-                .expect("Markdown hosts bezel-editor")
-        });
         cx.update(|window, app| {
-            markdown_editor
-                .read(app)
-                .focus_handle(app)
-                .focus(window, app)
+            view.update(app, |view, cx| view.editor_focus.focus(window, cx));
         });
         cx.update(|window, app| window.simulate_next_frame(app));
         #[cfg(target_os = "macos")]

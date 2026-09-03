@@ -87,8 +87,8 @@ pub const MARKDOWN_PREVIEW_THRESHOLD: u64 = 256 * 1024;
 /// the editor model states so the pixel layer cannot drift from it.
 pub const CODE_EDITOR_WRAPS: bool = false;
 
-/// Four-space indentation (F-EDIT-07): pressing Tab in a code file inserts
-/// exactly this unit. The Markdown editor's Tab does nothing special.
+/// Four-space indentation (F-EDIT-07): pressing Tab in the source editor
+/// inserts exactly this unit.
 pub const INDENT_UNIT: &str = "    ";
 
 /// The Markdown source syntax used by the formatting operations.
@@ -536,18 +536,6 @@ impl Editor {
     /// Inserts the four-space indent unit (F-EDIT-07) at a caret offset.
     pub fn insert_indent(&mut self, at: usize) -> Result<(), String> {
         self.insert(at, INDENT_UNIT)
-    }
-
-    /// Replaces the live text with a serialized document supplied by the
-    /// GPUI editor. This is the one synchronization seam bezel-editor needs:
-    /// disk snapshots, conflicts, and save/reload behavior remain owned by
-    /// this headless model.
-    pub(crate) fn sync_serialized_markdown(&mut self, text: String) {
-        if self.buffer() == text {
-            return;
-        }
-        self.buffer = text;
-        self.sync_document_from_buffer();
     }
 
     // ── External change (F-EDIT-05 / F-EDIT-06) ────────────────────────
