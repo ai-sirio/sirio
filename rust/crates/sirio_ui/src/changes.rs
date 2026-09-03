@@ -80,8 +80,9 @@ pub(crate) const HUNK_ROW_HEIGHT: f32 = 24.0;
 /// Diff code lines: gallery 12px mono on an 18px line at 20px overall.
 pub(crate) const DIFF_LINE_HEIGHT: f32 = 20.0;
 const BAND_ROW_HEIGHT: f32 = 24.0;
-/// Gallery diff rows reserve five monospace figures for each line number.
-const DIFF_NUMBER_WIDTH: f32 = 30.0;
+/// Five 12px Geist Mono digits need 36px; the extra room avoids clipping
+/// when the resolved monospace fallback is fractionally wider.
+const DIFF_NUMBER_WIDTH: f32 = 40.0;
 /// Width of the gallery diff's `+` / `-` marker column.
 const DIFF_SIGN_WIDTH: f32 = 12.0;
 const DIFF_ROW_GAP: f32 = 8.0;
@@ -4870,8 +4871,14 @@ mod tests {
         let marker = cx
             .debug_bounds("changes-diff-marker")
             .expect("the change marker column is drawn");
-        assert_eq!(f32::from(old.size.width), 30.0);
-        assert_eq!(f32::from(new.size.width), 30.0);
+        assert!(
+            f32::from(old.size.width) >= 36.0,
+            "the old gutter must fit five 12px monospace digits"
+        );
+        assert!(
+            f32::from(new.size.width) >= 36.0,
+            "the new gutter must fit five 12px monospace digits"
+        );
         assert_eq!(f32::from(marker.size.width), 12.0);
     }
 
