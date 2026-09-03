@@ -54,7 +54,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #374 Ctrl+Shift+S/I inerti | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-374` (herdr wF) | 1 | in corso |
 | #375 overflow command palette | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-375` (herdr wG, rimosso) | 1 | verificata e chiusa (31b650a1) |
 | #376 menu popup dietro la webview | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-376` (herdr wH, rimosso) | 1 | verificata e chiusa (d5b7ec5e) |
-| #377 chat ACP OpenCode "program not found" | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-377` | 1 | in corso |
+| #377 chat ACP OpenCode "program not found" | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-377` (herdr wJ) | 2 | tent. 1 mergiato e **revertito** (nome nudo `opencode` non wrappato); tent. 2 in corso |
 
 ## Note non classificate come bug
 
