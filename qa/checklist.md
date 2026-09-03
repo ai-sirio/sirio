@@ -10,7 +10,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 2 | Avvio | Stato vuoto "Add a project, then select a worktree" | ok |  |  | stato vuoto + spinner; dialog "not a git repository" (Initialize/Add without Git/Cancel) |
 | 3 | Sidebar | Aggiungi progetto (`+`), elenco worktree per progetto | ok |  |  | menu Open/Clone/Create Project, picker nativo, worktree elencati |
 | 4 | Sidebar | Filtro progetti/worktree | todo | | | |
-| 5 | Sidebar | Selezione worktree, cambio worktree rapido, stato `mounted` | bug | #372 | opencode-go | switch istantaneo e catalogo aggiornato; New Worktree ok; Remove Worktree senza nome del bersaglio |
+| 5 | Sidebar | Selezione worktree, cambio worktree rapido, stato `mounted` | ok | #372 (chiusa) | opencode-go | switch, catalogo live, New Worktree, Remove Worktree con dialog nominativo e primario protetto |
 | 6 | Sidebar | Toggle sidebar (icona titlebar, `Ctrl+Shift+S`) | ok |  |  | toggle da titlebar ok |
 | 7 | Titlebar | Indietro / avanti (history), `+` nuova tab | ok |  |  | ← → senza effetto visibile con history vuota; + titlebar senza effetto visibile e senza tooltip (#299) |
 | 8 | Titlebar | Caption buttons Windows (min/max/close), doppio click, resize, snap | todo | | | |
@@ -29,7 +29,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
 | 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | ok | #366 (chiusa) | opencode-go | colonna Date corretta post-merge; filtri/ricerca da testare |
 | 23 | Browser | Tab browser embedded | ok | #368 (chiusa), #369 | opencode-go / pi | crash risolto (2/2 + 2 restore); barra indirizzi in retest |
-| 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | bug | #371 (aperta), #365 (chiusa) | pi | tema Light/Dark/System e font terminale si applicano; font Interface inerte |
+| 24 | Settings | Apertura, modifica (tema, shell, socket, provider), applicazione, ripristino | ok | #365, #371 (chiuse) | pi | tema, font terminale e font Interface si applicano (live e al riavvio) e si ripristinano; Agents ok |
 | 25 | Status bar | Indicatori provider usage (Claude/Codex/...), refresh | ok |  |  | indicatori Claude/Codex presenti; tooltip = etichetta (vedi note) |
 | 26 | Controllo | `sirioctl` / control socket | ok | #370 (chiusa) | opencode-go | ping/version/list-workspaces ok da PowerShell e Git Bash |
 | 27 | Notifiche/Tray | Notifica fine agente, icona tray | todo | | | |
@@ -48,8 +48,8 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #368 crash New Browser (RefCell) | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-368` (herdr w8, rimosso) | 1 | verificata e chiusa (6525bc00) |
 | #369 barra indirizzi browser | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 2 | tentativo 1 mergiato (33e96f85→); riaperta per il caso Ctrl+L (primi 3 caratteri persi), tentativo 2 in corso |
 | #370 sirioctl pipe/owner Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-370` (herdr wA, rimosso) | 1 | verificata e chiusa (33e96f85) |
-| #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB) | 1 | in corso |
-| #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC) | 1 | in corso |
+| #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB, rimosso) | 1 | verificata e chiusa (5b3bfb28) |
+| #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC, rimosso) | 1 | verificata e chiusa (901f0c2e) |
 | #373 editor Markdown riscrive il file | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-373` | 1 | in corso |
 
 ## Note non classificate come bug
