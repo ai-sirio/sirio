@@ -1,0 +1,115 @@
+diff --git a/README.md b/README.md
+index 9523f7d4..4126474d 100644
+--- a/README.md
++++ b/README.md
+@@ -1,25 +1,25 @@
+-<p align="center">
+-  <img src="assets/sirio-logo.png" width="120" alt="Sirio logo" />
+-</p>
++\<p align="center">
++\<img src="assets/sirio-logo.png" width="120" alt="Sirio logo" />
++\</p>
+ 
+-<h1 align="center">Sirio</h1>
++\<h1 align="center">Sirio\</h1>
+ 
+-<p align="center">
+-  <strong>Steer every coding agent from one native Linux window.</strong>
+-</p>
++\<p align="center">
++\<strong>Steer every coding agent from one native Linux window.\</strong>
++\</p>
+ 
+-<p align="center">
+-  A lightweight native Linux app for running Claude Code, Codex, OpenCode, Pi and Oh-My-Pi<br/>
+-  side by side — one sidebar per project, one terminal per worktree, one glance at who needs you.
+-</p>
++qa-edit-probe\<p align="center">
++A lightweight native Linux app for running Claude Code, Codex, OpenCode, Pi and Oh-My-Pi\<br/>
++side by side — one sidebar per project, one terminal per worktree, one glance at who needs you.
++\</p>
+ 
+-<p align="center">
+-  <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
+-  <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" />
+-  <img src="https://img.shields.io/badge/Rust-2024%20edition-orange?style=flat-square" alt="Rust 2024 edition" />
+-  <a href="https://github.com/ai-sirio/sirio"><img src="https://img.shields.io/github/stars/ai-sirio/sirio?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
+-  <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" /></a>
+-</p>
++\<p align="center">
++\<img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
++\<img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" />
++\<img src="https://img.shields.io/badge/Rust-2024%20edition-orange?style=flat-square" alt="Rust 2024 edition" />
++\<a href="https://github.com/ai-sirio/sirio"><img src="https://img.shields.io/github/stars/ai-sirio/sirio?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" />\</a>
++\<a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" />\</a>
++\</p>
+ 
+ ---
+ 
+@@ -48,13 +48,13 @@
+ 
+ ## Supported Agents
+ 
+-<p>
+-  <a href="https://docs.anthropic.com/claude/docs/claude-code"><kbd><img src="https://www.google.com/s2/favicons?domain=docs.anthropic.com&sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a>&nbsp;
+-  <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=64" alt="Codex logo" width="16" valign="middle" /> Codex</kbd></a>&nbsp;
+-  <a href="https://opencode.ai/docs/cli/"><kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&sz=64" alt="OpenCode logo" width="16" valign="middle" /> OpenCode</kbd></a>&nbsp;
+-  <a href="https://pi.dev"><kbd><img src="https://www.google.com/s2/favicons?domain=pi.dev&sz=64" alt="Pi logo" width="16" valign="middle" /> Pi</kbd></a>&nbsp;
+-  <a href="https://omp.sh"><kbd><img src="https://www.google.com/s2/favicons?domain=omp.sh&sz=64" alt="Oh-My-Pi logo" width="16" valign="middle" /> Oh-My-Pi</kbd></a>
+-</p>
++\<p>
++\<a href="https://docs.anthropic.com/claude/docs/claude-code"><kbd><img src="https://www.google.com/s2/favicons?domain=docs.anthropic.com&sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code\</kbd>\</a>\&nbsp;
++\<a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=64" alt="Codex logo" width="16" valign="middle" /> Codex\</kbd>\</a>\&nbsp;
++\<a href="https://opencode.ai/docs/cli/"><kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&sz=64" alt="OpenCode logo" width="16" valign="middle" /> OpenCode\</kbd>\</a>\&nbsp;
++\<a href="https://pi.dev"><kbd><img src="https://www.google.com/s2/favicons?domain=pi.dev&sz=64" alt="Pi logo" width="16" valign="middle" /> Pi\</kbd>\</a>\&nbsp;
++\<a href="https://omp.sh"><kbd><img src="https://www.google.com/s2/favicons?domain=omp.sh&sz=64" alt="Oh-My-Pi logo" width="16" valign="middle" /> Oh-My-Pi\</kbd>\</a>
++\</p>
+ 
+ ---
+ 
+@@ -111,7 +111,7 @@ Sirio needs no special permission prompts on Linux — it runs with no elevated
+ ## Keyboard Shortcuts
+ 
+ | Action | Shortcut |
+-|--------|----------|
++| --- | --- |
+ | New terminal tab | `Ctrl+T` |
+ | Close active tab | `Ctrl+W` |
+ | Open file | `Ctrl+O` |
+@@ -130,7 +130,7 @@ The tray icon is always one click away — it reflects the worst status across e
+ ## Repository Layout
+ 
+ | Path | Role |
+-|------|------|
++| --- | --- |
+ | `rust/crates/sirio/` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
+ | `rust/crates/sirio_ui/` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings) |
+ | `rust/crates/sirio_terminal/` | Terminal panes backed by `alacritty_terminal`, PTY handling, splits |
+@@ -198,16 +198,14 @@ Bug reports and pull requests are welcome.
+ ### Rules
+ 
+ 1. **Tests first.** New logic needs `#[test]` coverage before implementation.
+-   ```bash
+-   cd rust && cargo test -p <crate>
+-   ```
+ 
+-2. **Respect the crate boundaries.** See `CLAUDE.md`'s Architecture section for the current dependency graph between `rust/crates/*`. `sirio` (the app) is the only crate that depends on everything; nothing underneath depends back up.
++    ```bash
++    cd rust && cargo test -p <crate>
++    ```
+ 
++2. **Respect the crate boundaries.** See `CLAUDE.md`'s Architecture section for the current dependency graph between `rust/crates/*`. `sirio` (the app) is the only crate that depends on everything; nothing underneath depends back up.
+ 3. **Keep pure logic pure.** State machines, parsers, and merge/filter logic that don't need a window belong in a crate with no `gpui` dependency (see `sirio_activity` for the pattern) — that is what keeps them unit-testable without spinning up a window.
+-
+ 4. **Commit messages.** Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`. Lower-case, imperative subject.
+-
+ 5. **Verification gate.** `Scripts/ci.sh` must print `CI OK` before you open a PR.
+ 
+ ---
+@@ -225,4 +223,4 @@ Sirio is a fork of [Orca](https://github.com/stability-ai/orca) with a deliberat
+ - **[Claude Code](https://claude.ai/code)** by Anthropic — architecture, implementation, and review throughout the project, including the Rust/gpui Linux port.
+ - **[OpenCode](https://opencode.ai/)** — parallel subagent execution for isolated, independently-verified feature branches.
+ 
+-> *A fork with its own name and its own terms.*
++> _A fork with its own name and its own terms._
+\ No newline at end of file
