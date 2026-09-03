@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
     FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, Modifiers,
@@ -16097,6 +16099,22 @@ fn register_fonts(cx: &App) {
     }
 }
 
+/// #364: reuses the parent terminal when there is one, so `eprintln!`
+/// logs stay visible when the app is launched from a console. A no-op
+/// when launched from Explorer (no parent console) or when the process
+/// already owns one — both cases simply have nothing to attach to, and
+/// must not open a new console window. Runs before any logging.
+#[cfg(target_os = "windows")]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::AttachConsole;
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+    // The return value only reports whether a parent console existed;
+    // either outcome is fine, so it is deliberately ignored.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() {
     // First statement in the process, and it has to stay first. `gpui`
     // decides X11 vs Wayland by reading the environment
@@ -16135,6 +16153,11 @@ fn main() {
             unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
         }
     }
+
+    // #364: after the env setup above (which must stay single-threaded and
+    // before `application()`), before any logging or window exists.
+    #[cfg(target_os = "windows")]
+    attach_parent_console();
 
     application().run(|cx: &mut App| {
         // Must land before `Theme::init` — see `register_fonts`'s own doc
@@ -16901,6 +16924,16 @@ mod tests {
         );
         assert_eq!(powershell_single_quote_literal("plain text"), "plain text");
         assert_eq!(powershell_single_quote_literal(""), "");
+    }
+
+    /// #364: attaching to the parent console must never fail the process.
+    /// Whether the OS grants a parent console (cargo's) or reports there
+    /// is none to attach to (an Explorer launch), the call must simply
+    /// return and leave the process running.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn attach_parent_console_never_fails_the_process() {
+        attach_parent_console();
     }
 
     struct TerminalReplayFixture {
