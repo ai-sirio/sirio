@@ -24,7 +24,7 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | 16 | Terminale | Harness: Oh-My-Pi | todo | | | |
 | 17 | Activity | Stato running/idle/needs-input per pane (dot nella tab, sidebar, tray) | bug | #370 | opencode-go | Layer A (sirioctl notify) non raggiunge l'app: stato agente sempre "?" |
 | 18 | Chat | Tab Chat (ACP): invio prompt lungo, streaming, markdown, permessi | todo | | | |
-| 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | todo | | | |
+| 19 | Editor/Markdown | Apri file `.md` (`Ctrl+O`, drag&drop, link nel terminale), preview/code mode, live reload, salva (`Ctrl+S`) | bug | #373 | pi | apertura/preview/live ok; Code clippato in pane stretto; salvataggio riscrive il file |
 | 20 | Right panel | Toggle (`Ctrl+Shift+I`), tab Files | ok |  |  | toggle da titlebar ok; Ctrl+Shift+I non registrato su Windows (vedi note); Files aggiornato live |
 | 21 | Right panel | Tab Changes: stage/unstage/discard, apri diff tab | ok | #367 (chiusa) | pi | gutter 5 cifre corretto; stage/unstage/discard (con conferma) ok |
 | 22 | Right panel | Tab Git (grafo/branch) e altre icone del pannello | ok | #366 (chiusa) | opencode-go | colonna Date corretta post-merge; filtri/ricerca da testare |
@@ -49,7 +49,8 @@ build debug `rust/target/debug/sirio.exe` da `main`, computer-use via screenshot
 | #369 barra indirizzi browser | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-369` (herdr w9) | 1 | in corso |
 | #370 sirioctl pipe/owner Windows | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-370` (herdr wA) | 1 | in corso |
 | #371 font Interface inerte | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-371` (herdr wB) | 1 | in corso |
-| #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` | 1 | in corso |
+| #372 dialog Remove Worktree | opencode-go (muse-spark-1.3-contributor, xhigh) | `~/.herdr/worktrees/sirio/fix-372` (herdr wC) | 1 | in corso |
+| #373 editor Markdown riscrive il file | pi (gpt-5.6-luna, xhigh) | `~/.herdr/worktrees/sirio/fix-373` | 1 | in corso |
 
 ## Note non classificate come bug
 
