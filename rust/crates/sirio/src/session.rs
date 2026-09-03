@@ -42,7 +42,7 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, BaseColor, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord,
 };
-use sirio_project::{DiscoveredProject, discover_project, is_git_repository};
+use sirio_project::{DiscoveredProject, discover_project};
 
 /// How long a burst of changes is held before one write. 500 ms is under the
 /// reaction time between discrete user actions (a click then flushes at the
@@ -837,18 +837,7 @@ pub fn new_tab_id(working_directory: &Path, counter: usize) -> String {
 /// flag normalized), and the sidebar selection (read-modify-write so other
 /// projects' expansion state survives).
 fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), PersistenceError> {
-    let ids_from_database = persisted_catalog_ids_for_path(db, &layout.working_directory)?;
-    let (project_root, project_id, worktree_id) = if let Some(ids) = ids_from_database {
-        ids
-    } else if is_git_repository(&layout.working_directory) {
-        eprintln!(
-            "[session] dropping layout for unresolved git worktree: {}",
-            layout.working_directory.display()
-        );
-        return Ok(());
-    } else {
-        catalog_ids_for_path(&layout.working_directory)
-    };
+    let (project_root, project_id, worktree_id) = catalog_ids_for_path(&layout.working_directory);
     let name = project_root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -931,37 +920,6 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     }
     db.save_sidebar_state(&state)?;
     Ok(())
-}
-
-/// Resolves a layout path through the durable catalog before asking Git.
-/// Linked worktrees can retain a `.git` file after the main repository has
-/// moved; Git cannot resolve those paths, but the persisted worktree row still
-/// identifies the project that owns them. Returning that identity prevents a
-/// failed discovery from being turned into a new top-level project.
-fn persisted_catalog_ids_for_path(
-    db: &AppDatabase,
-    working_directory: &Path,
-) -> Result<Option<(PathBuf, String, String)>, PersistenceError> {
-    let working_directory = canonical_path(working_directory);
-    let Some(worktree) = db
-        .worktrees()?
-        .into_iter()
-        .find(|worktree| canonical_path(Path::new(&worktree.path)) == working_directory)
-    else {
-        return Ok(None);
-    };
-    let Some(project) = db
-        .projects()?
-        .into_iter()
-        .find(|project| project.id == worktree.project_id)
-    else {
-        return Ok(None);
-    };
-    Ok(Some((
-        canonical_path(Path::new(&project.root_path)),
-        worktree.project_id,
-        worktree.id,
-    )))
 }
 
 fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), PersistenceError> {
@@ -1057,30 +1015,13 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
     let mut settings = BTreeMap::new();
     let mut diagnostics = Vec::new();
     let mut seen_project_ids = HashSet::new();
-    let project_records = db.projects().unwrap_or_default();
-    let persisted_worktrees = db.worktrees().unwrap_or_default();
-    let persisted_project_ids: HashSet<String> = project_records
-        .iter()
-        .map(|project| project.id.clone())
-        .collect();
-    for record in project_records {
+    for record in db.projects().unwrap_or_default() {
         let root = PathBuf::from(&record.root_path);
         if !root.is_dir() {
             diagnostics.push(format!(
                 "project {} vanished: {}",
                 record.name,
                 root.display()
-            ));
-            continue;
-        }
-        if persisted_worktrees.iter().any(|worktree| {
-            worktree.project_id != record.id
-                && persisted_project_ids.contains(worktree.project_id.as_str())
-                && canonical_path(Path::new(&worktree.path)) == canonical_path(&root)
-        }) {
-            diagnostics.push(format!(
-                "project {} is a linked worktree of another project and was dropped",
-                record.name
             ));
             continue;
         }
@@ -2662,106 +2603,6 @@ mod tests {
                 worktree_id(&projects[0].id, 0),
                 worktree_id(&projects[0].id, 1),
             ]
-        );
-    }
-
-    #[test]
-    fn a_broken_linked_worktree_is_not_promoted_to_a_project() {
-        let dir = TempDir::new();
-        let primary = dir.0.join("repo");
-        let linked = dir.0.join("repo-linked");
-        std::fs::create_dir_all(&primary).expect("repo dir");
-        run_git(&primary, &["init", "--quiet", "-b", "main"]);
-        run_git(
-            &primary,
-            &["config", "user.email", "sirio-tests@example.com"],
-        );
-        run_git(&primary, &["config", "user.name", "Sirio Tests"]);
-        std::fs::write(primary.join("README"), "catalog fixture\n").expect("fixture file");
-        run_git(&primary, &["add", "README"]);
-        run_git(&primary, &["commit", "--quiet", "-m", "fixture"]);
-
-        let status = std::process::Command::new("git")
-            .args(["worktree", "add", "--quiet", "-b", "linked"])
-            .arg(&linked)
-            .current_dir(&primary)
-            .status()
-            .expect("git worktree add");
-        assert!(status.success(), "git worktree add failed: {status}");
-
-        std::fs::write(
-            linked.join(".git"),
-            format!(
-                "gitdir: {}\n",
-                dir.0.join("missing-worktree-admin").display()
-            ),
-        )
-        .expect("break linked worktree gitdir");
-
-        let database = dir.db_path("broken-linked-worktree");
-        let store = SessionStore::open(&database);
-        let mut catalog = ProjectCatalog::default();
-        assert!(catalog.add(&primary).expect("discover primary repository"));
-        store.schedule_catalog(&catalog);
-
-        // Seed the duplicate rows that the old startup save produced, then
-        // make sure a relaunch drops the stale top-level project again.
-        let db = AppDatabase::open(&database).expect("open database");
-        db.save_project(&ProjectRecord::new(
-            "phantom-project",
-            "repo-linked",
-            linked.to_string_lossy(),
-        ))
-        .expect("save stale project");
-        db.save_worktree(&WorktreeRecord::new(
-            "phantom-worktree",
-            "phantom-project",
-            "main",
-            linked.to_string_lossy(),
-        ))
-        .expect("save stale project worktree");
-        drop(db);
-
-        let restored = restore_catalog(&database);
-        assert_eq!(
-            restored.projects.len(),
-            1,
-            "a stale linked worktree project must be merged away on restore"
-        );
-        assert!(
-            restored
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("worktree")),
-            "dropping the stale project must be logged: {:?}",
-            restored.diagnostics
-        );
-        store.schedule_catalog(&ProjectCatalog::from_restored(
-            restored.projects,
-            restored.settings,
-        ));
-
-        // This is the startup save that used to derive a second project from
-        // the broken linked worktree after discovery failed.
-        store.schedule(layout(&linked, Vec::new()));
-        store.flush_now();
-
-        let db = AppDatabase::open(&database).expect("reopen database");
-        let projects = db.projects().expect("read projects");
-        assert_eq!(
-            projects.len(),
-            1,
-            "broken worktree must not become a project"
-        );
-        assert_eq!(projects[0].root_path, primary.to_string_lossy());
-        let worktrees = db
-            .worktrees_of_project(&projects[0].id)
-            .expect("read project worktrees");
-        assert!(
-            worktrees
-                .iter()
-                .any(|worktree| worktree.path == linked.to_string_lossy()),
-            "the broken checkout remains owned by its repository project"
         );
     }
 

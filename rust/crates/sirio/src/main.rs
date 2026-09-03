@@ -4663,10 +4663,7 @@ impl SirioWorkspace {
         })
         .detach();
         workspace.seed_browser_origins(cx);
-        // Construction is not a user action. When the catalog is empty,
-        // `working_directory` can be `initial_working_directory()`'s cwd
-        // fallback (often `/` under LaunchServices); snapshotting here would
-        // silently create that directory as a project.
+        workspace.schedule_save(cx);
         // F-CHG-02: `right_panel` is always constructed bound to
         // `working_directory` -- on a genuinely empty catalog that is
         // `initial_working_directory()`'s git-repo-walking fallback (real,
@@ -5093,13 +5090,6 @@ impl SirioWorkspace {
     /// Records the current layout; the session store's debounce collapses a
     /// burst of changes into one database write.
     fn schedule_save(&self, cx: &App) {
-        if !self.project_catalog.projects().iter().any(|project| {
-            project.worktrees.iter().any(|worktree| {
-                paths_name_the_same_document(&worktree.path, &self.working_directory)
-            })
-        }) {
-            return;
-        }
         self.session.schedule(self.layout(cx));
     }
 
