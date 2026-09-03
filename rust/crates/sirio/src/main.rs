@@ -8275,6 +8275,7 @@ impl SirioWorkspace {
         let mut cached_tab_ids = HashSet::new();
         let mut represented_pane_ids = HashSet::new();
         let mut cached_active_tab = None;
+        let assigned_pane_ids = restored_pane_ids(&restored, 0);
 
         for (index, pane_ids) in parked.terminal_panes_by_tab.iter().enumerate() {
             let live_panes: HashSet<usize> = pane_ids
@@ -8309,7 +8310,7 @@ impl SirioWorkspace {
                 .get(index)
                 .cloned()
                 .unwrap_or_default();
-            let pane_ids = restored_tab_pane_ids(index, &state);
+            let pane_ids = restored_tab_pane_ids(assigned_pane_ids[index], &state);
             if cached_tab_ids.contains(&tab.id)
                 || pane_ids.iter().any(|pane_id| live_pane_ids.contains(pane_id))
             {
@@ -14593,21 +14594,26 @@ fn resumable_session_refs(
     restored: &RestoredSession,
     saved_refs: &BTreeMap<String, String>,
     worktree_path: &str,
+    fallback_pane_id_start: usize,
 ) -> BTreeMap<String, String> {
     let mut refs = Vec::new();
     let mut live_ids = HashSet::new();
+    let assigned_pane_ids = restored_pane_ids(restored, fallback_pane_id_start);
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
-        let root_id = restored
-            .tab_states
-            .get(tab_index)
-            .and_then(|state| state.root_id)
-            .unwrap_or(tab_index);
+        let root_id = assigned_pane_ids[tab_index];
         let pane_key = format!("pane-{root_id}");
         // A persisted identity is qualified; the resume plan keys natively
         // on the bare adapter id, so extract it (None for a value that does
         // not resolve to a known adapter — the same skip as before).
         let adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        if let (Some(agent_id), Some(session_ref)) = (adapter_id, saved_refs.get(&pane_key)) {
+        let legacy_pane_key = format!(
+            "pane-{}",
+            fallback_pane_id_start.saturating_add(tab_index)
+        );
+        let session_ref = saved_refs
+            .get(&pane_key)
+            .or_else(|| saved_refs.get(&legacy_pane_key));
+        if let (Some(agent_id), Some(session_ref)) = (adapter_id, session_ref) {
             refs.push(AgentSessionRef::new(
                 TerminalContentId::new(pane_key.clone()),
                 agent_id,
@@ -14698,8 +14704,8 @@ fn restore_tabs(
     (tabs, active)
 }
 
-fn restored_tab_pane_ids(tab_index: usize, state: &SessionTabState) -> HashSet<usize> {
-    let mut pane_ids = HashSet::from([state.root_id.unwrap_or(tab_index)]);
+fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSet<usize> {
+    let mut pane_ids = HashSet::from([state.root_id.unwrap_or(root_pane_id)]);
     for event in &state.pane_events {
         match event {
             PaneEvent::Split { new_id, .. } => {
@@ -14712,6 +14718,62 @@ fn restored_tab_pane_ids(tab_index: usize, state: &SessionTabState) -> HashSet<u
         }
     }
     pane_ids
+}
+
+/// Assigns each restored tab a pane id without letting a session from before
+/// `root_id` was persisted reuse a sibling's explicit id. The old tab-index
+/// fallback is retained whenever it is free; only the colliding legacy tab
+/// moves, which keeps old pane identities stable as far as the snapshot
+/// allows.
+fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<usize> {
+    let mut reserved = HashSet::new();
+    for state in &restored.tab_states {
+        if let Some(root_id) = state.root_id {
+            reserved.insert(root_id);
+        }
+        for event in &state.pane_events {
+            if let PaneEvent::Split { new_id, .. } = event {
+                reserved.insert(*new_id);
+            }
+        }
+    }
+
+    restored
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(tab_index, _)| {
+            let Some(root_id) = restored
+                .tab_states
+                .get(tab_index)
+                .and_then(|state| state.root_id)
+            else {
+                let mut candidate = fallback_start.saturating_add(tab_index);
+                while reserved.contains(&candidate) {
+                    candidate = candidate.saturating_add(1);
+                }
+                reserved.insert(candidate);
+                return candidate;
+            };
+            root_id
+        })
+        .collect()
+}
+
+fn materialize_restored_root(
+    state: &mut SessionTabState,
+    pane_id: usize,
+    fallback_pane_id: usize,
+) {
+    if state.root_id.is_some() {
+        return;
+    }
+    if pane_id != fallback_pane_id
+        && let Some(scrollback) = state.scrollback.remove(&fallback_pane_id)
+    {
+        state.scrollback.insert(pane_id, scrollback);
+    }
+    state.root_id = Some(pane_id);
 }
 
 fn cached_terminal_view(
@@ -14747,6 +14809,7 @@ fn restore_tabs_with_terminal_cache(
         restored,
         saved_session_refs,
         &working_directory.to_string_lossy(),
+        0,
     );
     // F-PER-01/F-PERSIST-DB-05: a restored chat tab previously got a
     // Chat::launch_with_command with `persistence: None` — this doc's own
@@ -14764,6 +14827,7 @@ fn restore_tabs_with_terminal_cache(
     let mut tabs = Vec::new();
     let mut active = 0usize;
     let mut reused_terminal_panes = HashSet::new();
+    let assigned_pane_ids = restored_pane_ids(restored, 0);
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
         let id = tabs.len();
         let mut tab_state = restored
@@ -14771,7 +14835,8 @@ fn restore_tabs_with_terminal_cache(
             .get(tab_index)
             .cloned()
             .unwrap_or_default();
-        let pane_id = tab_state.root_id.unwrap_or(id);
+        let pane_id = assigned_pane_ids[tab_index];
+        materialize_restored_root(&mut tab_state, pane_id, id);
         // A chat whose source will not resolve is restored disarmed rather
         // than dropped: it used to vanish with its reason on stderr, which a
         // desktop user never sees. The safety rule is unchanged -- no command
@@ -15072,6 +15137,7 @@ fn restore_tabs_in_workspace(
         restored,
         saved_session_refs,
         &working_directory.to_string_lossy(),
+        pane_id_start,
     );
     // F-PER-01/F-PERSIST-DB-05: see the matching comment in restore_tabs —
     // this is the same restore path taken by restore_launch_snapshot when a
@@ -15081,16 +15147,20 @@ fn restore_tabs_in_workspace(
         session::persisted_worktree_id_for_database(&database_path, working_directory);
     let mut tabs = Vec::new();
     let mut active = 0usize;
+    let assigned_pane_ids = restored_pane_ids(restored, pane_id_start);
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
         let id = tab_id_start + tabs.len();
-        let tab_state = restored
+        let mut tab_state = restored
             .tab_states
             .get(tab_index)
             .cloned()
             .unwrap_or_default();
-        let pane_id = tab_state
-            .root_id
-            .unwrap_or_else(|| pane_id_start + tabs.len());
+        let pane_id = assigned_pane_ids[tab_index];
+        materialize_restored_root(
+            &mut tab_state,
+            pane_id,
+            pane_id_start.saturating_add(tab_index),
+        );
         // A chat whose source will not resolve is restored disarmed rather
         // than dropped: it used to vanish with its reason on stderr, which a
         // desktop user never sees. The safety rule is unchanged -- no command
@@ -21732,6 +21802,93 @@ mod tests {
             root.size,
             composer,
         );
+    }
+
+    #[gpui::test]
+    async fn restored_legacy_chat_does_not_inherit_sibling_pane_activity(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+            let restored_tab = |id: &str, title: &str, active: bool| SessionTab {
+                id: id.into(),
+                title: title.into(),
+                kind: "chat".into(),
+                agent_id: None,
+                active,
+            };
+            let restored = RestoredSession {
+                working_directory: workspace.working_directory.clone(),
+                tabs: vec![
+                    restored_tab("first-chat", "First chat", false),
+                    restored_tab("second-chat", "Second chat", false),
+                    restored_tab("sibling-chat", "Sibling chat", false),
+                    restored_tab("legacy-chat", "Chat", false),
+                    restored_tab("active-chat", "Active chat", true),
+                ],
+                tab_states: vec![
+                    SessionTabState::default(),
+                    SessionTabState::with_root(2),
+                    SessionTabState::with_root(3),
+                    SessionTabState::default(),
+                    SessionTabState::with_root(4),
+                ],
+                diagnostics: Vec::new(),
+            };
+            let mut activity = AgentActivityModel::new();
+            let (tabs, active) = restore_tabs(
+                &restored,
+                &workspace.working_directory.clone(),
+                None,
+                &mut activity,
+                &BTreeMap::new(),
+                cx,
+            );
+            workspace.tabs = tabs;
+            workspace.active_tab = active;
+            workspace.activity = activity;
+            workspace.rebuild_center_split();
+            workspace
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .activity
+                .notify("pane-3", AgentStatus::Running, Instant::now());
+            workspace.sync_entity_evidence(cx);
+
+            let legacy_index = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.persistence_id == "legacy-chat")
+                .expect("restored legacy chat");
+            let mut legacy_pane = None;
+            workspace.tabs[legacy_index]
+                .panes
+                .for_each(&mut |pane_id, _| legacy_pane = Some(pane_id));
+            let mut pane_ids = Vec::new();
+            for tab in &workspace.tabs {
+                tab.panes
+                    .for_each(&mut |pane_id, _| pane_ids.push(pane_id));
+            }
+            let distinct_pane_ids = pane_ids.iter().copied().collect::<HashSet<_>>();
+            assert_eq!(
+                pane_ids.len(),
+                distinct_pane_ids.len(),
+                "restored tabs must not share a pane id"
+            );
+            assert_ne!(
+                legacy_pane,
+                Some(3),
+                "a missing legacy root must avoid the persisted sibling pane id"
+            );
+            assert_eq!(
+                workspace.tab_status(&workspace.tabs[legacy_index], cx),
+                Some(ActivityStatus::Idle),
+                "the legacy tab must not render a sibling pane's Running status"
+            );
+        });
     }
 
     #[gpui::test]
