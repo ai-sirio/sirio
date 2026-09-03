@@ -374,6 +374,12 @@ pub enum SidebarEvent {
     /// [`Sidebar::set_selected_worktree`] so the highlight follows the
     /// host's decision, not the other way around.
     SelectWorktree(PathBuf),
+    /// A worktree was created successfully on disk. The host must refresh
+    /// the owning catalog before accepting the new path as selectable.
+    WorktreeCreated { project_id: String, path: PathBuf },
+    /// A worktree was removed successfully on disk. The host must refresh
+    /// the owning catalog and control state before rebuilding its rows.
+    WorktreeRemoved { project_id: String, path: PathBuf },
     /// Close the open tab with this id.
     CloseTab(usize),
     /// Open the project settings sheet for a catalog project.
@@ -2316,6 +2322,7 @@ impl Sidebar {
         let repo_root = prompt.repo_root.clone();
         let project_name = prompt.project_name.clone();
         let project_row_id = prompt.project_row_id;
+        let project_id = self.project_ids.get(&project_row_id).cloned();
         // F-PRJ-17/F-CORE-DOM-02: an explicit base branch, when typed, wins
         // outright (threaded through to `create_worktree`'s `base`
         // argument); left blank, it falls back to the project's *pinned*
@@ -2369,7 +2376,10 @@ impl Sidebar {
                 .await;
             this.update(cx, |sidebar, cx| match result {
                 Ok(()) => {
-                    sidebar.insert_worktree_row(project_row_id, &branch, path, cx);
+                    sidebar.insert_worktree_row(project_row_id, &branch, path.clone(), cx);
+                    if let Some(project_id) = project_id {
+                        cx.emit(SidebarEvent::WorktreeCreated { project_id, path });
+                    }
                 }
                 Err(error) => {
                     sidebar.notice = Some(error.to_string());
@@ -2479,6 +2489,9 @@ impl Sidebar {
         else {
             return;
         };
+        let project_id = self
+            .enclosing_project_index(row_id)
+            .and_then(|index| self.project_ids.get(&self.rows[index].id).cloned());
 
         let repo_root_for_task = repo_root.clone();
         let worktree_path_for_task = worktree_path.clone();
@@ -2497,6 +2510,12 @@ impl Sidebar {
             this.update(cx, |sidebar, cx| match result {
                 Ok(()) => {
                     sidebar.drop_worktree_rows(row_id);
+                    if let Some(project_id) = project_id {
+                        cx.emit(SidebarEvent::WorktreeRemoved {
+                            project_id,
+                            path: worktree_path,
+                        });
+                    }
                     cx.notify();
                 }
                 Err(error) => {

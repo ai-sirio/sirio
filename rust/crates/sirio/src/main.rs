@@ -4506,38 +4506,9 @@ impl SirioWorkspace {
             });
         }
 
-        cx.subscribe(
-            &sidebar,
-            |workspace, _, event: &SidebarEvent, cx| match event {
-                SidebarEvent::AddProject(path) => workspace.add_project(path.clone(), cx),
-                SidebarEvent::RemoveProject(id) => workspace.remove_project(id, cx),
-                SidebarEvent::SelectTab(id) => workspace.select_tab(*id, None, cx),
-                SidebarEvent::SelectWorktree(path) => {
-                    // No `&mut Window` reaches an entity-event `cx.subscribe`
-                    // callback -- `restore_tabs` tolerates `None` the same
-                    // way boot's own call does, skipping only `browser`
-                    // tabs. See `select_worktree`'s doc comment.
-                    let _ = workspace.select_worktree(path.clone(), None, cx);
-                }
-                SidebarEvent::CloseTab(id) => workspace.close_tab_by_id(*id, None, cx),
-                SidebarEvent::OpenProjectSettings(id) => {
-                    workspace
-                        .sidebar
-                        .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
-                }
-                SidebarEvent::ProjectSettingsChanged(update) => {
-                    workspace.update_project_settings(update, cx)
-                }
-                SidebarEvent::Reorder {
-                    drag,
-                    target_id,
-                    before,
-                } => workspace.reorder_sidebar(*drag, *target_id, *before, cx),
-                SidebarEvent::ContextAction { target, action } => {
-                    workspace.handle_sidebar_context_action(target, *action, cx)
-                }
-            },
-        )
+        cx.subscribe(&sidebar, |workspace, _, event: &SidebarEvent, cx| {
+            workspace.handle_sidebar_event(event, cx)
+        })
         .detach();
 
         cx.subscribe(
@@ -5195,8 +5166,14 @@ impl SirioWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
     }
 
-    fn mounted_worktree_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.working_directory.clone()];
+    fn mounted_worktree_paths(&self, excluded_path: Option<&Path>) -> Vec<PathBuf> {
+        let is_excluded = |path: &Path| {
+            excluded_path.is_some_and(|excluded| paths_name_the_same_document(excluded, path))
+        };
+        let mut paths = Vec::new();
+        if !is_excluded(&self.working_directory) {
+            paths.push(self.working_directory.clone());
+        }
         let state = self
             .control_state
             .lock()
@@ -5208,18 +5185,31 @@ impl SirioWorkspace {
                 .filter(|workspace| workspace.mounted)
                 .map(|workspace| PathBuf::from(&workspace.path)),
         );
+        paths.retain(|path| !is_excluded(path));
         paths.extend(
             self.parked_worktree_tabs
                 .keys()
                 .filter(|path| self.terminal_pane_cache.has_in_worktree(path))
                 .map(PathBuf::from),
         );
+        paths.retain(|path| !is_excluded(path));
         paths
     }
 
-    fn refresh_catalog_project(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+    fn refresh_catalog_project(
+        &mut self,
+        id: &str,
+        excluded_path: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let before = self.project_catalog.clone();
-        let mounted_paths = self.mounted_worktree_paths();
+        let selected_path = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_workspace()
+            .map(|workspace| PathBuf::from(&workspace.path));
+        let mounted_paths = self.mounted_worktree_paths(excluded_path);
         let refreshed = if mounted_paths.is_empty() {
             self.project_catalog.refresh_project(id)
         } else {
@@ -5231,14 +5221,23 @@ impl SirioWorkspace {
                 .update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
             return false;
         }
-        if self.project_catalog == before {
-            return false;
+        let changed = self.project_catalog != before;
+        if changed {
+            self.session.schedule_catalog(&self.project_catalog);
         }
-        self.session.schedule_catalog(&self.project_catalog);
+        // The sidebar can have performed a local optimistic mutation before
+        // this discovery completes, while control state can also be stale
+        // after another owner changed the catalog. Keep both projections in
+        // lockstep even when git reports no catalog delta.
         self.sync_control_state();
         self.refresh_sidebar(cx);
+        if let Some(selected_path) = selected_path {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_selected_worktree(&selected_path, cx);
+            });
+        }
         cx.notify();
-        true
+        changed
     }
 
     fn refresh_project_for_path(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
@@ -5259,7 +5258,7 @@ impl SirioWorkspace {
         if !is_git_root {
             return false;
         }
-        self.refresh_catalog_project(&project_id, cx)
+        self.refresh_catalog_project(&project_id, None, cx)
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -5889,6 +5888,77 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    fn handle_sidebar_event(&mut self, event: &SidebarEvent, cx: &mut Context<Self>) {
+        match event {
+            SidebarEvent::AddProject(path) => self.add_project(path.clone(), cx),
+            SidebarEvent::RemoveProject(id) => self.remove_project(id, cx),
+            SidebarEvent::SelectTab(id) => self.select_tab(*id, None, cx),
+            SidebarEvent::SelectWorktree(path) => {
+                self.select_worktree_from_sidebar(path.clone(), cx);
+            }
+            SidebarEvent::WorktreeCreated { project_id, path } => {
+                self.refresh_catalog_project(project_id, None, cx);
+                self.select_worktree_from_sidebar(path.clone(), cx);
+            }
+            SidebarEvent::WorktreeRemoved { project_id, path } => {
+                let removed_current = paths_name_the_same_document(&self.working_directory, path);
+                let selector = path.to_string_lossy().into_owned();
+                let _ = self.close_workspace(&selector, cx);
+                self.refresh_catalog_project(project_id, Some(path), cx);
+
+                if removed_current {
+                    let fallback = self
+                        .project_catalog
+                        .projects()
+                        .iter()
+                        .find(|project| project.id == *project_id)
+                        .and_then(|project| {
+                            project
+                                .worktrees
+                                .iter()
+                                .find(|worktree| worktree.is_primary)
+                                .or_else(|| project.worktrees.first())
+                        })
+                        .map(|worktree| worktree.path.clone());
+                    if let Some(fallback) = fallback {
+                        self.select_worktree_from_sidebar(fallback, cx);
+                    } else {
+                        self.restore_sidebar_selection(cx);
+                    }
+                }
+            }
+            SidebarEvent::CloseTab(id) => self.close_tab_by_id(*id, None, cx),
+            SidebarEvent::OpenProjectSettings(id) => {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
+            }
+            SidebarEvent::ProjectSettingsChanged(update) => {
+                self.update_project_settings(update, cx)
+            }
+            SidebarEvent::Reorder {
+                drag,
+                target_id,
+                before,
+            } => self.reorder_sidebar(*drag, *target_id, *before, cx),
+            SidebarEvent::ContextAction { target, action } => {
+                self.handle_sidebar_context_action(target, *action, cx)
+            }
+        }
+    }
+
+    fn select_worktree_from_sidebar(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.select_worktree(path, None, cx).is_err() {
+            self.restore_sidebar_selection(cx);
+        }
+    }
+
+    fn restore_sidebar_selection(&mut self, cx: &mut Context<Self>) {
+        let current_path = self.working_directory.clone();
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_selected_worktree(&current_path, cx);
+        });
+    }
+
     fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match self.project_catalog.add(&path) {
             Ok(true) => {
@@ -6150,7 +6220,7 @@ impl SirioWorkspace {
                     .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
             }
             (SidebarContextTarget::Project { id, .. }, SidebarContextAction::RefreshProject) => {
-                self.refresh_catalog_project(id, cx);
+                self.refresh_catalog_project(id, None, cx);
             }
             (
                 SidebarContextTarget::Project { id, path, is_git },
@@ -6171,7 +6241,7 @@ impl SirioWorkspace {
                             .await;
                     let _ = this.update(cx, |workspace, cx| match result {
                         Ok(()) => {
-                            workspace.refresh_catalog_project(&project_id, cx);
+                            workspace.refresh_catalog_project(&project_id, None, cx);
                         }
                         Err(error) => {
                             sidebar.update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
@@ -17026,6 +17096,38 @@ mod tests {
         repo
     }
 
+    fn committed_test_repo(tag: &str) -> PathBuf {
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("README.md"), "worktree state fixture\n")
+            .expect("seed worktree state fixture");
+        git_test(&repo, &["add", "README.md"]);
+        git_test(&repo, &["commit", "-q", "-m", "fixture"]);
+        repo
+    }
+
+    fn worktree_state_test_workspace(
+        cx: &mut Context<SirioWorkspace>,
+        repo: &Path,
+        worktrees: Vec<session::CatalogWorktree>,
+    ) -> SirioWorkspace {
+        let mut workspace = palette_test_workspace_with_tab_count(cx, 0);
+        let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "worktree-state-project".into(),
+            name: "Worktree State Project".into(),
+            root_path: repo.to_path_buf(),
+            is_git: true,
+            worktrees,
+        }]);
+        workspace.working_directory = repo.to_path_buf();
+        workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+            &project_catalog,
+            repo,
+        )));
+        workspace.project_catalog = project_catalog;
+        workspace.refresh_sidebar(cx);
+        workspace
+    }
+
     fn changed_test_repo(tag: &str) -> PathBuf {
         let repo = test_repo(tag);
         std::fs::write(repo.join("changed.md"), "before\n").expect("seed changed fixture");
@@ -24469,6 +24571,165 @@ mod tests {
                 .map(|workspace| workspace.path.as_str()),
             Some(expected_path.as_str())
         );
+    }
+
+    #[gpui::test]
+    async fn sidebar_create_worktree_refreshes_catalog_and_control_state(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("sidebar-create-state");
+        let branch = "sidebar-created";
+        let created_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-sidebar-create-state-worktree");
+        let _ = std::fs::remove_dir_all(&created_path);
+        sirio_git::create_worktree(&repo, branch, &created_path, None)
+            .expect("create the fixture worktree");
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+        workspace.update(cx, |workspace, cx| {
+            assert!(!workspace
+                .project_catalog
+                .projects()[0]
+                .worktrees
+                .iter()
+                .any(|worktree| worktree.path == created_path));
+            assert!(!workspace
+                .control_state
+                .lock()
+                .expect("control state")
+                .workspace_rows()
+                .iter()
+                .any(|row| row.get("path") == Some(&created_path.to_string_lossy().into_owned())));
+
+            workspace.handle_sidebar_event(
+                &SidebarEvent::WorktreeCreated {
+                    project_id: "worktree-state-project".into(),
+                    path: created_path.clone(),
+                },
+                cx,
+            );
+        });
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.project_catalog.projects()[0]
+                .worktrees
+                .iter()
+                .any(|worktree| worktree.path == created_path));
+            let state = workspace.control_state.lock().expect("control state");
+            assert!(state
+                .workspace_rows()
+                .iter()
+                .any(|row| row.get("path") == Some(&created_path.to_string_lossy().into_owned())));
+            assert_eq!(workspace.working_directory, created_path);
+            assert_eq!(
+                state.current_workspace().map(|workspace| workspace.path.clone()),
+                Some(created_path.to_string_lossy().into_owned())
+            );
+        });
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                created_path.to_str().expect("fixture path is utf-8"),
+            ],
+        );
+    }
+
+    #[gpui::test]
+    async fn sidebar_remove_worktree_refreshes_catalog_and_control_state(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("sidebar-remove-state");
+        let branch = "sidebar-removed";
+        let removed_path = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join("sirio-sidebar-remove-state-worktree");
+        let _ = std::fs::remove_dir_all(&removed_path);
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                removed_path.to_str().expect("fixture path is utf-8"),
+            ],
+        );
+
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: branch.into(),
+                        path: removed_path.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .select_worktree(removed_path.clone(), None, cx)
+                .expect("select the worktree before removing it");
+            git_test(
+                &repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    removed_path.to_str().expect("fixture path is utf-8"),
+                ],
+            );
+            workspace.handle_sidebar_event(
+                &SidebarEvent::WorktreeRemoved {
+                    project_id: "worktree-state-project".into(),
+                    path: removed_path.clone(),
+                },
+                cx,
+            );
+        });
+
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.project_catalog.projects()[0]
+                .worktrees
+                .iter()
+                .any(|worktree| worktree.path == removed_path));
+            let state = workspace.control_state.lock().expect("control state");
+            assert!(!state
+                .workspace_rows()
+                .iter()
+                .any(|row| row.get("path") == Some(&removed_path.to_string_lossy().into_owned())));
+            assert_eq!(workspace.working_directory, repo);
+            assert_eq!(
+                state.current_workspace().map(|workspace| workspace.path.clone()),
+                Some(repo.to_string_lossy().into_owned())
+            );
+        });
     }
 
     #[test]
