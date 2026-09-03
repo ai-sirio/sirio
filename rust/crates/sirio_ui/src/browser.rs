@@ -1560,6 +1560,11 @@ impl BrowserSurface {
         }
         let focus = self.address_field.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+        // A keyboard shortcut can be followed by text input before the next
+        // frame installs the TextField's platform input handler. Reasserting
+        // focus after that frame closes the gap; mouse clicks naturally leave
+        // enough time for the same frame boundary.
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
     }
 
     // `impl Focusable for BrowserSurface` below gives the host (F-WIN-06's
