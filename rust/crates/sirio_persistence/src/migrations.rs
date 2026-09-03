@@ -8,9 +8,10 @@
 //! the schema change. Adding a new schema version is a single function
 //! appended to [`MIGRATIONS`] — nothing else changes.
 
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
 use crate::error::PersistenceError;
+use crate::model::stable_worktree_id;
 
 /// One schema migration: `PRAGMA user_version` starts at `index + 1` after
 /// it runs. A migration runs inside its own transaction; if it fails, the
@@ -295,6 +296,163 @@ fn migrate_v16(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v17 — replace positional worktree ids with ids derived from the canonical
+/// checkout path. The old id is not only a worktree primary key: `tab` and
+/// `sidebar_state` refer to it as well. SQLite does not have `ON UPDATE
+/// CASCADE` on this schema, so the migration moves each row through a
+/// temporary parent id, creates the final parent, moves the references, and
+/// only then removes the temporary row. Tab ids stay unchanged because
+/// `tab_state` and `chat_turn` refer to those ids, not to the worktree id.
+fn migrate_v17(db: &Transaction) -> Result<(), rusqlite::Error> {
+    let mappings = {
+        let mut statement = db.prepare(
+            "SELECT rowid, id, project_id, path, is_primary
+             FROM worktree
+             ORDER BY rowid",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let rowid: i64 = row.get(0)?;
+            let old_id: String = row.get(1)?;
+            let project_id: String = row.get(2)?;
+            let path: String = row.get(3)?;
+            let is_primary: i64 = row.get(4)?;
+            Ok((rowid, old_id, project_id, path, is_primary))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|(rowid, old_id, project_id, path, is_primary)| {
+                let positional_prefix = format!("{project_id}-wt-");
+                old_id
+                    .strip_prefix(&positional_prefix)
+                    .and_then(|index| index.parse::<usize>().ok())?;
+                Some((
+                    old_id,
+                    format!("__sirio_worktree_migration_{rowid}"),
+                    stable_worktree_id(&project_id, std::path::Path::new(&path)),
+                    is_primary,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    db.execute_batch(
+        "CREATE TEMP TABLE worktree_id_migration (
+            old_id TEXT PRIMARY KEY,
+            temporary_id TEXT NOT NULL UNIQUE,
+            new_id TEXT NOT NULL UNIQUE,
+            is_primary INTEGER NOT NULL
+        );",
+    )?;
+    for (old_id, temporary_id, new_id, is_primary) in &mappings {
+        db.execute(
+            "INSERT INTO worktree_id_migration
+                 (old_id, temporary_id, new_id, is_primary)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![old_id, temporary_id, new_id, is_primary],
+        )?;
+    }
+
+    // Create temporary parent rows before moving the child foreign keys. They
+    // deliberately start non-primary so the existing partial unique index is
+    // never violated while both generations of each row coexist.
+    db.execute(
+        "INSERT INTO worktree
+             (id, project_id, branch, path, is_primary, order_idx,
+              comment, created_at, updated_at, secondary_pane_open)
+         SELECT migration.temporary_id, worktree.project_id, worktree.branch,
+                worktree.path, 0, worktree.order_idx, worktree.comment,
+                worktree.created_at, worktree.updated_at,
+                worktree.secondary_pane_open
+         FROM worktree
+         JOIN worktree_id_migration AS migration ON migration.old_id = worktree.id",
+        [],
+    )?;
+    db.execute(
+        "UPDATE worktree SET is_primary = 0
+         WHERE id IN (SELECT old_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute(
+        "UPDATE tab
+         SET worktree_id = (
+             SELECT temporary_id FROM worktree_id_migration
+             WHERE old_id = tab.worktree_id
+         )
+         WHERE worktree_id IN (SELECT old_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute(
+        "UPDATE sidebar_state
+         SET selected_worktree_id = (
+             SELECT temporary_id FROM worktree_id_migration
+             WHERE old_id = sidebar_state.selected_worktree_id
+         )
+         WHERE selected_worktree_id IN (SELECT old_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute(
+        "DELETE FROM worktree
+         WHERE id IN (SELECT old_id FROM worktree_id_migration)",
+        [],
+    )?;
+
+    // A second parent copy is needed because SQLite checks a foreign key at
+    // the end of an UPDATE of the parent primary key. Move children to the
+    // final parent first, then remove the temporary parent.
+    db.execute(
+        "INSERT INTO worktree
+             (id, project_id, branch, path, is_primary, order_idx,
+              comment, created_at, updated_at, secondary_pane_open)
+         SELECT migration.new_id, worktree.project_id, worktree.branch,
+                worktree.path, 0, worktree.order_idx, worktree.comment,
+                worktree.created_at, worktree.updated_at,
+                worktree.secondary_pane_open
+         FROM worktree
+         JOIN worktree_id_migration AS migration
+           ON migration.temporary_id = worktree.id",
+        [],
+    )?;
+    db.execute(
+        "UPDATE tab
+         SET worktree_id = (
+             SELECT new_id FROM worktree_id_migration
+             WHERE temporary_id = tab.worktree_id
+         )
+         WHERE worktree_id IN (SELECT temporary_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute(
+        "UPDATE sidebar_state
+         SET selected_worktree_id = (
+             SELECT new_id FROM worktree_id_migration
+             WHERE temporary_id = sidebar_state.selected_worktree_id
+         )
+         WHERE selected_worktree_id IN
+             (SELECT temporary_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute(
+        "DELETE FROM worktree
+         WHERE id IN (SELECT temporary_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute(
+        "UPDATE worktree
+         SET is_primary = (
+             SELECT is_primary FROM worktree_id_migration
+             WHERE new_id = worktree.id
+         )
+         WHERE id IN (SELECT new_id FROM worktree_id_migration)",
+        [],
+    )?;
+    db.execute_batch("DROP TABLE worktree_id_migration;")?;
+    Ok(())
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -314,6 +472,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v14,
     migrate_v15,
     migrate_v16,
+    migrate_v17,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -391,6 +550,72 @@ mod tests {
     #[test]
     fn current_version_is_the_migration_count() {
         assert_eq!(CURRENT_SCHEMA_VERSION, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn positional_worktree_ids_are_rekeyed_with_their_references() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .expect("enable foreign keys");
+        migrate_up_to(&mut conn, 16).expect("migrate to the pre-rekey schema");
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path) VALUES ('project', 'Project', '/repo');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx, is_primary)
+                 VALUES ('project-wt-0', 'project', 'main', '/repo', 0, 1);
+             INSERT INTO worktree (id, project_id, branch, path, order_idx, is_primary)
+                 VALUES ('project-wt-1', 'project', 'feature', '/repo-feature', 1, 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-feature', 'project-wt-1', 'Feature', 'terminal', 0, 1);
+             INSERT INTO tab_state (tab_id, state)
+                 VALUES ('tab-feature', '{\"marker\":\"feature\"}');
+             INSERT INTO sidebar_state (id, selected_worktree_id)
+                 VALUES (1, 'project-wt-1');",
+        )
+        .expect("seed positional worktree rows");
+
+        migrate_up_to(&mut conn, 17).expect("migrate to the stable-id schema");
+
+        let ids: Vec<(String, String)> = conn
+            .prepare("SELECT id, path FROM worktree ORDER BY path")
+            .expect("prepare worktree query")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query worktree rows")
+            .collect::<Result<_, _>>()
+            .expect("collect worktree rows");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|(id, _)| !id.ends_with("-wt-0") && !id.ends_with("-wt-1")));
+        assert_ne!(ids[0].0, ids[1].0, "rekeying must not create duplicate ids");
+
+        let feature_id = ids
+            .iter()
+            .find(|(_, path)| path == "/repo-feature")
+            .expect("feature worktree row")
+            .0
+            .clone();
+        let tab_worktree_id: String = conn
+            .query_row(
+                "SELECT worktree_id FROM tab WHERE id = 'tab-feature'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read rekeyed tab reference");
+        assert_eq!(tab_worktree_id, feature_id);
+        let selected_worktree_id: String = conn
+            .query_row(
+                "SELECT selected_worktree_id FROM sidebar_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read rekeyed sidebar selection");
+        assert_eq!(selected_worktree_id, feature_id);
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM tab_state WHERE tab_id = 'tab-feature'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("tab state survives rekeying");
+        assert_eq!(state, "{\"marker\":\"feature\"}");
     }
 
     #[test]

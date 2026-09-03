@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, BaseColor, PersistenceError, ProjectRecord, SidebarState, TabRecord,
-    TabStateRecord, WorktreeRecord,
+    TabStateRecord, WorktreeRecord, stable_worktree_id,
 };
 use sirio_project::{DiscoveredProject, discover_project, is_git_repository};
 
@@ -852,17 +852,17 @@ fn project_id(root_path: &Path) -> String {
     format!("p-{hash:016x}")
 }
 
-fn worktree_id(project_id: &str, index: usize) -> String {
-    format!("{project_id}-wt-{index}")
+fn worktree_id(project_id: &str, path: &Path) -> String {
+    stable_worktree_id(project_id, path)
 }
 
 fn path_derived_catalog_ids(working_directory: &Path) -> (PathBuf, String, String) {
     let working_directory = canonical_path(working_directory);
     let project_id = project_id(&working_directory);
     (
-        working_directory,
+        working_directory.clone(),
         project_id.clone(),
-        worktree_id(&project_id, 0),
+        worktree_id(&project_id, &working_directory),
     )
 }
 
@@ -877,14 +877,14 @@ fn catalog_ids_for_discovered_path(
     let working_directory = canonical_path(working_directory);
     let root = catalog_root(&working_directory, discovered);
     let project_id = project_id(&root);
-    let Some(index) = discovered
+    let Some(_index) = discovered
         .worktrees
         .iter()
         .position(|worktree| canonical_path(&worktree.path) == working_directory)
     else {
         return path_derived_catalog_ids(&working_directory);
     };
-    (root, project_id.clone(), worktree_id(&project_id, index))
+    (root, project_id.clone(), worktree_id(&project_id, &working_directory))
 }
 
 /// Resolves a worktree through Git when no persisted catalog row identifies
@@ -1142,24 +1142,13 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
                 .entry(canonical_path(Path::new(&worktree.path)))
                 .or_insert_with(|| worktree.id.clone());
         }
-        let mut used_ids: HashSet<String> = existing_by_id.keys().cloned().collect();
         let mut worktree_ids = Vec::with_capacity(project.worktrees.len());
         let mut desired_worktree_ids = HashSet::new();
-        for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
+        for worktree in &project.worktrees {
             let id = existing_by_path
                 .get(&canonical_path(&worktree.path))
                 .cloned()
-                .unwrap_or_else(|| {
-                    let mut candidate_index = worktree_index;
-                    loop {
-                        let candidate = worktree_id(&project.id, candidate_index);
-                        if used_ids.insert(candidate.clone()) {
-                            break candidate;
-                        }
-                        candidate_index += 1;
-                    }
-                });
-            used_ids.insert(id.clone());
+                .unwrap_or_else(|| worktree_id(&project.id, &worktree.path));
             desired_worktree_ids.insert(id.clone());
             worktree_ids.push(id);
         }
@@ -2890,8 +2879,8 @@ mod tests {
                 .map(|worktree| worktree.id.clone())
                 .collect::<Vec<_>>(),
             vec![
-                worktree_id(&projects[0].id, 0),
-                worktree_id(&projects[0].id, 1),
+                worktree_id(&projects[0].id, Path::new(&worktrees[0].path)),
+                worktree_id(&projects[0].id, Path::new(&worktrees[1].path)),
             ]
         );
     }
@@ -3048,7 +3037,11 @@ mod tests {
             .find(|worktree| worktree.path == linked.to_string_lossy())
             .expect("linked worktree row")
             .id;
-        assert!(original_id.ends_with("-wt-2"), "fixture starts at index 2");
+        assert_eq!(
+            original_id,
+            worktree_id(&catalog.projects()[0].id, &linked),
+            "the linked worktree id is derived from its path, not its catalog index"
+        );
         assert_eq!(
             before
                 .tabs_of_worktree(&original_id)
@@ -3100,6 +3093,86 @@ mod tests {
                 .len(),
             1,
             "refresh must not cascade-delete tabs under the preserved worktree id"
+        );
+    }
+
+    #[test]
+    fn inserting_a_preceding_worktree_preserves_its_id_and_layout() {
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let preceding = dir.0.join("repo-aaa");
+        let linked = dir.0.join("repo-zzz");
+        for path in [&primary, &preceding, &linked] {
+            std::fs::create_dir_all(path).expect("create worktree fixture");
+        }
+
+        let project = CatalogProject {
+            id: "project".into(),
+            name: "Project".into(),
+            root_path: primary.clone(),
+            is_git: true,
+            worktrees: vec![
+                CatalogWorktree {
+                    branch: "main".into(),
+                    path: primary.clone(),
+                    is_primary: true,
+                },
+                CatalogWorktree {
+                    branch: "linked".into(),
+                    path: linked.clone(),
+                    is_primary: false,
+                },
+            ],
+        };
+        let mut shifted_project = project.clone();
+        shifted_project.worktrees.insert(
+            1,
+            CatalogWorktree {
+                branch: "preceding".into(),
+                path: preceding,
+                is_primary: false,
+            },
+        );
+
+        let baseline_database = dir.db_path("baseline");
+        let baseline_store = SessionStore::open(&baseline_database);
+        baseline_store.schedule_catalog(&ProjectCatalog::from_projects(vec![project]));
+        let baseline_id = AppDatabase::open(&baseline_database)
+            .expect("open baseline database")
+            .worktree_by_path(&linked.to_string_lossy())
+            .expect("read baseline worktree")
+            .expect("baseline linked worktree")
+            .id;
+
+        let shifted_database = dir.db_path("shifted");
+        let shifted_store = SessionStore::open(&shifted_database);
+        shifted_store.schedule_catalog(&ProjectCatalog::from_projects(vec![shifted_project]));
+        shifted_store.schedule(layout(
+            &linked,
+            vec![SessionTab {
+                id: "linked-tab".into(),
+                title: "Linked terminal".into(),
+                kind: "terminal".into(),
+                agent_id: None,
+                active: true,
+            }],
+        ));
+        shifted_store.flush_now();
+
+        let shifted_db = AppDatabase::open(&shifted_database).expect("open shifted database");
+        let shifted_id = shifted_db
+            .worktree_by_path(&linked.to_string_lossy())
+            .expect("read shifted worktree")
+            .expect("shifted linked worktree")
+            .id;
+        assert_eq!(
+            shifted_id, baseline_id,
+            "a worktree id must not change when a preceding catalog row is inserted"
+        );
+        assert_eq!(
+            restore(&shifted_database, Path::new("/tmp")).tabs[0].title,
+            "Linked terminal",
+            "the shifted catalog must still restore the layout owned by linked"
         );
     }
 
@@ -3787,7 +3860,7 @@ mod tests {
         assert_eq!(project, project_id(&missing));
         assert_ne!(
             worktree,
-            worktree_id(&project_id(&primary), 0),
+            worktree_id(&project_id(&primary), &primary),
             "a missing discovery entry must not become the primary worktree"
         );
     }

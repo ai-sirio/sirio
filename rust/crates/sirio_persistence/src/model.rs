@@ -8,6 +8,23 @@
 //! mirrors what the Swift `SirioPersistence` package persists.
 
 use crate::agent_ref::AgentRef;
+use std::path::Path;
+
+/// Returns the persistent identity for a worktree.
+///
+/// The project id scopes the identity and the canonical worktree path makes
+/// it independent of Git's mutable `worktree list` ordering. FNV-1a is used
+/// here because it is deterministic across processes and platforms, matching
+/// the existing project-id convention in the application.
+pub fn stable_worktree_id(project_id: &str, path: &Path) -> String {
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in canonical_path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{project_id}-wt-{hash:016x}")
+}
 
 /// A project the user added, as persisted.
 #[derive(Clone, Debug, PartialEq, Eq)]

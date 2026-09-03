@@ -59,4 +59,5 @@ pub use model::{
     ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatToolLocation, ChatTranscript,
     ChatTurn, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, TabRecord, TabStateRecord, WorktreeRecord, settings_keys, settings_ranges,
+    stable_worktree_id,
 };
