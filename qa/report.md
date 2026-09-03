@@ -52,22 +52,22 @@ Agents), status bar, `sirioctl`, notifiche.
 | #366 | Git log: colonna Date troncata e disallineata | minor | opencode-go | 1 | chiusa, verificata |
 | #367 | Diff: numeri di riga a 5 cifre sovrapposti | minor | pi | 1 | chiusa, verificata |
 | #368 | Windows: New Browser abortisce l'app (`RefCell already borrowed`, anche al restore) | blocker | opencode-go | 1 | chiusa, verificata |
-| #369 | Browser: barra indirizzi senza input, campo URL 60 px | major | pi → opencode-go | 3 | aperta: tent. 1 (click) mergiato, tent. 2 revertito, tent. 3 in corso |
+| #369 | Browser: barra indirizzi senza input, campo URL 60 px | major | pi → opencode-go | 4 | aperta: tent. 1 (click) mergiato; tent. 2 (pi) e 3 (opencode-go) revertiti; tent. 4 in corso |
 | #370 | Windows: `sirioctl` non raggiunge l'app (pipe da HOME, owner elevato) | major | opencode-go | 1 | chiusa, verificata (caso residuo: hook di Claude Code con Sirio elevato) |
 | #371 | Font Interface inerte | minor | pi | 1 | chiusa, verificata |
 | #372 | Remove Worktree senza nome del bersaglio, anche sul primario | major | opencode-go | 1 | chiusa, verificata |
 | #373 | Editor Markdown riscrive il file al salvataggio | major | pi | 1 | chiusa, verificata |
-| #374 | Ctrl+Shift+S / Ctrl+Shift+I inerti | minor | opencode-go | 1 | in corso |
-| #375 | Command palette sfora sotto il pannello | minor | pi | 1 | in corso |
-| #376 | Menu popup disegnati dietro la webview | major | opencode-go | 1 | in corso |
-| #377 | New Chat › OpenCode: ACP "program not found" (shim .cmd) | major | pi | 1 | in corso |
+| #374 | Ctrl+Shift+S / Ctrl+Shift+I inerti (hotkey globali di un altro programma) | minor | opencode-go | 1 | chiusa, verificata (chord Windows ritargate a Ctrl+Shift+D/R/H — da confermare dal maintainer) |
+| #375 | Command palette sfora sotto il pannello | minor | pi | 1 | chiusa, verificata |
+| #376 | Menu popup disegnati dietro la webview | major | opencode-go | 1 | chiusa, verificata |
+| #377 | New Chat › OpenCode: ACP "program not found" (shim .cmd) | major | pi | 2 | chiusa, verificata (tent. 1 revertito: nome nudo non risolto) |
 
 ## Fix mergiate per agente
 
 | Agente | Issue (tentativi) |
 |--------|-------------------|
-| pi (gpt-5.6-luna) | #365 (1), #367 (1), #371 (1), #373 (1), #369 tent. 1 parziale (mergiato) e tent. 2 (revertito) |
-| opencode-go (muse-spark-1.3-contributor) | #364 (2: tent. 1 revertito), #366 (1), #368 (1), #370 (1), #372 (1) |
+| pi (gpt-5.6-luna) | #365 (1), #367 (1), #371 (1), #373 (1), #375 (1), #377 (2: tent. 1 revertito), #369 tent. 1 parziale (mergiato) e tent. 2 (revertito) |
+| opencode-go (muse-spark-1.3-contributor) | #364 (2: tent. 1 revertito), #366 (1), #368 (1), #370 (1), #372 (1), #374 (1), #376 (1), #369 tent. 3 (revertito) |
 
 Ogni fix è stata squash-mergiata su `main`, ricompilata e ritestata ripetendo gli step della issue
 prima della chiusura; i worktree dei fix chiusi sono stati rimossi (alcune cartelle vuote
