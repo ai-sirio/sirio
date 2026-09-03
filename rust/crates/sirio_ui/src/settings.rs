@@ -8,7 +8,8 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
-    KeyDownEvent, MouseButton, Render, Rgba, Window, actions, div, prelude::*, px, text,
+    KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, Window, actions, div, point, prelude::*,
+    px, text,
 };
 use sirio_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
 use sirio_project::SkillInstallCommand;
@@ -862,6 +863,7 @@ pub enum InstallState {
 
 pub struct Settings {
     category: SettingsCategory,
+    detail_scroll: ScrollHandle,
     on_back: Option<Rc<dyn Fn()>>,
     on_change: Option<Rc<dyn Fn(SettingsSnapshot)>>,
     theme_mode: ThemeMode,
@@ -1118,6 +1120,7 @@ impl Settings {
         let agent_last_refreshed = Some(Self::format_refreshed_stamp());
         Self {
             category: SettingsCategory::Appearance,
+            detail_scroll: ScrollHandle::new(),
             on_back: None,
             on_change: None,
             theme_mode: initial.theme,
@@ -1623,6 +1626,9 @@ impl Settings {
     /// Selects the category shown in the detail column. Both the sidebar
     /// click and the control socket call this function.
     pub fn select_category(&mut self, category: SettingsCategory, cx: &mut Context<Self>) {
+        if self.category != category {
+            self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
+        }
         // Entering the Agents screen asks the host to re-check the launch
         // sources (registry fetch respecting its cache + recompute).
         let entering_agents =
@@ -4505,6 +4511,7 @@ impl Render for Settings {
                             .flex_col()
                             .items_center()
                             .overflow_y_scroll()
+                            .track_scroll(&self.detail_scroll)
                             .child(
                                 div()
                                     .id("settings-detail-page")
@@ -7979,6 +7986,63 @@ mod tests {
              {:?} before the wheel and {:?} after",
             before.origin.y,
             after.origin.y
+        );
+    }
+
+    #[gpui::test]
+    async fn switching_settings_category_resets_the_detail_scroll(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(600.0)));
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let viewport = cx
+            .debug_bounds("settings-detail-scroll")
+            .expect("the scroll viewport is drawn");
+        let before = cx
+            .debug_bounds("settings-version")
+            .expect("the top of General is drawn");
+        let over = gpui::point(px(CATEGORY_WIDTH + 260.0), px(300.0));
+        cx.simulate_mouse_move(over, None, Modifiers::none());
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: over,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-200.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        let after = cx
+            .debug_bounds("settings-version")
+            .expect("the General content remains drawn after scrolling");
+        assert!(
+            after.origin.y < before.origin.y - px(50.0),
+            "scrolling General must move its content: before {:?}, after {:?}",
+            before.origin.y,
+            after.origin.y
+        );
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let first_provider = cx
+            .debug_bounds("settings-provider-account-status-Claude Code")
+            .expect("the first AI Provider card is drawn");
+        assert!(
+            first_provider.origin.y >= viewport.origin.y,
+            "switching categories must return the detail column to its top: viewport {:?}, first provider {:?}",
+            viewport.origin.y,
+            first_provider.origin.y
         );
     }
 
