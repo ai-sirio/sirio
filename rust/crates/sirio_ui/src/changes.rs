@@ -1241,7 +1241,7 @@ impl ChangesTab {
                 .py(px(1.0))
                 .bg(ink(0.02))
                 .font_family(theme.typography.code_family)
-                .text_size(px(12.0))
+                .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
                 .child(
                     div()
@@ -1298,7 +1298,7 @@ impl ChangesTab {
                 .px(px(DIFF_ROW_PADDING))
                 .py(px(1.0))
                 .font_family(theme.typography.code_family)
-                .text_size(px(12.0))
+                .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
                 .text_color(theme.text_faint)
                 .child(
@@ -1345,7 +1345,7 @@ impl ChangesTab {
             .justify_center()
             .gap(px(8.0))
             .font_family(theme.typography.code_family)
-            .text_size(px(12.0))
+            .text_size(theme.typography.scaled(12.0))
             .text_color(theme.text_faint)
             .bg(ink(0.02))
             .hover(|style| style.bg(theme.element_hover))
@@ -1395,7 +1395,7 @@ impl ChangesTab {
             .items_center()
             .gap(px(DIFF_ROW_GAP))
             .font_family(theme.typography.code_family)
-            .text_size(px(12.0))
+            .text_size(theme.typography.scaled(12.0))
             .bg(ink(0.02))
             .hover(|style| style.bg(theme.element_hover))
             .on_click(move |_, _, cx| {
@@ -1495,7 +1495,7 @@ impl ChangesTab {
             .border_b_1()
             .border_color(theme.border)
             .font_family(theme.typography.code_family)
-            .text_size(px(12.0))
+            .text_size(theme.typography.scaled(12.0))
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.text)
             .hover(|style| style.bg(theme.element_hover))
@@ -1551,13 +1551,13 @@ impl ChangesTab {
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(theme.typography.scaled(11.5))
                     .text_color(theme.diff_add)
                     .child(additions),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(theme.typography.scaled(11.5))
                     .text_color(theme.diff_del)
                     .child(deletions),
             )
@@ -1689,7 +1689,7 @@ impl ChangesTab {
             .flex()
             .items_stretch()
             .font_family(theme.typography.code_family)
-            .text_size(px(12.0))
+            .text_size(theme.typography.scaled(12.0))
             .child(split_cell(row.left, true, theme).debug_selector(|| "changes-split-left".into()))
             .child(
                 div()
@@ -1741,7 +1741,7 @@ impl ChangesTab {
             .px(px(DIFF_ROW_PADDING))
             .py(px(1.0))
             .font_family(theme.typography.code_family)
-            .text_size(px(12.0))
+            .text_size(theme.typography.scaled(12.0))
             .line_height(px(18.0))
             .bg(background)
             .child(
@@ -1833,7 +1833,7 @@ impl ChangesTab {
                 div()
                     .flex_1()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(12.5))
+                    .text_size(theme.typography.scaled(12.5))
                     .text_color(theme.text)
                     .child(title),
             )
@@ -2482,7 +2482,7 @@ where
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(6.0))
-        .text_size(px(12.5))
+        .text_size(theme.typography.scaled(12.5))
         .text_color(theme.text_muted)
         .hover(|style| style.text_color(theme.danger))
         .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
@@ -2512,7 +2512,7 @@ where
         .px(px(8.0))
         .py(px(4.0))
         .rounded(px(6.0))
-        .text_size(px(12.5))
+        .text_size(theme.typography.scaled(12.5))
         .text_color(theme.text_muted)
         .hover(|style| style.text_color(theme.danger))
         .on_click(move |_, window, cx| {

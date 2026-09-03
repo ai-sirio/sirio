@@ -2982,7 +2982,7 @@ impl Sidebar {
             if let Some(reason) = item.disabled_reason {
                 row = row.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(theme.typography.scaled(11.0))
                         .text_color(bezel_theme.text_faint)
                         .child(reason.to_string()),
                 );
@@ -3363,7 +3363,7 @@ impl Sidebar {
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(theme.typography.scaled(11.0))
                     .text_color(theme.text_faint)
                     .child(card.id),
             )
@@ -3427,7 +3427,7 @@ impl Sidebar {
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(theme.typography.scaled(11.0))
                                     .text_color(theme.text_faint)
                                     .child(subtitle),
                             ),
@@ -3534,7 +3534,7 @@ impl Sidebar {
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(theme.typography.scaled(11.0))
                     .text_color(theme.text_faint)
                     .child(format!(
                         "Parent folder for new worktrees. Empty uses the default: {default_location}"
@@ -3617,7 +3617,7 @@ impl Sidebar {
                         .id("project-worktree-location-restore")
                         .debug_selector(|| "project-worktree-location-restore".to_owned())
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .text_size(px(11.0))
+                        .text_size(theme.typography.scaled(11.0))
                         .text_color(theme.text_faint)
                         .hover(|style| style.text_color(theme.text))
                         .on_click(move |_, _, cx| {
@@ -3731,6 +3731,7 @@ impl Sidebar {
             format!("sidebar-row-{row_id}")
         };
         let mut row_view = tree::tree_row(bezel_theme, &row_shape, selected, cursor)
+            .text_size(theme.typography.scaled(12.5))
             .id(row_id)
             .debug_selector(move || row_debug_selector)
             .group(hover_group.clone())
@@ -4029,7 +4030,7 @@ impl Sidebar {
                                     .rounded(theme.radii.chip)
                                     .bg(theme.surface_raised)
                                     .text_color(theme.text)
-                                    .text_size(px(11.0))
+                                    .text_size(theme.typography.scaled(11.0))
                                     .child("Primary"),
                             )
                         })
@@ -4235,7 +4236,7 @@ impl Render for Sidebar {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_size(px(12.5))
+                    .text_size(theme.typography.scaled(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_faint)
                     .child("Projects")
@@ -4302,7 +4303,7 @@ impl Render for Sidebar {
                             .flex_1()
                             .flex()
                             .items_center()
-                            .text_size(px(12.5))
+                            .text_size(theme.typography.scaled(12.5))
                             .text_color(if filter_is_empty {
                                 theme.text_faint
                             } else {

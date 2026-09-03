@@ -480,7 +480,7 @@ static CAPTION_FONT_FAMILY: OnceLock<&'static str> = OnceLock::new();
 /// buttons keep working — their hit areas are geometric, so the window
 /// stays closable.
 fn caption_font_family(cx: &App) -> &'static str {
-    *CAPTION_FONT_FAMILY.get_or_init(|| {
+    CAPTION_FONT_FAMILY.get_or_init(|| {
         if cx
             .text_system()
             .all_font_names()
@@ -887,11 +887,16 @@ impl Render for Titlebar {
                     // of mixing the COSMIC roles with the shell's.
                     div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(bar_on),
                 )
-                .child(div().text_color(bar_on).text_size(px(13.5)).child(title))
+                .child(
+                    div()
+                        .text_color(bar_on)
+                        .text_size(theme.typography.scaled(13.5))
+                        .child(title),
+                )
                 .children(subtitle.map(|subtitle| {
                     div()
                         .text_color(bar_on.opacity(0.55))
-                        .text_size(px(13.5))
+                        .text_size(theme.typography.scaled(13.5))
                         .child(subtitle)
                 }))
         });

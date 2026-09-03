@@ -4444,7 +4444,7 @@ impl Chat {
                 .px(px(10.0))
                 .py(px(1.0))
                 .font_family(typography.code_family)
-                .text_size(px(12.0))
+                .text_size(typography.scaled(12.0))
                 .line_height(px(18.0))
                 .text_color(text_color)
                 .child(
@@ -4731,7 +4731,7 @@ impl Chat {
                         .bg(theme.surface_raised)
                         .px(px(USER_PILL_H_PADDING))
                         .py(px(USER_PILL_V_PADDING))
-                        .text_size(px(USER_PILL_TEXT_SIZE))
+                        .text_size(typography.scaled(USER_PILL_TEXT_SIZE))
                         .text_color(theme.text)
                         .child(Self::render_plain_text(
                             text,
@@ -7118,7 +7118,7 @@ impl Chat {
             })
             .child(
                 div()
-                    .text_size(px(15.0))
+                    .text_size(typography.scaled(15.0))
                     .text_color(theme.text_faint)
                     .child("…"),
             );
@@ -7468,7 +7468,7 @@ impl Chat {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(15.0))
+                            .text_size(typography.scaled(15.0))
                             .bg(if self.streaming || can_send {
                                 theme.overlay_strong
                             } else {
@@ -7906,7 +7906,7 @@ impl Render for Chat {
                         )
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(theme.typography.scaled(12.5))
                                 .text_color(theme.text_muted)
                                 .child("Thinking"),
                         ),

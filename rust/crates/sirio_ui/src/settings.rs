@@ -1672,6 +1672,8 @@ impl Settings {
 
     fn set_interface_font_size(&mut self, value: i32, cx: &mut Context<Self>) {
         self.interface_font_size = value.clamp(10, 20);
+        Theme::set_interface_font_size(self.interface_font_size, cx);
+        cx.refresh_windows();
         self.changed();
         cx.notify();
     }
@@ -7725,6 +7727,11 @@ mod tests {
                 .interface_font_size),
             14,
             "the + half of the stepper raises the interface font size"
+        );
+        assert_eq!(
+            cx.update(|_, cx| Theme::get(cx).typography.ui_size),
+            px(14.0),
+            "the interface font size updates the shared typography"
         );
     }
 

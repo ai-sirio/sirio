@@ -898,6 +898,25 @@ impl Typography {
             ui_line_height: px(17.0),
         }
     }
+
+    /// Returns the type scale for the persisted interface font size. The
+    /// persisted value is the 13pt UI chrome size; the body scale retains the
+    /// existing +1.5px design offset and every explicit UI size moves by the
+    /// same delta.
+    pub fn for_interface_size(interface_size: f32) -> Self {
+        let delta = interface_size - 13.0;
+        let mut typography = Self::for_base_size(14.5 + delta);
+        typography.code_line_height = px(19.0 + delta);
+        typography.ui_size = px(13.0 + delta);
+        typography.body_line_height = px(22.0 + delta);
+        typography.ui_line_height = px(17.0 + delta);
+        typography
+    }
+
+    /// Shifts an explicit UI text size by the persisted interface-size delta.
+    pub fn scaled(&self, points: f32) -> Pixels {
+        px((points + f32::from(self.base_size) - 14.5).max(6.0))
+    }
 }
 
 impl Default for Typography {
@@ -1225,10 +1244,12 @@ impl Theme {
         let previous = cx.try_global::<Self>();
         let base = previous.map_or_else(BaseColor::default, |theme| theme.base_color);
         let translucency = previous.is_some_and(|theme| theme.translucency_enabled);
+        let typography = previous.map_or_else(Typography::default, |theme| theme.typography);
         #[cfg(target_os = "linux")]
-        let theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
+        let mut theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
         #[cfg(not(target_os = "linux"))]
-        let theme = Self::for_mode(mode, cx.window_appearance(), base);
+        let mut theme = Self::for_mode(mode, cx.window_appearance(), base);
+        theme.typography = typography;
         let theme = theme.with_translucency(translucency);
         theme.install_into_bezel(cx);
         cx.set_global(theme);
@@ -1293,13 +1314,14 @@ impl Theme {
         let mode = cx
             .try_global::<Self>()
             .map_or(ThemeMode::System, |theme| theme.mode);
-        let translucency = cx
-            .try_global::<Self>()
-            .is_some_and(|theme| theme.translucency_enabled);
+        let previous = cx.try_global::<Self>();
+        let translucency = previous.is_some_and(|theme| theme.translucency_enabled);
+        let typography = previous.map_or_else(Typography::default, |theme| theme.typography);
         #[cfg(target_os = "linux")]
-        let theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
+        let mut theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
         #[cfg(not(target_os = "linux"))]
-        let theme = Self::for_mode(mode, cx.window_appearance(), base);
+        let mut theme = Self::for_mode(mode, cx.window_appearance(), base);
+        theme.typography = typography;
         let theme = theme.with_translucency(translucency);
         theme.install_into_bezel(cx);
         cx.set_global(theme);
@@ -1334,12 +1356,14 @@ impl Theme {
             cx.update(|cx| {
                 let Some(preference) = preference else { return };
                 if cx.global::<Theme>().mode == ThemeMode::System {
-                    let next = Theme::for_appearance(
+                    let current = *cx.global::<Theme>();
+                    let mut next = Theme::for_appearance(
                         ThemeMode::System,
                         preference,
-                        cx.global::<Theme>().base_color,
-                    )
-                    .with_translucency(cx.global::<Theme>().translucency_enabled);
+                        current.base_color,
+                    );
+                    next.typography = current.typography;
+                    let next = next.with_translucency(current.translucency_enabled);
                     next.install_into_bezel(cx);
                     cx.set_global(next);
                 }
@@ -1390,6 +1414,13 @@ impl Theme {
         Self::for_mode(ThemeMode::System, system_appearance, base)
     }
 
+    /// Applies the persisted interface font size to the installed theme.
+    pub fn set_interface_font_size(value: i32, cx: &mut App) {
+        let mut theme = *cx.global::<Self>();
+        theme.typography = Typography::for_interface_size(value.clamp(10, 20) as f32);
+        cx.set_global(theme);
+    }
+
     /// Returns the surface opacity used when translucency is enabled.
     ///
     /// The fade is 0.45. The earlier steps (0.96 → 0.85 → 0.70) all read as
@@ -1419,6 +1450,7 @@ impl Theme {
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
     pub fn with_translucency(self, enabled: bool) -> Self {
         let mut theme = Self::for_appearance(self.mode, self.appearance, self.base_color);
+        theme.typography = self.typography;
         theme.translucency_enabled = enabled;
         if !enabled {
             return theme;
@@ -2113,6 +2145,19 @@ mod tests {
         assert_eq!(spacing.shell_gap, px(4.0));
         assert_eq!(spacing.shell_outer_inset, px(4.0));
         assert_eq!(radii.shell_panel, px(7.0));
+    }
+
+    #[test]
+    fn interface_font_size_shifts_the_whole_typography_scale() {
+        let typography = Typography::for_interface_size(16.0);
+
+        assert_eq!(typography.base_size, px(17.5));
+        assert_eq!(typography.code_size, px(16.0));
+        assert_eq!(typography.code_line_height, px(22.0));
+        assert_eq!(typography.ui_size, px(16.0));
+        assert_eq!(typography.body_line_height, px(25.0));
+        assert_eq!(typography.ui_line_height, px(20.0));
+        assert_eq!(typography.scaled(12.0), px(15.0));
     }
 
     /// Composites `over` (which may be translucent) onto `under`, so a wash
