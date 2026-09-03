@@ -3428,7 +3428,7 @@ fn agent_id_for_action(action: NewTabAction) -> Option<&'static str> {
         NewTabAction::OpenCode => Some("opencode"),
         NewTabAction::Pi => Some("pi"),
         NewTabAction::OhMyPi => Some("omp"),
-        NewTabAction::SplitClaudeCode => Some("claude"),
+        NewTabAction::SplitClaudeCode => None,
         NewTabAction::NewTerminal
         | NewTabAction::NewChanges
         | NewTabAction::NewBrowser
@@ -3538,6 +3538,13 @@ fn tab_status_name(status: ActivityStatus) -> &'static str {
         ActivityStatus::Done => "done",
         ActivityStatus::Error => "error",
     }
+}
+
+fn tab_primary_pane_id(tab: &OpenTab) -> Option<usize> {
+    tab.session_state
+        .root_id
+        .filter(|root_id| tab.panes.contains(*root_id))
+        .or_else(|| tab.panes.first_id())
 }
 
 fn chat_tab_identity(
@@ -6645,19 +6652,24 @@ impl SirioWorkspace {
 
     fn terminal_exit_label(tab: &OpenTab, cx: &App) -> Option<String> {
         let mut label = None;
+        let mut has_live_terminal = false;
         tab.panes.for_each(&mut |_, content| {
-            if let TabContent::Terminal { view } = content
-                && let Some(status) = view.read(cx).exit_status()
-            {
-                label = Some(match status {
-                    TerminalExitStatus::Success => "exit 0".to_string(),
-                    TerminalExitStatus::Code(code) => format!("exit {code}"),
-                    TerminalExitStatus::Signal(signal) => format!("signal {signal}"),
-                    TerminalExitStatus::Unknown => "exit unknown".to_string(),
-                });
+            if let TabContent::Terminal { view } = content {
+                let terminal = view.read(cx);
+                let exit_status = terminal.exit_status();
+                if !terminal.is_failed() && exit_status.is_none() {
+                    has_live_terminal = true;
+                } else if let Some(status) = exit_status {
+                    label = Some(match status {
+                        TerminalExitStatus::Success => "exit 0".to_string(),
+                        TerminalExitStatus::Code(code) => format!("exit {code}"),
+                        TerminalExitStatus::Signal(signal) => format!("signal {signal}"),
+                        TerminalExitStatus::Unknown => "exit unknown".to_string(),
+                    });
+                }
             }
         });
-        label
+        (!has_live_terminal).then_some(label).flatten()
     }
 
     /// F-USE-04: the tray menu's roster, one row per worktree with a live
@@ -6817,7 +6829,7 @@ impl SirioWorkspace {
                         None,
                     ),
                     TabContent::Terminal { view } => {
-                        let agent = tab.agent_id.clone().unwrap_or_default();
+                        let agent = self.pane_agent_id(tab, pane_id).unwrap_or_default();
                         let terminal = view.read(cx);
                         let state = PaneStateSnapshot {
                             working_directory: terminal.working_directory().to_path_buf(),
@@ -7551,20 +7563,19 @@ impl SirioWorkspace {
     /// This is the port of `App/WorkspaceTabIcon.swift`, and its order is
     /// that view's order: a tab that knows its own agent (a chat, or a
     /// terminal Sirio launched an adapter into) keeps that identity, and
-    /// otherwise the tab asks the activity model what its panes turned out
-    /// to be — Swift's
-    /// `tab.leafIds.compactMap { model.agentActivity.paneAgents[$0] }.first`,
-    /// leaf order, first match wins.
+    /// otherwise the tab asks the activity model what its primary pane turned
+    /// out to be. A split's newly-created pane is deliberately not allowed
+    /// to become the tab's identity: the tab row represents the original
+    /// surface, while the control panel reports each leaf independently.
     ///
     /// That second clause is the whole point. `agent_spawned` is only one of
     /// four ways a pane acquires an identity; the other three —
     /// `handle_title_change` (Layer B, OSC title), `process_identified`
     /// (Layer D, the foreground-process walk) and `register_agent_id` (a
-    /// restored session) — all land *after* the tab exists, and every agent
-    /// the user starts by hand arrives that way. Reading the field fixed at
-    /// spawn meant those tabs kept the generic terminal glyph for their whole
-    /// life, while the worktree row directly above them already showed the
-    /// brand, because that row reads the same model live.
+    /// restored session) — all land *after* the tab exists, and an agent the
+    /// user starts by hand arrives that way. Reading only the primary pane
+    /// keeps that useful live discovery without letting a split sibling
+    /// rewrite the tab's identity.
     ///
     /// **This is a pure read of `pane_agents` and nothing else.** Pane
     /// ownership — spawn-owned, title-owned (`titleOwnedPanes`),
@@ -7574,18 +7585,16 @@ impl SirioWorkspace {
     /// from wiping each other. An icon lookup must never participate in
     /// them, so this never writes, never registers, and never clears.
     fn tab_agent_mark(&self, tab: &OpenTab) -> Option<AgentMark> {
-        // `WorkspaceTabIcon`'s order: the tab's own agent, then its panes'.
         // Falling through for the *id* as well as the icon matters for one
-        // frame that really happens: a pane's identity may be discovered
-        // after its tab exists (a hand-launched or restored agent), so the
-        // fallback keeps the first reconciliation after that discovery from
-        // drawing the generic terminal silhouette.
+        // frame that really happens: the primary pane's identity may be
+        // discovered after its tab exists (a hand-launched or restored
+        // agent), so the fallback keeps the first reconciliation after that
+        // discovery from drawing the generic terminal silhouette.
         let agent_id = tab.agent_id.clone().or_else(|| {
-            tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
-                self.activity
-                    .agent_id(&format!("pane-{pane_id}"))
-                    .map(str::to_owned)
-            })
+            let pane_id = tab_primary_pane_id(tab)?;
+            self.activity
+                .agent_id(&format!("pane-{pane_id}"))
+                .map(str::to_owned)
         });
         // A tab that already carries a brand icon keeps it even when no id
         // resolves — it is still an agent tab, just an unnamed one, and the
@@ -7599,6 +7608,17 @@ impl SirioWorkspace {
                 .as_deref()
                 .map_or(AgentBrandColor::Unknown, AgentBrandColor::for_agent_id),
         })
+    }
+
+    fn pane_agent_id(&self, tab: &OpenTab, pane_id: usize) -> Option<String> {
+        self.activity
+            .agent_id(&format!("pane-{pane_id}"))
+            .map(str::to_owned)
+            .or_else(|| {
+                (tab_primary_pane_id(tab) == Some(pane_id))
+                    .then(|| tab.agent_id.clone())
+                    .flatten()
+            })
     }
 
     /// Every path that changes what the activity reconcile reads must arm this
@@ -10370,11 +10390,6 @@ impl SirioWorkspace {
                 },
             );
             if split {
-                tab.agent_icon = Some(
-                    Icon::for_agent_id(adapter.id())
-                        .expect("every catalog agent must have a brand icon"),
-                );
-                tab.agent_id = Some(adapter.id().to_string());
                 tab.focused_pane = pane_id;
             }
             split
@@ -20720,6 +20735,64 @@ mod tests {
         });
     }
 
+    /// F-TAB-358: splitting a plain terminal launches a Claude pane, but the
+    /// tab itself remains owned by its original pane. The split must not
+    /// overwrite the title, icon, or persisted adapter id that the tab row
+    /// and the next session restore use.
+    #[gpui::test]
+    async fn split_claude_keeps_a_non_claude_tab_identity(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            assert_eq!(workspace.tabs[0].title, "Terminal");
+            assert_eq!(workspace.tabs[0].agent_icon, None);
+            assert_eq!(workspace.tabs[0].agent_id, None);
+
+            workspace.split_focused_agent("claude", SplitDirection::Horizontal, None, cx);
+
+            let tab = &workspace.tabs[0];
+            assert_eq!(tab.title, "Terminal");
+            assert_eq!(tab.agent_icon, None);
+            assert_eq!(tab.agent_id, None);
+            assert_eq!(
+                workspace.tab_agent_mark(tab),
+                None,
+                "the Claude pane must not become the tab's identity"
+            );
+            assert_eq!(
+                workspace.layout(cx).tabs[0].agent_id,
+                None,
+                "the split must persist the original tab identity"
+            );
+            workspace.sync_control_panes(cx);
+            let mut panes = workspace
+                .panes
+                .list_for(&workspace.working_directory)
+                .expect("list the split tab's panes");
+            panes.sort_by(|left, right| left.id.cmp(&right.id));
+            assert_eq!(
+                panes
+                    .iter()
+                    .map(|pane| pane.agent.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["", "claude"],
+                "panel list must report each split pane's own agent"
+            );
+        });
+        cx.run_until_parked();
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+    }
+
     /// F-CORE-ACT-17/18, the colours: a *running* Claude worktree must not
     /// paint the same hex as one that *needs input*, and each badge mark
     /// must wear its own agent's brand rather than one shared accent.
@@ -21711,6 +21784,116 @@ mod tests {
             cx.debug_bounds("workspace-tab-exit-0").is_some(),
             "the tab exposes the concrete exit status"
         );
+    }
+
+    /// F-TAB-358: an exited sibling may retain its concrete exit label only
+    /// while the tab has no live terminal pane to report. Once a sibling is
+    /// live, its activity status is the one status shown in the tab cell.
+    #[gpui::test]
+    async fn drawn_split_tab_shows_live_status_without_exited_sibling_label(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-tab-split-exit-status-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory)
+            .expect("create split exit status test directory");
+        let exited_shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+        };
+        let (exited_terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, exited_shell, cx)
+                .expect("spawn exited split status test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(exited_terminal.clone(), working_directory.clone(), cx)
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            let live_terminal = cx.new(|cx| {
+                TerminalView::with_shell(
+                    &working_directory,
+                    TerminalShell::WithArguments {
+                        program: "/bin/sh".into(),
+                        args: vec!["-c".into(), "sleep 30".into()],
+                    },
+                    cx,
+                )
+                .expect("spawn live split status test terminal")
+            });
+            assert!(workspace.tabs[0].panes.split_focused(
+                0,
+                1,
+                SplitDirection::Horizontal,
+                TabContent::Terminal {
+                    view: live_terminal,
+                },
+            ));
+            workspace
+                .activity
+                .agent_spawned("pane-1", "claude", Instant::now());
+            workspace.activity.notify(
+                "pane-1",
+                AgentStatus::NeedsInput,
+                Instant::now() + Duration::from_millis(1),
+            );
+            workspace.mark_activity_dirty();
+            cx.notify();
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            let exited = workspace.read_with(&cx.cx, |workspace, app| {
+                let mut exited = false;
+                workspace.tabs[0].panes.for_each(&mut |pane_id, content| {
+                    if pane_id == 0
+                        && let TabContent::Terminal { view } = content
+                    {
+                        exited = view.read(app).exit_status().is_some();
+                    }
+                });
+                exited
+            });
+            if exited {
+                break;
+            }
+            cx.background_executor
+                .advance_clock(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cx.run_until_parked();
+
+        let (status, exit_label) = workspace.read_with(&cx.cx, |workspace, app| {
+            (
+                workspace.tab_status(&workspace.tabs[0], app),
+                SirioWorkspace::terminal_exit_label(&workspace.tabs[0], app),
+            )
+        });
+        assert_eq!(
+            status,
+            Some(ActivityStatus::NeedsInput),
+            "the live Claude pane supplies the tab status"
+        );
+        assert_eq!(
+            exit_label, None,
+            "an exited sibling must not add a second status beside the live one"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-status-needs-input-0")
+                .is_some(),
+            "the live status glyph is drawn"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-exit-0").is_none(),
+            "the exited sibling label is not drawn beside the live status"
+        );
+
+        shutdown_workspace_terminals(&workspace, cx);
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// F-TERM-PTY-07: proves the app crate is a real caller, not just the
