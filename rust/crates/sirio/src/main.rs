@@ -17964,6 +17964,227 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// F-TERM-PTY-08/#354: a worktree switch must retain the materialized
+    /// terminal entities, even when the selected worktree's directory is
+    /// gone. The live cache remains authoritative and the missing worktree
+    /// must not create a database row that belongs to another worktree.
+    #[gpui::test]
+    async fn missing_worktree_switch_keeps_live_terminals_and_database_rows_intact(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("reselect-terminal");
+        let root_for_window = root.clone();
+        let window = cx.add_window(|_window, cx| {
+            worktree_urgency_test_workspace_with_shell(cx, &root_for_window, TerminalShell::System)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let worktree_a = worktrees[0].clone();
+        let worktree_b = worktrees[1].clone();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_terminal_tab("Second terminal", cx);
+        });
+        cx.run_until_parked();
+
+        let original_terminals = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut terminals = Vec::new();
+            for tab in &workspace.tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        terminals.push(view.clone());
+                    }
+                });
+            }
+            terminals
+        });
+        assert_eq!(
+            original_terminals.len(),
+            2,
+            "the fixture has two live terminals"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            cx.run_until_parked();
+            let ready = original_terminals.iter().all(|terminal| {
+                terminal.read_with(&cx.cx, |terminal, _| terminal.shell_pid().is_some())
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fixture terminals never mounted"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        original_terminals[0].update(&mut cx.cx, |terminal, _| {
+            terminal.input(b"printf 'MARKER-H\\n'\n".to_vec());
+        });
+        let zsh_before_switch = direct_zsh_child_count();
+        let mut previous_scrollback = None;
+        let (original_pids, original_scrollback) = loop {
+            cx.run_until_parked();
+            let state: Vec<_> = original_terminals
+                .iter()
+                .map(|terminal| {
+                    terminal.read_with(&cx.cx, |terminal, _| {
+                        (
+                            terminal.shell_pid(),
+                            String::from_utf8_lossy(&terminal.snapshot().scrollback).into_owned(),
+                        )
+                    })
+                })
+                .collect();
+            let scrollback: Vec<String> = state
+                .iter()
+                .map(|(_, scrollback)| scrollback.clone())
+                .collect();
+            let settled = previous_scrollback
+                .as_ref()
+                .is_some_and(|previous| previous == &scrollback);
+            if state[0].1.contains("MARKER-H")
+                && state.iter().all(|(pid, _)| pid.is_some())
+                && settled
+            {
+                break (
+                    state
+                        .iter()
+                        .map(|(pid, _)| pid.expect("mounted terminal shell"))
+                        .collect::<Vec<_>>(),
+                    scrollback,
+                );
+            }
+            previous_scrollback = Some(scrollback);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fixture marker never reached both terminals"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        let database = root.join("sirio.sqlite");
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.session.save_layout_now(&workspace.layout(cx));
+        });
+        let original_worktree_id = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.session.persisted_worktree_id(&worktree_a)
+        });
+        let original_tab_rows = AppDatabase::open(&database)
+            .expect("open seeded session database")
+            .tabs_of_worktree(&original_worktree_id)
+            .expect("read seeded worktree tabs");
+        assert_eq!(
+            original_tab_rows.len(),
+            2,
+            "both live terminals are persisted"
+        );
+        std::fs::remove_dir_all(&worktree_b).expect("remove the selected worktree directory");
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktree_b.clone(), None, cx)
+                .expect("select the missing worktree");
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(worktree_a.clone(), None, cx)
+                .expect("reselect the original worktree");
+        });
+        workspace.update(&mut cx.cx, |workspace, _cx| {
+            workspace.session.flush_now();
+        });
+
+        let restored_terminals = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut terminals = Vec::new();
+            for tab in &workspace.tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        terminals.push(view.clone());
+                    }
+                });
+            }
+            terminals
+        });
+        let (tab_titles, active_tab) = workspace.read_with(&cx.cx, |workspace, _| {
+            (
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.title.clone())
+                    .collect::<Vec<_>>(),
+                workspace.active_tab,
+            )
+        });
+        assert_eq!(tab_titles, ["Terminal", "Second terminal"]);
+        assert_eq!(
+            active_tab, 1,
+            "the live tab order and active tab survive the switch"
+        );
+        assert_eq!(
+            restored_terminals.len(),
+            2,
+            "both cached terminals are restored"
+        );
+        for ((restored, original), (pid, scrollback)) in restored_terminals
+            .iter()
+            .zip(&original_terminals)
+            .zip(original_pids.iter().zip(&original_scrollback))
+        {
+            assert_eq!(
+                restored.entity_id(),
+                original.entity_id(),
+                "reselecting a mounted worktree must reuse its terminal entity"
+            );
+            assert_eq!(
+                restored
+                    .read_with(&cx.cx, |terminal, _| terminal.shell_pid())
+                    .expect("the restored terminal shell is running"),
+                *pid,
+                "reselecting a mounted worktree must not spawn a second shell"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(
+                    &restored.read_with(&cx.cx, |terminal, _| terminal.snapshot().scrollback)
+                ),
+                *scrollback,
+                "reselecting a mounted worktree must preserve terminal scrollback"
+            );
+        }
+        let zsh_after_switch = direct_zsh_child_count();
+        assert!(
+            zsh_after_switch <= zsh_before_switch,
+            "reselecting a mounted worktree must not grow its zsh child count: {} -> {}",
+            zsh_before_switch,
+            zsh_after_switch
+        );
+
+        let database = AppDatabase::open(&database).expect("reopen session database");
+        assert_eq!(
+            database
+                .tabs_of_worktree(&original_worktree_id)
+                .expect("read original worktree tabs after switch"),
+            original_tab_rows,
+            "the original worktree's persisted tabs survive the missing-directory switch"
+        );
+        assert_eq!(
+            database.worktrees().expect("read worktree rows").len(),
+            1,
+            "a missing worktree must not create a derived row beside the original"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// CENTER-01: a runtime worktree switch must load the *newly selected*
     /// worktree's own tabs, not leave whichever tabs were already
     /// materialized on screen. Before this fix `select_worktree` never

@@ -836,11 +836,14 @@ fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
 fn worktree_id_for_database(
     db: &AppDatabase,
     working_directory: &Path,
-) -> Result<String, PersistenceError> {
+) -> Result<Option<String>, PersistenceError> {
     if let Some((_, _, worktree_id)) = persisted_catalog_ids_for_path(db, working_directory)? {
-        return Ok(worktree_id);
+        return Ok(Some(worktree_id));
     }
-    Ok(catalog_ids_for_path(working_directory).2)
+    if !working_directory.is_dir() {
+        return Ok(None);
+    }
+    Ok(Some(catalog_ids_for_path(working_directory).2))
 }
 
 /// Resolves a persisted worktree identity using a database path. This is the
@@ -850,7 +853,8 @@ fn worktree_id_for_database(
 pub fn persisted_worktree_id_for_database(database: &Path, working_directory: &Path) -> String {
     match AppDatabase::open(database) {
         Ok(db) => match worktree_id_for_database(&db, working_directory) {
-            Ok(worktree_id) => worktree_id,
+            Ok(Some(worktree_id)) => worktree_id,
+            Ok(None) => catalog_ids_for_path(working_directory).2,
             Err(error) => {
                 eprintln!(
                     "[session] failed to resolve worktree identity for {}: {error}; using Git fallback",
@@ -877,6 +881,12 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
     let ids_from_database = persisted_catalog_ids_for_path(db, &layout.working_directory)?;
     let (project_root, project_id, worktree_id) = if let Some(ids) = ids_from_database {
         ids
+    } else if !layout.working_directory.is_dir() {
+        eprintln!(
+            "[session] dropping layout for unresolved missing worktree: {}",
+            layout.working_directory.display()
+        );
+        return Ok(());
     } else if is_git_repository(&layout.working_directory) {
         eprintln!(
             "[session] dropping layout for unresolved git worktree: {}",
@@ -990,11 +1000,17 @@ fn persisted_catalog_ids_for_path(
     db: &AppDatabase,
     working_directory: &Path,
 ) -> Result<Option<(PathBuf, String, String)>, PersistenceError> {
-    let working_directory = canonical_path(working_directory);
+    let requested_path = working_directory.to_string_lossy();
+    let canonical_working_directory = working_directory.canonicalize().ok();
     let Some(worktree) = db
         .worktrees()?
         .into_iter()
-        .find(|worktree| canonical_path(Path::new(&worktree.path)) == working_directory)
+        .find(|worktree| {
+            worktree.path == requested_path
+                || canonical_working_directory.as_ref().is_some_and(|canonical| {
+                    Path::new(&worktree.path).canonicalize().ok().as_ref() == Some(canonical)
+                })
+        })
     else {
         return Ok(None);
     };
@@ -1520,7 +1536,8 @@ impl SessionStore {
             return catalog_ids_for_path(working_directory).2;
         };
         match worktree_id_for_database(db, working_directory) {
-            Ok(worktree_id) => worktree_id,
+            Ok(Some(worktree_id)) => worktree_id,
+            Ok(None) => catalog_ids_for_path(working_directory).2,
             Err(error) => {
                 eprintln!(
                     "[session] failed to resolve worktree identity for {}: {error}; using Git fallback",
@@ -1563,14 +1580,18 @@ impl SessionStore {
         let Some(db) = db.as_ref() else {
             return default_restored(working_directory);
         };
-        let worktree_id =
-            worktree_id_for_database(db, working_directory).unwrap_or_else(|error| {
+        let Some(worktree_id) = (match worktree_id_for_database(db, working_directory) {
+            Ok(worktree_id) => worktree_id,
+            Err(error) => {
                 eprintln!(
-                    "[session] failed to resolve worktree identity for {}: {error}; using Git fallback",
+                    "[session] failed to resolve worktree identity for {}: {error}; using an empty layout",
                     working_directory.display()
                 );
-                catalog_ids_for_path(working_directory).2
-            });
+                None
+            }
+        }) else {
+            return default_restored(working_directory);
+        };
         match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
             Ok(restored) => restored,
             Err(error) => {
@@ -2565,6 +2586,37 @@ mod tests {
             "a checkout that vanished falls back instead of failing"
         );
         assert_eq!(restored.tabs.len(), 2);
+    }
+
+    #[test]
+    fn missing_worktree_without_a_row_does_not_fall_back_to_another_row() {
+        let dir = TempDir::new();
+        let database = dir.db_path("missing-worktree-identity");
+        let project_root = dir.0.join("repo");
+        let missing_path = dir.0.join("gone-worktree");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        assert!(!missing_path.is_dir(), "the selected worktree is absent");
+
+        let db = AppDatabase::open(&database).expect("open database");
+        db.save_project(&ProjectRecord::new(
+            "project",
+            "Project",
+            project_root.to_string_lossy(),
+        ))
+        .expect("save project");
+        db.save_worktree(&WorktreeRecord::new(
+            "other-worktree",
+            "project",
+            "other",
+            dir.0.join("other-worktree").to_string_lossy(),
+        ))
+        .expect("save other worktree");
+
+        assert_eq!(
+            worktree_id_for_database(&db, &missing_path).expect("resolve worktree"),
+            None,
+            "an absent worktree must not fall back to another row's identity"
+        );
     }
 
     #[test]
