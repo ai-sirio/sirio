@@ -49,7 +49,12 @@ const ROW_HEIGHT_ANNOTATED: f32 = 42.0;
 const AUTHOR_WIDTH: f32 = 78.0;
 /// Date column. A fit, not a budget: `%Y-%m-%d` is always the same ten
 /// characters and can never grow past this.
-const DATE_WIDTH: f32 = 71.0;
+///
+/// 71px held the 63px ink the Linux screenshot measured, but the running
+/// Windows app (#366) cut the last digit (`2026-09-0`) and the headless
+/// stub already needs 78px for ten characters — so 71 left no room for a
+/// wider face or side bearings. 80px fits both with room to spare.
+const DATE_WIDTH: f32 = 80.0;
 /// Horizontal gap between a row's columns.
 const ROW_GAP: f32 = 6.0;
 /// What a commit row loses to chrome it does not control: the panel's two
@@ -949,6 +954,8 @@ fn render_history_row(
                     .debug_selector(|| "history-row-date".to_owned())
                     .w(px(DATE_WIDTH))
                     .flex_none()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .text_size(theme.typography.footnote)
                     .text_color(theme.text_faint)
                     .child(date),
@@ -1490,10 +1497,13 @@ mod tests {
             },
         );
 
-        // Three characters of clearance, so a change to any one piece of
-        // chrome cannot flip the default's behaviour on its own.
+        // Two lowercase characters of clearance, so a change to any one piece of
+        // chrome cannot flip the default's behaviour on its own. Was three
+        // characters (+14px) before #366 widened the date column from 71px to
+        // 80px so `2026-09-03` fits on Windows; the default still keeps every
+        // column with 9px to spare.
         assert!(
-            subject >= MIN_SUBJECT_WIDTH + 14.0,
+            subject >= MIN_SUBJECT_WIDTH + 8.0,
             "the default width leaves the subject {subject}px, only {}px clear of the \
              {MIN_SUBJECT_WIDTH}px floor",
             subject - MIN_SUBJECT_WIDTH
@@ -2146,6 +2156,49 @@ mod tests {
         assert!(
             cx.debug_bounds("history-row-date").is_none(),
             "and so does the date"
+        );
+    }
+
+    /// #366: the date column wrapped to two lines when its text was wider
+    /// than `DATE_WIDTH`, so the first line sat half a line above the row's
+    /// subject (and the first row's date stuck out above the list, under the
+    /// header) while the second line was clipped with no ellipsis.
+    ///
+    /// The author column already carries `overflow_hidden` + `text_ellipsis`
+    /// and stays single-line; the date must do the same. The drawn frame is
+    /// the only place this is true or false — `DATE_WIDTH` alone cannot prove
+    /// the row obeys it.
+    #[gpui::test]
+    async fn the_date_column_stays_single_line_like_the_author(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let dir = TempDir::new();
+        seed_two_commits(&dir.0);
+        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let history =
+            cx.update(|window, _| window.root::<GitHistory>().flatten().expect("history root"));
+        pump_until(&cx.cx, || {
+            history.read_with(&cx.cx, |history, _| history.commits.len() == 2)
+        });
+        cx.run_until_parked();
+
+        let author = cx
+            .debug_bounds("history-row-author")
+            .expect("author column is drawn at the default width");
+        let date = cx
+            .debug_bounds("history-row-date")
+            .expect("date column is drawn at the default width");
+
+        let author_h: f32 = author.size.height.into();
+        let date_h: f32 = date.size.height.into();
+        assert!(
+            (date_h - author_h).abs() < 1.0,
+            "date ({date_h}px) must stay single-line like the author ({author_h}px), or it sits half a line above its row (#366)"
+        );
+        assert!(
+            date_h <= ROW_HEIGHT + 1.0,
+            "a wrapped date ({date_h}px) spills out of its {ROW_HEIGHT}px row (#366)"
         );
     }
 }
