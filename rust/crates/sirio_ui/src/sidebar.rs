@@ -290,6 +290,7 @@ pub enum SidebarContextTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarContextAction {
     ProjectSettings,
+    RefreshProject,
     InitializeGit,
     RevealInFileManager,
     RemoveProject,
@@ -1019,6 +1020,12 @@ impl Sidebar {
                 item(
                     "Project Settings",
                     SidebarContextAction::ProjectSettings,
+                    true,
+                    None,
+                ),
+                item(
+                    "Refresh Project",
+                    SidebarContextAction::RefreshProject,
                     true,
                     None,
                 ),
@@ -2779,6 +2786,7 @@ impl Sidebar {
     fn context_action_selector(action: SidebarContextAction) -> &'static str {
         match action {
             SidebarContextAction::ProjectSettings => "project-settings",
+            SidebarContextAction::RefreshProject => "refresh-project",
             SidebarContextAction::InitializeGit => "initialize-git",
             SidebarContextAction::RevealInFileManager => "reveal-in-file-manager",
             SidebarContextAction::RemoveProject => "remove-project",
@@ -3693,8 +3701,8 @@ impl Sidebar {
                             // calling back `set_selected_worktree`.
                             if let Some(path) = worktree_path.as_ref() {
                                 cx.emit(SidebarEvent::SelectWorktree(path.clone()));
+                                sidebar.select_row(row_id, cx);
                             }
-                            sidebar.select_row(row_id, cx);
                         }
                     }
                 });
@@ -5181,6 +5189,55 @@ mod tests {
                 action: SidebarContextAction::NewTab(NewTabAction::NewTerminal),
             }
         )));
+    }
+
+    #[gpui::test]
+    async fn drawn_project_context_menu_offers_refresh_project(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("context-menu-refresh-project");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "refresh-project".into(),
+                    name: "refresh-project".into(),
+                    is_git: true,
+                    root_path: repo.clone(),
+                    worktrees: vec![SidebarWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                        comment: None,
+                    }],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("sidebar-row-0")
+            .expect("the project row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("sidebar-context-item-refresh-project")
+                .is_some(),
+            "the project context menu exposes Refresh Project"
+        );
     }
 
     #[gpui::test]
