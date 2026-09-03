@@ -37,24 +37,11 @@ fn launch_fixture_with_pid_file() -> (AcpClient, sirio_acp::EventStream, PathBuf
     (launched.0, launched.1, pid_path)
 }
 
-#[cfg(not(windows))]
 fn process_exists(pid: &str) -> bool {
     ProcessCommand::new("ps")
         .args(["-p", pid, "-o", "pid="])
         .output()
         .map(|output| !String::from_utf8_lossy(&output.stdout).trim().is_empty())
-        .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn process_exists(pid: &str) -> bool {
-    let filter = format!("PID eq {pid}");
-    ProcessCommand::new("tasklist")
-        .args(["/FI", &filter, "/NH"])
-        .output()
-        .map(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).contains(pid)
-        })
         .unwrap_or(false)
 }
 
