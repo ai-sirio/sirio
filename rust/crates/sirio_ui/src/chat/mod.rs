@@ -28,10 +28,9 @@ use sirio_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatSessionSummary, ChatToolLocation, ChatTranscript, ChatTurn,
 };
-use sirio_project::{display_absolute_path, display_path};
 use sirio_theme::Theme;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -41,6 +40,7 @@ use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
+mod tool_calls;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
@@ -237,10 +237,6 @@ impl IntoElement for MarkdownBody {
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
-const TOOL_CALL_GROUP_GAP: f32 = 6.0;
-const TOOL_CALL_GROUP_CHEVRON_WIDTH: f32 = 12.0;
-const TOOL_CALL_GROUP_MEMBER_INDENT: f32 =
-    CARD_H_PADDING + TOOL_CALL_GROUP_CHEVRON_WIDTH + TOOL_CALL_GROUP_GAP;
 
 /// The user turn's bubble: rounded, right-aligned, capped at the Bezel
 /// Activity pattern's 440. The assistant reply has no container at all.
@@ -490,6 +486,7 @@ struct SubagentToolCall {
     content: Vec<ToolCallContentInfo>,
     locations: Vec<ToolCallLocationInfo>,
     expanded: bool,
+    duration_ms: Option<u64>,
 }
 
 /// One rendered element of the transcript.
@@ -518,12 +515,6 @@ enum Entry {
     /// reported, when it reported them. `expanded` starts `false`, same as
     /// `Thought` (F-CHAT-21): the card renders as one line until the reader
     /// opts in.
-    ///
-    /// `group_expanded` (F-CHAT-22) is read only on the *last* entry of a
-    /// consecutive run of tool calls — that is the entry the transcript
-    /// renders the "N steps" toggle against, since a run has no separate
-    /// grouping record of its own. It is meaningless, and ignored, on any
-    /// entry that is not currently a run's tail.
     ToolCall {
         id: String,
         title: String,
@@ -534,7 +525,7 @@ enum Entry {
         raw_input: Option<String>,
         raw_output: Option<String>,
         expanded: bool,
-        group_expanded: bool,
+        duration_ms: Option<u64>,
     },
     /// A Task/dispatch tool call whose following live calls are presented as
     /// the child agent's work. ACP v1/v2 carry no parent-child relation, so
@@ -650,6 +641,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             status,
             kind,
             locations,
+            duration_ms,
             ..
         } => Some(ChatEntry::ToolCall {
             id: id.clone(),
@@ -665,6 +657,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                     line: location.line,
                 })
                 .collect(),
+            duration_ms: *duration_ms,
         }),
         // A subagent task carries neither a tool kind nor file locations, so
         // it stores what it has and restores exactly as it did before #168.
@@ -676,6 +669,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             status: status.clone(),
             kind: None,
             locations: Vec::new(),
+            duration_ms: None,
         }),
         Entry::Permission {
             request_id,
@@ -798,6 +792,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             status,
             kind,
             locations,
+            duration_ms,
         } => Entry::ToolCall {
             id,
             title,
@@ -816,7 +811,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             raw_input: None,
             raw_output: None,
             expanded: false,
-            group_expanded: false,
+            duration_ms,
         },
         ChatEntry::Permission {
             request_id,
@@ -1002,7 +997,7 @@ pub enum ChatEvent {
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
 #[derive(Clone, Debug, Default)]
-struct EditSummaryState {
+pub(crate) struct EditSummaryState {
     confirming_path: Option<PathBuf>,
     reverted_paths: Vec<PathBuf>,
     revert_error: Option<String>,
@@ -1020,7 +1015,7 @@ impl TranscriptSelection {
 }
 
 #[derive(Clone)]
-struct TranscriptInteraction {
+pub(crate) struct TranscriptInteraction {
     chat: Entity<Chat>,
     focus: FocusHandle,
 }
@@ -1318,6 +1313,9 @@ pub struct Chat {
     /// Images attached through the picker or a drop, drawn as a strip above
     /// the field. Not persisted, as before.
     attachments: Vec<ImageAttachment>,
+    /// View state for the same-verb folds of a tool run, keyed by the fold's
+    /// first entry index. Not persisted; a fold starts closed.
+    open_verb_folds: HashSet<usize>,
     /// The placeholder last pushed into the field, so render pushes a new
     /// one only when the state it names changed.
     composer_placeholder_shown: String,
@@ -1390,6 +1388,11 @@ pub struct Chat {
     unfolded_turns: BTreeSet<usize>,
     copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
+    /// When each live tool call started, by protocol id, so its first
+    /// terminal status can store the elapsed time on the entry. Consumed on
+    /// that status; a call that never settles simply leaves its start here
+    /// until the chat is dropped.
+    tool_started: HashMap<String, std::time::Instant>,
     persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
@@ -1610,6 +1613,7 @@ impl Chat {
             draft_caret: 0,
             accepted_mentions: Vec::new(),
             attachments: Vec::new(),
+            open_verb_folds: HashSet::new(),
             composer_placeholder_shown: String::new(),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
@@ -1643,6 +1647,7 @@ impl Chat {
             unfolded_turns: BTreeSet::new(),
             copied_target: None,
             edit_summaries: BTreeMap::new(),
+            tool_started: HashMap::new(),
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
@@ -1666,6 +1671,26 @@ impl Chat {
             #[cfg(test)]
             attach_test_paths: Vec::new(),
         }
+    }
+
+    /// When each live tool call started, by protocol id, so its first
+    /// terminal status can store the elapsed time on the entry. Consumed on
+    /// that status; a call that never settles simply leaves its start here
+    /// until the chat is dropped.
+    fn note_tool_started(&mut self, id: &str) {
+        self.tool_started
+            .insert(id.to_string(), std::time::Instant::now());
+    }
+
+    /// The elapsed time for `id` if `status` is terminal and the call's start
+    /// is known; `None` otherwise. Consumes the start.
+    fn tool_duration_on(&mut self, id: &str, status: &str) -> Option<u64> {
+        if !is_terminal_tool_status(status) {
+            return None;
+        }
+        self.tool_started
+            .remove(id)
+            .map(|started| started.elapsed().as_millis() as u64)
     }
 
     /// Add one transcript row and keep the virtualizer's index tree in sync.
@@ -1704,6 +1729,19 @@ impl Chat {
 
     fn remeasure_entry(&self, index: usize) {
         self.list_state.remeasure_items(index..index + 1);
+    }
+
+    /// F-CHAT-22's fold for one verb inside a tool run. The fold's row is
+    /// measured off the run's tail entry, so remeasure that one.
+    pub(crate) fn toggle_verb_fold(&mut self, start: usize, cx: &mut Context<Self>) {
+        if !self.open_verb_folds.insert(start) {
+            self.open_verb_folds.remove(&start);
+        }
+        // The run's row is measured off its tail entry; the fold changed its height.
+        if let Some((_, end)) = tool_call_run_bounds_inclusive(&self.entries, start) {
+            self.remeasure_entry(end);
+        }
+        cx.notify();
     }
 
     fn subagent_task_position(&self, id: &str) -> Option<usize> {
@@ -1791,17 +1829,6 @@ impl Chat {
         cx.notify();
     }
 
-    /// F-CHAT-22: flips a run of tool calls between its compact "N steps"
-    /// summary and every step shown as its own full card. `index` is the
-    /// run's last entry — the one the group's header renders against.
-    fn toggle_tool_call_group_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(Entry::ToolCall { group_expanded, .. }) = self.entries.get_mut(index) {
-            *group_expanded = !*group_expanded;
-            self.remeasure_entry(index);
-        }
-        cx.notify();
-    }
-
     /// Install the composer keymap in the host application.
     pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
@@ -1875,6 +1902,8 @@ impl Chat {
                 raw_output,
             } => {
                 self.maybe_follow_location(&locations, cx);
+                self.note_tool_started(&id);
+                let duration_ms = self.tool_duration_on(&id, &status);
                 if is_subagent_tool_call(&title, raw_input.as_deref()) {
                     self.push_entry(Entry::SubagentTask {
                         id,
@@ -1901,6 +1930,7 @@ impl Chat {
                             content,
                             locations,
                             expanded: false,
+                            duration_ms,
                         });
                         self.remeasure_entry(index);
                     }
@@ -1915,7 +1945,7 @@ impl Chat {
                         raw_input,
                         raw_output,
                         expanded: false,
-                        group_expanded: false,
+                        duration_ms,
                     });
                 }
             }
@@ -1932,6 +1962,9 @@ impl Chat {
                 if let Some(locations) = &locations {
                     self.maybe_follow_location(locations, cx);
                 }
+                let measured = status
+                    .as_deref()
+                    .and_then(|status| self.tool_duration_on(&id, status));
                 if let Some(task_index) = self.subagent_task_position(&id) {
                     if let Some(Entry::SubagentTask {
                         title: existing_title,
@@ -1967,6 +2000,9 @@ impl Chat {
                         if let Some(locations) = locations {
                             call.locations = locations;
                         }
+                        if let Some(ms) = measured {
+                            call.duration_ms = Some(ms);
+                        }
                         self.remeasure_entry(task_index);
                     }
                 } else if let Some((index, Entry::ToolCall {
@@ -1977,6 +2013,7 @@ impl Chat {
                     locations: existing_locations,
                     raw_input: existing_raw_input,
                     raw_output: existing_raw_output,
+                    duration_ms: existing_duration_ms,
                     ..
                 })) = self
                     .entries
@@ -2006,6 +2043,9 @@ impl Chat {
                     if let Some(raw_output) = raw_output {
                         *existing_raw_output = Some(raw_output);
                     }
+                    if let Some(ms) = measured {
+                        *existing_duration_ms = Some(ms);
+                    }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
@@ -2021,6 +2061,7 @@ impl Chat {
                 if let Some(locations) = &locations {
                     self.maybe_follow_location(locations, cx);
                 }
+                let measured = self.tool_duration_on(&id, &status);
                 if let Some(task_index) = self.subagent_task_position(&id) {
                     if let Some(Entry::SubagentTask { status: existing_status, .. }) =
                         self.entries.get_mut(task_index)
@@ -2043,6 +2084,9 @@ impl Chat {
                         if let Some(locations) = locations {
                             call.locations = locations;
                         }
+                        if let Some(ms) = measured {
+                            call.duration_ms = Some(ms);
+                        }
                         self.remeasure_entry(task_index);
                     }
                 } else if let Some((index, Entry::ToolCall {
@@ -2052,6 +2096,7 @@ impl Chat {
                     locations: existing_locations,
                     raw_input: existing_raw_input,
                     raw_output: existing_raw_output,
+                    duration_ms: existing_duration_ms,
                     ..
                 })) = self
                     .entries
@@ -2075,6 +2120,9 @@ impl Chat {
                     }
                     if let Some(raw_output) = raw_output {
                         *existing_raw_output = Some(raw_output);
+                    }
+                    if let Some(ms) = measured {
+                        *existing_duration_ms = Some(ms);
                     }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
@@ -4029,38 +4077,6 @@ impl Chat {
         MarkdownBody::with_link_override(bezel_doc_from_legacy(document), link_click)
             .into_any_element()
     }
-    fn render_tool_output_text(text: &str, theme: &Theme) -> AnyElement {
-        let typography = theme.typography;
-        let (shown, truncated) = truncate_tool_output(text);
-        let mut column = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(theme.input_bg)
-            .px(px(10.0))
-            .py(px(6.0))
-            .gap(px(4.0));
-        if truncated {
-            column = column.child(
-                div()
-                    .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
-                    .child(format!("Showing last {TOOL_OUTPUT_MAX_CHARS} characters")),
-            );
-        }
-        column
-            .child(
-                div()
-                    .font_family(typography.code_family)
-                    .text_size(typography.code_size)
-                    .line_height(typography.code_line_height)
-                    .text_color(theme.text)
-                    .child(shown),
-            )
-            .into_any_element()
-    }
-
     /// F-CHAT-31: a diff preview for a tool call that changed a file —
     /// removed lines then added lines at each point of divergence, capped
     /// so one huge rewrite cannot make the transcript unusable.
@@ -4441,6 +4457,7 @@ impl Chat {
         edit_summary: Option<EditSummaryState>,
     ) -> impl IntoElement {
         let typography = theme.typography;
+        let bezel_theme = theme.to_bezel_theme();
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
             focus: transcript_focus,
@@ -4624,19 +4641,24 @@ impl Chat {
                 content,
                 locations,
                 expanded,
+                duration_ms,
                 ..
-            } => Self::render_tool_call_card(
+            } => Self::render_tool_row(
                 entry_index,
-                title,
-                status,
-                kind,
+                None,
+                true,
+                &title,
+                &status,
+                &kind,
+                duration_ms,
                 content,
                 locations,
                 expanded,
                 edit_summary,
                 source_start,
-                interaction.clone(),
+                Some(interaction.clone()),
                 theme,
+                &bezel_theme,
                 entity.clone(),
             ),
             Entry::SubagentTask {
@@ -4645,13 +4667,14 @@ impl Chat {
                 tool_calls,
                 expanded,
                 ..
-            } => Self::render_subagent_task_card(
+            } => Self::render_subagent_task(
                 entry_index,
                 title,
                 status,
                 tool_calls,
                 expanded,
                 theme,
+                &bezel_theme,
                 entity.clone(),
             ),
             Entry::Permission {
@@ -5075,404 +5098,6 @@ impl Chat {
         }
     }
 
-    fn render_subagent_task_card(
-        task_index: usize,
-        title: String,
-        status: String,
-        tool_calls: Vec<SubagentToolCall>,
-        expanded: bool,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let toggle_entity = entity.clone();
-        let header = div()
-            .id(("subagent-task-toggle", task_index))
-            .debug_selector(move || format!("subagent-task-toggle-{task_index}"))
-            .px(px(CARD_H_PADDING))
-            .py(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor(CursorStyle::PointingHand)
-            .child(
-                IconElement::new(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    IconSize::XSmall,
-                )
-                .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.border_strong)
-                    .child("Subagent"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(typography.callout)
-                    .text_color(theme.text)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(status),
-            )
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_subagent_task_expanded(task_index, cx);
-                });
-            });
-        let mut card = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(theme.surface_raised)
-            .border_l_2()
-            .border_color(theme.border_strong)
-            .child(header);
-        if expanded {
-            for (child_index, call) in tool_calls.into_iter().enumerate() {
-                card = card.child(Self::render_subagent_tool_call_card(
-                    task_index,
-                    child_index,
-                    call,
-                    theme,
-                    entity.clone(),
-                ));
-            }
-        }
-        card.into_any_element()
-    }
-
-    fn render_subagent_tool_call_card(
-        task_index: usize,
-        child_index: usize,
-        call: SubagentToolCall,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let SubagentToolCall {
-            title,
-            status,
-            kind,
-            content,
-            locations,
-            expanded,
-            ..
-        } = call;
-        let toggle_entity = entity.clone();
-        let header = div()
-            .id(format!(
-                "subagent-tool-call-toggle-{task_index}-{child_index}"
-            ))
-            .debug_selector(move || format!("subagent-tool-call-toggle-{task_index}-{child_index}"))
-            .pl(px(CARD_H_PADDING + 10.0))
-            .pr(px(CARD_H_PADDING))
-            .py(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor(CursorStyle::PointingHand)
-            .child(
-                IconElement::new(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    IconSize::XSmall,
-                )
-                .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(kind),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(typography.callout)
-                    .text_color(theme.text)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(status),
-            )
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_subagent_tool_call_expanded(task_index, child_index, cx);
-                });
-            });
-        let mut card = div().w_full().flex().flex_col().child(header);
-        if expanded {
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .pl(px(CARD_H_PADDING + 26.0))
-                .pr(px(CARD_H_PADDING))
-                .pb(px(CARD_V_PADDING));
-            let mut diff_ordinal = 0usize;
-            for item in &content {
-                match item {
-                    ToolCallContentInfo::Text(text) => {
-                        body = body.child(Self::render_tool_output_text(text, theme));
-                    }
-                    ToolCallContentInfo::Diff(diff) => {
-                        body = body.child(Self::render_tool_diff(
-                            diff,
-                            theme,
-                            DiffPreviewContext {
-                                id_prefix: format!(
-                                    "subagent-diff-{task_index}-{child_index}-{diff_ordinal}"
-                                ),
-                                entity: entity.clone(),
-                                // See `DiffPreviewContext::selection`: a
-                                // nested call contributes no text of its own
-                                // to `transcript_text`, so its rows are
-                                // numbered and its header opens the file, but
-                                // they are honestly not selectable.
-                                selection: None,
-                            },
-                        ));
-                        diff_ordinal += 1;
-                    }
-                    ToolCallContentInfo::Other => {}
-                }
-            }
-            if !locations.is_empty() {
-                body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
-                    locations.iter().enumerate().map(|(index, location)| {
-                        let label = match location.line {
-                            Some(line) => format!("{}:{line}", location.path.display()),
-                            None => location.path.display().to_string(),
-                        };
-                        let open_path = location.path.clone();
-                        let open_entity = entity.clone();
-                        let selector = format!(
-                            "subagent-tool-call-location-{task_index}-{child_index}-{index}"
-                        );
-                        let element_id = selector.clone();
-                        div()
-                            .id(SharedString::from(element_id))
-                            .debug_selector(move || selector.clone())
-                            .text_size(typography.footnote)
-                            .text_color(theme.file_link)
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.text_color(theme.text))
-                            .on_click(move |_, _, cx| {
-                                open_entity.update(cx, |_, cx| {
-                                    cx.emit(ChatEvent::OpenFile(open_path.clone()));
-                                });
-                            })
-                            .child(label)
-                    }),
-                ));
-            }
-            card = card.child(body);
-        }
-        card.into_any_element()
-    }
-
-    /// One tool call's card: a chevron-toggle header (kind, title, status)
-    /// and, when `expanded`, its content/diff/location detail. Shared by
-    /// the single-entry render path and by `render_tool_call_group`'s
-    /// expanded view, so a run's members look identical whether they are
-    /// standing alone or inside a group.
-    #[allow(clippy::too_many_arguments)]
-    fn render_tool_call_card(
-        entry_index: usize,
-        title: String,
-        status: String,
-        kind: String,
-        content: Vec<ToolCallContentInfo>,
-        locations: Vec<ToolCallLocationInfo>,
-        expanded: bool,
-        edit_summary: Option<EditSummaryState>,
-        source_start: usize,
-        interaction: TranscriptInteraction,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let toggle_entity = entity.clone();
-        // F-CHAT-31: the same projection `Entry::plain_text` contributes to
-        // the transcript, so every diff row drawn below can name its own
-        // offset in the global selection coordinate space.
-        let plain = tool_call_plain_text(&title, &status, &content, &locations);
-        let header = div()
-            .id(("tool-call-toggle", entry_index))
-            .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
-            .flex_1()
-            .px(px(CARD_H_PADDING))
-            .py(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor(CursorStyle::PointingHand)
-            .child(
-                IconElement::new(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    IconSize::XSmall,
-                )
-                .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(kind),
-            )
-            .child(
-                // Bezel step-row grammar: verb (above), then this detail
-                // slot, then duration-or-status pinned right. `min_w_0` +
-                // `text_ellipsis` keep the row single-line — a long title
-                // truncates instead of pushing the status off the row.
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_ellipsis()
-                    .text_size(typography.callout)
-                    .text_color(theme.text)
-                    .child(title),
-            )
-            .child(
-                // Sirio has no per-call duration today, so this is always the
-                // status; failed and cancelled keep their own words and never
-                // read as finished.
-                div()
-                    .flex_none()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(status),
-            )
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_tool_call_expanded(entry_index, cx);
-                });
-            });
-        let mut card = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(theme.surface_raised)
-            .border_l_2()
-            .border_color(theme.border_strong)
-            .child(header);
-        if expanded {
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .px(px(CARD_H_PADDING))
-                .pb(px(CARD_V_PADDING));
-            let mut diff_ordinal = 0usize;
-            for item in &content {
-                match item {
-                    ToolCallContentInfo::Text(text) => {
-                        body = body.child(Self::render_tool_output_text(text, theme));
-                    }
-                    ToolCallContentInfo::Diff(diff) => {
-                        let drawn = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text)
-                            .len()
-                            .min(DIFF_PREVIEW_MAX_LINES);
-                        body = body.child(Self::render_tool_diff(
-                            diff,
-                            theme,
-                            DiffPreviewContext {
-                                id_prefix: format!("tool-diff-{entry_index}-{diff_ordinal}"),
-                                entity: entity.clone(),
-                                selection: Some(DiffPreviewSelection {
-                                    interaction: interaction.clone(),
-                                    line_starts: plain.diff_line_starts(
-                                        diff_ordinal,
-                                        source_start,
-                                        drawn,
-                                    ),
-                                }),
-                            },
-                        ));
-                        diff_ordinal += 1;
-                    }
-                    ToolCallContentInfo::Other => {}
-                }
-            }
-            if !locations.is_empty() {
-                // F-CHAT-23: a location is a *link*, not a label. Swift makes
-                // each one a `Button { appModel.openFileReference(...) }`;
-                // the equivalent here is the same `ChatEvent::OpenFile` the
-                // edit-summary card already opens an editor tab with, so
-                // there is one door into the file, not two.
-                body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
-                    locations.iter().enumerate().map(|(index, location)| {
-                        let label = match location.line {
-                            Some(line) => {
-                                format!("{}:{line}", location.path.display())
-                            }
-                            None => location.path.display().to_string(),
-                        };
-                        let open_path = location.path.clone();
-                        let open_entity = entity.clone();
-                        let selector = format!("tool-call-location-{entry_index}-{index}");
-                        let element_id = selector.clone();
-                        div()
-                            .id(SharedString::from(element_id))
-                            .debug_selector(move || selector.clone())
-                            .text_size(typography.footnote)
-                            .text_color(theme.file_link)
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.text_color(theme.text))
-                            .on_click(move |_, _, cx| {
-                                open_entity.update(cx, |_, cx| {
-                                    cx.emit(ChatEvent::OpenFile(open_path.clone()));
-                                });
-                            })
-                            .child(label)
-                    }),
-                ));
-            }
-            card = card.child(body);
-        }
-        let diffs = content
-            .iter()
-            .filter_map(|content| match content {
-                ToolCallContentInfo::Diff(diff) => Some(diff.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if !diffs.is_empty() {
-            card = card.child(Self::render_edit_summary(
-                entry_index,
-                diffs,
-                edit_summary.unwrap_or_default(),
-                theme,
-                entity.clone(),
-            ));
-        }
-        card.into_any_element()
-    }
-
     /// F-CHAT-22, turn half: the single row an older turn collapses to.
     ///
     /// Swift's `TurnFoldRow` — a chevron, `Turn: <label>`, the turn's clock
@@ -5522,121 +5147,6 @@ impl Chat {
                     .child(at),
             )
             .into_any_element()
-    }
-
-    /// F-CHAT-22: a consecutive run of tool calls, collapsed by default to
-    /// one "N steps" header. `members` is every entry in the run in order;
-    /// `group_index` is the run's last entry, the only index the transcript
-    /// list actually draws a row for (see `tool_call_run_bounds`), so the
-    /// header's toggle and its `group_expanded` state both key off it.
-    /// Collapsed, each member shows as a compact one-line status row;
-    /// expanded, each renders through `render_tool_call_card` exactly as it
-    /// would standing alone, keyed by its own transcript index so its own
-    /// F-CHAT-23 detail toggle still works independently.
-    fn render_tool_call_group(
-        members: Vec<(usize, usize, Entry)>,
-        group_index: usize,
-        group_expanded: bool,
-        transcript_focus: FocusHandle,
-        cwd: &Path,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let count = members.len();
-        let toggle_entity = entity.clone();
-        let header = div()
-            .id(("tool-call-group-toggle", group_index))
-            .debug_selector(move || format!("tool-call-group-toggle-{group_index}"))
-            .px(px(CARD_H_PADDING))
-            .py(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(TOOL_CALL_GROUP_GAP))
-            .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.text_color(theme.text))
-            .child(
-                IconElement::new(
-                    if group_expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    IconSize::XSmall,
-                )
-                .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .text_size(typography.callout)
-                    .text_color(theme.text_muted)
-                    .italic()
-                    .child(tool_group_label(count)),
-            )
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_tool_call_group_expanded(group_index, cx);
-                });
-            });
-        let mut column = div().w_full().flex().flex_col().gap(px(2.0)).child(header);
-        if group_expanded {
-            for (member_index, member_source_start, member) in members {
-                if let Entry::ToolCall {
-                    title,
-                    status,
-                    kind,
-                    content,
-                    locations,
-                    expanded,
-                    ..
-                } = member
-                {
-                    column = column.child(Self::render_tool_call_card(
-                        member_index,
-                        title,
-                        status,
-                        kind,
-                        content,
-                        locations,
-                        expanded,
-                        None,
-                        member_source_start,
-                        TranscriptInteraction {
-                            chat: entity.clone(),
-                            focus: transcript_focus.clone(),
-                        },
-                        theme,
-                        entity.clone(),
-                    ));
-                }
-            }
-        } else {
-            for (member_index, _, member) in members {
-                if let Entry::ToolCall {
-                    title,
-                    status,
-                    locations,
-                    ..
-                } = member
-                {
-                    column = column.child(
-                        div()
-                            .id(("tool-call-group-member", member_index))
-                            .debug_selector(move || {
-                                format!("tool-call-group-member-{member_index}")
-                            })
-                            .pl(px(TOOL_CALL_GROUP_MEMBER_INDENT))
-                            .text_size(typography.footnote)
-                            .text_color(theme.text_faint)
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis_start()
-                            .child(collapsed_tool_row_text(&status, &title, &locations, cwd)),
-                    );
-                }
-            }
-        }
-        column.into_any_element()
     }
 
     /// Blink timer tick for the question answer field's caret.
@@ -7263,6 +6773,7 @@ impl Render for Chat {
         // copy — never `Theme::dark()`, never a field.
         let theme = *Theme::get(cx);
         let transcript_theme = theme;
+        let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let entity = cx.entity();
         let entity_for_bar = entity.clone();
         let transcript_ranges = self.transcript_entry_ranges();
@@ -7410,14 +6921,17 @@ impl Render for Chat {
                                     }
                                     TurnRowRole::Normal => {}
                                 }
-                                // F-CHAT-22: a run of consecutive tool calls
-                                // renders as one group, keyed to the run's
-                                // last index. Every other index in that run
-                                // is "swallowed" — an empty row — since the
-                                // list requires one measured row per index
-                                // but the group's card lives only at the tail.
+                                // F-CHAT-22: a run of consecutive tool
+                                // calls renders as one bordered box, keyed
+                                // to the run's last index. Every other
+                                // index in that run is "swallowed" — an
+                                // empty row — since the list requires one
+                                // measured row per index but the box lives
+                                // only at the tail. A lone call is its own
+                                // box with one row (the gallery's rule),
+                                // and consecutive same-verb calls fold.
                                 if let Some((start, end)) =
-                                    tool_call_run_bounds(&this.entries, entry_index)
+                                    tool_call_run_bounds_inclusive(&this.entries, entry_index)
                                 {
                                     if entry_index != end {
                                         return div()
@@ -7435,13 +6949,6 @@ impl Render for Chat {
                                             })
                                         })
                                         .collect();
-                                    let group_expanded = matches!(
-                                        this.entries.get(end),
-                                        Some(Entry::ToolCall {
-                                            group_expanded: true,
-                                            ..
-                                        })
-                                    );
                                     // Bezel Transcript pattern §2: a work
                                     // zone sits 8px from the answer that
                                     // follows it, tighter than the 10px
@@ -7451,13 +6958,11 @@ impl Render for Chat {
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
-                                        .child(Chat::render_tool_call_group(
+                                        .child(this.render_tool_run(
                                             members,
-                                            end,
-                                            group_expanded,
                                             transcript_focus.clone(),
-                                            &this.agent_cwd,
                                             &transcript_theme,
+                                            &bezel_theme,
                                             entity.clone(),
                                         ))
                                         .into_any_element();
@@ -7763,11 +7268,10 @@ fn option_hash(option: &AnswerOption) -> usize {
 }
 
 /// F-CHAT-22: the `[start, end]` bounds (inclusive) of the consecutive run
-/// of `Entry::ToolCall` entries that `index` belongs to, when that run has
-/// more than one member. Returns `None` for a lone tool call or an index
-/// that isn't a tool call at all — the caller then falls back to the
-/// ordinary single-entry render path instead of grouping.
-fn tool_call_run_bounds(entries: &[Entry], index: usize) -> Option<(usize, usize)> {
+/// of `Entry::ToolCall` entries that `index` belongs to — `(index, index)`
+/// for a lone call. Returns `None` only for an index that isn't a tool call
+/// at all.
+fn tool_call_run_bounds_inclusive(entries: &[Entry], index: usize) -> Option<(usize, usize)> {
     if !matches!(entries.get(index), Some(Entry::ToolCall { .. })) {
         return None;
     }
@@ -7779,18 +7283,7 @@ fn tool_call_run_bounds(entries: &[Entry], index: usize) -> Option<(usize, usize
     while matches!(entries.get(end + 1), Some(Entry::ToolCall { .. })) {
         end += 1;
     }
-    (end > start).then_some((start, end))
-}
-
-/// The header for a run of consecutive tool calls, in the Bezel Transcript
-/// pattern's words. Pure, so the singular/plural split is testable without a
-/// window.
-fn tool_group_label(count: usize) -> String {
-    if count == 1 {
-        "Worked · 1 step".to_string()
-    } else {
-        format!("Worked · {count} steps")
-    }
+    Some((start, end))
 }
 
 /// F-CHAT-22, turn half: how many of the most recent turns stay open. Swift's
@@ -7932,21 +7425,6 @@ fn turn_row_roles(entries: &[Entry], unfolded: &BTreeSet<usize>) -> Vec<TurnRowR
     roles
 }
 
-/// F-CHAT-23: caps a tool call's rendered text output. Kept as the tail
-/// rather than the head — a long run's result or error is usually at the
-/// end, not the start.
-const TOOL_OUTPUT_MAX_CHARS: usize = 2000;
-
-fn truncate_tool_output(text: &str) -> (String, bool) {
-    let char_count = text.chars().count();
-    if char_count <= TOOL_OUTPUT_MAX_CHARS {
-        (text.to_string(), false)
-    } else {
-        let skip = char_count - TOOL_OUTPUT_MAX_CHARS;
-        (text.chars().skip(skip).collect(), true)
-    }
-}
-
 /// F-CHAT-31: one line of a diff preview.
 ///
 /// `number` is the line's position in the file it belongs to — the *new*
@@ -8070,53 +7548,6 @@ impl ToolCallPlainText {
             .map(|offset| entry_start + self.offset_of(first + offset))
             .collect()
     }
-}
-
-/// Names the first file a collapsed tool call touched, keeping the path
-/// useful without repeating a path already present in the tool title.
-fn collapsed_tool_row_text(
-    status: &str,
-    title: &str,
-    locations: &[ToolCallLocationInfo],
-    cwd: &Path,
-) -> String {
-    let base = format!("{status} · {title}");
-    let Some(location) = locations.first() else {
-        return base;
-    };
-
-    // Both sides go through `display_absolute_path` so a verbatim `\\?\`
-    // prefix never survives the comparison — after stripping, the strings
-    // compare component-for-component against a plain cwd.
-    let location_string = display_absolute_path(&location.path);
-    let relative = Path::new(&location_string)
-        .strip_prefix(display_absolute_path(cwd))
-        .ok()
-        .filter(|path| !path.as_os_str().is_empty());
-    let target = relative
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| {
-            if location.path == cwd {
-                ".".to_string()
-            } else {
-                display_path(&location.path)
-            }
-        });
-    if target.is_empty() {
-        return base;
-    }
-
-    let title_for_match = title.replace('\\', "/").to_lowercase();
-    let target_for_match = target.replace('\\', "/").to_lowercase();
-    if title_for_match.contains(&target_for_match) {
-        return base;
-    }
-
-    let target = match location.line {
-        Some(line) => format!("{target}:{line}"),
-        None => target,
-    };
-    format!("{base} {target}")
 }
 
 fn tool_call_plain_text(
@@ -8556,8 +7987,10 @@ mod tests {
     /// A freshly drawn frame, so `debug_bounds` reads state that actually
     /// rendered rather than the last stale frame.
     fn refresh_frame(cx: &mut VisualTestContext) {
-        cx.update(|window, _| window.refresh());
-        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
     }
 
     fn chat_view<'a>(
@@ -8984,7 +8417,7 @@ two"
             raw_input: None,
             raw_output: None,
             expanded: false,
-            group_expanded: false,
+            duration_ms: None,
         };
 
         let stored = persisted_entry(&live).expect("a tool call is persisted");
@@ -9005,6 +8438,92 @@ two"
             }],
             "the file the call touched must survive the round trip"
         );
+    }
+
+    /// A call's duration is the wall clock between its start and its first
+    /// terminal status, and it survives a restart; a call restored from a
+    /// database written before the field has none.
+    #[gpui::test]
+    async fn a_tool_call_measures_its_duration_and_persists_it(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallStarted {
+                    id: "t1".into(),
+                    title: "cargo test".into(),
+                    status: "in_progress".into(),
+                    kind: "Execute".into(),
+                    content: vec![],
+                    locations: vec![],
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+            assert!(
+                matches!(
+                    chat.entries.last(),
+                    Some(Entry::ToolCall {
+                        duration_ms: None,
+                        ..
+                    })
+                ),
+                "no duration while the call runs"
+            );
+            chat.handle_event(
+                AcpEvent::ToolCallCompleted {
+                    id: "t1".into(),
+                    status: "completed".into(),
+                    kind: None,
+                    content: None,
+                    locations: None,
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+        });
+        let duration = chat.read_with(cx, |chat, _| match chat.entries.last() {
+            Some(Entry::ToolCall { duration_ms, .. }) => *duration_ms,
+            other => panic!("expected a tool call, got {other:?}"),
+        });
+        assert!(
+            duration.is_some(),
+            "a terminal status stores the elapsed time"
+        );
+        assert!(
+            chat.read_with(cx, |chat, _| chat.tool_started.is_empty()),
+            "the start is consumed once measured"
+        );
+
+        let persisted = chat.read_with(cx, |chat, _| persisted_entry(chat.entries.last().unwrap()));
+        assert!(
+            matches!(
+                persisted,
+                Some(ChatEntry::ToolCall {
+                    duration_ms: Some(_),
+                    ..
+                })
+            ),
+            "the duration is written to the persisted entry"
+        );
+        let restored = restored_entry(ChatEntry::ToolCall {
+            id: "old".into(),
+            title: "Read".into(),
+            status: "completed".into(),
+            kind: Some("Read".into()),
+            locations: vec![],
+            duration_ms: None,
+        });
+        assert!(matches!(
+            restored,
+            Entry::ToolCall {
+                duration_ms: None,
+                ..
+            }
+        ));
     }
 
     /// A row written before #168 carries neither field and must restore
@@ -9735,8 +9254,8 @@ let answer = 42;
                 locations: vec![],
                 raw_input: None,
                 raw_output: None,
-                expanded: false,
-                group_expanded: false,
+                expanded: true,
+                duration_ms: None,
             });
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
@@ -9751,8 +9270,8 @@ let answer = 42;
                 locations: vec![],
                 raw_input: None,
                 raw_output: None,
-                expanded: false,
-                group_expanded: false,
+                expanded: true,
+                duration_ms: None,
             });
             chat
         });
@@ -9845,6 +9364,20 @@ let answer = 42;
             cx.debug_bounds("subagent-task-toggle-1").is_some(),
             "the subagent task card is drawn"
         );
+        // The task is its own run box, and its header row sits inside it.
+        let run = cx
+            .debug_bounds("tool-run-1")
+            .expect("the task is a run box");
+        let task_toggle = cx
+            .debug_bounds("subagent-task-toggle-1")
+            .expect("subagent task toggle");
+        assert!(
+            run.left() <= task_toggle.left()
+                && task_toggle.right() <= run.right()
+                && run.top() <= task_toggle.top()
+                && task_toggle.bottom() <= run.bottom(),
+            "the task header sits inside its run box: run={run:?} toggle={task_toggle:?}"
+        );
         assert!(
             cx.debug_bounds("subagent-tool-call-toggle-1-0").is_none(),
             "nested tool calls stay collapsed with their parent card"
@@ -9855,9 +9388,12 @@ let answer = 42;
             .expect("subagent task toggle");
         cx.simulate_click(task_toggle.center(), Modifiers::none());
         cx.run_until_parked();
+        let child = cx
+            .debug_bounds("subagent-tool-call-toggle-1-0")
+            .expect("expanding the task reveals its nested tool call");
         assert!(
-            cx.debug_bounds("subagent-tool-call-toggle-1-0").is_some(),
-            "expanding the task reveals its nested tool call"
+            child.left() > task_toggle.left(),
+            "a nested call is indented under the task header: child={child:?} header={task_toggle:?}"
         );
 
         let child_toggle = cx
@@ -10080,7 +9616,12 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(entry, Entry::Permission { resolved: Some(choice), .. } if choice == "Deny once")
-            })
+            }) && chat
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TurnFooter(_)))
+                .count()
+                == 2
         });
         let (answered, footers) = chat.read_with(&cx.cx, |chat, _| {
             let answered = chat
@@ -11330,136 +10871,6 @@ let answer = 42;
         assert_eq!(default_agent_cwd(), std::env::current_dir().unwrap());
     }
 
-    #[test]
-    fn a_tool_run_is_labelled_as_a_work_zone() {
-        assert_eq!(tool_group_label(1), "Worked · 1 step");
-        assert_eq!(tool_group_label(4), "Worked · 4 steps");
-    }
-
-    #[test]
-    fn collapsed_tool_row_text_names_a_relative_location_and_line() {
-        let cwd = Path::new("/workspace");
-        let locations = vec![ToolCallLocationInfo {
-            path: cwd.join("src").join("main.rs"),
-            line: Some(42),
-        }];
-
-        assert_eq!(
-            collapsed_tool_row_text("Completed", "read", &locations, cwd),
-            format!(
-                "Completed · read {}:42",
-                Path::new("src").join("main.rs").display()
-            )
-        );
-    }
-
-    #[test]
-    fn collapsed_tool_row_text_keeps_the_existing_bash_row_unchanged() {
-        assert_eq!(
-            collapsed_tool_row_text(
-                "Completed",
-                "git status --short",
-                &[],
-                Path::new("/workspace")
-            ),
-            "Completed · git status --short"
-        );
-    }
-
-    #[test]
-    fn collapsed_tool_row_text_does_not_repeat_a_path_in_the_title() {
-        let cwd = Path::new("/workspace");
-        let relative = Path::new("src").join("main.rs");
-        let locations = vec![ToolCallLocationInfo {
-            path: cwd.join(&relative),
-            line: Some(42),
-        }];
-        let title = format!("read {}", relative.display());
-
-        assert_eq!(
-            collapsed_tool_row_text("Completed", &title, &locations, cwd),
-            format!("Completed · {title}")
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn collapsed_tool_row_text_uses_display_path_outside_the_cwd() {
-        let locations = vec![ToolCallLocationInfo {
-            path: PathBuf::from("/other/project/file.rs"),
-            line: None,
-        }];
-
-        assert_eq!(
-            collapsed_tool_row_text("Completed", "read", &locations, Path::new("/workspace")),
-            "Completed · read /other/project/file.rs"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn collapsed_tool_row_text_strips_the_windows_verbatim_prefix_outside_the_cwd() {
-        let locations = vec![ToolCallLocationInfo {
-            path: PathBuf::from(r"\\?\D:\outside\file.rs"),
-            line: None,
-        }];
-        let row =
-            collapsed_tool_row_text("Completed", "read", &locations, Path::new(r"D:\workspace"));
-
-        assert!(!row.contains(r"\\?\"), "collapsed row leaked {row}");
-        assert!(row.contains(r"D:\outside\file.rs"), "row = {row}");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn collapsed_tool_row_text_shortens_a_verbatim_location_against_a_plain_cwd() {
-        let locations = vec![ToolCallLocationInfo {
-            path: PathBuf::from(r"\\?\D:\workspace\src\main.rs"),
-            line: None,
-        }];
-
-        assert_eq!(
-            collapsed_tool_row_text("Completed", "read", &locations, Path::new(r"D:\workspace"),),
-            format!("Completed · read src{}main.rs", std::path::MAIN_SEPARATOR),
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn collapsed_tool_row_text_shortens_a_plain_location_against_a_verbatim_cwd() {
-        let locations = vec![ToolCallLocationInfo {
-            path: PathBuf::from(r"D:\workspace\src\main.rs"),
-            line: None,
-        }];
-
-        assert_eq!(
-            collapsed_tool_row_text(
-                "Completed",
-                "read",
-                &locations,
-                Path::new(r"\\?\D:\workspace"),
-            ),
-            format!("Completed · read src{}main.rs", std::path::MAIN_SEPARATOR),
-        );
-    }
-
-    /// F-CHAT-23: text output past the cap is truncated to its tail, not
-    /// its head — a long run's result or error usually lands at the end.
-    #[test]
-    fn truncate_tool_output_keeps_the_tail_past_the_cap() {
-        let (shown, truncated) = truncate_tool_output("short output");
-        assert_eq!(shown, "short output");
-        assert!(!truncated);
-
-        let long: String = (0..(TOOL_OUTPUT_MAX_CHARS + 500))
-            .map(|index| char::from(b'a' + (index % 26) as u8))
-            .collect();
-        let (shown, truncated) = truncate_tool_output(&long);
-        assert!(truncated);
-        assert_eq!(shown.chars().count(), TOOL_OUTPUT_MAX_CHARS);
-        assert_eq!(shown, &long[long.len() - TOOL_OUTPUT_MAX_CHARS..]);
-    }
-
     /// F-CHAT-31: matching lines stay context; a changed line emits the old
     /// text as `Removed` then the new text as `Added` at the point the two
     /// texts diverge, and a pure addition/deletion needs no counterpart.
@@ -11546,57 +10957,22 @@ let answer = 42;
             raw_input: None,
             raw_output: None,
             expanded: false,
-            group_expanded: false,
+            duration_ms: None,
         }
     }
 
     #[test]
-    fn tool_call_run_bounds_is_none_for_a_non_tool_call_entry() {
-        let entries = vec![Entry::User("hi".into())];
-        assert_eq!(tool_call_run_bounds(&entries, 0), None);
-    }
-
-    #[test]
-    fn tool_call_run_bounds_is_none_for_a_lone_tool_call() {
-        let entries = vec![
-            Entry::User("hi".into()),
-            test_tool_call("tool-1"),
-            Entry::User("bye".into()),
-        ];
-        assert_eq!(
-            tool_call_run_bounds(&entries, 1),
-            None,
-            "a run of one is not a group"
-        );
-    }
-
-    #[test]
-    fn tool_call_run_bounds_spans_a_consecutive_run_and_ignores_neighbors() {
+    fn tool_call_run_bounds_inclusive_singles_a_lone_call_and_spans_runs() {
         let entries = vec![
             Entry::User("hi".into()),
             test_tool_call("tool-1"),
             test_tool_call("tool-2"),
-            test_tool_call("tool-3"),
             Entry::User("bye".into()),
         ];
-        assert_eq!(tool_call_run_bounds(&entries, 1), Some((1, 3)));
-        assert_eq!(tool_call_run_bounds(&entries, 2), Some((1, 3)));
-        assert_eq!(tool_call_run_bounds(&entries, 3), Some((1, 3)));
-    }
-
-    #[test]
-    fn tool_call_run_bounds_treats_two_separate_runs_independently() {
-        let entries = vec![
-            test_tool_call("tool-1"),
-            test_tool_call("tool-2"),
-            Entry::User("in between".into()),
-            test_tool_call("tool-3"),
-            test_tool_call("tool-4"),
-        ];
-        assert_eq!(tool_call_run_bounds(&entries, 0), Some((0, 1)));
-        assert_eq!(tool_call_run_bounds(&entries, 1), Some((0, 1)));
-        assert_eq!(tool_call_run_bounds(&entries, 3), Some((3, 4)));
-        assert_eq!(tool_call_run_bounds(&entries, 4), Some((3, 4)));
+        assert_eq!(tool_call_run_bounds_inclusive(&entries, 0), None);
+        assert_eq!(tool_call_run_bounds_inclusive(&entries, 1), Some((1, 2)));
+        assert_eq!(tool_call_run_bounds_inclusive(&entries, 2), Some((1, 2)));
+        assert_eq!(tool_call_run_bounds_inclusive(&entries, 3), None);
     }
 
     #[gpui::test]
@@ -12573,7 +11949,7 @@ let answer = 42;
                 raw_input,
                 raw_output,
                 expanded,
-                group_expanded,
+                duration_ms,
             }) => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(title, "Edit file");
@@ -12584,7 +11960,7 @@ let answer = 42;
                 assert!(raw_input.is_some());
                 assert!(raw_output.is_some());
                 assert!(!expanded, "a new tool call starts collapsed");
-                assert!(!group_expanded, "a new tool call starts group-collapsed");
+                assert!(duration_ms.is_none(), "a running tool call has no duration");
             }
             other => panic!("expected a widened ToolCall entry, got {other:?}"),
         });
@@ -12615,7 +11991,7 @@ let answer = 42;
                 raw_input: None,
                 raw_output: None,
                 expanded: false,
-                group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -12680,7 +12056,7 @@ let answer = 42;
                 raw_input: None,
                 raw_output: None,
                 expanded: false,
-                group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -12711,109 +12087,197 @@ let answer = 42;
         assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
     }
 
+    /// A call is one `step_row`: icon and verb from its kind, the title as
+    /// the truncating detail, the duration (or the status word) pinned right,
+    /// and a chevron only when there is something to open.
     #[gpui::test]
-    async fn consecutive_tool_calls_group_under_one_toggle_and_expand_to_full_cards(
+    async fn a_tool_call_is_a_step_row_with_a_chevron_only_when_it_has_a_body(
         cx: &mut TestAppContext,
     ) {
-        // F-CHAT-22: three tool calls run back-to-back land as one "3 steps"
-        // group, not three separate cards — and expanding it reveals every
-        // member as its own full card, keyed by its own transcript index.
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(
-                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
-                cx,
-            );
-            for id in ["tool-1", "tool-2", "tool-3"] {
-                chat.push_entry(Entry::ToolCall {
-                    id: id.into(),
-                    title: format!("{id} title"),
-                    status: "Completed".into(),
-                    kind: "Edit".into(),
-                    content: vec![],
-                    locations: vec![],
-                    raw_input: None,
-                    raw_output: None,
-                    expanded: false,
-                    group_expanded: false,
-                });
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            let mut bare = test_tool_call("bare");
+            if let Entry::ToolCall {
+                content,
+                locations,
+                duration_ms,
+                ..
+            } = &mut bare
+            {
+                content.clear();
+                locations.clear();
+                *duration_ms = Some(1412);
             }
+            chat.push_entry(bare);
+            chat.push_entry(Entry::Assistant {
+                text: "x".into(),
+                document: parse_chat_markdown("x"),
+            });
+            let mut full = test_tool_call("full");
+            if let Entry::ToolCall {
+                content,
+                locations,
+                status,
+                duration_ms,
+                ..
+            } = &mut full
+            {
+                content.push(ToolCallContentInfo::Text("hello from the tool".into()));
+                // A path long enough that the link must clip inside the
+                // run box rather than run past it.
+                locations.push(ToolCallLocationInfo {
+                    path: std::path::PathBuf::from(format!("/{}", "a".repeat(300))),
+                    line: None,
+                });
+                *status = "failed".into();
+                *duration_ms = None;
+            }
+            chat.push_entry(full);
             chat
         });
-        cx.update(|window, _| window.refresh());
-
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("tool-call-toggle-0").is_some());
         assert!(
-            cx.debug_bounds("tool-call-group-toggle-2").is_some(),
-            "three consecutive tool calls collapse under one group toggle"
+            cx.debug_bounds("tool-call-chevron-0").is_none(),
+            "nothing to open, no chevron"
         );
         assert!(
-            cx.debug_bounds("tool-call-toggle-0").is_none(),
-            "a collapsed group does not render its members' own toggles"
-        );
-
-        let group_toggle = cx
-            .debug_bounds("tool-call-group-toggle-2")
-            .expect("group toggle is rendered");
-        cx.simulate_click(group_toggle.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("tool-call-toggle-0").is_some(),
-            "expanding the group renders the first member as its own full card"
+            cx.debug_bounds("tool-call-meta-0-1.4s").is_some(),
+            "a measured call shows its duration"
         );
         assert!(
-            cx.debug_bounds("tool-call-toggle-1").is_some(),
-            "expanding the group renders the second member as its own full card"
+            cx.debug_bounds("tool-call-chevron-2").is_some(),
+            "text output opens"
         );
         assert!(
-            cx.debug_bounds("tool-call-toggle-2").is_some(),
-            "expanding the group renders the third member as its own full card"
+            cx.debug_bounds("tool-call-meta-2-failed").is_some(),
+            "unmeasured shows the status word"
         );
-
-        let group_toggle = cx
-            .debug_bounds("tool-call-group-toggle-2")
-            .expect("group toggle stays rendered while expanded");
-        cx.simulate_click(group_toggle.center(), Modifiers::none());
-        cx.run_until_parked();
-
         assert!(
-            cx.debug_bounds("tool-call-toggle-0").is_none(),
-            "clicking again collapses the group back"
+            cx.debug_bounds("tool-call-failed-2").is_some(),
+            "a failed row is flagged"
+        );
+        assert!(
+            cx.debug_bounds("tool-output-2-0").is_none(),
+            "closed until clicked"
+        );
+        let row = cx.debug_bounds("tool-call-toggle-2").expect("row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("tool-output-2-0").is_some(),
+            "the row opens onto its output"
+        );
+        let link = cx.debug_bounds("tool-call-location-2-0").expect("the link");
+        let run = cx.debug_bounds("tool-run-2").expect("the lone call's box");
+        assert!(
+            link.right() <= run.right(),
+            "a long path ends in an ellipsis inside the box: link={link:?} run={run:?}"
         );
     }
 
+    /// A run of consecutive calls is one bordered box; inside it, consecutive
+    /// calls of the same verb fold under a `Verb · N` header that opens on
+    /// click — `chunk_by` twice, the gallery's own finding.
     #[gpui::test]
-    async fn collapsed_tool_call_rows_stay_single_line_with_long_paths(cx: &mut TestAppContext) {
+    async fn a_run_is_one_box_and_same_verb_calls_fold(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let cwd = std::env::temp_dir();
         let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, cwd.clone(), cx);
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            for (id, kind) in [
+                ("a", "Read"),
+                ("b", "Read"),
+                ("c", "Read"),
+                ("d", "Execute"),
+            ] {
+                let mut call = test_tool_call(id);
+                if let Entry::ToolCall { kind: k, .. } = &mut call {
+                    *k = kind.into();
+                }
+                chat.push_entry(call);
+            }
+            chat.push_entry(Entry::Assistant {
+                text: "done".into(),
+                document: parse_chat_markdown("done"),
+            });
+            chat.push_entry(test_tool_call("e"));
+            chat
+        });
+        refresh_frame(cx);
+        let run = cx
+            .debug_bounds("tool-run-0")
+            .expect("the four calls share one box");
+        assert!(
+            cx.debug_bounds("tool-run-5").is_some(),
+            "the lone call after the prose is its own box"
+        );
+        assert!(cx.debug_bounds("tool-run-1").is_none());
+        let fold = cx
+            .debug_bounds("tool-fold-0")
+            .expect("three Reads fold under one header");
+        assert!(
+            cx.debug_bounds("tool-call-toggle-0").is_none(),
+            "folded members are not drawn"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-3").is_some(),
+            "the Execute row stands on its own"
+        );
+        assert!(
+            cx.debug_bounds("tool-fold-3").is_none(),
+            "a run of one has no fold header"
+        );
+        assert!(fold.top() >= run.top() && fold.bottom() <= run.bottom());
+
+        cx.simulate_click(fold.center(), Modifiers::none());
+        refresh_frame(cx);
+        let member = cx
+            .debug_bounds("tool-call-toggle-1")
+            .expect("opening the fold draws its members");
+        assert!(
+            member.left() > fold.left(),
+            "members are indented under the header"
+        );
+        let fold_again = cx
+            .debug_bounds("tool-fold-0")
+            .expect("fold header persists");
+        cx.simulate_click(fold_again.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("tool-call-toggle-1").is_none(),
+            "clicking again folds them back"
+        );
+    }
+
+    /// A long title truncates in the row's detail slot instead of wrapping:
+    /// the row stays one line tall.
+    #[gpui::test]
+    async fn a_tool_row_with_a_long_title_stays_one_line(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.push_entry(test_tool_call("short"));
             let mut long = test_tool_call("long");
-            if let Entry::ToolCall { locations, .. } = &mut long {
-                locations.push(ToolCallLocationInfo {
-                    path: cwd.join(format!("{}file.rs", "directory ".repeat(80))),
-                    line: None,
-                });
+            if let Entry::ToolCall { title, kind, .. } = &mut long {
+                *title = format!("{}file.rs", "directory ".repeat(80));
+                *kind = "Execute".into();
             }
             chat.push_entry(long);
             chat
         });
         refresh_frame(cx);
-
-        let short = cx
-            .debug_bounds("tool-call-group-member-0")
-            .expect("the short collapsed row is drawn");
-        let long = cx
-            .debug_bounds("tool-call-group-member-1")
-            .expect("the long collapsed row is drawn");
+        let short = cx.debug_bounds("tool-call-toggle-0").expect("short row");
+        let long = cx.debug_bounds("tool-call-toggle-1").expect("long row");
         assert_eq!(
-            long.size.height, short.size.height,
-            "a long target must stay a single-line row: short={short:?} long={long:?}"
+            short.size.height, long.size.height,
+            "the detail truncates, the row does not grow"
         );
+        assert!(long.right() <= cx.debug_bounds("tool-run-0").unwrap().right());
     }
 
     #[gpui::test]
@@ -14297,7 +13761,7 @@ let answer = 42;
                 raw_input: None,
                 raw_output: None,
                 expanded: true,
-                group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -14368,7 +13832,7 @@ let answer = 42;
                 raw_input: None,
                 raw_output: None,
                 expanded: true,
-                group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -14476,7 +13940,7 @@ let answer = 42;
             raw_input: None,
             raw_output: None,
             expanded: true,
-            group_expanded: false,
+            duration_ms: None,
         };
         let Entry::ToolCall {
             title,

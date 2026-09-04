@@ -270,10 +270,10 @@ unchanged, stacked with `gap 6` under `px 12 pb 8`.
 ### Deletions
 
 `render_tool_call_card`'s header, `render_tool_call_group`,
-`collapsed_tool_row_text`, `TOOL_CALL_GROUP_*` constants. The
-`group_expanded` field on `Entry::ToolCall` and its persistence counterpart
-stay in place through sub-project 2 (still read by the current transcript)
-and are removed by sub-project 4.
+`collapsed_tool_row_text`, `TOOL_CALL_GROUP_*` constants. `group_expanded`
+was removed in sub-project 2 itself (nothing read it once the run box
+replaced the "N steps" header); sub-project 4 adds the Work zone's own
+`work_open`.
 
 ### Tests
 
@@ -419,6 +419,7 @@ against the same selectors.
   reviewed against the reference screenshots and the acceptance list below.
 - Sub-project 1 landed on branch `feat/composer-bezel-textfield` (2026-09-04).
 - Revised 2026-09-04: the control row inside the card was rejected by the user; the card is the gallery's and the controls sit in a toolbar above it.
+- Sub-project 2 landed on branch `feat/tool-calls-step-row` (2026-09-04).
 - Implementation by a pi or opencode agent in a Herdr pane (models
   `opencode-go/gpt-5.6-luna` and `opencode-go/muse-spark-1.3-contributor`),
   one writer per sub-project, driven by a task file that carries this spec's
