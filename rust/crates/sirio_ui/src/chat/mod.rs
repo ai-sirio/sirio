@@ -41,6 +41,8 @@ use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
+mod composer_view;
+
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
 /// file before falling back to opening it externally. `None` keeps the
@@ -56,6 +58,7 @@ fn highlight_markdown_code(
 }
 
 /// Installs the app-owned syntax highlighter used by bezel-markdown code
+
 /// blocks. The renderer remains usable without this registration and simply
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {
