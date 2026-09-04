@@ -515,11 +515,6 @@ enum Entry {
     /// reported, when it reported them. `expanded` starts `false`, same as
     /// `Thought` (F-CHAT-21): the card renders as one line until the reader
     /// opts in.
-    ///
-    /// consecutive run of tool calls — that is the entry the transcript
-    /// renders the "N steps" toggle against, since a run has no separate
-    /// grouping record of its own. It is meaningless, and ignored, on any
-    /// entry that is not currently a run's tail.
     ToolCall {
         id: String,
         title: String,
@@ -7273,10 +7268,9 @@ fn option_hash(option: &AnswerOption) -> usize {
 }
 
 /// F-CHAT-22: the `[start, end]` bounds (inclusive) of the consecutive run
-/// of `Entry::ToolCall` entries that `index` belongs to, when that run has
-/// more than one member. Returns `None` for a lone tool call or an index
-/// that isn't a tool call at all — the caller then falls back to the
-/// ordinary single-entry render path instead of grouping.
+/// of `Entry::ToolCall` entries that `index` belongs to — `(index, index)`
+/// for a lone call. Returns `None` only for an index that isn't a tool call
+/// at all.
 fn tool_call_run_bounds_inclusive(entries: &[Entry], index: usize) -> Option<(usize, usize)> {
     if !matches!(entries.get(index), Some(Entry::ToolCall { .. })) {
         return None;
@@ -7292,9 +7286,6 @@ fn tool_call_run_bounds_inclusive(entries: &[Entry], index: usize) -> Option<(us
     Some((start, end))
 }
 
-/// The header for a run of consecutive tool calls, in the Bezel Transcript
-/// pattern's words. Pure, so the singular/plural split is testable without a
-/// window.
 /// F-CHAT-22, turn half: how many of the most recent turns stay open. Swift's
 /// `TimelineBuilder.openTurnCount` — "current + previous".
 const OPEN_TURN_COUNT: usize = 2;
