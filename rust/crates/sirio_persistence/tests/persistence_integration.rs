@@ -621,6 +621,7 @@ fn sample_chat_transcript() -> ChatTranscript {
                             path: "src/main.rs".into(),
                             line: Some(42),
                         }],
+                        duration_ms: None,
                     },
                 ],
             },

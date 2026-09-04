@@ -553,6 +553,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
                 status,
                 kind: Some(kind),
                 locations: persisted_locations(&locations),
+                duration_ms: None,
             });
             state.status = ChatStatus::Streaming;
             EventFold::default()
