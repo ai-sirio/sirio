@@ -9,11 +9,11 @@
 
 use bezel::ui::icons;
 use bezel::ui::widgets::{Status as _, step_row_hover};
-use gpui::{AnyElement, Div, Entity, FocusHandle, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Div, ElementId, Entity, FocusHandle, SharedString, div, prelude::*, px};
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
-    Entry, TranscriptInteraction, diff_preview_lines, tool_call_plain_text,
+    Entry, SubagentToolCall, TranscriptInteraction, diff_preview_lines, tool_call_plain_text,
 };
 use sirio_acp::{ToolCallContentInfo, ToolCallLocationInfo};
 use sirio_theme::Theme;
@@ -101,10 +101,14 @@ impl Chat {
     }
 
     /// One call: the row, then — when open — its body. `first` skips the
-    /// hairline above, so a run box needs no divider of its own.
+    /// hairline above, so a run box needs no divider of its own. `nested`
+    /// addresses a call inside a subagent task rather than a transcript
+    /// entry: its own toggle ids, and a body without the edit summary or
+    /// transcript selection.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_tool_row(
         entry_index: usize,
+        nested: Option<(usize, usize)>,
         first: bool,
         title: &str,
         status: &str,
@@ -115,7 +119,7 @@ impl Chat {
         expanded: bool,
         edit_summary: Option<EditSummaryState>,
         source_start: usize,
-        interaction: TranscriptInteraction,
+        interaction: Option<TranscriptInteraction>,
         theme: &Theme,
         bezel_theme: &bezel::theme::Theme,
         entity: Entity<Chat>,
@@ -125,6 +129,20 @@ impl Chat {
         let meta = Self::tool_row_meta(status, duration_ms);
         let meta_for_id = meta.clone();
         let toggle_entity = entity.clone();
+        let (row_id, selector, marker): (ElementId, String, String) = match nested {
+            None => (
+                ("tool-call-toggle", entry_index).into(),
+                format!("tool-call-toggle-{entry_index}"),
+                entry_index.to_string(),
+            ),
+            Some((task, child)) => (
+                ElementId::Name(SharedString::from(format!(
+                    "subagent-tool-call-toggle-{task}-{child}"
+                ))),
+                format!("subagent-tool-call-toggle-{task}-{child}"),
+                format!("{task}-{child}"),
+            ),
+        };
         let row = bezel_theme
             .step_row(
                 tool_icon(kind),
@@ -134,33 +152,34 @@ impl Chat {
                 failed,
                 has_body.then_some(expanded),
             )
-            .id(("tool-call-toggle", entry_index))
-            .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
+            .id(row_id)
+            .debug_selector(move || selector.clone())
             .hover(step_row_hover)
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
+            .on_click(move |_, _, cx| match nested {
+                None => toggle_entity.update(cx, |chat, cx| {
                     chat.toggle_tool_call_expanded(entry_index, cx)
-                });
+                }),
+                Some((task, child)) => toggle_entity.update(cx, |chat, cx| {
+                    chat.toggle_subagent_tool_call_expanded(task, child, cx)
+                }),
             })
             // Zero-size markers: what the row *means* is testable without
             // reading pixels.
-            .child(
-                div()
-                    .size_0()
-                    .debug_selector(move || format!("tool-call-meta-{entry_index}-{meta_for_id}")),
-            )
+            .child(div().size_0().debug_selector({
+                let marker = marker.clone();
+                move || format!("tool-call-meta-{marker}-{meta_for_id}")
+            }))
             .when(has_body, |row| {
-                row.child(
-                    div()
-                        .size_0()
-                        .debug_selector(move || format!("tool-call-chevron-{entry_index}")),
-                )
+                row.child(div().size_0().debug_selector({
+                    let marker = marker.clone();
+                    move || format!("tool-call-chevron-{marker}")
+                }))
             })
             .when(failed, |row| {
                 row.child(
                     div()
                         .size_0()
-                        .debug_selector(move || format!("tool-call-failed-{entry_index}")),
+                        .debug_selector(move || format!("tool-call-failed-{marker}")),
                 )
             });
 
@@ -175,6 +194,7 @@ impl Chat {
         if expanded && has_body {
             item = item.child(Self::render_tool_body(
                 entry_index,
+                nested,
                 content,
                 locations,
                 edit_summary,
@@ -196,11 +216,12 @@ impl Chat {
     #[allow(clippy::too_many_arguments)]
     fn render_tool_body(
         entry_index: usize,
+        nested: Option<(usize, usize)>,
         content: Vec<ToolCallContentInfo>,
         locations: Vec<ToolCallLocationInfo>,
         edit_summary: Option<EditSummaryState>,
         source_start: usize,
-        interaction: TranscriptInteraction,
+        interaction: Option<TranscriptInteraction>,
         title: &str,
         status: &str,
         theme: &Theme,
@@ -210,8 +231,23 @@ impl Chat {
         let typography = theme.typography;
         // F-CHAT-31: the same projection `Entry::plain_text` contributes to
         // the transcript, so every diff row drawn below can name its own
-        // offset in the global selection coordinate space.
+        // offset in the global selection coordinate space. A nested call
+        // contributes no text of its own, so it gets no selection either.
         let plain = tool_call_plain_text(title, status, &content, &locations);
+        // Top-level rows key their ids off the transcript entry; nested rows
+        // off the subagent task and the call's position in it.
+        let (output_base, diff_base, location_base) = match nested {
+            None => (
+                format!("tool-output-{entry_index}"),
+                format!("tool-diff-{entry_index}"),
+                format!("tool-call-location-{entry_index}"),
+            ),
+            Some((task, child)) => (
+                format!("subagent-tool-output-{task}-{child}"),
+                format!("subagent-diff-{task}-{child}"),
+                format!("subagent-tool-call-location-{task}-{child}"),
+            ),
+        };
         let mut body = div()
             .flex()
             .flex_col()
@@ -226,13 +262,12 @@ impl Chat {
                     body = body.child(
                         bezel_theme
                             .step_output(
-                                SharedString::from(format!(
-                                    "tool-output-{entry_index}-{output_ordinal}"
-                                )),
+                                SharedString::from(format!("{output_base}-{output_ordinal}")),
                                 text.clone(),
                             )
-                            .debug_selector(move || {
-                                format!("tool-output-{entry_index}-{output_ordinal}")
+                            .debug_selector({
+                                let output_base = output_base.clone();
+                                move || format!("{output_base}-{output_ordinal}")
                             }),
                     );
                     output_ordinal += 1;
@@ -241,20 +276,19 @@ impl Chat {
                     let drawn = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text)
                         .len()
                         .min(DIFF_PREVIEW_MAX_LINES);
+                    let selection = interaction
+                        .as_ref()
+                        .map(|interaction| DiffPreviewSelection {
+                            interaction: interaction.clone(),
+                            line_starts: plain.diff_line_starts(diff_ordinal, source_start, drawn),
+                        });
                     body = body.child(Self::render_tool_diff(
                         diff,
                         theme,
                         DiffPreviewContext {
-                            id_prefix: format!("tool-diff-{entry_index}-{diff_ordinal}"),
+                            id_prefix: format!("{diff_base}-{diff_ordinal}"),
                             entity: entity.clone(),
-                            selection: Some(DiffPreviewSelection {
-                                interaction: interaction.clone(),
-                                line_starts: plain.diff_line_starts(
-                                    diff_ordinal,
-                                    source_start,
-                                    drawn,
-                                ),
-                            }),
+                            selection,
                         },
                     ));
                     diff_ordinal += 1;
@@ -278,7 +312,7 @@ impl Chat {
                     };
                     let open_path = location.path.clone();
                     let open_entity = entity.clone();
-                    let selector = format!("tool-call-location-{entry_index}-{index}");
+                    let selector = format!("{location_base}-{index}");
                     let element_id = selector.clone();
                     div()
                         .id(SharedString::from(element_id))
@@ -303,7 +337,7 @@ impl Chat {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if !diffs.is_empty() {
+        if !diffs.is_empty() && nested.is_none() {
             body = body.child(Self::render_edit_summary(
                 entry_index,
                 diffs,
@@ -342,6 +376,7 @@ impl Chat {
         };
         Self::render_tool_row(
             entry_index,
+            None,
             first,
             title,
             status,
@@ -352,14 +387,88 @@ impl Chat {
             *expanded,
             self.edit_summaries.get(&entry_index).cloned(),
             source_start,
-            TranscriptInteraction {
+            Some(TranscriptInteraction {
                 chat: entity.clone(),
                 focus: transcript_focus,
-            },
+            }),
             theme,
             bezel_theme,
             entity,
         )
+    }
+
+    /// The protocol Task call: one run box whose header reads "Task" with
+    /// the agent's title as its detail, and whose nested tool calls are
+    /// step rows indented under it while it is open.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_subagent_task(
+        task_index: usize,
+        title: String,
+        status: String,
+        tool_calls: Vec<SubagentToolCall>,
+        expanded: bool,
+        theme: &Theme,
+        bezel_theme: &bezel::theme::Theme,
+        entity: Entity<Chat>,
+    ) -> AnyElement {
+        let failed = is_failed_status(&status);
+        let toggle_entity = entity.clone();
+        let header = bezel_theme
+            .step_row(
+                icons::CPU,
+                "Task",
+                Some(SharedString::from(title)),
+                Some(Self::tool_row_meta(&status, None)),
+                failed,
+                Some(expanded),
+            )
+            .id(("subagent-task-toggle", task_index))
+            .debug_selector(move || format!("subagent-task-toggle-{task_index}"))
+            .hover(step_row_hover)
+            .on_click(move |_, _, cx| {
+                toggle_entity.update(cx, |chat, cx| {
+                    chat.toggle_subagent_task_expanded(task_index, cx)
+                });
+            });
+        let mut run = Self::run_box(bezel_theme)
+            .id(("tool-run", task_index))
+            .debug_selector(move || format!("tool-run-{task_index}"))
+            .child(header);
+        if expanded {
+            let mut members = div().w_full().flex().flex_col().pl(px(16.0));
+            for (child_index, call) in tool_calls.into_iter().enumerate() {
+                let SubagentToolCall {
+                    title,
+                    status,
+                    kind,
+                    content,
+                    locations,
+                    expanded,
+                    duration_ms,
+                    ..
+                } = call;
+                members = members.child(Self::render_tool_row(
+                    task_index,
+                    Some((task_index, child_index)),
+                    child_index == 0,
+                    &title,
+                    &status,
+                    &kind,
+                    duration_ms,
+                    content,
+                    locations,
+                    expanded,
+                    None,
+                    0,
+                    None,
+                    theme,
+                    bezel_theme,
+                    entity.clone(),
+                ));
+            }
+            run = run.child(members);
+        }
+        run.into_any_element()
     }
 
     /// The box a run shares: rounded, bordered, clipping whatever it holds.

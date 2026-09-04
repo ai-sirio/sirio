@@ -4682,6 +4682,7 @@ impl Chat {
                 ..
             } => Self::render_tool_row(
                 entry_index,
+                None,
                 true,
                 &title,
                 &status,
@@ -4692,7 +4693,7 @@ impl Chat {
                 expanded,
                 edit_summary,
                 source_start,
-                interaction.clone(),
+                Some(interaction.clone()),
                 theme,
                 &bezel_theme,
                 entity.clone(),
@@ -4703,13 +4704,14 @@ impl Chat {
                 tool_calls,
                 expanded,
                 ..
-            } => Self::render_subagent_task_card(
+            } => Self::render_subagent_task(
                 entry_index,
                 title,
                 status,
                 tool_calls,
                 expanded,
                 theme,
+                &bezel_theme,
                 entity.clone(),
             ),
             Entry::Permission {
@@ -5131,220 +5133,6 @@ impl Chat {
                     .into_any_element()
             }
         }
-    }
-
-    fn render_subagent_task_card(
-        task_index: usize,
-        title: String,
-        status: String,
-        tool_calls: Vec<SubagentToolCall>,
-        expanded: bool,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let toggle_entity = entity.clone();
-        let header = div()
-            .id(("subagent-task-toggle", task_index))
-            .debug_selector(move || format!("subagent-task-toggle-{task_index}"))
-            .px(px(CARD_H_PADDING))
-            .py(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor(CursorStyle::PointingHand)
-            .child(
-                IconElement::new(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    IconSize::XSmall,
-                )
-                .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.border_strong)
-                    .child("Subagent"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(typography.callout)
-                    .text_color(theme.text)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(status),
-            )
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_subagent_task_expanded(task_index, cx);
-                });
-            });
-        let mut card = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(theme.surface_raised)
-            .border_l_2()
-            .border_color(theme.border_strong)
-            .child(header);
-        if expanded {
-            for (child_index, call) in tool_calls.into_iter().enumerate() {
-                card = card.child(Self::render_subagent_tool_call_card(
-                    task_index,
-                    child_index,
-                    call,
-                    theme,
-                    entity.clone(),
-                ));
-            }
-        }
-        card.into_any_element()
-    }
-
-    fn render_subagent_tool_call_card(
-        task_index: usize,
-        child_index: usize,
-        call: SubagentToolCall,
-        theme: &Theme,
-        entity: gpui::Entity<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let SubagentToolCall {
-            title,
-            status,
-            kind,
-            content,
-            locations,
-            expanded,
-            ..
-        } = call;
-        let toggle_entity = entity.clone();
-        let header = div()
-            .id(format!(
-                "subagent-tool-call-toggle-{task_index}-{child_index}"
-            ))
-            .debug_selector(move || format!("subagent-tool-call-toggle-{task_index}-{child_index}"))
-            .pl(px(CARD_H_PADDING + 10.0))
-            .pr(px(CARD_H_PADDING))
-            .py(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor(CursorStyle::PointingHand)
-            .child(
-                IconElement::new(
-                    if expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    IconSize::XSmall,
-                )
-                .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(kind),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(typography.callout)
-                    .text_color(theme.text)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(theme.text_faint)
-                    .child(status),
-            )
-            .on_click(move |_, _, cx| {
-                toggle_entity.update(cx, |chat, cx| {
-                    chat.toggle_subagent_tool_call_expanded(task_index, child_index, cx);
-                });
-            });
-        let mut card = div().w_full().flex().flex_col().child(header);
-        if expanded {
-            let mut body = div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .pl(px(CARD_H_PADDING + 26.0))
-                .pr(px(CARD_H_PADDING))
-                .pb(px(CARD_V_PADDING));
-            let mut diff_ordinal = 0usize;
-            for item in &content {
-                match item {
-                    ToolCallContentInfo::Text(text) => {
-                        body = body.child(Self::render_tool_output_text(text, theme));
-                    }
-                    ToolCallContentInfo::Diff(diff) => {
-                        body = body.child(Self::render_tool_diff(
-                            diff,
-                            theme,
-                            DiffPreviewContext {
-                                id_prefix: format!(
-                                    "subagent-diff-{task_index}-{child_index}-{diff_ordinal}"
-                                ),
-                                entity: entity.clone(),
-                                // See `DiffPreviewContext::selection`: a
-                                // nested call contributes no text of its own
-                                // to `transcript_text`, so its rows are
-                                // numbered and its header opens the file, but
-                                // they are honestly not selectable.
-                                selection: None,
-                            },
-                        ));
-                        diff_ordinal += 1;
-                    }
-                    ToolCallContentInfo::Other => {}
-                }
-            }
-            if !locations.is_empty() {
-                body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
-                    locations.iter().enumerate().map(|(index, location)| {
-                        let label = match location.line {
-                            Some(line) => format!("{}:{line}", location.path.display()),
-                            None => location.path.display().to_string(),
-                        };
-                        let open_path = location.path.clone();
-                        let open_entity = entity.clone();
-                        let selector = format!(
-                            "subagent-tool-call-location-{task_index}-{child_index}-{index}"
-                        );
-                        let element_id = selector.clone();
-                        div()
-                            .id(SharedString::from(element_id))
-                            .debug_selector(move || selector.clone())
-                            .text_size(typography.footnote)
-                            .text_color(theme.file_link)
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.text_color(theme.text))
-                            .on_click(move |_, _, cx| {
-                                open_entity.update(cx, |_, cx| {
-                                    cx.emit(ChatEvent::OpenFile(open_path.clone()));
-                                });
-                            })
-                            .child(label)
-                    }),
-                ));
-            }
-            card = card.child(body);
-        }
-        card.into_any_element()
     }
 
     /// F-CHAT-22, turn half: the single row an older turn collapses to.
@@ -9632,6 +9420,20 @@ let answer = 42;
             cx.debug_bounds("subagent-task-toggle-1").is_some(),
             "the subagent task card is drawn"
         );
+        // The task is its own run box, and its header row sits inside it.
+        let run = cx
+            .debug_bounds("tool-run-1")
+            .expect("the task is a run box");
+        let task_toggle = cx
+            .debug_bounds("subagent-task-toggle-1")
+            .expect("subagent task toggle");
+        assert!(
+            run.left() <= task_toggle.left()
+                && task_toggle.right() <= run.right()
+                && run.top() <= task_toggle.top()
+                && task_toggle.bottom() <= run.bottom(),
+            "the task header sits inside its run box: run={run:?} toggle={task_toggle:?}"
+        );
         assert!(
             cx.debug_bounds("subagent-tool-call-toggle-1-0").is_none(),
             "nested tool calls stay collapsed with their parent card"
@@ -9642,9 +9444,12 @@ let answer = 42;
             .expect("subagent task toggle");
         cx.simulate_click(task_toggle.center(), Modifiers::none());
         cx.run_until_parked();
+        let child = cx
+            .debug_bounds("subagent-tool-call-toggle-1-0")
+            .expect("expanding the task reveals its nested tool call");
         assert!(
-            cx.debug_bounds("subagent-tool-call-toggle-1-0").is_some(),
-            "expanding the task reveals its nested tool call"
+            child.left() > task_toggle.left(),
+            "a nested call is indented under the task header: child={child:?} header={task_toggle:?}"
         );
 
         let child_toggle = cx
