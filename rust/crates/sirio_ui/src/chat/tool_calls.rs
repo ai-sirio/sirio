@@ -33,20 +33,28 @@ pub(crate) fn tool_icon(kind: &str) -> &'static str {
     }
 }
 
-/// The verb a row leads with: the kind word, capitalised; `Tool` when the
-/// protocol gave none (an empty kind, or the generic `tool` a pre-#168
-/// database restores).
+/// The verb a row leads with: the kind word, capitalised, snake_case read
+/// as two words; `Tool` when the protocol gave none (an empty kind, the
+/// generic `tool` a pre-#168 database restores, or `Other` — no kind of
+/// tool at all).
 pub(crate) fn tool_verb(kind: &str) -> String {
     let kind = kind.trim();
-    if kind.is_empty() || kind.eq_ignore_ascii_case("tool") {
+    if kind.is_empty() || kind.eq_ignore_ascii_case("tool") || kind.eq_ignore_ascii_case("other") {
         return "Tool".to_string();
     }
-    let mut chars = kind.chars();
-    let first = chars
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    format!("{first}{}", chars.as_str())
+    let mut out = String::with_capacity(kind.len());
+    let mut first = true;
+    for c in kind.chars() {
+        if c == '_' {
+            out.push(' ');
+        } else if first {
+            out.extend(c.to_uppercase());
+            first = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `412ms` under a second, `1.4s` over it — a figure you read at a glance
@@ -611,6 +619,9 @@ mod tests {
         assert_eq!(tool_verb("Read"), "Read");
         assert_eq!(tool_verb("execute"), "Execute");
         assert_eq!(tool_verb("tool"), "Tool");
+        assert_eq!(tool_verb("other"), "Tool");
+        assert_eq!(tool_verb("Other"), "Tool");
+        assert_eq!(tool_verb("switch_mode"), "Switch mode");
         assert_eq!(tool_verb(""), "Tool");
     }
 
