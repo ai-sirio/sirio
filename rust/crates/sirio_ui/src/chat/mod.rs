@@ -7400,7 +7400,7 @@ impl TurnSegment {
 /// Swift's `TimelineBuilder.segment` splits at each `.turnDivider`. The
 /// footer belongs to the turn it closes; a trailing run with no footer is
 /// the open turn, and is only recorded when it actually has entries.
-pub(crate) fn segment_turns(entries: &[Entry]) -> Vec<TurnSegment> {
+fn segment_turns(entries: &[Entry]) -> Vec<TurnSegment> {
     let mut turns = Vec::new();
     let mut start = 0usize;
     for (index, entry) in entries.iter().enumerate() {
