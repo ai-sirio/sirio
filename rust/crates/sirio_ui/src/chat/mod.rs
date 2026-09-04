@@ -4082,38 +4082,6 @@ impl Chat {
         MarkdownBody::with_link_override(bezel_doc_from_legacy(document), link_click)
             .into_any_element()
     }
-    fn render_tool_output_text(text: &str, theme: &Theme) -> AnyElement {
-        let typography = theme.typography;
-        let (shown, truncated) = truncate_tool_output(text);
-        let mut column = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .rounded(theme.radii.code_block)
-            .bg(theme.input_bg)
-            .px(px(10.0))
-            .py(px(6.0))
-            .gap(px(4.0));
-        if truncated {
-            column = column.child(
-                div()
-                    .text_size(typography.caption2)
-                    .text_color(theme.text_faint)
-                    .child(format!("Showing last {TOOL_OUTPUT_MAX_CHARS} characters")),
-            );
-        }
-        column
-            .child(
-                div()
-                    .font_family(typography.code_family)
-                    .text_size(typography.code_size)
-                    .line_height(typography.code_line_height)
-                    .text_color(theme.text)
-                    .child(shown),
-            )
-            .into_any_element()
-    }
-
     /// F-CHAT-31: a diff preview for a tool call that changed a file —
     /// removed lines then added lines at each point of divergence, capped
     /// so one huge rewrite cannot make the transcript unusable.
@@ -7464,21 +7432,6 @@ fn turn_row_roles(entries: &[Entry], unfolded: &BTreeSet<usize>) -> Vec<TurnRowR
         roles[turn.start] = TurnRowRole::Fold { turn_id, label, at };
     }
     roles
-}
-
-/// F-CHAT-23: caps a tool call's rendered text output. Kept as the tail
-/// rather than the head — a long run's result or error is usually at the
-/// end, not the start.
-const TOOL_OUTPUT_MAX_CHARS: usize = 2000;
-
-fn truncate_tool_output(text: &str) -> (String, bool) {
-    let char_count = text.chars().count();
-    if char_count <= TOOL_OUTPUT_MAX_CHARS {
-        (text.to_string(), false)
-    } else {
-        let skip = char_count - TOOL_OUTPUT_MAX_CHARS;
-        (text.chars().skip(skip).collect(), true)
-    }
 }
 
 /// F-CHAT-31: one line of a diff preview.
@@ -10920,21 +10873,6 @@ let answer = 42;
     #[test]
     fn default_agent_cwd_follows_the_process_workspace() {
         assert_eq!(default_agent_cwd(), std::env::current_dir().unwrap());
-    }
-
-    #[test]
-    fn truncate_tool_output_keeps_the_tail_past_the_cap() {
-        let (shown, truncated) = truncate_tool_output("short output");
-        assert_eq!(shown, "short output");
-        assert!(!truncated);
-
-        let long: String = (0..(TOOL_OUTPUT_MAX_CHARS + 500))
-            .map(|index| char::from(b'a' + (index % 26) as u8))
-            .collect();
-        let (shown, truncated) = truncate_tool_output(&long);
-        assert!(truncated);
-        assert_eq!(shown.chars().count(), TOOL_OUTPUT_MAX_CHARS);
-        assert_eq!(shown, &long[long.len() - TOOL_OUTPUT_MAX_CHARS..]);
     }
 
     /// F-CHAT-31: matching lines stay context; a changed line emits the old
