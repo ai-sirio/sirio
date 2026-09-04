@@ -1344,6 +1344,9 @@ pub struct Chat {
     /// View state for the same-verb folds of a tool run, keyed by the fold's
     /// first entry index. Not persisted; a fold starts closed.
     open_verb_folds: HashSet<usize>,
+    /// Each turn's say over its Work zone (`widgets::Takeover`), keyed by the
+    /// turn's first entry index. Not persisted; cleared with the entries.
+    work_open: HashMap<usize, bezel::ui::widgets::Takeover>,
     /// The placeholder last pushed into the field, so render pushes a new
     /// one only when the state it names changed.
     composer_placeholder_shown: String,
@@ -1646,6 +1649,7 @@ impl Chat {
             accepted_mentions: Vec::new(),
             attachments: Vec::new(),
             open_verb_folds: HashSet::new(),
+            work_open: HashMap::new(),
             composer_placeholder_shown: String::new(),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
@@ -2313,6 +2317,9 @@ impl Chat {
                 self.expire_unanswered();
                 self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
+                if let Some(turn) = segment_turns(&self.entries).last().map(|t| t.start) {
+                    self.remeasure_turn(turn);
+                }
                 self.streaming = false;
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
@@ -2646,6 +2653,7 @@ impl Chat {
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
         self.unfolded_turns.clear();
+        self.work_open.clear();
         self.thought_scroll.clear();
         for turn in transcript.turns {
             for entry in turn.entries {
@@ -2871,6 +2879,7 @@ impl Chat {
         });
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
+            self.work_open.clear();
             self.thought_scroll.clear();
             self.list_state.splice(0..old_count, self.entries.len());
         }
@@ -3302,6 +3311,7 @@ impl Chat {
         let old_count = self.entries.len();
         self.entries.clear();
         self.unfolded_turns.clear();
+        self.work_open.clear();
         self.thought_scroll.clear();
         self.list_state.splice(0..old_count, 0);
         self.accepted_mentions.clear();
@@ -11200,6 +11210,68 @@ let answer = 42;
         let entry: ChatEntry =
             serde_json::from_str(r#"{"UserMessage":{"text":"hi"}}"#).expect("deserializes");
         assert!(matches!(entry, ChatEntry::UserMessage { at: None, .. }));
+    }
+
+    /// The streaming turn is the trailing one without a footer, only while
+    /// the chat streams; pressing a zone flips what is on screen and holds.
+    #[gpui::test]
+    async fn the_work_zone_follows_the_stream_until_pressed(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::User {
+                text: "q".into(),
+                at: None,
+            });
+            chat.push_entry(test_tool_call("a"));
+            chat.streaming = true;
+            chat
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.streaming_turn_start(), Some(0));
+            let roles =
+                transcript::work_roles(&chat.entries, &chat.work_open, chat.streaming_turn_start());
+            assert_eq!(
+                roles[1],
+                transcript::WorkRole::Member {
+                    turn: 0,
+                    open: true
+                }
+            );
+        });
+        chat.update(cx, |chat, cx| chat.toggle_work(0, cx));
+        chat.read_with(cx, |chat, _| {
+            let roles =
+                transcript::work_roles(&chat.entries, &chat.work_open, chat.streaming_turn_start());
+            assert_eq!(
+                roles[1],
+                transcript::WorkRole::Member {
+                    turn: 0,
+                    open: false
+                },
+                "pressed while auto-open: closes and holds"
+            );
+        });
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::TurnEnded {
+                    stop_reason: "end_turn".into(),
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.streaming_turn_start(), None);
+            let roles = transcript::work_roles(&chat.entries, &chat.work_open, None);
+            assert_eq!(
+                roles[1],
+                transcript::WorkRole::Member {
+                    turn: 0,
+                    open: false
+                }
+            );
+        });
     }
 
     #[test]
