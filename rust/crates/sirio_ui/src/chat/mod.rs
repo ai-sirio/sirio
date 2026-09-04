@@ -13091,6 +13091,17 @@ let answer = 42;
         std::fs::create_dir_all(dir.0.join("src")).expect("create src dir");
         std::fs::write(dir.0.join("src/main.rs"), "fn main() {}").expect("write main.rs");
         std::fs::write(dir.0.join("README.md"), "# readme").expect("write readme");
+        // A relative path long enough that an unconstrained row would paint
+        // the card far past its own 360px width.
+        let deep = dir.0.join(
+            "rust/target/debug/incremental/o1o2o3o4o5/quirky-uid-slug/a-place-for-building-things/very",
+        );
+        std::fs::create_dir_all(&deep).expect("create deep dir");
+        std::fs::write(
+            deep.join("long-incremental-artifact-name.bin"),
+            "artifact",
+        )
+        .expect("write long-path file");
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
@@ -13113,6 +13124,23 @@ let answer = 42;
         let popup = cx
             .debug_bounds("mention-popup")
             .expect("typing @ opens the mention popup");
+        // The card's width is a cap, not a suggestion: a 90+-character path
+        // must ellipsize inside it, never stretch the card.
+        assert!(
+            popup.size.width <= px(372.0),
+            "the mention popup is capped at its 360px card (plus border/shadow allowance): {popup:?}"
+        );
+        let long_row = cx
+            .debug_bounds(
+                "mention-option-rust/target/debug/incremental/o1o2o3o4o5/quirky-uid-slug/a-place-for-building-things/very/long-incremental-artifact-name.bin",
+            )
+            .expect("the long-path row is drawn");
+        // The row fills the card's inner width (360 − 2×4 card pad) and the
+        // path ellipsizes inside it — it never overflows the card.
+        assert!(
+            long_row.size.width <= px(352.0),
+            "the long-path row stays inside the card and ellipsizes: {long_row:?}"
+        );
         assert!(cx.debug_bounds("mention-option-README.md").is_some());
         assert!(cx.debug_bounds("mention-option-src/main.rs").is_some());
         // Same anchor as the command popup: a card above the composer, not a
