@@ -31,7 +31,7 @@ use sirio_persistence::{
 use sirio_project::{display_absolute_path, display_path};
 use sirio_theme::Theme;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -491,6 +491,7 @@ struct SubagentToolCall {
     content: Vec<ToolCallContentInfo>,
     locations: Vec<ToolCallLocationInfo>,
     expanded: bool,
+    duration_ms: Option<u64>,
 }
 
 /// One rendered element of the transcript.
@@ -536,6 +537,7 @@ enum Entry {
         raw_output: Option<String>,
         expanded: bool,
         group_expanded: bool,
+        duration_ms: Option<u64>,
     },
     /// A Task/dispatch tool call whose following live calls are presented as
     /// the child agent's work. ACP v1/v2 carry no parent-child relation, so
@@ -651,6 +653,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             status,
             kind,
             locations,
+            duration_ms,
             ..
         } => Some(ChatEntry::ToolCall {
             id: id.clone(),
@@ -666,6 +669,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                     line: location.line,
                 })
                 .collect(),
+            duration_ms: *duration_ms,
         }),
         // A subagent task carries neither a tool kind nor file locations, so
         // it stores what it has and restores exactly as it did before #168.
@@ -677,6 +681,7 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             status: status.clone(),
             kind: None,
             locations: Vec::new(),
+            duration_ms: None,
         }),
         Entry::Permission {
             request_id,
@@ -799,6 +804,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             status,
             kind,
             locations,
+            duration_ms,
         } => Entry::ToolCall {
             id,
             title,
@@ -818,6 +824,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             raw_output: None,
             expanded: false,
             group_expanded: false,
+            duration_ms,
         },
         ChatEntry::Permission {
             request_id,
@@ -1391,6 +1398,11 @@ pub struct Chat {
     unfolded_turns: BTreeSet<usize>,
     copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
+    /// When each live tool call started, by protocol id, so its first
+    /// terminal status can store the elapsed time on the entry. Consumed on
+    /// that status; a call that never settles simply leaves its start here
+    /// until the chat is dropped.
+    tool_started: HashMap<String, std::time::Instant>,
     persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
@@ -1644,6 +1656,7 @@ impl Chat {
             unfolded_turns: BTreeSet::new(),
             copied_target: None,
             edit_summaries: BTreeMap::new(),
+            tool_started: HashMap::new(),
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
@@ -1667,6 +1680,26 @@ impl Chat {
             #[cfg(test)]
             attach_test_paths: Vec::new(),
         }
+    }
+
+    /// When each live tool call started, by protocol id, so its first
+    /// terminal status can store the elapsed time on the entry. Consumed on
+    /// that status; a call that never settles simply leaves its start here
+    /// until the chat is dropped.
+    fn note_tool_started(&mut self, id: &str) {
+        self.tool_started
+            .insert(id.to_string(), std::time::Instant::now());
+    }
+
+    /// The elapsed time for `id` if `status` is terminal and the call's start
+    /// is known; `None` otherwise. Consumes the start.
+    fn tool_duration_on(&mut self, id: &str, status: &str) -> Option<u64> {
+        if !is_terminal_tool_status(status) {
+            return None;
+        }
+        self.tool_started
+            .remove(id)
+            .map(|started| started.elapsed().as_millis() as u64)
     }
 
     /// Add one transcript row and keep the virtualizer's index tree in sync.
@@ -1876,6 +1909,8 @@ impl Chat {
                 raw_output,
             } => {
                 self.maybe_follow_location(&locations, cx);
+                self.note_tool_started(&id);
+                let duration_ms = self.tool_duration_on(&id, &status);
                 if is_subagent_tool_call(&title, raw_input.as_deref()) {
                     self.push_entry(Entry::SubagentTask {
                         id,
@@ -1902,6 +1937,7 @@ impl Chat {
                             content,
                             locations,
                             expanded: false,
+                            duration_ms,
                         });
                         self.remeasure_entry(index);
                     }
@@ -1917,6 +1953,7 @@ impl Chat {
                         raw_output,
                         expanded: false,
                         group_expanded: false,
+                        duration_ms,
                     });
                 }
             }
@@ -1933,6 +1970,9 @@ impl Chat {
                 if let Some(locations) = &locations {
                     self.maybe_follow_location(locations, cx);
                 }
+                let measured = status
+                    .as_deref()
+                    .and_then(|status| self.tool_duration_on(&id, status));
                 if let Some(task_index) = self.subagent_task_position(&id) {
                     if let Some(Entry::SubagentTask {
                         title: existing_title,
@@ -1968,6 +2008,9 @@ impl Chat {
                         if let Some(locations) = locations {
                             call.locations = locations;
                         }
+                        if let Some(ms) = measured {
+                            call.duration_ms = Some(ms);
+                        }
                         self.remeasure_entry(task_index);
                     }
                 } else if let Some((index, Entry::ToolCall {
@@ -1978,6 +2021,7 @@ impl Chat {
                     locations: existing_locations,
                     raw_input: existing_raw_input,
                     raw_output: existing_raw_output,
+                    duration_ms: existing_duration_ms,
                     ..
                 })) = self
                     .entries
@@ -2007,6 +2051,9 @@ impl Chat {
                     if let Some(raw_output) = raw_output {
                         *existing_raw_output = Some(raw_output);
                     }
+                    if let Some(ms) = measured {
+                        *existing_duration_ms = Some(ms);
+                    }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
@@ -2022,6 +2069,7 @@ impl Chat {
                 if let Some(locations) = &locations {
                     self.maybe_follow_location(locations, cx);
                 }
+                let measured = self.tool_duration_on(&id, &status);
                 if let Some(task_index) = self.subagent_task_position(&id) {
                     if let Some(Entry::SubagentTask { status: existing_status, .. }) =
                         self.entries.get_mut(task_index)
@@ -2044,6 +2092,9 @@ impl Chat {
                         if let Some(locations) = locations {
                             call.locations = locations;
                         }
+                        if let Some(ms) = measured {
+                            call.duration_ms = Some(ms);
+                        }
                         self.remeasure_entry(task_index);
                     }
                 } else if let Some((index, Entry::ToolCall {
@@ -2053,6 +2104,7 @@ impl Chat {
                     locations: existing_locations,
                     raw_input: existing_raw_input,
                     raw_output: existing_raw_output,
+                    duration_ms: existing_duration_ms,
                     ..
                 })) = self
                     .entries
@@ -2076,6 +2128,9 @@ impl Chat {
                     }
                     if let Some(raw_output) = raw_output {
                         *existing_raw_output = Some(raw_output);
+                    }
+                    if let Some(ms) = measured {
+                        *existing_duration_ms = Some(ms);
                     }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
@@ -8986,6 +9041,7 @@ two"
             raw_output: None,
             expanded: false,
             group_expanded: false,
+            duration_ms: None,
         };
 
         let stored = persisted_entry(&live).expect("a tool call is persisted");
@@ -9006,6 +9062,92 @@ two"
             }],
             "the file the call touched must survive the round trip"
         );
+    }
+
+    /// A call's duration is the wall clock between its start and its first
+    /// terminal status, and it survives a restart; a call restored from a
+    /// database written before the field has none.
+    #[gpui::test]
+    async fn a_tool_call_measures_its_duration_and_persists_it(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallStarted {
+                    id: "t1".into(),
+                    title: "cargo test".into(),
+                    status: "in_progress".into(),
+                    kind: "Execute".into(),
+                    content: vec![],
+                    locations: vec![],
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+            assert!(
+                matches!(
+                    chat.entries.last(),
+                    Some(Entry::ToolCall {
+                        duration_ms: None,
+                        ..
+                    })
+                ),
+                "no duration while the call runs"
+            );
+            chat.handle_event(
+                AcpEvent::ToolCallCompleted {
+                    id: "t1".into(),
+                    status: "completed".into(),
+                    kind: None,
+                    content: None,
+                    locations: None,
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+        });
+        let duration = chat.read_with(cx, |chat, _| match chat.entries.last() {
+            Some(Entry::ToolCall { duration_ms, .. }) => *duration_ms,
+            other => panic!("expected a tool call, got {other:?}"),
+        });
+        assert!(
+            duration.is_some(),
+            "a terminal status stores the elapsed time"
+        );
+        assert!(
+            chat.read_with(cx, |chat, _| chat.tool_started.is_empty()),
+            "the start is consumed once measured"
+        );
+
+        let persisted = chat.read_with(cx, |chat, _| persisted_entry(chat.entries.last().unwrap()));
+        assert!(
+            matches!(
+                persisted,
+                Some(ChatEntry::ToolCall {
+                    duration_ms: Some(_),
+                    ..
+                })
+            ),
+            "the duration is written to the persisted entry"
+        );
+        let restored = restored_entry(ChatEntry::ToolCall {
+            id: "old".into(),
+            title: "Read".into(),
+            status: "completed".into(),
+            kind: Some("Read".into()),
+            locations: vec![],
+            duration_ms: None,
+        });
+        assert!(matches!(
+            restored,
+            Entry::ToolCall {
+                duration_ms: None,
+                ..
+            }
+        ));
     }
 
     /// A row written before #168 carries neither field and must restore
@@ -9738,6 +9880,7 @@ let answer = 42;
                 raw_output: None,
                 expanded: false,
                 group_expanded: false,
+                duration_ms: None,
             });
             chat.push_entry(Entry::Assistant {
                 text: "done".into(),
@@ -9754,6 +9897,7 @@ let answer = 42;
                 raw_output: None,
                 expanded: false,
                 group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -11548,6 +11692,7 @@ let answer = 42;
             raw_output: None,
             expanded: false,
             group_expanded: false,
+            duration_ms: None,
         }
     }
 
@@ -12575,6 +12720,7 @@ let answer = 42;
                 raw_output,
                 expanded,
                 group_expanded,
+                duration_ms,
             }) => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(title, "Edit file");
@@ -12586,6 +12732,7 @@ let answer = 42;
                 assert!(raw_output.is_some());
                 assert!(!expanded, "a new tool call starts collapsed");
                 assert!(!group_expanded, "a new tool call starts group-collapsed");
+                assert!(duration_ms.is_none(), "a running tool call has no duration");
             }
             other => panic!("expected a widened ToolCall entry, got {other:?}"),
         });
@@ -12617,6 +12764,7 @@ let answer = 42;
                 raw_output: None,
                 expanded: false,
                 group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -12682,6 +12830,7 @@ let answer = 42;
                 raw_output: None,
                 expanded: false,
                 group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -12739,6 +12888,7 @@ let answer = 42;
                     raw_output: None,
                     expanded: false,
                     group_expanded: false,
+                    duration_ms: None,
                 });
             }
             chat
@@ -14299,6 +14449,7 @@ let answer = 42;
                 raw_output: None,
                 expanded: true,
                 group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -14370,6 +14521,7 @@ let answer = 42;
                 raw_output: None,
                 expanded: true,
                 group_expanded: false,
+                duration_ms: None,
             });
             chat
         });
@@ -14478,6 +14630,7 @@ let answer = 42;
             raw_output: None,
             expanded: true,
             group_expanded: false,
+            duration_ms: None,
         };
         let Entry::ToolCall {
             title,
