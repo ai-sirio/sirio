@@ -7035,53 +7035,64 @@ impl Chat {
                     // nothing.
                     .child(div().relative().child(model_control).children(model_picker))
                     .children(effort_control)
+                    // The right-hand trio wraps as one unit: context,
+                    // overflow and send never split across lines — when the
+                    // row is tight the whole group drops to its own line,
+                    // pushed to its right edge by `ml_auto`.
                     .child(
                         div()
-                            .relative()
                             .flex()
                             .flex_none()
-                            .ml_auto()
                             .items_center()
                             .gap(px(6.0))
-                            .h(px(24.0))
-                            .px(px(7.0))
-                            .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
-                            .text_size(typography.ui_size)
-                            .child(context_ring)
-                            // Named, like every other value in this
-                            // row. A blind review of the composer
-                            // could read the ring and the number but
-                            // not what they measured -- "context
-                            // used? budget? direction unreadable" --
-                            // and the answer only appeared after
-                            // clicking through to the popover, which
-                            // spells out "N% of context used". The
-                            // field name belongs where the value is.
+                            .ml_auto()
                             .child(
                                 div()
-                                    .id("context-label")
-                                    .debug_selector(|| "context-label".into())
-                                    .text_color(theme.text_faint)
-                                    .child("Context"),
+                                    .relative()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .h(px(24.0))
+                                    .px(px(7.0))
+                                    .rounded(theme.radii.control)
+                                    .bg(theme.surface_raised)
+                                    .text_size(typography.ui_size)
+                                    .child(context_ring)
+                                    // Named, like every other value in this
+                                    // row. A blind review of the composer
+                                    // could read the ring and the number but
+                                    // not what they measured -- "context
+                                    // used? budget? direction unreadable" --
+                                    // and the answer only appeared after
+                                    // clicking through to the popover, which
+                                    // spells out "N% of context used". The
+                                    // field name belongs where the value is.
+                                    .child(
+                                        div()
+                                            .id("context-label")
+                                            .debug_selector(|| "context-label".into())
+                                            .text_color(theme.text_faint)
+                                            .child("Context"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("context-percent")
+                                            .debug_selector(|| "context-percent".into())
+                                            .text_color(theme.text)
+                                            .child(format!("{context_percent}%")),
+                                    )
+                                    .children(context_popover),
                             )
                             .child(
                                 div()
-                                    .id("context-percent")
-                                    .debug_selector(|| "context-percent".into())
-                                    .text_color(theme.text)
-                                    .child(format!("{context_percent}%")),
+                                    .relative()
+                                    .child(overflow_button)
+                                    .children(overflow_menu)
+                                    .children(chat_history_menu),
                             )
-                            .children(context_popover),
+                            .child(send_disc),
                     )
-                    .child(
-                        div()
-                            .relative()
-                            .child(overflow_button)
-                            .children(overflow_menu)
-                            .children(chat_history_menu),
-                    )
-                    .child(send_disc),
             )
             .children(slash_popup)
             .children(mention_popup);
@@ -9042,10 +9053,22 @@ two"
                 "send is the rightmost edge, {name} ends left of it: {bounds:?} send={send:?}"
             );
         }
-        // …wrapped onto its own line below attach.
+        // …wrapped onto its own line below attach, as one unit: context,
+        // overflow and send share a line and never split across lines.
         assert!(
             send.top() > attach.top(),
             "the send disc wraps under the left at 420px: send={send:?} attach={attach:?}"
+        );
+        assert_eq!(
+            send.top(),
+            overflow.top(),
+            "overflow rides the same line as send: {overflow:?} {send:?}"
+        );
+        // The context ring is a 16px icon centred in the 24px cluster, so
+        // "same line" is vertical containment, not equal tops.
+        assert!(
+            send.top() <= context.top() && context.bottom() <= send.bottom(),
+            "context rides the same line as the trio: {context:?} send={send:?}"
         );
 
         // Back to a wide pane, the row is one line again.
