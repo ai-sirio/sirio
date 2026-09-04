@@ -7000,94 +7000,79 @@ impl Chat {
                 )
             })
             .child(
-                // Two clusters on one row, spread to the edges: what you
-                // configure on the left, status and send on the right. When
-                // the card is too narrow to hold both, the row wraps and the
-                // right cluster lands on its own line, pushed to the right
-                // edge of that line by `ml_auto`.
+                // One wrapping row: pill · attach · model · effort, then
+                // context · overflow · send pushed to the right end of
+                // whichever line fits by `ml_auto`. No cluster wrappers and
+                // no `overflow_hidden` — nothing is ever clipped in half;
+                // when a line runs out, the next control wraps.
                 div()
                     .flex()
                     .flex_row()
                     .flex_wrap()
-                    .gap_y(px(4.0))
                     .items_center()
-                    .justify_between()
+                    .gap(px(6.0))
+                    .gap_y(px(4.0))
                     .px(px(6.0))
                     .child(
-                        // The row degrades by wrapping, never by painting
-                        // over: with no room the right cluster drops to its
-                        // own line and the left cluster clips its last chip
-                        // when there is none left even there. `flex_auto`,
-                        // not `flex_1` — `flex_1`'s zero basis makes the
-                        // cluster's hypothetical size 0, so the row would
-                        // never wrap and the cluster would just be squeezed
-                        // back down to the pill.
                         div()
-                            .flex()
-                            .flex_auto()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(div().relative().child(status_pill).children(mode_picker))
-                            .child(attach_button)
-                            .child(div().relative().child(model_control).children(model_picker))
-                            .children(effort_control),
+                            .relative()
+                            .flex_none()
+                            .child(status_pill)
+                            .children(mode_picker),
                     )
+                    .child(attach_button)
+                    // The one shrinkable child: on a tight line the chip
+                    // ellipsizes its name down to its 56px floor, never to
+                    // nothing.
+                    .child(div().relative().child(model_control).children(model_picker))
+                    .children(effort_control)
                     .child(
                         div()
+                            .relative()
                             .flex()
                             .flex_none()
                             .ml_auto()
                             .items_center()
                             .gap(px(6.0))
+                            .h(px(24.0))
+                            .px(px(7.0))
+                            .rounded(theme.radii.control)
+                            .bg(theme.surface_raised)
+                            .text_size(typography.ui_size)
+                            .child(context_ring)
+                            // Named, like every other value in this
+                            // row. A blind review of the composer
+                            // could read the ring and the number but
+                            // not what they measured -- "context
+                            // used? budget? direction unreadable" --
+                            // and the answer only appeared after
+                            // clicking through to the popover, which
+                            // spells out "N% of context used". The
+                            // field name belongs where the value is.
                             .child(
                                 div()
-                                    .relative()
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .h(px(24.0))
-                                    .px(px(7.0))
-                                    .rounded(theme.radii.control)
-                                    .bg(theme.surface_raised)
-                                    .text_size(typography.ui_size)
-                                    .child(context_ring)
-                                    // Named, like every other value in this
-                                    // row. A blind review of the composer
-                                    // could read the ring and the number but
-                                    // not what they measured -- "context
-                                    // used? budget? direction unreadable" --
-                                    // and the answer only appeared after
-                                    // clicking through to the popover, which
-                                    // spells out "N% of context used". The
-                                    // field name belongs where the value is.
-                                    .child(
-                                        div()
-                                            .id("context-label")
-                                            .debug_selector(|| "context-label".into())
-                                            .text_color(theme.text_faint)
-                                            .child("Context"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("context-percent")
-                                            .debug_selector(|| "context-percent".into())
-                                            .text_color(theme.text)
-                                            .child(format!("{context_percent}%")),
-                                    )
-                                    .children(context_popover),
+                                    .id("context-label")
+                                    .debug_selector(|| "context-label".into())
+                                    .text_color(theme.text_faint)
+                                    .child("Context"),
                             )
                             .child(
                                 div()
-                                    .relative()
-                                    .child(overflow_button)
-                                    .children(overflow_menu)
-                                    .children(chat_history_menu),
+                                    .id("context-percent")
+                                    .debug_selector(|| "context-percent".into())
+                                    .text_color(theme.text)
+                                    .child(format!("{context_percent}%")),
                             )
-                            .child(send_disc),
-                    ),
+                            .children(context_popover),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .child(overflow_button)
+                            .children(overflow_menu)
+                            .children(chat_history_menu),
+                    )
+                    .child(send_disc),
             )
             .children(slash_popup)
             .children(mention_popup);
@@ -9020,33 +9005,38 @@ two"
             chip.size.width >= px(56.0),
             "the model chip keeps at least its floor: {chip:?}"
         );
-        // Each line lays its controls out in order, none over a neighbour.
+        // Every control is fully inside the card — nothing clipped in half
+        // by a hidden-overflow cluster any more.
+        for (name, bounds) in [
+            ("attach", attach),
+            ("model chip", chip),
+            ("effort chip", effort),
+            ("context", context),
+            ("overflow", overflow),
+            ("send", send),
+        ] {
+            assert!(
+                bounds.left() >= card.left() && bounds.right() <= card.right(),
+                "{name} is fully inside the card: {name}={bounds:?} card={card:?}"
+            );
+        }
+        // The send disc is the rightmost edge of all controls…
+        for (name, bounds) in [
+            ("attach", attach),
+            ("model chip", chip),
+            ("effort chip", effort),
+            ("context", context),
+            ("overflow", overflow),
+        ] {
+            assert!(
+                bounds.right() <= send.right(),
+                "send is the rightmost edge, {name} ends left of it: {bounds:?} send={send:?}"
+            );
+        }
+        // …wrapped onto its own line below attach.
         assert!(
-            attach.right() <= chip.left(),
-            "line order pill · attach · model: attach={attach:?} chip={chip:?}"
-        );
-        assert!(
-            chip.right() <= effort.left(),
-            "model precedes effort: chip={chip:?} effort={effort:?}"
-        );
-        assert!(
-            context.right() <= overflow.left(),
-            "context precedes overflow: {context:?} {overflow:?}"
-        );
-        assert!(
-            overflow.right() <= send.left(),
-            "overflow precedes send: {overflow:?} {send:?}"
-        );
-        // The send disc stays inside the card.
-        assert!(
-            send.right() <= card.right(),
-            "the send disc stays inside the card: send={send:?} card={card:?}"
-        );
-        // Too narrow for both clusters: the right cluster wrapped under, so
-        // its line starts below attach's bottom edge.
-        assert!(
-            send.top() >= attach.bottom(),
-            "the right cluster wraps under the left at 420px: send={send:?} attach={attach:?}"
+            send.top() > attach.top(),
+            "the send disc wraps under the left at 420px: send={send:?} attach={attach:?}"
         );
 
         // Back to a wide pane, the row is one line again.
@@ -9054,9 +9044,16 @@ two"
         refresh_frame(cx);
         let send = cx.debug_bounds("send").expect("send at 900");
         let attach = cx.debug_bounds("attach-image").expect("attach at 900");
-        assert!(
-            send.top() < attach.bottom(),
+        let effort = cx.debug_bounds("effort-chip").expect("effort chip at 900");
+        assert_eq!(
+            send.top(),
+            attach.top(),
             "the row is one line again at 900px: send={send:?} attach={attach:?}"
+        );
+        assert_eq!(
+            effort.top(),
+            attach.top(),
+            "the effort chip rides the same line at 900px: effort={effort:?}"
         );
     }
 
