@@ -4507,6 +4507,7 @@ impl Chat {
         edit_summary: Option<EditSummaryState>,
         thought_streaming: bool,
         thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
+        role: &transcript::WorkRole,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
@@ -4517,37 +4518,66 @@ impl Chat {
             focus: transcript_focus,
         };
         match entry {
-            Entry::User { text, .. } => div()
-                .w_full()
-                .flex()
-                .justify_end()
-                // #173: without this the row's flex child keeps its content
-                // width as a floor, so a message wider than the pane refuses
-                // to shrink and — being end-justified — spills off the *left*
-                // edge, where nothing can scroll to it. `max_w` never binds in
-                // that case, because the pane is already narrower than the cap.
-                .min_w_0()
-                .child(
-                    div()
-                        .debug_selector(move || format!("user-bubble-{entry_index}"))
-                        .min_w_0()
-                        .max_w(px(USER_PILL_MAX_WIDTH))
-                        .rounded(theme.radii.user_pill)
-                        .bg(theme.surface_raised)
-                        .px(px(USER_PILL_H_PADDING))
-                        .py(px(USER_PILL_V_PADDING))
-                        .text_size(typography.scaled(USER_PILL_TEXT_SIZE))
-                        .text_color(theme.text)
-                        .child(Self::render_plain_text(
-                            text,
+            Entry::User { text, .. } => {
+                let bubble = div()
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    // #173: without this the row's flex child keeps its content
+                    // width as a floor, so a message wider than the pane refuses
+                    // to shrink and — being end-justified — spills off the *left*
+                    // edge, where nothing can scroll to it. `max_w` never binds in
+                    // that case, because the pane is already narrower than the cap.
+                    .min_w_0()
+                    .child(
+                        div()
+                            .debug_selector(move || format!("user-bubble-{entry_index}"))
+                            .min_w_0()
+                            .max_w(px(USER_PILL_MAX_WIDTH))
+                            .rounded(theme.radii.user_pill)
+                            .bg(theme.surface_raised)
+                            .px(px(USER_PILL_H_PADDING))
+                            .py(px(USER_PILL_V_PADDING))
+                            .text_size(typography.scaled(USER_PILL_TEXT_SIZE))
+                            .text_color(theme.text)
+                            .child(Self::render_plain_text(
+                                text,
+                                theme,
+                                format!("user-entry-{entry_index}"),
+                                source_start,
+                                Some(&interaction),
+                            )),
+                    )
+                    .into_any_element();
+                match role {
+                    transcript::WorkRole::Header { turn, steps, open } if *steps > 0 => div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(bubble)
+                        .child(Chat::render_work_header(
+                            *turn,
+                            *steps,
+                            *open,
                             theme,
-                            format!("user-entry-{entry_index}"),
-                            source_start,
-                            Some(&interaction),
-                        )),
-                )
-                .into_any_element(),
+                            &bezel_theme,
+                            entity.clone(),
+                        ))
+                        .into_any_element(),
+                    _ => bubble,
+                }
+            }
             Entry::Assistant { text, document } => {
+                if matches!(role, transcript::WorkRole::Member { open: true, .. }) {
+                    return Chat::render_interim_prose(
+                        entry_index,
+                        &text,
+                        source_start,
+                        &interaction,
+                        theme,
+                    );
+                }
                 let target = CopyTarget::Assistant(entry_index);
                 let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");
@@ -4589,15 +4619,22 @@ impl Chat {
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .child("Copy");
                 }
-                div()
+                let mut answer = div()
                     .id(("assistant-response", entry_index))
                     .debug_selector(move || format!("assistant-response-{entry_index}"))
                     .relative()
                     .group(hover_group)
                     .w_full()
                     .child(MarkdownBody::new(document))
-                    .child(copy)
-                    .into_any_element()
+                    .child(copy);
+                if matches!(role, transcript::WorkRole::Outside) {
+                    answer = answer.child(
+                        div()
+                            .size_0()
+                            .debug_selector(move || format!("answer-{entry_index}")),
+                    );
+                }
+                answer.into_any_element()
             }
             Entry::Thought {
                 text,
@@ -6719,6 +6756,8 @@ impl Render for Chat {
         // row — segmenting the transcript is O(entries), and the virtualizer
         // calls its row processor separately for every visible index.
         let turn_roles = turn_row_roles(&self.entries, &self.unfolded_turns);
+        let work =
+            transcript::work_roles(&self.entries, &self.work_open, self.streaming_turn_start());
         let transcript_focus = self.transcript_focus.clone();
         // The answer field's caret, resolved before the tree is built so the
         // card and the composer agree within one frame.
@@ -6868,6 +6907,7 @@ impl Render for Chat {
                                                                         entry_index,
                                                                     ),
                                                                     &this.thought_scroll,
+                                                                    &transcript::WorkRole::Outside,
                                                                     &mut *window,
                                                                     &mut *cx,
                                                                 )
@@ -6879,6 +6919,40 @@ impl Render for Chat {
                                     }
                                     TurnRowRole::Normal => {}
                                 }
+                                // The Work zone: interim entries fold behind
+                                // the turn's header. Resolved after the
+                                // F-CHAT-22 fold above — a folded turn hides
+                                // its Work header too — and before the
+                                // tool-run grouping below, because a folded
+                                // zone hides its tool runs as well.
+                                let role = work
+                                    .get(entry_index)
+                                    .cloned()
+                                    .unwrap_or(transcript::WorkRole::Outside);
+                                // Permission, Plan, Error and TurnFooter
+                                // entries render where they are, outside every
+                                // zone — even when they sit before the answer.
+                                let in_zone = match &role {
+                                    transcript::WorkRole::Member { open, .. } => {
+                                        let outside = matches!(
+                                            this.entries.get(entry_index),
+                                            Some(
+                                                Entry::Permission { .. }
+                                                    | Entry::Plan { .. }
+                                                    | Entry::Error { .. }
+                                                    | Entry::TurnFooter(_)
+                                            )
+                                        );
+                                        (!outside).then_some(*open)
+                                    }
+                                    _ => None,
+                                };
+                                if in_zone == Some(false) {
+                                    return div()
+                                        .id(("chat-entry", entry_index))
+                                        .into_any_element();
+                                }
+                                let frame_open = in_zone == Some(true);
                                 // F-CHAT-22: a run of consecutive tool
                                 // calls renders as one bordered box, keyed
                                 // to the run's last index. Every other
@@ -6911,18 +6985,29 @@ impl Render for Chat {
                                     // zone sits 8px from the answer that
                                     // follows it, tighter than the 10px
                                     // between turns elsewhere in the list.
+                                    // A run is by construction interim —
+                                    // every tool sits before `answer_from` —
+                                    // so a run never crosses the zone
+                                    // boundary; an open zone frames the whole
+                                    // box here.
+                                    let run = this.render_tool_run(
+                                        members,
+                                        transcript_focus.clone(),
+                                        &transcript_theme,
+                                        &row_bezel_theme,
+                                        entity.clone(),
+                                    );
+                                    let body = if frame_open {
+                                        Chat::render_work_member(entry_index, run, &row_bezel_theme)
+                                    } else {
+                                        run
+                                    };
                                     return div()
                                         .id(("chat-entry", entry_index))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
-                                        .child(this.render_tool_run(
-                                            members,
-                                            transcript_focus.clone(),
-                                            &transcript_theme,
-                                            &row_bezel_theme,
-                                            entity.clone(),
-                                        ))
+                                        .child(body)
                                         .into_any_element();
                                 }
                                 let source_start = transcript_ranges
@@ -6933,33 +7018,50 @@ impl Render for Chat {
                                     .get(entry_index)
                                     .cloned()
                                     .map(|entry| {
-                                        let bottom_padding =
-                                            if matches!(entry, Entry::TurnFooter(_)) {
-                                                TURN_BOTTOM_PADDING
-                                            } else {
-                                                10.0
-                                            };
+                                        // An open member trades the row's own
+                                        // bottom padding for the zone frame's
+                                        // `gap 8`, so members stack at the
+                                        // gallery's spacing.
+                                        let bottom_padding = if frame_open {
+                                            0.0
+                                        } else if matches!(entry, Entry::TurnFooter(_)) {
+                                            TURN_BOTTOM_PADDING
+                                        } else {
+                                            10.0
+                                        };
+                                        let body = Chat::render_entry(
+                                            entry,
+                                            entry_index,
+                                            &transcript_theme,
+                                            entity.clone(),
+                                            transcript_focus.clone(),
+                                            source_start,
+                                            &question_answer,
+                                            answer_caret_visible,
+                                            this.copied_target.clone(),
+                                            this.edit_summaries.get(&entry_index).cloned(),
+                                            this.thought_is_streaming(entry_index),
+                                            &this.thought_scroll,
+                                            &role,
+                                            &mut *window,
+                                            &mut *cx,
+                                        )
+                                        .into_any_element();
+                                        let body = if frame_open {
+                                            Chat::render_work_member(
+                                                entry_index,
+                                                body,
+                                                &row_bezel_theme,
+                                            )
+                                        } else {
+                                            body
+                                        };
                                         div()
                                             .id(("chat-entry", entry_index))
                                             .w_full()
                                             .max_w(px(TRANSCRIPT_WIDTH))
                                             .pb(px(bottom_padding))
-                                            .child(Chat::render_entry(
-                                                entry,
-                                                entry_index,
-                                                &transcript_theme,
-                                                entity.clone(),
-                                                transcript_focus.clone(),
-                                                source_start,
-                                                &question_answer,
-                                                answer_caret_visible,
-                                                this.copied_target.clone(),
-                                                this.edit_summaries.get(&entry_index).cloned(),
-                                                this.thought_is_streaming(entry_index),
-                                                &this.thought_scroll,
-                                                &mut *window,
-                                                &mut *cx,
-                                            ))
+                                            .child(body)
                                             .into_any_element()
                                     })
                                     .unwrap_or_else(|| div().into_any_element())
@@ -9468,6 +9570,9 @@ let answer = 42;
                 expanded: true,
                 duration_ms: None,
             });
+            // The expanded rows live inside the zone; the turn streams so
+            // it opens by itself.
+            chat.streaming = true;
             chat
         });
         let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -9555,6 +9660,11 @@ let answer = 42;
         });
         refresh_frame(cx);
 
+        // The settled turn folds its interim work; open the zone first.
+        let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
+        cx.simulate_click(work.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
         assert!(
             cx.debug_bounds("subagent-task-toggle-1").is_some(),
             "the subagent task card is drawn"
@@ -11274,6 +11384,144 @@ let answer = 42;
         });
     }
 
+    /// A finished turn folds its interim work — thought, interim prose, tool
+    /// run — behind `Worked · N steps`; the answer stays; a press opens the
+    /// zone and its members draw inside the frame.
+    #[gpui::test]
+    async fn a_finished_turn_folds_its_work_behind_a_header(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::User {
+                text: "q".into(),
+                at: None,
+            });
+            chat.push_entry(Entry::Thought {
+                text: "hmm".into(),
+                open: Default::default(),
+                started: None,
+                duration_ms: Some(1000),
+            });
+            chat.push_entry(Entry::Assistant {
+                text: "looking".into(),
+                document: parse_chat_markdown("looking"),
+            });
+            chat.push_entry(test_tool_call("a"));
+            chat.push_entry(test_tool_call("b"));
+            chat.push_entry(Entry::Assistant {
+                text: "the answer".into(),
+                document: parse_chat_markdown("the answer"),
+            });
+            chat.push_entry(Entry::TurnFooter("12:00".into()));
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        let header = cx
+            .debug_bounds("work-toggle-0")
+            .expect("Worked · 2 steps header");
+        let bubble = cx.debug_bounds("user-bubble-0").expect("bubble");
+        assert!(
+            header.top() >= bubble.bottom(),
+            "the header sits under the question"
+        );
+        assert!(
+            cx.debug_bounds("thought-toggle-1").is_none(),
+            "folded: no thought row"
+        );
+        assert!(
+            cx.debug_bounds("interim-2").is_none(),
+            "folded: no interim prose"
+        );
+        assert!(
+            cx.debug_bounds("tool-run-3").is_none(),
+            "folded: no tool run"
+        );
+        assert!(
+            cx.debug_bounds("answer-5").is_some(),
+            "the answer is outside the zone"
+        );
+
+        cx.simulate_click(header.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("work-open-0").is_some());
+        let thought = cx
+            .debug_bounds("thought-toggle-1")
+            .expect("open: thought header");
+        let interim = cx.debug_bounds("interim-2").expect("open: interim prose");
+        let run = cx.debug_bounds("tool-run-3").expect("open: the run box");
+        let frame = cx
+            .debug_bounds("work-member-1")
+            .expect("the frame around a member");
+        assert!(
+            thought.left() > bubble.left() || thought.left() > frame.left(),
+            "members are inset by the frame"
+        );
+        assert!(
+            interim.top() >= thought.bottom() && run.top() >= interim.bottom(),
+            "members keep transcript order"
+        );
+    }
+
+    /// The streaming turn's zone is open by itself and folds when the turn
+    /// ends; a turn without tools has no header at all.
+    #[gpui::test]
+    async fn the_streaming_turns_zone_is_open_and_folds_on_turn_end(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::User {
+                text: "q".into(),
+                at: None,
+            });
+            chat.push_entry(test_tool_call("a"));
+            chat.streaming = true;
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("work-open-0").is_some(),
+            "open while streaming"
+        );
+        assert!(cx.debug_bounds("tool-run-1").is_some());
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::AgentMessageChunk("done".into()), cx);
+            chat.handle_event(
+                AcpEvent::TurnEnded {
+                    stop_reason: "end_turn".into(),
+                },
+                cx,
+            );
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("work-open-0").is_none(),
+            "folded on turn end"
+        );
+        assert!(cx.debug_bounds("tool-run-1").is_none());
+        assert!(cx.debug_bounds("answer-2").is_some());
+
+        chat.update(cx, |chat, _| {
+            chat.push_entry(Entry::User {
+                text: "q2".into(),
+                at: None,
+            });
+            chat.push_entry(Entry::Assistant {
+                text: "plain".into(),
+                document: parse_chat_markdown("plain"),
+            });
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("work-toggle-4").is_none(),
+            "no tools, no header"
+        );
+        assert!(cx.debug_bounds("answer-5").is_some());
+    }
+
     #[test]
     fn tool_call_run_bounds_inclusive_singles_a_lone_call_and_spans_runs() {
         let entries = vec![
@@ -12459,6 +12707,9 @@ let answer = 42;
                 *duration_ms = None;
             }
             chat.push_entry(full);
+            // The zone folds interim rows behind its header; these rows are
+            // the subject, so the turn streams and the zone opens by itself.
+            chat.streaming = true;
             chat
         });
         cx.update(|_window, cx| init(cx));
@@ -12529,6 +12780,9 @@ let answer = 42;
                 document: parse_chat_markdown("done"),
             });
             chat.push_entry(test_tool_call("e"));
+            // Row-level assertions need the rows: the turn streams so the
+            // Work zone opens by itself.
+            chat.streaming = true;
             chat
         });
         refresh_frame(cx);
@@ -12592,6 +12846,9 @@ let answer = 42;
                 *kind = "Execute".into();
             }
             chat.push_entry(long);
+            // The row is the subject, so the turn streams and the zone
+            // opens by itself.
+            chat.streaming = true;
             chat
         });
         refresh_frame(cx);
@@ -12620,6 +12877,9 @@ let answer = 42;
                 *kind = "Execute".into();
             }
             chat.push_entry(multi);
+            // The row is the subject, so the turn streams and the zone
+            // opens by itself.
+            chat.streaming = true;
             chat
         });
         refresh_frame(cx);
@@ -14081,6 +14341,11 @@ let answer = 42;
             .expect("second fold row is drawn");
 
         cx.simulate_click(fold.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        // The unfolded turn's tool row lives inside its Work zone.
+        let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
+        cx.simulate_click(work.center(), Modifiers::none());
         cx.run_until_parked();
         refresh_frame(cx);
         assert!(
