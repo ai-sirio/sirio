@@ -31,8 +31,15 @@ and are the "expected" side of every visual review below.
    document (`sirio_ui/src/composer.rs`), the custom `ComposerText` element,
    `ComposerPaintTrace` and the composer caret blink are deleted. Skill and
    file mentions become text tokens; images become an attachment strip.
-3. **One control row under the field** (Swift `ComposerControlBar` shape):
-   no gallery hint row; the placeholder carries the `/` and `@` hint.
+3. **The gallery's card, with a toolbar above it** (revised 2026-09-04 —
+   the user rejected the control row inside the card): the card is the
+   gallery's own — field on top, then the mono hint row with the send/stop
+   disc — and nothing else lives in it. Sirio's controls move to a toolbar
+   above the card, outside it. The placeholder is the gallery's sentence:
+   `Ask anything, or @ to attach a file`, or
+   `Ask anything, / for commands, or @ to attach a file` when commands
+   exist; the agent's name no longer appears (the pill and the model chip
+   already name it).
 4. **Four sequential sub-projects, one new module each**, each rewriting its
    code *out of* `chat.rs` into `sirio_ui/src/chat/<module>.rs` as it goes.
    No preliminary refactor step, no parallel agents on `chat.rs`.
@@ -113,20 +120,41 @@ corresponding Sirio action types are deleted.
 - **Queued item** (D-CHAT-03): `commit_queued_item` reads the same triple and
   clears the field; the queued row keeps its place above the card.
 
-### Card
+### Card and toolbar
 
-Transcribed from the gallery's `Composer::render`:
+The card is transcribed from the gallery's `Composer::render`; the toolbar
+above it carries everything else. Not drawn when no agent is configured —
+the card stands alone as in the gallery.
 
 ```
+toolbar (above the card, outside it): flex_row items_center flex_wrap
+    gap 6 px 4 pb 6, id + selector `composer-toolbar`, w_full,
+    max_w(TRANSCRIPT_WIDTH)
+  ├ left  (flex_auto min_w_0, gap 6): status/mode pill · Model chip
+  │       (the shrinkable child: min_w_0 + text_ellipsis, 56 px floor)
+  │       · Effort chip (flex_none) · context ring + label + percent
+  └ right (flex_none ml_auto, gap 4): attach button · overflow button
+    — when the line is tight the right cluster wraps as one unit; nothing
+      is ever clipped in half.
+
 div rounded(Theme::surface_radius()) border_1 border_color(theme.border)
     bg(theme.card_glass_bg()) px 4 pt 4 pb 6 flex_col gap 4
   ├ attachment strip (only when non-empty)
   ├ field
-  └ control row: flex_row items_center justify_between px 6
-      left  (gap 6): status/mode pill · Model chip · Effort chip · attach button
-      right (gap 6): context ring · overflow button · send disc
+  ├ queued row / attach error (only when present)
+  └ hint row: flex_row items_center justify_between px 6
+      left  `composer-hint` (font_mono, text_faint): the state's hint, plus
+            a zero-size marker div (`composer-hint-pick` / `-queue` /
+            `-send`) so tests read the state without pixels
+      right send disc
 ```
 
+- **The four hint states** (gallery `TextStyle::Subheadline`, falling back
+  to `typography.footnote` in the pinned bezel):
+  slash popup open → `↑↓ pick · enter insert · esc close`; mention popup
+  open → `↑↓ pick · enter attach · esc close`; streaming →
+  `enter queue · shift-enter newline`; otherwise →
+  `enter send · shift-enter newline`.
 - The pill and chips keep their current content, selectors and click
   behaviour; they are re-measured to 24 px height on `surface_raised` at
   `Theme::control_radius()` so they sit level with the send disc.
@@ -386,6 +414,7 @@ against the same selectors.
 - One branch per sub-project from `main`, in order 1 → 4; each ends in a PR
   reviewed against the reference screenshots and the acceptance list below.
 - Sub-project 1 landed on branch `feat/composer-bezel-textfield` (2026-09-04).
+- Revised 2026-09-04: the control row inside the card was rejected by the user; the card is the gallery's and the controls sit in a toolbar above it.
 - Implementation by a pi or opencode agent in a Herdr pane (models
   `opencode-go/gpt-5.6-luna` and `opencode-go/muse-spark-1.3-contributor`),
   one writer per sub-project, driven by a task file that carries this spec's
