@@ -12113,12 +12113,19 @@ let answer = 42;
             let mut full = test_tool_call("full");
             if let Entry::ToolCall {
                 content,
+                locations,
                 status,
                 duration_ms,
                 ..
             } = &mut full
             {
                 content.push(ToolCallContentInfo::Text("hello from the tool".into()));
+                // A path long enough that the link must clip inside the
+                // run box rather than run past it.
+                locations.push(ToolCallLocationInfo {
+                    path: std::path::PathBuf::from(format!("/{}", "a".repeat(300))),
+                    line: None,
+                });
                 *status = "failed".into();
                 *duration_ms = None;
             }
@@ -12158,6 +12165,12 @@ let answer = 42;
         assert!(
             cx.debug_bounds("tool-output-2-0").is_some(),
             "the row opens onto its output"
+        );
+        let link = cx.debug_bounds("tool-call-location-2-0").expect("the link");
+        let run = cx.debug_bounds("tool-run-2").expect("the lone call's box");
+        assert!(
+            link.right() <= run.right(),
+            "a long path ends in an ellipsis inside the box: link={link:?} run={run:?}"
         );
     }
 
