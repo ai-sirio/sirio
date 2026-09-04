@@ -31,11 +31,12 @@ and are the "expected" side of every visual review below.
    document (`sirio_ui/src/composer.rs`), the custom `ComposerText` element,
    `ComposerPaintTrace` and the composer caret blink are deleted. Skill and
    file mentions become text tokens; images become an attachment strip.
-3. **The gallery's card, with a toolbar above it** (revised 2026-09-04 —
-   the user rejected the control row inside the card): the card is the
-   gallery's own — field on top, then the mono hint row with the send/stop
-   disc — and nothing else lives in it. Sirio's controls move to a toolbar
-   above the card, outside it. The placeholder is the gallery's sentence:
+3. **The gallery's card, with the chip row in its bottom row** (revised
+   2026-09-04 (22:58) — the user rejected the toolbar above the card):
+   the card is field on top, then one wrapping chip row ending in the
+   send/stop disc — pill · model · effort · context, then attach ·
+   overflow · send. No hint row (the placeholder already carries `/`
+   and `@`). The placeholder is the gallery's sentence:
    `Ask anything, or @ to attach a file`, or
    `Ask anything, / for commands, or @ to attach a file` when commands
    exist; the agent's name no longer appears (the pill and the model chip
@@ -120,47 +121,35 @@ corresponding Sirio action types are deleted.
 - **Queued item** (D-CHAT-03): `commit_queued_item` reads the same triple and
   clears the field; the queued row keeps its place above the card.
 
-### Card and toolbar
+### Card and chip row
 
-The card is transcribed from the gallery's `Composer::render`; the toolbar
-above it carries everything else. Not drawn when no agent is configured —
-the card stands alone as in the gallery.
+The card is field on top, then one wrapping chip row ending in the
+send/stop disc. No hint row; the placeholder already carries `/` and `@`.
+With no agent configured the row holds only the send disc.
 
 ```
-toolbar (above the card, outside it): one flat wrapping row (flex_row
-    flex_wrap items_center gap 6 gap_y 4 px 4 pb 6, id + selector
-    `composer-toolbar`, w_full max_w(TRANSCRIPT_WIDTH)) whose direct
-    children are, in order, the mode pill (flex_none), the Model chip
-    (the one shrinkable child: min_w_0 + text_ellipsis, 56 px floor),
-    the Effort chip (flex_none), the context chip (ring + label +
-    percent, flex_none), and last the attach · overflow pair as one
-    flex_none ml_auto group; when a line is full the next chip wraps to
-    the next line and the pair follows to the end of whichever line it
-    lands on; nothing is ever clipped.
-
-The toolbar and the card are centred with the transcript (`items_center`
-on their column).
-
 div rounded(Theme::surface_radius()) border_1 border_color(theme.border)
     bg(theme.card_glass_bg()) px 4 pt 4 pb 6 flex_col gap 4
   ├ attachment strip (only when non-empty)
   ├ field
   ├ queued row / attach error (only when present)
-  └ hint row: flex_row items_center justify_between px 6
-      left  `composer-hint` (font_mono, text_faint): the state's hint, plus
-            a zero-size marker div (`composer-hint-pick` / `-queue` /
-            `-send`) so tests read the state without pixels
-      right send disc
+  └ chip row: one flat wrapping row (flex_row flex_wrap items_center
+      gap 6 gap_y 4 px 6) whose direct children are, in order, the mode
+      pill (flex_none), the Model chip (the one shrinkable child:
+      min_w_0 + text_ellipsis, 56 px floor), the Effort chip
+      (flex_none), the context chip (ring + label + percent,
+      flex_none), and last the attach · overflow · send trio as one
+      flex_none ml_auto group; when a line is full the next chip wraps
+      to the next line and the trio follows to the end of whichever line
+      it lands on; nothing is ever clipped, and the disc never paints
+      over a neighbour.
 ```
 
-- **The four hint states** (gallery `TextStyle::Subheadline`, falling back
-  to `typography.footnote` in the pinned bezel):
-  slash popup open → `↑↓ pick · enter insert · esc close`; mention popup
-  open → `↑↓ pick · enter attach · esc close`; streaming →
-  `enter queue · shift-enter newline`; otherwise →
-  `enter send · shift-enter newline`.
+- The chips sit on the card's surface: no fill and no border at rest,
+  only the hover wash, so they still read as pressable. The send disc
+  keeps its own look.
 - The pill and chips keep their current content, selectors and click
-  behaviour; they are re-measured to 24 px height on `surface_raised` at
+  behaviour; they are re-measured to 24 px height at
   `Theme::control_radius()` so they sit level with the send disc.
 - **Send disc**: 24 px, `rounded_full`, `ARROW_UP` at 14 px. Ready
   (`can_send()`): `bg(theme.solid)`, icon `theme.on_solid`, `cursor_pointer`,
@@ -419,6 +408,7 @@ against the same selectors.
   reviewed against the reference screenshots and the acceptance list below.
 - Sub-project 1 landed on branch `feat/composer-bezel-textfield` (2026-09-04).
 - Revised 2026-09-04: the control row inside the card was rejected by the user; the card is the gallery's and the controls sit in a toolbar above it.
+- Revised 2026-09-04 (22:58): the toolbar above the card was rejected by the user; the chip row lives in the card's bottom row, in place of the hint text.
 - Sub-project 2 landed on branch `feat/tool-calls-step-row` (2026-09-04).
 - Sub-project 3 landed on branch feat/thought-takeover (2026-09-04).
 - Implementation by a pi or opencode agent in a Herdr pane (models
