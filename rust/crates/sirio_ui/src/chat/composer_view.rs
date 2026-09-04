@@ -116,3 +116,161 @@ mod tests {
         assert_eq!(paths, vec!["a.rs".to_string(), "b.rs".to_string()]);
     }
 }
+
+use gpui::{Context, SharedString};
+
+use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
+
+/// Which token picker is on screen, if any. Enter/up/down/tab belong to it
+/// while it is; otherwise they fall through to the field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TokenPopup {
+    None,
+    Slash,
+    Mention,
+}
+
+impl Chat {
+    /// F-CHAT-05: the composer is out of service while a permission/plan
+    /// question is unanswered or the agent is disconnected — the whole
+    /// editor, not just Send, mirroring the Swift `.disabled(!canInteract)`.
+    pub(crate) fn composer_disabled(&self) -> bool {
+        self.pending_question().is_some() || self.is_offline()
+    }
+
+    /// The field's placeholder names the state the composer is in.
+    pub(crate) fn composer_placeholder(&self) -> String {
+        if self.pending_question().is_some() {
+            "Waiting for permission response…".to_string()
+        } else if self.streaming {
+            "Type to queue for the next turn…".to_string()
+        } else if self.is_offline() {
+            "Agent offline — reconnecting when you send…".to_string()
+        } else {
+            self.default_placeholder()
+        }
+    }
+
+    /// Replace the draft programmatically: the cache first, so the observer
+    /// that fires next sees nothing to revert.
+    pub(crate) fn set_composer_text(
+        &mut self,
+        text: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let text: SharedString = text.into();
+        self.draft = text.clone();
+        self.draft_caret = text.len();
+        self.composer_field
+            .update(cx, |field, cx| field.set_content(text, cx));
+        self.refresh_token_popups(cx);
+    }
+
+    /// The observer: runs after every content or caret change in the field.
+    /// A disabled composer refuses edits by putting the last accepted draft
+    /// back (`offline_enter_never_discards_the_typed_draft`).
+    pub(crate) fn reread_composer(&mut self, cx: &mut Context<Self>) {
+        let (content, caret) = {
+            let field = self.composer_field.read(cx);
+            (field.content().clone(), field.cursor())
+        };
+        if content == self.draft && caret == self.draft_caret {
+            return;
+        }
+        if self.composer_disabled() && content != self.draft {
+            let last = self.draft.clone();
+            self.composer_field
+                .update(cx, |field, cx| field.set_content(last, cx));
+            return;
+        }
+        self.draft = content;
+        self.draft_caret = caret;
+        self.refresh_token_popups(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn open_token_popup(&self) -> TokenPopup {
+        if self.slash_popup_visible() {
+            TokenPopup::Slash
+        } else if self.mention_popup_visible() {
+            TokenPopup::Mention
+        } else {
+            TokenPopup::None
+        }
+    }
+
+    pub(crate) fn mention_popup_visible(&self) -> bool {
+        mention_token(&self.draft, self.draft_caret).is_some()
+            && !self.mention_filter.filtered().is_empty()
+    }
+
+    /// `up`: the popup's row when one is open, otherwise the field's own
+    /// vertical motion — `propagate` lets gpui try the field's binding next.
+    pub(crate) fn popup_previous(
+        &mut self,
+        _: &PopupPrevious,
+        _: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.open_token_popup() {
+            TokenPopup::Slash => self.slash_filter.step(-1),
+            TokenPopup::Mention => self.mention_filter.step(-1),
+            TokenPopup::None => return cx.propagate(),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn popup_next(
+        &mut self,
+        _: &PopupNext,
+        _: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.open_token_popup() {
+            TokenPopup::Slash => self.slash_filter.step(1),
+            TokenPopup::Mention => self.mention_filter.step(1),
+            TokenPopup::None => return cx.propagate(),
+        }
+        cx.notify();
+    }
+
+    /// `tab`: accept the active row; with no popup, ordinary focus traversal.
+    pub(crate) fn popup_accept(
+        &mut self,
+        _: &PopupAccept,
+        _: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_active_popup_row(cx) {
+            cx.propagate();
+        }
+    }
+
+    /// Accept whichever picker is open. `true` when one was.
+    pub(crate) fn accept_active_popup_row(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.open_token_popup() {
+            TokenPopup::Slash => {
+                if let Some(item) = self.slash_filter.active_item() {
+                    let name = self.slash_filter.items()[item].to_string();
+                    self.accept_slash_command(&name, cx);
+                }
+                true
+            }
+            TokenPopup::Mention => {
+                if let Some(item) = self.mention_filter.active_item() {
+                    let path = self.mention_filter.items()[item].to_string();
+                    self.accept_mention(&path, cx);
+                }
+                true
+            }
+            TokenPopup::None => false,
+        }
+    }
+
+    pub(crate) fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.attachments.len() {
+            self.attachments.remove(index);
+            cx.notify();
+        }
+    }
+}
