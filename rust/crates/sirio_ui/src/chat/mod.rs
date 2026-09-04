@@ -505,9 +505,18 @@ enum Entry {
     },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
-    /// `expanded` starts `false` (F-CHAT-21): thinking renders collapsed to
-    /// a one-line summary until the reader opts in, live or historical.
-    Thought { text: String, expanded: bool },
+    /// `open` is the reader's say over the body (`widgets::Takeover`): until
+    /// they press the header it follows the run — open while the thought
+    /// streams, folded once it settles. `started` is view state (the first
+    /// chunk's instant); `duration_ms` is what the settling entry stored and
+    /// what persists. A restored thought has neither `started` nor a live
+    /// run, so it opens closed as before (F-CHAT-21).
+    Thought {
+        text: String,
+        open: bezel::ui::widgets::Takeover,
+        started: Option<std::time::Instant>,
+        duration_ms: Option<u64>,
+    },
     /// A tool call, tracked by protocol id so later updates can patch it.
     ///
     /// `kind`, `content`, `locations`, `raw_input` and `raw_output` are the
@@ -635,7 +644,12 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
     match entry {
         Entry::User(text) => Some(ChatEntry::UserMessage { text: text.clone() }),
         Entry::Assistant { text, .. } => Some(ChatEntry::AssistantMessage { text: text.clone() }),
-        Entry::Thought { text, .. } => Some(ChatEntry::Thought { text: text.clone() }),
+        Entry::Thought {
+            text, duration_ms, ..
+        } => Some(ChatEntry::Thought {
+            text: text.clone(),
+            duration_ms: *duration_ms,
+        }),
         Entry::ToolCall {
             id,
             title,
@@ -783,9 +797,11 @@ fn restored_entry(entry: ChatEntry) -> Entry {
             document: parse_chat_markdown(&text),
             text,
         },
-        ChatEntry::Thought { text } => Entry::Thought {
+        ChatEntry::Thought { text, duration_ms } => Entry::Thought {
             text,
-            expanded: false,
+            open: Default::default(),
+            started: None,
+            duration_ms,
         },
         ChatEntry::ToolCall {
             id,
@@ -1698,6 +1714,9 @@ impl Chat {
     fn push_entry(&mut self, entry: Entry) {
         let index = self.entries.len();
         let following_tail = self.list_state.is_following_tail();
+        if !matches!(entry, Entry::Thought { .. }) {
+            self.settle_open_thought();
+        }
         self.entries.push(entry);
         self.list_state.splice(index..index, 1);
         if following_tail {
@@ -1765,15 +1784,6 @@ impl Chat {
                     .position(|call| call.id == id)
                     .map(|child_index| (task_index, child_index))
             })
-    }
-
-    /// F-CHAT-21: flips one thought entry's expand/collapse state.
-    fn toggle_thought_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(Entry::Thought { expanded, .. }) = self.entries.get_mut(index) {
-            *expanded = !*expanded;
-            self.remeasure_entry(index);
-        }
-        cx.notify();
     }
 
     /// F-CHAT-23: flips one tool call entry's expand/collapse state.
@@ -1888,7 +1898,9 @@ impl Chat {
                 } else {
                     self.push_entry(Entry::Thought {
                         text,
-                        expanded: false,
+                        open: Default::default(),
+                        started: Some(std::time::Instant::now()),
+                        duration_ms: None,
                     });
                 }
             }
@@ -2268,6 +2280,7 @@ impl Chat {
                 }
             }
             AcpEvent::TurnEnded { stop_reason } => {
+                self.settle_open_thought();
                 // The footer must state *why* the turn stopped. A cancelled
                 // or refused turn that ends in a plain timestamp looks like an
                 // ordinary completion, and that is the exact failure class
@@ -4546,7 +4559,10 @@ impl Chat {
                     .child(copy)
                     .into_any_element()
             }
-            Entry::Thought { text, expanded } => {
+            Entry::Thought { text, open, .. } => {
+                // Task 3 replaces this arm; for now the old header reads
+                // the takeover's folded auto state so it compiles.
+                let expanded = open.get(false);
                 let toggle_entity = entity.clone();
                 let mut column = div().w_full().flex().flex_col().gap(px(4.0)).child(
                     div()
@@ -4591,7 +4607,7 @@ impl Chat {
                         )
                         .on_click(move |_, _, cx| {
                             toggle_entity.update(cx, |chat, cx| {
-                                chat.toggle_thought_expanded(entry_index, cx);
+                                chat.toggle_thought(entry_index, cx);
                             });
                         }),
                 );
@@ -8546,6 +8562,121 @@ two"
         assert!(locations.is_empty(), "and no target to name");
     }
 
+    /// A thought measures the wall clock from its first chunk to the entry
+    /// that settles it, and the duration survives a restart; a thought
+    /// restored from a database written before the field has none.
+    #[gpui::test]
+    async fn a_thought_measures_its_duration_and_persists_it(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(AcpEvent::ThoughtChunk("weigh the options".into()), cx);
+            assert!(
+                matches!(
+                    chat.entries.last(),
+                    Some(Entry::Thought {
+                        started: Some(_),
+                        duration_ms: None,
+                        ..
+                    })
+                ),
+                "the first chunk starts the clock"
+            );
+            assert!(chat.thought_is_streaming(chat.entries.len() - 1));
+            chat.handle_event(
+                AcpEvent::AgentMessageChunk("Here is the answer.".into()),
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            let thought = chat
+                .entries
+                .iter()
+                .find(|entry| matches!(entry, Entry::Thought { .. }))
+                .expect("the thought is still there");
+            assert!(
+                matches!(
+                    thought,
+                    Entry::Thought {
+                        duration_ms: Some(_),
+                        ..
+                    }
+                ),
+                "the answer's first chunk settles the thought: {thought:?}"
+            );
+            assert!(!chat.thought_is_streaming(0));
+            assert!(
+                matches!(
+                    persisted_entry(thought),
+                    Some(ChatEntry::Thought {
+                        duration_ms: Some(_),
+                        ..
+                    })
+                ),
+                "the duration is written to the persisted entry"
+            );
+        });
+        let restored = restored_entry(ChatEntry::Thought {
+            text: "old".into(),
+            duration_ms: None,
+        });
+        assert!(matches!(
+            restored,
+            Entry::Thought {
+                started: None,
+                duration_ms: None,
+                ..
+            }
+        ));
+    }
+
+    /// The turn's end settles a thought that no answer followed.
+    #[gpui::test]
+    async fn a_turn_end_settles_a_trailing_thought(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(AcpEvent::ThoughtChunk("…".into()), cx);
+            chat.handle_event(
+                AcpEvent::TurnEnded {
+                    stop_reason: "end_turn".into(),
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                chat.entries.iter().any(|entry| matches!(
+                    entry,
+                    Entry::Thought {
+                        duration_ms: Some(_),
+                        ..
+                    }
+                )),
+                "the trailing thought settled on turn end"
+            );
+        });
+    }
+
+    /// A pre-field row restores with no duration rather than failing to
+    /// deserialize.
+    #[test]
+    fn a_thought_row_written_before_the_duration_field_restores() {
+        let json = r#"{"Thought":{"text":"hmm"}}"#;
+        let entry: ChatEntry = serde_json::from_str(json).expect("deserializes");
+        assert!(matches!(
+            entry,
+            ChatEntry::Thought {
+                duration_ms: None,
+                ..
+            }
+        ));
+    }
+
     /// #173: a user message longer than the pane must wrap inside it. The
     /// bubble is end-justified, so when it refuses to shrink below its
     /// content width the overflow goes off the *left* edge — off screen,
@@ -11870,7 +12001,9 @@ let answer = 42;
             );
             chat.push_entry(Entry::Thought {
                 text: "considering the approach".into(),
-                expanded: false,
+                open: Default::default(),
+                started: None,
+                duration_ms: None,
             });
             chat
         });
@@ -11878,7 +12011,7 @@ let answer = 42;
 
         fn is_expanded(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
             chat.read_with(cx, |chat, _| {
-                matches!(chat.entries.last(), Some(Entry::Thought { expanded, .. }) if *expanded)
+                matches!(chat.entries.last(), Some(Entry::Thought { open, .. }) if open.get(false))
             })
         }
         assert!(!is_expanded(&chat, cx), "a new thought starts collapsed");

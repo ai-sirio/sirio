@@ -265,7 +265,13 @@ pub enum ChatEntry {
     /// Rendered assistant prose (stored as source text, not a parsed view tree).
     AssistantMessage { text: String },
     /// Rendered assistant reasoning text.
-    Thought { text: String },
+    Thought {
+        text: String,
+        /// Wall-clock milliseconds from the first chunk to the entry that
+        /// settled the thought, when this process measured it.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
     /// A tool card, including its terminal status when the turn settled.
     ToolCall {
         id: String,

@@ -13,6 +13,8 @@ use gpui::ScrollHandle;
 
 use crate::loading;
 
+use super::Entry;
+
 /// The header's word: `Thinking` while the thought streams, then
 /// `Thought for Ns` when this process measured it, or a bare `Thought` for a
 /// thought restored from a database that never knew.
@@ -40,6 +42,50 @@ impl ThoughtScroll {
             follow: FollowState::new(),
             bar: ScrollbarState::new(painter),
         }
+    }
+}
+
+impl super::Chat {
+    /// A thought streams while the turn does and nothing has settled it.
+    pub(crate) fn thought_is_streaming(&self, index: usize) -> bool {
+        self.streaming
+            && matches!(
+                self.entries.get(index),
+                Some(Entry::Thought {
+                    started: Some(_),
+                    duration_ms: None,
+                    ..
+                })
+            )
+    }
+
+    /// Settles the thought at the tail, if one is still open: stores its
+    /// elapsed time and remeasures the row (the header's word and the body's
+    /// auto-open both change). Called before any non-thought entry is pushed
+    /// and when the turn ends.
+    pub(crate) fn settle_open_thought(&mut self) {
+        let index = self.entries.len().checked_sub(1);
+        if let Some(index) = index
+            && let Some(Entry::Thought {
+                started: Some(started),
+                duration_ms,
+                ..
+            }) = self.entries.get_mut(index)
+                && duration_ms.is_none() {
+                    *duration_ms = Some(started.elapsed().as_millis() as u64);
+                    self.remeasure_entry(index);
+                }
+    }
+
+    /// The reader presses the header: flip what is on screen and hold it
+    /// (`Takeover::toggle` against the current auto state).
+    pub(crate) fn toggle_thought(&mut self, index: usize, cx: &mut gpui::Context<Self>) {
+        let auto = self.thought_is_streaming(index);
+        if let Some(Entry::Thought { open, .. }) = self.entries.get_mut(index) {
+            open.toggle(auto);
+            self.remeasure_entry(index);
+        }
+        cx.notify();
     }
 }
 
