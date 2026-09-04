@@ -218,11 +218,11 @@ fn chat_session_sends_queued_text_after_a_normal_turn() {
     assert!(completed.queued_text.is_empty());
     assert!(matches!(
         &completed.transcript.turns[0].entries[0],
-        sirio_persistence::ChatEntry::UserMessage { text } if text == "first prompt"
+        sirio_persistence::ChatEntry::UserMessage { text, .. } if text == "first prompt"
     ));
     assert!(matches!(
         &completed.transcript.turns[1].entries[0],
-        sirio_persistence::ChatEntry::UserMessage { text } if text == "second prompt"
+        sirio_persistence::ChatEntry::UserMessage { text, .. } if text == "second prompt"
     ));
     session.shutdown().expect("shutdown queue chat");
 }

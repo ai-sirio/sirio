@@ -494,7 +494,10 @@ struct SubagentToolCall {
 #[derive(Clone, Debug)]
 enum Entry {
     /// The user's own turn, shown as the gallery's right-aligned raised pill.
-    User(String),
+    User {
+        text: String,
+        at: Option<chrono::DateTime<chrono::Local>>,
+    },
     /// A streamed assistant reply, grown in place as chunks arrive.
     ///
     /// The parsed tree is updated at ingestion time rather than during
@@ -596,7 +599,7 @@ pub struct ChatControlSnapshot {
 impl Entry {
     fn plain_text(&self) -> String {
         match self {
-            Self::User(text) => text.clone(),
+            Self::User { text, .. } => text.clone(),
             Self::Thought { text, .. } => text.clone(),
             Self::Assistant { text, .. } => text.clone(),
             Self::ToolCall {
@@ -642,7 +645,10 @@ impl Entry {
 
 fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
     match entry {
-        Entry::User(text) => Some(ChatEntry::UserMessage { text: text.clone() }),
+        Entry::User { text, at } => Some(ChatEntry::UserMessage {
+            text: text.clone(),
+            at: at.map(|at| at.timestamp()),
+        }),
         Entry::Assistant { text, .. } => Some(ChatEntry::AssistantMessage { text: text.clone() }),
         Entry::Thought {
             text, duration_ms, ..
@@ -792,7 +798,12 @@ fn discard_edited_path(repo: &Path, reported_path: &Path) -> Result<(), String> 
 
 fn restored_entry(entry: ChatEntry) -> Entry {
     match entry {
-        ChatEntry::UserMessage { text } => Entry::User(text),
+        ChatEntry::UserMessage { text, at } => Entry::User {
+            text,
+            at: at
+                .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+                .map(|utc| utc.with_timezone(&chrono::Local)),
+        },
         ChatEntry::AssistantMessage { text } => Entry::Assistant {
             document: parse_chat_markdown(&text),
             text,
@@ -2740,7 +2751,7 @@ impl Chat {
     /// `None` rather than offering the agent's words as the user's.
     pub fn first_user_prompt(&self) -> Option<String> {
         self.entries.iter().find_map(|entry| match entry {
-            Entry::User(text) if !text.trim().is_empty() => Some(text.clone()),
+            Entry::User { text, .. } if !text.trim().is_empty() => Some(text.clone()),
             _ => None,
         })
     }
@@ -3372,7 +3383,10 @@ impl Chat {
         images: Vec<ImageAttachment>,
         cx: &mut Context<Self>,
     ) {
-        self.push_entry(Entry::User(text.clone()));
+        self.push_entry(Entry::User {
+            text: text.clone(),
+            at: Some(chrono::Local::now()),
+        });
         self.streaming = true;
         if let Some(client) = &self.client
             && let Err(error) =
@@ -4493,7 +4507,7 @@ impl Chat {
             focus: transcript_focus,
         };
         match entry {
-            Entry::User(text) => div()
+            Entry::User { text, .. } => div()
                 .w_full()
                 .flex()
                 .justify_end()
@@ -6577,7 +6591,7 @@ impl Chat {
 fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
     let mut row = BTreeMap::new();
     match entry {
-        Entry::User(text) => {
+        Entry::User { text, .. } => {
             row.insert("kind".into(), "user".into());
             row.insert("text".into(), text.clone());
         }
@@ -7295,7 +7309,7 @@ fn turn_is_foldable(turns: &[TurnSegment], position: usize) -> bool {
 /// `"Turn"` fallback for a turn that opened without one.
 fn turn_label(entries: &[Entry], turn: &TurnSegment) -> String {
     for index in turn.start..=turn.end {
-        if let Some(Entry::User(text)) = entries.get(index) {
+        if let Some(Entry::User { text, .. }) = entries.get(index) {
             let line = text.lines().next().unwrap_or(text.as_str());
             return line.chars().take(TURN_LABEL_MAX_CHARS).collect();
         }
@@ -8728,7 +8742,10 @@ two"
             .to_owned();
         let (chat, cx) = chat_view(cx, &[]);
         chat.update(cx, |chat, cx| {
-            chat.push_entry(Entry::User(message));
+            chat.push_entry(Entry::User {
+                text: message,
+                at: None,
+            });
             cx.notify();
         });
         cx.simulate_resize(size(px(420.0), px(600.0)));
@@ -8981,13 +8998,19 @@ let answer = 42;
     #[test]
     fn persisted_transcript_contains_only_completed_turns() {
         let entries = vec![
-            Entry::User("inspect".into()),
+            Entry::User {
+                text: "inspect".into(),
+                at: None,
+            },
             Entry::Assistant {
                 text: "done".into(),
                 document: parse_chat_markdown("done"),
             },
             Entry::TurnFooter("12:00".into()),
-            Entry::User("still streaming".into()),
+            Entry::User {
+                text: "still streaming".into(),
+                at: None,
+            },
         ];
         let transcript = Chat::transcript_from_entries("tab-chat", &entries);
         assert_eq!(transcript.turns.len(), 1);
@@ -9076,7 +9099,7 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| {
                 chat.entries
                     .iter()
-                    .any(|entry| matches!(entry, Entry::User(text) if text == "first"))
+                    .any(|entry| matches!(entry, Entry::User { text, .. } if text == "first"))
             }),
             "Return sends the composed message"
         );
@@ -9096,7 +9119,7 @@ let answer = 42;
         let user_entries = chat.read_with(&cx.cx, |chat, _| {
             chat.entries
                 .iter()
-                .filter(|entry| matches!(entry, Entry::User(_)))
+                .filter(|entry| matches!(entry, Entry::User { .. }))
                 .count()
         });
         assert_eq!(
@@ -9106,10 +9129,9 @@ let answer = 42;
 
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| {
-            chat.entries
-                .iter()
-                .any(|entry| matches!(entry, Entry::User(text) if text == "line one\nline two"))
-                && chat.has_completed_turn
+            chat.entries.iter().any(
+                |entry| matches!(entry, Entry::User { text, .. } if text == "line one\nline two"),
+            ) && chat.has_completed_turn
         });
     }
 
@@ -9714,7 +9736,7 @@ let answer = 42;
                 chat.entries
             );
             assert!(
-                matches!(chat.entries.first(), Some(Entry::User(text)) if text == "first"),
+                matches!(chat.entries.first(), Some(Entry::User { text, .. }) if text == "first"),
                 "turn 1's user message must survive turn 2's dismiss: {:?}",
                 chat.entries.first()
             );
@@ -10351,7 +10373,7 @@ let answer = 42;
                 .count();
             chat.entries
                 .iter()
-                .any(|entry| matches!(entry, Entry::User(text) if text == "still alive?"))
+                .any(|entry| matches!(entry, Entry::User { text, .. } if text == "still alive?"))
                 && footers >= 2
         });
     }
@@ -10531,7 +10553,7 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| {
                 chat.entries
                     .iter()
-                    .any(|entry| matches!(entry, Entry::User(text) if text == "again"))
+                    .any(|entry| matches!(entry, Entry::User { text, .. } if text == "again"))
             }),
             "the recovered connection takes a new turn"
         );
@@ -10749,7 +10771,7 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| {
             chat.entries
                 .iter()
-                .filter(|entry| matches!(entry, Entry::User(text) if text == "queued msg"))
+                .filter(|entry| matches!(entry, Entry::User { text, .. } if text == "queued msg"))
                 .count()
                 == 1
                 && chat
@@ -10762,12 +10784,13 @@ let answer = 42;
                 let queued_count = chat
                     .entries
                     .iter()
-                    .filter(|entry| matches!(entry, Entry::User(text) if text == "queued msg"))
+                    .filter(
+                        |entry| matches!(entry, Entry::User { text, .. } if text == "queued msg"),
+                    )
                     .count();
-                let uncommitted_sent = chat
-                    .entries
-                    .iter()
-                    .any(|entry| matches!(entry, Entry::User(text) if text == "half a thought"));
+                let uncommitted_sent = chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::User { text, .. } if text == "half a thought"),
+                );
                 (
                     queued_count,
                     uncommitted_sent,
@@ -10848,7 +10871,7 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| {
                 chat.entries
                     .iter()
-                    .all(|entry| !matches!(entry, Entry::User(text) if text == "queued msg"))
+                    .all(|entry| !matches!(entry, Entry::User { text, .. } if text == "queued msg"))
             }),
             "nothing sends when the queued item was removed"
         );
@@ -10898,7 +10921,7 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| {
             chat.entries
                 .iter()
-                .filter(|entry| matches!(entry, Entry::User(text) if text == "queued msg"))
+                .filter(|entry| matches!(entry, Entry::User { text, .. } if text == "queued msg"))
                 .count()
                 == 1
                 && chat
@@ -11124,13 +11147,74 @@ let answer = 42;
         }
     }
 
+    /// A sent message carries the moment it was sent, the moment survives a
+    /// restart as unix seconds, and a row written before the field restores
+    /// with none.
+    #[gpui::test]
+    async fn a_user_message_is_stamped_and_the_stamp_persists(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        // `send` refuses while offline (no client here), so drive the exact
+        // fn the send path uses to push the `User` entry.
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("hello".into(), Vec::new(), Vec::new(), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            let user = chat
+                .entries
+                .iter()
+                .find(|e| matches!(e, Entry::User { .. }))
+                .expect("the user entry");
+            let Entry::User { at, .. } = user else {
+                unreachable!()
+            };
+            let at = at.as_ref().expect("a sent message is stamped");
+            assert!(
+                chrono::Local::now()
+                    .signed_duration_since(*at)
+                    .num_seconds()
+                    .abs()
+                    < 60
+            );
+            let persisted = persisted_entry(user).expect("persisted");
+            assert!(matches!(
+                persisted,
+                ChatEntry::UserMessage { at: Some(_), .. }
+            ));
+        });
+        let restored = restored_entry(ChatEntry::UserMessage {
+            text: "old".into(),
+            at: None,
+        });
+        assert!(matches!(restored, Entry::User { at: None, .. }));
+        let stamped = restored_entry(ChatEntry::UserMessage {
+            text: "old".into(),
+            at: Some(1_757_000_000),
+        });
+        assert!(matches!(stamped, Entry::User { at: Some(_), .. }));
+    }
+
+    #[test]
+    fn a_user_row_written_before_the_stamp_restores() {
+        let entry: ChatEntry =
+            serde_json::from_str(r#"{"UserMessage":{"text":"hi"}}"#).expect("deserializes");
+        assert!(matches!(entry, ChatEntry::UserMessage { at: None, .. }));
+    }
+
     #[test]
     fn tool_call_run_bounds_inclusive_singles_a_lone_call_and_spans_runs() {
         let entries = vec![
-            Entry::User("hi".into()),
+            Entry::User {
+                text: "hi".into(),
+                at: None,
+            },
             test_tool_call("tool-1"),
             test_tool_call("tool-2"),
-            Entry::User("bye".into()),
+            Entry::User {
+                text: "bye".into(),
+                at: None,
+            },
         ];
         assert_eq!(tool_call_run_bounds_inclusive(&entries, 0), None);
         assert_eq!(tool_call_run_bounds_inclusive(&entries, 1), Some((1, 2)));
@@ -11479,7 +11563,10 @@ let answer = 42;
                 std::env::temp_dir(),
                 cx,
             );
-            chat.push_entry(Entry::User("earlier turn".into()));
+            chat.push_entry(Entry::User {
+                text: "earlier turn".into(),
+                at: None,
+            });
             chat.push_entry(Entry::Error {
                 message: "MCP server \"scratch\" failed to start".into(),
                 retryable: false,
@@ -11514,9 +11601,9 @@ let answer = 42;
                 chat.entries
             );
             assert!(
-                chat.entries
-                    .iter()
-                    .any(|entry| matches!(entry, Entry::User(text) if text == "earlier turn")),
+                chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::User { text, .. } if text == "earlier turn")
+                ),
                 "dismissing the warning must not touch the rest of the transcript: {:?}",
                 chat.entries
             );
@@ -12483,7 +12570,10 @@ let answer = 42;
                 cx,
             );
             for index in 0..100 {
-                chat.push_entry(Entry::User(format!("Transcript entry {index}")));
+                chat.push_entry(Entry::User {
+                    text: format!("Transcript entry {index}"),
+                    at: None,
+                });
             }
             chat
         });
@@ -12516,7 +12606,10 @@ let answer = 42;
                 std::env::temp_dir(),
                 cx,
             );
-            chat.push_entry(Entry::User("user question".into()));
+            chat.push_entry(Entry::User {
+                text: "user question".into(),
+                at: None,
+            });
             chat.push_entry(Entry::Assistant {
                 text: "assistant answer".into(),
                 document: parse_chat_markdown("assistant answer"),
@@ -12554,7 +12647,10 @@ let answer = 42;
                 std::env::temp_dir(),
                 cx,
             );
-            chat.push_entry(Entry::User("question".into()));
+            chat.push_entry(Entry::User {
+                text: "question".into(),
+                at: None,
+            });
             chat.push_entry(Entry::Assistant {
                 text: "answer".into(),
                 document: parse_chat_markdown("answer"),
@@ -12665,7 +12761,7 @@ let answer = 42;
             assert!(
                 chat.entries
                     .iter()
-                    .any(|entry| { matches!(entry, Entry::User(text) if text == "hello") })
+                    .any(|entry| { matches!(entry, Entry::User { text, .. } if text == "hello") })
             );
             assert!(chat.has_completed_turn, "retry prompt should complete");
         });
@@ -12762,9 +12858,9 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
         assert!(chat.read_with(&cx.cx, |chat, _| {
-            chat.entries
-                .iter()
-                .any(|entry| matches!(entry, Entry::User(text) if text.trim() == "/create-plan"))
+            chat.entries.iter().any(
+                |entry| matches!(entry, Entry::User { text, .. } if text.trim() == "/create-plan"),
+            )
         }));
 
         // Clicking a row accepts directly.
@@ -12975,13 +13071,13 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| {
             chat.entries
                 .iter()
-                .any(|entry| matches!(entry, Entry::User(text) if text.trim() == "check"))
+                .any(|entry| matches!(entry, Entry::User { text, .. } if text.trim() == "check"))
         });
         assert!(
             !chat.read_with(&cx.cx, |chat, _| {
                 chat.entries
                     .iter()
-                    .any(|entry| matches!(entry, Entry::User(text) if text.contains("src/main.rs")))
+                    .any(|entry| matches!(entry, Entry::User { text, .. } if text.contains("src/main.rs")))
             }),
             "the mention path must not leak into the user bubble text"
         );
@@ -13391,7 +13487,7 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| {
             chat.entries
                 .iter()
-                .any(|entry| matches!(entry, Entry::User(text) if text == "again"))
+                .any(|entry| matches!(entry, Entry::User { text, .. } if text == "again"))
                 && chat.has_completed_turn
         });
     }
@@ -13766,13 +13862,25 @@ let answer = 42;
     #[test]
     fn only_turns_older_than_the_last_two_fold() {
         let entries = vec![
-            Entry::User("first question".into()),
+            Entry::User {
+                text: "first question".into(),
+                at: None,
+            },
             Entry::TurnFooter("10:00".into()),
-            Entry::User("second question".into()),
+            Entry::User {
+                text: "second question".into(),
+                at: None,
+            },
             Entry::TurnFooter("10:01".into()),
-            Entry::User("third question".into()),
+            Entry::User {
+                text: "third question".into(),
+                at: None,
+            },
             Entry::TurnFooter("10:02".into()),
-            Entry::User("fourth question".into()),
+            Entry::User {
+                text: "fourth question".into(),
+                at: None,
+            },
         ];
         let turns = segment_turns(&entries);
         assert_eq!(turns.len(), 4, "three closed turns plus the open one");
@@ -13792,7 +13900,10 @@ let answer = 42;
         for count in 0..=2usize {
             let mut entries = Vec::new();
             for index in 0..count {
-                entries.push(Entry::User(format!("question {index}")));
+                entries.push(Entry::User {
+                    text: format!("question {index}"),
+                    at: None,
+                });
                 entries.push(Entry::TurnFooter(format!("10:0{index}")));
             }
             let turns = segment_turns(&entries);
@@ -13812,14 +13923,23 @@ let answer = 42;
                 text: "leading note".into(),
                 document: parse_chat_markdown("leading note"),
             },
-            Entry::User("what does this do?\nsecond line".into()),
+            Entry::User {
+                text: "what does this do?\nsecond line".into(),
+                at: None,
+            },
             Entry::TurnFooter("10:00".into()),
         ];
         let turns = segment_turns(&entries);
         assert_eq!(turn_label(&entries, &turns[0]), "what does this do?");
 
         let long = "x".repeat(100);
-        let entries = vec![Entry::User(long), Entry::TurnFooter("10:00".into())];
+        let entries = vec![
+            Entry::User {
+                text: long,
+                at: None,
+            },
+            Entry::TurnFooter("10:00".into()),
+        ];
         let turns = segment_turns(&entries);
         assert_eq!(turn_label(&entries, &turns[0]).chars().count(), 60);
 
@@ -13849,14 +13969,26 @@ let answer = 42;
                 cx,
             );
             // 0..=2 first turn, 3..=4 second, 5..=6 third, 7 still open.
-            chat.push_entry(Entry::User("first question".into()));
+            chat.push_entry(Entry::User {
+                text: "first question".into(),
+                at: None,
+            });
             chat.push_entry(test_tool_call("step-one"));
             chat.push_entry(Entry::TurnFooter("10:00".into()));
-            chat.push_entry(Entry::User("second question".into()));
+            chat.push_entry(Entry::User {
+                text: "second question".into(),
+                at: None,
+            });
             chat.push_entry(Entry::TurnFooter("10:01".into()));
-            chat.push_entry(Entry::User("third question".into()));
+            chat.push_entry(Entry::User {
+                text: "third question".into(),
+                at: None,
+            });
             chat.push_entry(Entry::TurnFooter("10:02".into()));
-            chat.push_entry(Entry::User("fourth question".into()));
+            chat.push_entry(Entry::User {
+                text: "fourth question".into(),
+                at: None,
+            });
             chat
         });
         refresh_frame(cx);
