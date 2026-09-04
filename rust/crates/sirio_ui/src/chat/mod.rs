@@ -60,7 +60,6 @@ fn highlight_markdown_code(
 }
 
 /// Installs the app-owned syntax highlighter used by bezel-markdown code
-
 /// blocks. The renderer remains usable without this registration and simply
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {

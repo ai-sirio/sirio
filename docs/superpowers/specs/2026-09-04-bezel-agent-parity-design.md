@@ -385,6 +385,7 @@ against the same selectors.
 
 - One branch per sub-project from `main`, in order 1 → 4; each ends in a PR
   reviewed against the reference screenshots and the acceptance list below.
+- Sub-project 1 landed on branch `feat/composer-bezel-textfield` (2026-09-04).
 - Implementation by a pi or opencode agent in a Herdr pane (models
   `opencode-go/gpt-5.6-luna` and `opencode-go/muse-spark-1.3-contributor`),
   one writer per sub-project, driven by a task file that carries this spec's
