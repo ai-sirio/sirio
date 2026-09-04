@@ -12,7 +12,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
     StyledText, Task, Window, actions, canvas, div, linear_color_stop, linear_gradient, list,
-    point, prelude::*, px, quad, relative, rgb, transparent_black,
+    point, prelude::*, px, quad, rgb, transparent_black,
 };
 use sirio_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
@@ -6454,149 +6454,137 @@ impl Chat {
         let slash_popup =
             if self.slash_popup_visible() {
                 let candidates = self.slash_candidates();
-                let selected = self.slash_filter.active().unwrap_or(0);
-                let slash_entity = entity.clone();
-                Some(
-                    div()
-                        .id("slash-popup")
-                        .debug_selector(|| "slash-popup".into())
-                        .absolute()
-                        .left(px(16.0))
-                        .bottom(relative(1.0))
-                        .mb(px(8.0))
-                        .w(px(360.0))
-                        .p(px(6.0))
-                        .rounded(theme.radii.toast)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_lg()
-                        .children(candidates.into_iter().enumerate().map(
-                            move |(index, command)| {
-                                let name = command.name.clone();
-                                let tooltip = slash_option_tooltip(&command.description);
-                                let row_entity = slash_entity.clone();
-                                let is_selected = index == selected;
-                                let name_for_id = name.clone();
-                                let name_for_label_id = name.clone();
-                                let accept_name = name.clone();
-                                // One line per row: the name. The description
-                                // is the row's tooltip, so ten rows stay ten
-                                // lines and the list does not fill the pane.
+                let active = self.slash_filter.active();
+                let view = bezel::motion::Painter::of(cx);
+                let anchor = self
+                    .composer_field
+                    .read(cx)
+                    .offset_bounds(0, window)
+                    .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
+                anchor.map(|anchor| {
+                    let rows: Vec<AnyElement> = candidates
+                        .into_iter()
+                        .enumerate()
+                        .map(|(position, command)| {
+                            let name = command.name.clone();
+                            let tooltip = slash_option_tooltip(&command.description);
+                            let row_entity = entity.clone();
+                            let accept_name = name.clone();
+                            let name_for_id = name.clone();
+                            let name_for_label_id = name.clone();
+                            // One line per row: the name. The description is
+                            // the row's tooltip, so ten rows stay ten lines
+                            // and the list does not fill the pane.
+                            popover::menu_row(
+                                &bezel_theme,
+                                Some(position) == active,
+                                bezel::motion::Fade::new(view, format!("slash-option-{name}")),
+                            )
+                            .id(SharedString::from(format!("slash-option-{name}")))
+                            .debug_selector(move || format!("slash-option-{name_for_id}"))
+                            .when_some(tooltip, |this, text| {
+                                this.tooltip(move |window, cx| {
+                                    Tooltip::text(text.clone(), window, cx)
+                                })
+                            })
+                            .on_click(move |_, _, cx| {
+                                row_entity.update(cx, |chat, cx| {
+                                    chat.accept_slash_command(&accept_name, cx);
+                                });
+                            })
+                            .child(
                                 div()
-                                    .id(format!("slash-option-{name}"))
-                                    .debug_selector(move || format!("slash-option-{name_for_id}"))
-                                    .w_full()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(theme.radii.control)
-                                    .flex()
-                                    .items_center()
-                                    .when(is_selected, |this| this.bg(theme.element_active))
-                                    .when_some(tooltip, |this, text| {
-                                        this.tooltip(move |window, cx| {
-                                            Tooltip::text(text.clone(), window, cx)
-                                        })
+                                    .debug_selector(move || {
+                                        format!("slash-option-name-{name_for_label_id}")
                                     })
-                                    .on_click(move |_, window, cx| {
-                                        row_entity.update(cx, |chat, cx| {
-                                            chat.accept_slash_command(&accept_name, cx);
-                                        });
-                                        // Clicking a row blurs the field; a
-                                        // continued typing must land back
-                                        // in the composer.
-                                        let focus = row_entity
-                                            .read(cx)
-                                            .composer_field
-                                            .read(cx)
-                                            .focus_handle(cx);
-                                        window.focus(&focus, cx);
-                                    })
-                                    .child(
-                                        div()
-                                            .debug_selector(move || {
-                                                format!("slash-option-name-{name_for_label_id}")
-                                            })
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.text)
-                                            .child(format!("/{name}")),
-                                    )
-                            },
-                        )),
-                )
+                                    .text_size(typography.footnote)
+                                    .text_color(bezel_theme.text)
+                                    .child(format!("/{name}")),
+                            )
+                            .into_any_element()
+                        })
+                        .collect();
+                    div()
+                        .child(composer_view::menu_above_at(
+                            "slash-popup-menu",
+                            anchor,
+                            popover::popover_card(&bezel_theme)
+                                .debug_selector(|| "slash-popup".into())
+                                .w(px(280.0))
+                                .child(div().flex().flex_col().children(rows))
+                                .into_any_element(),
+                        ))
+                        .into_any_element()
+                })
             } else {
                 None
             };
 
         // @ file-mention popup (F-CHAT-10): the bounded filesystem walk's
-        // results for the trailing `@token`. Hidden when the token matches
-        // nothing.
+        // results for the trailing `@token`, anchored above the token. Hidden
+        // when the token matches nothing.
         let mention_popup =
             if mention_token(&self.draft, self.draft_caret).is_some()
                 && !self.mention_candidates.is_empty()
             {
-                let mention_entity = entity.clone();
+                let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
                 let candidates = self.mention_candidates.clone();
-                Some(
-                    div()
-                        .id("mention-popup")
-                        .debug_selector(|| "mention-popup".into())
-                        .absolute()
-                        .left(px(16.0))
-                        // Same anchor as the command popup above, for the
-                        // same reason.
-                        .bottom(relative(1.0))
-                        .mb(px(8.0))
-                        .w(px(360.0))
-                        .p(px(6.0))
-                        .rounded(theme.radii.toast)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_lg()
-                        .children(candidates.into_iter().map(move |path| {
-                            let row_entity = mention_entity.clone();
+                let active = self.mention_filter.active();
+                let view = bezel::motion::Painter::of(cx);
+                let anchor = self
+                    .composer_field
+                    .read(cx)
+                    .offset_bounds(at, window)
+                    .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
+                anchor.map(|anchor| {
+                    let rows: Vec<AnyElement> = candidates
+                        .into_iter()
+                        .enumerate()
+                        .map(|(position, path)| {
+                            let row_entity = entity.clone();
                             let path_for_id = path.clone();
                             let path_for_accept = path.clone();
-                            div()
-                                .id(format!("mention-option-{path_for_id}"))
-                                .debug_selector(move || format!("mention-option-{path_for_id}"))
-                                .w_full()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, window, cx| {
-                                    row_entity.update(cx, |chat, cx| {
-                                        chat.accept_mention(&path_for_accept, cx);
-                                    });
-                                    // Clicking a row blurs the field; a
-                                    // continued typing must land back in
-                                    // the composer.
-                                    let focus = row_entity
-                                        .read(cx)
-                                        .composer_field
-                                        .read(cx)
-                                        .focus_handle(cx);
-                                    window.focus(&focus, cx);
-                                })
-                                .child(
-                                    div()
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.text_faint)
-                                        .child("▤"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(typography.footnote)
-                                        .text_color(theme.text)
-                                        .child(path),
-                                )
-                        })),
-                )
+                            popover::menu_row(
+                                &bezel_theme,
+                                Some(position) == active,
+                                bezel::motion::Fade::new(
+                                    view,
+                                    format!("mention-option-{path}"),
+                                ),
+                            )
+                            .id(SharedString::from(format!("mention-option-{path_for_id}")))
+                            .debug_selector(move || format!("mention-option-{path_for_id}"))
+                            .on_click(move |_, _, cx| {
+                                row_entity.update(cx, |chat, cx| {
+                                    chat.accept_mention(&path_for_accept, cx);
+                                });
+                            })
+                            .child(
+                                bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
+                                    .size(px(12.0))
+                                    .text_color(bezel_theme.text_faint),
+                            )
+                            .child(
+                                div()
+                                    .text_size(typography.footnote)
+                                    .text_color(bezel_theme.text)
+                                    .child(path),
+                            )
+                            .into_any_element()
+                        })
+                        .collect();
+                    div()
+                        .child(composer_view::menu_above_at(
+                            "mention-popup-menu",
+                            anchor,
+                            popover::popover_card(&bezel_theme)
+                                .debug_selector(|| "mention-popup".into())
+                                .w(px(360.0))
+                                .child(div().flex().flex_col().children(rows))
+                                .into_any_element(),
+                        ))
+                        .into_any_element()
+                })
             } else {
                 None
             };
@@ -12902,6 +12890,34 @@ let answer = 42;
         );
     }
 
+    /// The pickers hang above the token that opened them, not above the
+    /// card: as the field grows a row, the menu follows the caret.
+    #[gpui::test]
+    async fn slash_popup_hangs_above_the_slash_and_steps_with_the_arrows(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "/");
+        refresh_frame(cx);
+        let popup = cx.debug_bounds("slash-popup").expect("popup");
+        let input = cx.debug_bounds("composer-input").expect("field");
+        assert!(
+            popup.bottom() <= input.top() + px(4.0),
+            "the menu opens upward from the token row"
+        );
+        assert!(
+            popup.left() >= input.left() - px(8.0),
+            "and starts at the token's column"
+        );
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()), Some(0));
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()), Some(1));
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()), Some(0));
+    }
+
     /// The command popup is a card of its own, floated above the composer.
     /// It used to be anchored 43px up from the composer's *bottom* — inside
     /// the card, in the card's own `surface_raised` fill — so it covered the
@@ -12934,10 +12950,11 @@ let answer = 42;
         let name = cx
             .debug_bounds("slash-option-name-cr")
             .expect("the row draws the command name");
-        // Vertical padding is 4px a side; anything taller means a second
-        // line — the description — crept back into the row.
+        // One line: bezel's `menu_row` adds 6px of vertical padding to the
+        // name's line box; anything meaningfully taller means a second line
+        // — the description — crept back into the row.
         assert!(
-            row.size.height <= name.size.height + px(9.0),
+            row.size.height <= name.size.height + px(13.0),
             "a row is the command name alone, one line tall \
              (row {:?}, name {:?})",
             row.size.height,

@@ -117,9 +117,36 @@ mod tests {
     }
 }
 
-use gpui::{Context, SharedString};
+use gpui::{AnyElement, Context, Pixels, Point, SharedString, div, prelude::*, px};
 
 use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
+
+/// An upward menu at a window point — `popover::anchored_menu_above` with an
+/// explicit position, for a token/caret anchor that is measured in window
+/// coordinates (`TextField::offset_bounds`). Same material
+/// (`ui::surface::popover`), entrance motion, occlusion and window snapping
+/// as bezel's own; bezel's `anchored_menu_above_at` takes an ancestor-relative
+/// point instead, which a caret measurement is not.
+pub(crate) fn menu_above_at(
+    id: impl Into<SharedString>,
+    position: Point<Pixels>,
+    content: AnyElement,
+) -> AnyElement {
+    let content =
+        bezel::ui::surface::popover(bezel::theme::Theme::surface_radius(), content);
+    gpui::deferred(
+        gpui::anchored()
+            .position(position)
+            .anchor(gpui::Anchor::BottomLeft)
+            .snap_to_window_with_margin(px(8.0))
+            .child(bezel::motion::menu_in(
+                id.into(),
+                div().occlude().pb(px(6.0)).child(content),
+            )),
+    )
+    .priority(1)
+    .into_any_element()
+}
 
 /// Which token picker is on screen, if any. Enter/up/down/tab belong to it
 /// while it is; otherwise they fall through to the field.
