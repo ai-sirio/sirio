@@ -41,6 +41,7 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 mod composer_view;
 mod thought;
 mod tool_calls;
+mod transcript;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
@@ -7225,10 +7226,10 @@ const TURN_LABEL_MAX_CHARS: usize = 60;
 /// F-CHAT-22: one segmented turn — the contiguous entries between two turn
 /// footers. `footer` is `None` for the trailing, still-open turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TurnSegment {
-    start: usize,
-    end: usize,
-    footer: Option<usize>,
+pub(crate) struct TurnSegment {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) footer: Option<usize>,
 }
 
 impl TurnSegment {
@@ -7243,7 +7244,7 @@ impl TurnSegment {
 /// Swift's `TimelineBuilder.segment` splits at each `.turnDivider`. The
 /// footer belongs to the turn it closes; a trailing run with no footer is
 /// the open turn, and is only recorded when it actually has entries.
-fn segment_turns(entries: &[Entry]) -> Vec<TurnSegment> {
+pub(crate) fn segment_turns(entries: &[Entry]) -> Vec<TurnSegment> {
     let mut turns = Vec::new();
     let mut start = 0usize;
     for (index, entry) in entries.iter().enumerate() {
@@ -11108,7 +11109,7 @@ let answer = 42;
         );
     }
 
-    fn test_tool_call(id: &str) -> Entry {
+    pub(crate) fn test_tool_call(id: &str) -> Entry {
         Entry::ToolCall {
             id: id.into(),
             title: format!("{id} title"),
