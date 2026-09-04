@@ -4469,6 +4469,9 @@ impl Chat {
         answer_caret_visible: bool,
         copied_target: Option<CopyTarget>,
         edit_summary: Option<EditSummaryState>,
+        thought_streaming: bool,
+        window: &mut Window,
+        cx: &mut App,
     ) -> impl IntoElement {
         let typography = theme.typography;
         let bezel_theme = theme.to_bezel_theme();
@@ -4559,62 +4562,32 @@ impl Chat {
                     .child(copy)
                     .into_any_element()
             }
-            Entry::Thought { text, open, .. } => {
-                // Task 3 replaces this arm; for now the old header reads
-                // the takeover's folded auto state so it compiles.
-                let expanded = open.get(false);
-                let toggle_entity = entity.clone();
+            Entry::Thought {
+                text,
+                open,
+                duration_ms,
+                ..
+            } => {
+                let streaming = thought_streaming;
+                let is_open = open.get(streaming);
                 let mut column = div().w_full().flex().flex_col().gap(px(4.0)).child(
-                    div()
-                        .id(("thought-toggle", entry_index))
-                        .debug_selector(move || format!("thought-toggle-{entry_index}"))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(4.0))
-                        .py(px(5.0))
-                        .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.text_color(theme.text))
-                        .child(
-                            div()
-                                .flex()
-                                .w(px(loading::THINKING_GLYPH))
-                                .justify_center()
-                                .child(
-                                    IconElement::new(
-                                        if expanded {
-                                            Icon::ChevronDown
-                                        } else {
-                                            Icon::ChevronRight
-                                        },
-                                        IconSize::XSmall,
-                                    )
-                                    .text_color(theme.text_faint),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(typography.callout)
-                                .line_height(px(19.0))
-                                .text_color(theme.text_muted)
-                                .italic()
-                                .child(if expanded {
-                                    "Thinking".to_string()
-                                } else {
-                                    loading::thought_label(None)
-                                }),
-                        )
-                        .on_click(move |_, _, cx| {
-                            toggle_entity.update(cx, |chat, cx| {
-                                chat.toggle_thought(entry_index, cx);
-                            });
-                        }),
+                    Self::render_thought_header(
+                        entry_index,
+                        streaming,
+                        is_open,
+                        duration_ms,
+                        theme,
+                        &bezel_theme,
+                        window,
+                        cx,
+                        Some(entity.clone()),
+                    ),
                 );
-                if expanded {
+                if is_open {
                     column = column.child(
                         div()
                             .id(("thought-body", entry_index))
+                            .debug_selector(move || format!("thought-body-{entry_index}"))
                             .relative()
                             .border_l_1()
                             .border_color(theme.border)
@@ -6855,7 +6828,7 @@ impl Render for Chat {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor(move |this, entry_index: usize, _window, _cx| {
+                            cx.processor(move |this, entry_index: usize, window, cx| {
                                 // F-CHAT-22, turn half: an older turn stands
                                 // in for itself with one row. Resolved before
                                 // the tool-call grouping below, because a
@@ -6929,6 +6902,11 @@ impl Render for Chat {
                                                                     answer_caret_visible,
                                                                     this.copied_target.clone(),
                                                                     None,
+                                                                    this.thought_is_streaming(
+                                                                        entry_index,
+                                                                    ),
+                                                                    &mut *window,
+                                                                    &mut *cx,
                                                                 )
                                                             },
                                                         ),
@@ -7014,6 +6992,9 @@ impl Render for Chat {
                                                 answer_caret_visible,
                                                 this.copied_target.clone(),
                                                 this.edit_summaries.get(&entry_index).cloned(),
+                                                this.thought_is_streaming(entry_index),
+                                                &mut *window,
+                                                &mut *cx,
                                             ))
                                             .into_any_element()
                                     })
@@ -8675,6 +8656,97 @@ two"
                 ..
             }
         ));
+    }
+
+    /// The body follows the run until the reader presses the header: open
+    /// while the thought streams, folded once it settles, and the reader's
+    /// press holds from then on — `widgets::Takeover`.
+    #[gpui::test]
+    async fn a_live_thought_opens_while_streaming_folds_on_settle_and_obeys_a_press(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        cx.update(|_window, cx| init(cx));
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(
+                AcpEvent::ThoughtChunk("first, look at the tests".into()),
+                cx,
+            );
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("thought-streaming-0").is_some(),
+            "the header shows the orb"
+        );
+        assert!(
+            cx.debug_bounds("thought-body-0").is_some(),
+            "a live thought is open"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::AgentMessageChunk("Done.".into()), cx);
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("thought-settled-0").is_some(),
+            "the header shows the chevron"
+        );
+        assert!(
+            cx.debug_bounds("thought-took-0").is_some(),
+            "a measured thought says how long"
+        );
+        assert!(
+            cx.debug_bounds("thought-body-0").is_none(),
+            "a settled thought folds"
+        );
+
+        let header = cx.debug_bounds("thought-toggle-0").expect("header");
+        cx.simulate_click(header.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("thought-body-0").is_some(),
+            "a press opens it"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::TurnEnded {
+                    stop_reason: "end_turn".into(),
+                },
+                cx,
+            );
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("thought-body-0").is_some(),
+            "the reader's choice holds across later events"
+        );
+    }
+
+    /// A restored thought opens closed and its header carries no clock.
+    #[gpui::test]
+    async fn a_restored_thought_opens_closed(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(restored_entry(ChatEntry::Thought {
+                text: "old reasoning".into(),
+                duration_ms: None,
+            }));
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("thought-settled-0").is_some());
+        assert!(
+            cx.debug_bounds("thought-took-0").is_none(),
+            "no clock to offer"
+        );
+        assert!(cx.debug_bounds("thought-body-0").is_none());
     }
 
     /// #173: a user message longer than the pane must wrap inside it. The
