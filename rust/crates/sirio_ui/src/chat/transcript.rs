@@ -9,11 +9,13 @@
 
 use std::collections::HashMap;
 
+use bezel::ui::widgets::Layout as _;
 use bezel::ui::widgets::Takeover;
 use chrono::{DateTime, Local};
-use gpui::Context;
+use gpui::{AnyElement, Context, Entity, div, prelude::*, px};
+use sirio_theme::Theme;
 
-use super::{Chat, Entry, TurnSegment, segment_turns};
+use super::{Chat, Entry, TranscriptInteraction, TurnSegment, segment_turns};
 
 /// One turn's zones: entries before `answer_from` are interim work, prose
 /// at or after it is the answer. `steps` is how much happened — each tool
@@ -154,6 +156,92 @@ impl Chat {
             self.list_state
                 .remeasure_items(segment.start..segment.end + 1);
         }
+    }
+
+    /// The gallery's `work_header`: chevron + `Worked · N steps`, clickable.
+    pub(crate) fn render_work_header(
+        turn: usize,
+        steps: usize,
+        open: bool,
+        theme: &Theme,
+        bezel_theme: &bezel::theme::Theme,
+        entity: Entity<Chat>,
+    ) -> AnyElement {
+        div()
+            .id(("work-toggle", turn))
+            .debug_selector(move || format!("work-toggle-{turn}"))
+            .self_start()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(4.0))
+            .py(px(5.0))
+            .rounded(px(bezel::theme::Theme::control_radius()))
+            .cursor_pointer()
+            .hover(|s| s.bg(bezel::theme::ink(0.03)))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |chat, cx| chat.toggle_work(turn, cx));
+            })
+            .child(bezel_theme.disclosure(open))
+            .child(
+                div()
+                    .text_size(theme.typography.callout)
+                    .line_height(px(19.0))
+                    .text_color(theme.text_muted)
+                    .child(work_label(steps)),
+            )
+            .when(open, |row| {
+                row.child(
+                    div()
+                        .size_0()
+                        .debug_selector(move || format!("work-open-{turn}")),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The zone's frame, one row at a time: the border line down the left
+    /// and the zone's `gap 8` as bottom padding, so adjacent member rows read
+    /// as one bordered column.
+    pub(crate) fn render_work_member(
+        entry_index: usize,
+        content: AnyElement,
+        bezel_theme: &bezel::theme::Theme,
+    ) -> AnyElement {
+        div()
+            .debug_selector(move || format!("work-member-{entry_index}"))
+            .ml(px(10.0))
+            .pl(px(12.0))
+            .border_l_1()
+            .border_color(bezel_theme.border)
+            .pb(px(8.0))
+            .child(content)
+            .into_any_element()
+    }
+
+    /// Interim prose: what the model said while working, `Callout` in
+    /// `text_muted`, plain text with the transcript's selection.
+    pub(crate) fn render_interim_prose(
+        entry_index: usize,
+        text: &str,
+        source_start: usize,
+        interaction: &TranscriptInteraction,
+        theme: &Theme,
+    ) -> AnyElement {
+        div()
+            .debug_selector(move || format!("interim-{entry_index}"))
+            .text_size(theme.typography.callout)
+            .line_height(px(19.0))
+            .text_color(theme.text_muted)
+            .child(Self::render_plain_text(
+                text.to_string(),
+                theme,
+                format!("interim-entry-{entry_index}"),
+                source_start,
+                Some(interaction),
+            ))
+            .into_any_element()
     }
 }
 
