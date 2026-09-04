@@ -9616,7 +9616,12 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(entry, Entry::Permission { resolved: Some(choice), .. } if choice == "Deny once")
-            })
+            }) && chat
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TurnFooter(_)))
+                .count()
+                == 2
         });
         let (answered, footers) = chat.read_with(&cx.cx, |chat, _| {
             let answered = chat
