@@ -327,6 +327,10 @@ impl Chat {
                         .debug_selector(move || selector.clone())
                         .text_size(typography.footnote)
                         .text_color(theme.file_link)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .cursor(gpui::CursorStyle::PointingHand)
                         .hover(|style| style.text_color(theme.text))
                         .on_click(move |_, _, cx| {
