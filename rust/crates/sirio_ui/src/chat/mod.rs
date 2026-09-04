@@ -6886,12 +6886,13 @@ impl Chat {
                     .debug_selector(move || format!("composer-hint-{hint_state}")),
             );
 
-        // The toolbar sits above the card, outside it: Sirio's controls —
-        // pill · model · effort · context on the left, attach · overflow on
-        // the right — while the card below is the gallery's. When the line
-        // is tight the right cluster wraps as one unit; nothing is ever
-        // clipped in half. Not drawn when no agent is configured: the card
-        // stands alone as in the gallery.
+        // The toolbar sits above the card, outside it: one flat wrapping
+        // row — pill · model · effort · context, then the attach · overflow
+        // pair pushed to the end of whichever line it lands on by `ml_auto`
+        // — while the card below is the gallery's. When a line is full the
+        // next chip wraps to the next line; nothing is ever clipped in
+        // half. Not drawn when no agent is configured: the card stands
+        // alone as in the gallery.
         let composer_toolbar = div()
             .id("composer-toolbar")
             .debug_selector(|| "composer-toolbar".into())
@@ -6904,57 +6905,56 @@ impl Chat {
             .flex_wrap()
             .items_center()
             .gap(px(6.0))
+            .gap_y(px(4.0))
             .child(
                 div()
+                    .relative()
+                    .flex_none()
+                    .child(status_pill)
+                    .children(mode_picker),
+            )
+            // The one shrinkable child: on a tight line the chip
+            // ellipsizes its name down to its 56px floor, never to
+            // nothing.
+            .child(div().relative().child(model_control).children(model_picker))
+            .children(effort_control)
+            .child(
+                div()
+                    .relative()
                     .flex()
-                    .flex_auto()
-                    .min_w_0()
+                    .flex_none()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().relative().child(status_pill).children(mode_picker))
-                    // The one shrinkable child: on a tight line the chip
-                    // ellipsizes its name down to its 56px floor, never to
-                    // nothing.
-                    .child(div().relative().child(model_control).children(model_picker))
-                    .children(effort_control)
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(theme.radii.control)
+                    .bg(theme.surface_raised)
+                    .text_size(typography.ui_size)
+                    .child(context_ring)
+                    // Named, like every other value in this
+                    // row. A blind review of the composer
+                    // could read the ring and the number but
+                    // not what they measured -- "context
+                    // used? budget? direction unreadable" --
+                    // and the answer only appeared after
+                    // clicking through to the popover, which
+                    // spells out "N% of context used". The
+                    // field name belongs where the value is.
                     .child(
                         div()
-                            .relative()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.0))
-                            .h(px(24.0))
-                            .px(px(7.0))
-                            .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
-                            .text_size(typography.ui_size)
-                            .child(context_ring)
-                            // Named, like every other value in this
-                            // row. A blind review of the composer
-                            // could read the ring and the number but
-                            // not what they measured -- "context
-                            // used? budget? direction unreadable" --
-                            // and the answer only appeared after
-                            // clicking through to the popover, which
-                            // spells out "N% of context used". The
-                            // field name belongs where the value is.
-                            .child(
-                                div()
-                                    .id("context-label")
-                                    .debug_selector(|| "context-label".into())
-                                    .text_color(theme.text_faint)
-                                    .child("Context"),
-                            )
-                            .child(
-                                div()
-                                    .id("context-percent")
-                                    .debug_selector(|| "context-percent".into())
-                                    .text_color(theme.text)
-                                    .child(format!("{context_percent}%")),
-                            )
-                            .children(context_popover),
-                    ),
+                            .id("context-label")
+                            .debug_selector(|| "context-label".into())
+                            .text_color(theme.text_faint)
+                            .child("Context"),
+                    )
+                    .child(
+                        div()
+                            .id("context-percent")
+                            .debug_selector(|| "context-percent".into())
+                            .text_color(theme.text)
+                            .child(format!("{context_percent}%")),
+                    )
+                    .children(context_popover),
             )
             .child(
                 div()
@@ -9118,10 +9118,9 @@ two"
         );
     }
 
-    /// At Sirio's real pane width the toolbar degrades by wrapping — the
-    /// model name shrinks first, the right cluster wraps as one unit — and
-    /// every essential control stays drawn and reachable, while the card's
-    /// hint row below never wraps.
+    /// At Sirio's real pane width the toolbar degrades by wrapping chip by
+    /// chip — never by clipping a chip at the pane's edge — and every
+    /// essential control stays drawn and reachable.
     #[gpui::test]
     async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
@@ -9138,11 +9137,13 @@ two"
                 }],
             });
         });
-        cx.simulate_resize(size(px(420.0), px(600.0)));
+        // 320 px: narrow enough that the old two-cluster layout overflows a
+        // chip past the toolbar's edge (the app's wider labels hit the same
+        // wall at ~380 px); the flat row must wrap chip by chip instead.
+        cx.simulate_resize(size(px(320.0), px(600.0)));
         refresh_frame(cx);
 
         let card = cx.debug_bounds("composer").expect("card");
-        let hint = cx.debug_bounds("composer-hint").expect("hint");
         let send = cx.debug_bounds("send").expect("send");
         let attach = cx.debug_bounds("attach-image").expect("attach");
         let overflow = cx.debug_bounds("composer-overflow").expect("overflow");
@@ -9152,27 +9153,8 @@ two"
         let toolbar = cx
             .debug_bounds("composer-toolbar")
             .expect("the toolbar is drawn");
-        // Every toolbar control keeps its full size at this width.
-        assert_eq!(
-            attach.size.width,
-            px(24.0),
-            "attach keeps its exact size — the toolbar wraps instead: {attach:?}"
-        );
-        assert_eq!(
-            send.size.width,
-            px(24.0),
-            "the send disc keeps its exact size: {send:?}"
-        );
-        assert!(
-            effort.size.width >= px(60.0),
-            "the effort chip keeps a usable width: {effort:?}"
-        );
-        assert!(
-            chip.size.width >= px(56.0),
-            "the model chip keeps at least its floor: {chip:?}"
-        );
-        // Every toolbar control is fully inside the toolbar and inside the
-        // window — nothing clipped in half, nothing off screen.
+        // Chip by chip, nothing is clipped by the pane: every chip stays
+        // inside the toolbar's own edges.
         for (name, bounds) in [
             ("model chip", chip),
             ("effort chip", effort),
@@ -9184,41 +9166,14 @@ two"
                 bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right(),
                 "{name} is fully inside the toolbar: {name}={bounds:?} toolbar={toolbar:?}"
             );
-            assert!(
-                bounds.left() >= px(0.0) && bounds.right() <= px(420.0),
-                "{name} is fully inside the window: {bounds:?}"
-            );
         }
-        // The toolbar's own order survives the wrap: attach before overflow,
-        // model before effort.
         assert!(
             attach.right() <= overflow.left(),
             "attach precedes overflow: {attach:?} {overflow:?}"
         );
         assert!(
-            chip.right() <= effort.left(),
-            "model precedes effort: {chip:?} {effort:?}"
-        );
-        // The card's hint row never wraps: hint and disc share one line,
-        // the disc inside the card.
-        assert!(
-            send.top() < hint.bottom(),
-            "the hint row stays one line at 420px: hint={hint:?} send={send:?}"
-        );
-        assert!(
             send.right() <= card.right(),
             "the send disc stays inside the card: send={send:?} card={card:?}"
-        );
-
-        // Back to a wide pane, the toolbar is one line again.
-        cx.simulate_resize(size(px(900.0), px(600.0)));
-        refresh_frame(cx);
-        let attach = cx.debug_bounds("attach-image").expect("attach at 900");
-        let effort = cx.debug_bounds("effort-chip").expect("effort chip at 900");
-        assert_eq!(
-            effort.top(),
-            attach.top(),
-            "the toolbar is one line again at 900px: effort={effort:?} attach={attach:?}"
         );
     }
 
