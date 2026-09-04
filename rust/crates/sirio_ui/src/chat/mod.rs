@@ -6497,6 +6497,11 @@ impl Chat {
                         )
                         .id(SharedString::from(format!("mention-option-{path_for_id}")))
                         .debug_selector(move || format!("mention-option-{path_for_id}"))
+                        // Pin the row to the card's inner width instead of
+                        // trusting cross-axis stretch, so the path below has
+                        // a definite box to ellipsize inside.
+                        .w_full()
+                        .min_w_0()
                         .on_click(move |_, _, cx| {
                             row_entity.update(cx, |chat, cx| {
                                 chat.accept_mention(&path_for_accept, cx);
@@ -6509,7 +6514,10 @@ impl Chat {
                         )
                         .child(
                             div()
+                                .flex_1()
                                 .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(typography.footnote)
                                 .text_color(bezel_theme.text)
@@ -6523,7 +6531,8 @@ impl Chat {
                         "mention-popup-menu",
                         anchor,
                         popover::popover_card(&bezel_theme)
-                            .debug_selector(|| "mention-popup".into())
+                            .id("mention-popup-card")
+                            .debug_selector(|| "mention-popup-card".into())
                             .w(px(360.0))
                             .child(div().flex().flex_col().children(rows))
                             .into_any_element(),
@@ -13119,10 +13128,12 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
         refresh_frame(cx);
         let popup = cx
-            .debug_bounds("mention-popup")
+            .debug_bounds("mention-popup-card")
             .expect("typing @ opens the mention popup");
         // The card's width is a cap, not a suggestion: a 90+-character path
-        // must ellipsize inside it, never stretch the card.
+        // must ellipsize inside it, never stretch the card. Measured on the
+        // card itself — the deferred layer's wrapper is zero-size and would
+        // prove nothing.
         assert!(
             popup.size.width <= px(372.0),
             "the mention popup is capped at its 360px card (plus border/shadow allowance): {popup:?}"
@@ -13155,7 +13166,7 @@ let answer = 42;
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("mention-popup").is_none(),
+            cx.debug_bounds("mention-popup-card").is_none(),
             "choosing a file closes the popup"
         );
         assert_eq!(
