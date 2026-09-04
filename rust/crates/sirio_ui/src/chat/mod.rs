@@ -36,7 +36,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::caret;
-use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
@@ -4596,8 +4595,8 @@ impl Chat {
                         Some(entity.clone()),
                     ),
                 );
-                if is_open {
-                    if let Some(scroll) = thought_scroll.get(&entry_index) {
+                if is_open
+                    && let Some(scroll) = thought_scroll.get(&entry_index) {
                         column = column.child(Self::render_thought_body(
                             entry_index,
                             &text,
@@ -4608,7 +4607,6 @@ impl Chat {
                             &bezel_theme,
                         ));
                     }
-                }
                 column.into_any_element()
             }
             Entry::ToolCall {
@@ -6815,7 +6813,11 @@ impl Render for Chat {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor(move |this, entry_index: usize, window, cx| {
+                            cx.processor({
+                                // The row processor outlives this frame, so it owns a clone;
+                                // the transient spinner below borrows the original.
+                                let row_bezel_theme = bezel_theme.clone();
+                                move |this, entry_index: usize, window, cx| {
                                 // The body's follow pin + scrollbar need per-entry state;
                                 // created on first draw so a restored chat pays nothing
                                 // until a thought is opened.
@@ -6959,7 +6961,7 @@ impl Render for Chat {
                                             members,
                                             transcript_focus.clone(),
                                             &transcript_theme,
-                                            &bezel_theme,
+                                            &row_bezel_theme,
                                             entity.clone(),
                                         ))
                                         .into_any_element();
@@ -7002,6 +7004,7 @@ impl Render for Chat {
                                             .into_any_element()
                                     })
                                     .unwrap_or_else(|| div().into_any_element())
+                            }
                             }),
                         )
                         .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -7022,30 +7025,21 @@ impl Render for Chat {
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
                         .pt(px(6.0))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(4.0))
-                        .py(px(5.0))
-                        .child(
-                            div()
-                                .flex()
-                                .w(px(loading::THINKING_GLYPH))
-                                .justify_center()
-                                .child(loading::thinking_indicator(
-                                    "chat-thinking",
-                                    &theme,
-                                    window,
-                                    cx,
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(theme.typography.scaled(12.5))
-                                .text_color(theme.text_muted)
-                                .child("Thinking"),
-                        ),
+                        // The transient row is the thought header itself — orb,
+                        // `Thinking`, same paddings — so a run in progress has one
+                        // shape whether or not a thought has arrived. `usize::MAX`
+                        // only feeds the row's marker ids; nothing reads them.
+                        .child(Self::render_thought_header(
+                            usize::MAX,
+                            true,
+                            false,
+                            None,
+                            &theme,
+                            &bezel_theme,
+                            window,
+                            cx,
+                            None,
+                        )),
                 )
             })
             .child(
@@ -7763,6 +7757,38 @@ mod tests {
         assert!(
             cx.debug_bounds("chat-generating-spinner").is_none(),
             "the spinner leaves with the turn"
+        );
+    }
+
+    /// The transient generating spinner is the same row a live thought's
+    /// header is: orb, `Thinking`, same paddings — one shape for a run in
+    /// progress whether or not a thought has arrived.
+    #[gpui::test]
+    async fn the_generating_spinner_shares_the_thought_header_shape(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
+        cx.update(|_window, cx| init(cx));
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(AcpEvent::ThoughtChunk("a".into()), cx);
+        });
+        refresh_frame(cx);
+        let header = cx.debug_bounds("thought-toggle-0").expect("live thought header");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::AgentMessageChunk("b".into()), cx);
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "the spinner row while the turn streams"
+        );
+        let spinner_header = cx
+            .debug_bounds("thought-toggle-18446744073709551615")
+            .expect("the spinner draws the thought header row");
+        assert_eq!(
+            spinner_header.size.height, header.size.height,
+            "one row shape: spinner={spinner_header:?} header={header:?}"
         );
     }
 
