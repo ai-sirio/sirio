@@ -532,7 +532,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             EventFold::default()
         }
         AcpEvent::ThoughtChunk(text) => {
-            state.current_turn.push(ChatEntry::Thought { text });
+            state.current_turn.push(ChatEntry::Thought { text, duration_ms: None });
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }

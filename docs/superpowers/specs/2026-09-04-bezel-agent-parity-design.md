@@ -420,6 +420,7 @@ against the same selectors.
 - Sub-project 1 landed on branch `feat/composer-bezel-textfield` (2026-09-04).
 - Revised 2026-09-04: the control row inside the card was rejected by the user; the card is the gallery's and the controls sit in a toolbar above it.
 - Sub-project 2 landed on branch `feat/tool-calls-step-row` (2026-09-04).
+- Sub-project 3 landed on branch feat/thought-takeover (2026-09-04).
 - Implementation by a pi or opencode agent in a Herdr pane (models
   `opencode-go/gpt-5.6-luna` and `opencode-go/muse-spark-1.3-contributor`),
   one writer per sub-project, driven by a task file that carries this spec's
