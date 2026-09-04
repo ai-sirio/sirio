@@ -4508,6 +4508,7 @@ impl Chat {
         thought_streaming: bool,
         thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
         role: &transcript::WorkRole,
+        day_heading: Option<&str>,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
@@ -4549,7 +4550,7 @@ impl Chat {
                             )),
                     )
                     .into_any_element();
-                match role {
+                let question = match role {
                     transcript::WorkRole::Header { turn, steps, open } if *steps > 0 => div()
                         .w_full()
                         .flex()
@@ -4566,6 +4567,23 @@ impl Chat {
                         ))
                         .into_any_element(),
                     _ => bubble,
+                };
+                // The heading row belongs to the `User` entry's row, so no
+                // extra list index is needed: it sits above the question.
+                match day_heading {
+                    Some(label) => div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(Chat::render_day_heading(
+                            entry_index,
+                            label,
+                            theme,
+                            &bezel_theme,
+                        ))
+                        .child(question)
+                        .into_any_element(),
+                    None => question,
                 }
             }
             Entry::Assistant { text, document } => {
@@ -6908,6 +6926,7 @@ impl Render for Chat {
                                                                     ),
                                                                     &this.thought_scroll,
                                                                     &transcript::WorkRole::Outside,
+                                                                    None,
                                                                     &mut *window,
                                                                     &mut *cx,
                                                                 )
@@ -7029,6 +7048,16 @@ impl Render for Chat {
                                         } else {
                                             10.0
                                         };
+                                        // The heading is the processor's to
+                                        // pass in: it holds `&this.entries`.
+                                        let day_heading = match this.entries.get(entry_index) {
+                                            Some(Entry::User { .. }) => transcript::heading_for(
+                                                &this.entries,
+                                                entry_index,
+                                                chrono::Local::now(),
+                                            ),
+                                            _ => None,
+                                        };
                                         let body = Chat::render_entry(
                                             entry,
                                             entry_index,
@@ -7043,6 +7072,7 @@ impl Render for Chat {
                                             this.thought_is_streaming(entry_index),
                                             &this.thought_scroll,
                                             &role,
+                                            day_heading.as_deref(),
                                             &mut *window,
                                             &mut *cx,
                                         )
@@ -11520,6 +11550,40 @@ let answer = 42;
             "no tools, no header"
         );
         assert!(cx.debug_bounds("answer-5").is_some());
+    }
+
+    #[gpui::test]
+    async fn day_headings_are_drawn_above_the_first_question_of_a_day(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let now = chrono::Local::now();
+        let yesterday = now - chrono::Duration::days(1);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::User {
+                text: "a".into(),
+                at: Some(yesterday),
+            });
+            chat.push_entry(Entry::Assistant {
+                text: "x".into(),
+                document: parse_chat_markdown("x"),
+            });
+            chat.push_entry(Entry::TurnFooter("t".into()));
+            chat.push_entry(Entry::User {
+                text: "b".into(),
+                at: Some(now),
+            });
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        let heading = cx.debug_bounds("day-heading-0").expect("Yesterday");
+        let bubble = cx.debug_bounds("user-bubble-0").expect("bubble");
+        assert!(
+            heading.bottom() <= bubble.top(),
+            "the heading sits above the question"
+        );
+        assert!(cx.debug_bounds("day-heading-3").is_some(), "Today");
     }
 
     #[test]
