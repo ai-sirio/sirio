@@ -40,6 +40,7 @@ use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
+mod thought;
 mod tool_calls;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
