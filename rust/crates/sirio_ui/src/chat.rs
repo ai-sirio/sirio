@@ -4,6 +4,7 @@
 //! session, same scope as `Sidebar`'s fixture model: the connection lifecycle
 //! and view model live here so the transcript renderer stays deterministic.
 
+use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
@@ -11,7 +12,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
     StyledText, Task, Window, actions, canvas, div, linear_color_stop, linear_gradient, list,
-    point, prelude::*, px, quad, rgb, transparent_black,
+    point, prelude::*, px, quad, relative, rgb, transparent_black,
 };
 use sirio_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
@@ -6751,6 +6752,15 @@ impl Chat {
         // longer a single unbroken prefix. Keyboard selection comes from the
         // composer key path (up/down/tab, enter accepts via `Send`); click
         // accepts directly.
+        //
+        // Anchored to the composer card's top edge (`bottom: 100%`), not a
+        // fixed distance up from its bottom: the card is taller than that
+        // distance, so the list used to sit *inside* it — over the input
+        // rows, in the card's own `surface_raised` fill, where it read as a
+        // transparent veil rather than a menu. The same token paints both
+        // on purpose (they are the same step above the page); what makes
+        // this a card of its own is that it floats over the page, with the
+        // gap below it.
         let slash_popup =
             if self.slash_popup_visible() {
                 let candidates = self.slash_candidates();
@@ -6762,7 +6772,8 @@ impl Chat {
                         .debug_selector(|| "slash-popup".into())
                         .absolute()
                         .left(px(16.0))
-                        .bottom(px(43.0))
+                        .bottom(relative(1.0))
+                        .mb(px(8.0))
                         .w(px(360.0))
                         .p(px(6.0))
                         .rounded(theme.radii.toast)
@@ -6773,11 +6784,15 @@ impl Chat {
                         .children(candidates.into_iter().enumerate().map(
                             move |(index, command)| {
                                 let name = command.name.clone();
-                                let description = command.description.clone();
+                                let tooltip = slash_option_tooltip(&command.description);
                                 let row_entity = slash_entity.clone();
                                 let is_selected = index == selected;
                                 let name_for_id = name.clone();
+                                let name_for_label_id = name.clone();
                                 let accept_name = name.clone();
+                                // One line per row: the name. The description
+                                // is the row's tooltip, so ten rows stay ten
+                                // lines and the list does not fill the pane.
                                 div()
                                     .id(format!("slash-option-{name}"))
                                     .debug_selector(move || format!("slash-option-{name_for_id}"))
@@ -6786,8 +6801,13 @@ impl Chat {
                                     .py(px(4.0))
                                     .rounded(theme.radii.control)
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
                                     .when(is_selected, |this| this.bg(theme.element_active))
+                                    .when_some(tooltip, |this, text| {
+                                        this.tooltip(move |window, cx| {
+                                            Tooltip::text(text.clone(), window, cx)
+                                        })
+                                    })
                                     .on_click(move |_, _, cx| {
                                         row_entity.update(cx, |chat, cx| {
                                             chat.accept_slash_command(&accept_name, cx);
@@ -6795,15 +6815,12 @@ impl Chat {
                                     })
                                     .child(
                                         div()
+                                            .debug_selector(move || {
+                                                format!("slash-option-name-{name_for_label_id}")
+                                            })
                                             .text_size(typography.footnote)
                                             .text_color(theme.text)
                                             .child(format!("/{name}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(typography.caption2)
-                                            .text_color(theme.text_faint)
-                                            .child(description),
                                     )
                             },
                         )),
@@ -6825,7 +6842,10 @@ impl Chat {
                         .debug_selector(|| "mention-popup".into())
                         .absolute()
                         .left(px(16.0))
-                        .bottom(px(43.0))
+                        // Same anchor as the command popup above, for the
+                        // same reason.
+                        .bottom(relative(1.0))
+                        .mb(px(8.0))
                         .w(px(360.0))
                         .p(px(6.0))
                         .rounded(theme.radii.toast)
@@ -7615,6 +7635,14 @@ impl Focusable for Chat {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.composer_focus.clone()
     }
+}
+
+/// The tooltip a command row carries: its description, trimmed, or nothing
+/// when the agent published none — an empty tooltip is a blank card that
+/// pops up for no reason.
+fn slash_option_tooltip(description: &str) -> Option<SharedString> {
+    let description = description.trim();
+    (!description.is_empty()).then(|| SharedString::from(description.to_owned()))
 }
 
 impl Render for Chat {
@@ -13312,6 +13340,59 @@ let answer = 42;
         );
     }
 
+    /// The command popup is a card of its own, floated above the composer.
+    /// It used to be anchored 43px up from the composer's *bottom* — inside
+    /// the card, in the card's own `surface_raised` fill — so it covered the
+    /// input rows and, being the same colour as what it lay on, read as a
+    /// transparent veil. A row carries only the command name; the
+    /// description is its tooltip, so a row is exactly one line tall.
+    #[gpui::test]
+    async fn slash_popup_floats_above_the_composer_with_single_line_rows(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "/");
+        refresh_frame(cx);
+        let popup = cx
+            .debug_bounds("slash-popup")
+            .expect("typing / opens the command popup");
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert!(
+            popup.bottom() <= composer.top(),
+            "the popup must float above the composer, never over its input rows \
+             (popup bottom {:?}, composer top {:?})",
+            popup.bottom(),
+            composer.top()
+        );
+
+        let row = cx
+            .debug_bounds("slash-option-cr")
+            .expect("a command row is drawn");
+        let name = cx
+            .debug_bounds("slash-option-name-cr")
+            .expect("the row draws the command name");
+        // Vertical padding is 4px a side; anything taller means a second
+        // line — the description — crept back into the row.
+        assert!(
+            row.size.height <= name.size.height + px(9.0),
+            "a row is the command name alone, one line tall \
+             (row {:?}, name {:?})",
+            row.size.height,
+            name.size.height
+        );
+    }
+
+    #[test]
+    fn slash_option_tooltip_carries_the_description_and_skips_a_blank_one() {
+        assert_eq!(
+            slash_option_tooltip("  Deep research harness.  ").as_deref(),
+            Some("Deep research harness.")
+        );
+        assert_eq!(slash_option_tooltip(""), None);
+        assert_eq!(slash_option_tooltip("   "), None);
+    }
+
     /// F-CHAT-10: typing `@` opens the mention popup fed by a real bounded
     /// filesystem walk over the chat's working directory; clicking a listed
     /// file inserts a file chip at the token's position, the chip survives
@@ -13341,9 +13422,20 @@ let answer = 42;
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
         refresh_frame(cx);
-        assert!(cx.debug_bounds("mention-popup").is_some());
+        let popup = cx
+            .debug_bounds("mention-popup")
+            .expect("typing @ opens the mention popup");
         assert!(cx.debug_bounds("mention-option-README.md").is_some());
         assert!(cx.debug_bounds("mention-option-src/main.rs").is_some());
+        // Same anchor as the command popup: a card above the composer, not a
+        // list drawn over its input rows.
+        assert!(
+            popup.bottom() <= composer.top(),
+            "the mention popup must float above the composer \
+             (popup bottom {:?}, composer top {:?})",
+            popup.bottom(),
+            composer.top()
+        );
 
         let row = cx
             .debug_bounds("mention-option-src/main.rs")
