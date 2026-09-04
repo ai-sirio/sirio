@@ -16394,7 +16394,12 @@ fn main() {
     #[cfg(target_os = "windows")]
     ensure_windows_console();
 
-    application().run(|cx: &mut App| {
+    application()
+        // bezel's icons are `svg().path("icons/…")`; without an asset source
+        // gpui finds nothing and paints nothing. Sirio's own icons embed their
+        // bytes and never needed this.
+        .with_assets(bezel::ui::icons::Assets)
+        .run(|cx: &mut App| {
         // Must land before `Theme::init` — see `register_fonts`'s own doc
         // comment for why the order is load-bearing.
         register_fonts(cx);
