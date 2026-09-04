@@ -11,8 +11,9 @@ use std::collections::HashMap;
 
 use bezel::ui::widgets::Takeover;
 use chrono::{DateTime, Local};
+use gpui::Context;
 
-use super::{Entry, TurnSegment};
+use super::{Chat, Entry, TurnSegment, segment_turns};
 
 /// One turn's zones: entries before `answer_from` are interim work, prose
 /// at or after it is the answer. `steps` is how much happened — each tool
@@ -121,6 +122,39 @@ pub(crate) fn work_roles(
         }
     }
     roles
+}
+
+impl Chat {
+    /// The trailing turn without a footer, while the chat streams.
+    pub(crate) fn streaming_turn_start(&self) -> Option<usize> {
+        if !self.streaming {
+            return None;
+        }
+        segment_turns(&self.entries)
+            .last()
+            .filter(|turn| turn.footer.is_none())
+            .map(|turn| turn.start)
+    }
+
+    /// The reader presses a Work header: flip what is on screen and hold it.
+    pub(crate) fn toggle_work(&mut self, turn: usize, cx: &mut Context<Self>) {
+        let auto = self.streaming_turn_start() == Some(turn);
+        self.work_open.entry(turn).or_default().toggle(auto);
+        self.remeasure_turn(turn);
+        cx.notify();
+    }
+
+    /// Every row of the turn starting at `turn` changes height when its zone
+    /// opens or folds; remeasure them all.
+    pub(crate) fn remeasure_turn(&mut self, turn: usize) {
+        if let Some(segment) = segment_turns(&self.entries)
+            .into_iter()
+            .find(|t| t.start == turn)
+        {
+            self.list_state
+                .remeasure_items(segment.start..segment.end + 1);
+        }
+    }
 }
 
 #[cfg(test)]
