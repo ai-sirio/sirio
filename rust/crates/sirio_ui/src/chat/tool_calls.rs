@@ -57,6 +57,18 @@ pub(crate) fn tool_verb(kind: &str) -> String {
     out
 }
 
+/// A title as one line: every line break (and the indentation that follows
+/// it) becomes a single space, so the row's detail slot truncates with an
+/// ellipsis instead of wrapping.
+pub(crate) fn one_line_title(title: &str) -> String {
+    title
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `412ms` under a second, `1.4s` over it — a figure you read at a glance
 /// rather than count digits in (gallery `took`).
 pub(crate) fn took(ms: u64) -> String {
@@ -155,7 +167,7 @@ impl Chat {
             .step_row(
                 tool_icon(kind),
                 tool_verb(kind),
-                Some(SharedString::from(title.to_string())),
+                Some(SharedString::from(one_line_title(title))),
                 Some(meta),
                 failed,
                 has_body.then_some(expanded),
@@ -627,6 +639,16 @@ mod tests {
         assert_eq!(tool_verb("Other"), "Tool");
         assert_eq!(tool_verb("switch_mode"), "Switch mode");
         assert_eq!(tool_verb(""), "Tool");
+    }
+
+    #[test]
+    fn titles_are_flattened_to_one_line() {
+        assert_eq!(one_line_title("cargo test"), "cargo test");
+        assert_eq!(
+            one_line_title("cd x && python - <<'EOF'\nimport io\n  p = 1\nEOF"),
+            "cd x && python - <<'EOF' import io p = 1 EOF"
+        );
+        assert_eq!(one_line_title("a\r\n\r\nb"), "a b");
     }
 
     #[test]
