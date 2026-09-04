@@ -6506,6 +6506,8 @@ impl Chat {
                         )
                         .child(
                             div()
+                                .min_w_0()
+                                .text_ellipsis()
                                 .text_size(typography.footnote)
                                 .text_color(bezel_theme.text)
                                 .child(path),
