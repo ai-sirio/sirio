@@ -283,6 +283,11 @@ pub enum ChatEntry {
         /// restores exactly as it did then, naming nothing.
         #[serde(default)]
         locations: Vec<ChatToolLocation>,
+        /// Wall-clock milliseconds from the call's start to its terminal
+        /// status, when this process measured it. `None` predates the field
+        /// or means the call was restored before it settled.
+        #[serde(default)]
+        duration_ms: Option<u64>,
     },
     /// A permission card and the outcome selected by the user or agent.
     /// `title` names the tool that asked (an empty string predates the
