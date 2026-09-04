@@ -12565,6 +12565,33 @@ let answer = 42;
         assert!(long.right() <= cx.debug_bounds("tool-run-0").unwrap().right());
     }
 
+    /// A title with newlines draws as one truncating line: the row stays the
+    /// same height as a single-line title.
+    #[gpui::test]
+    async fn a_tool_row_with_a_multi_line_title_stays_one_line(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(test_tool_call("single"));
+            let mut multi = test_tool_call("multi");
+            if let Entry::ToolCall { title, kind, .. } = &mut multi {
+                *title =
+                    "cd /d/Progetti/sirio/sirio && python - <<'EOF'\nimport io\np = 1\nEOF".into();
+                *kind = "Execute".into();
+            }
+            chat.push_entry(multi);
+            chat
+        });
+        refresh_frame(cx);
+        let single = cx.debug_bounds("tool-call-toggle-0").expect("single row");
+        let multi = cx.debug_bounds("tool-call-toggle-1").expect("multi row");
+        assert_eq!(
+            single.size.height, multi.size.height,
+            "a multi-line title does not grow the row"
+        );
+    }
+
     #[gpui::test]
     async fn transcript_only_lays_out_rows_near_the_viewport(cx: &mut TestAppContext) {
         cx.update(Theme::init);
