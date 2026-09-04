@@ -1323,10 +1323,10 @@ pub struct Chat {
     /// one surface, one `Blink`, one timer.
     answer_blink: caret::Blink,
     answer_caret_visible: bool,
-    /// The model picker's search row: a third editable surface, with its own
-    /// focus handle, so it gets its own blink and its own timer.
-    model_search_blink: caret::Blink,
-    model_search_caret_visible: bool,
+    /// The model picker's search row: a real bezel field (`Shape::Line`),
+    /// focused while the picker is open; typing filters, Backspace edits,
+    /// and none of it touches the composer's draft.
+    model_search_field: Entity<TextField>,
     streaming: bool,
     /// Retired with the rotating streaming border: the shared Bezel clock
     /// drives the reasoning header now, so this stays permanently `false`.
@@ -1350,11 +1350,10 @@ pub struct Chat {
     model_config_id: Option<String>,
     selected_model: Option<String>,
     model_picker_open: bool,
-    /// F-CHAT-16: the model picker's own search query, reset each time the
-    /// picker opens. Matches `ModelPickerFilter`'s Swift semantics — trimmed,
-    /// case-insensitive substring match against name/id/description, order
-    /// preserved, empty query keeps every model.
-    model_search: String,
+    /// F-CHAT-16: the model picker's own search query — live in the field,
+    /// read from it at render time. Matches `ModelPickerFilter`'s Swift
+    /// semantics — trimmed, case-insensitive substring match against
+    /// name/id/description, order preserved, empty query keeps every model.
     /// F-CHAT-15: the session-mode selector (ask/plan/auto, entirely
     /// agent-defined), re-read from `AcpClient::mode_catalog` on connect and
     /// after every event since the wire only pushes mode changes as an
@@ -1365,7 +1364,6 @@ pub struct Chat {
     mode_catalog: Option<ModeCatalog>,
     mode_picker_open: bool,
     context_popover_open: bool,
-    model_picker_focus: FocusHandle,
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
     transcript_focus: FocusHandle,
@@ -1577,6 +1575,14 @@ impl Chat {
             });
         });
 
+        let model_search_field = cx.new(|cx| {
+            TextField::new(cx)
+                .with_placeholder("Search models\u{2026}")
+                .with_key_context("ChatModelSearch")
+        });
+        cx.observe(&model_search_field, |_, _, cx| cx.notify())
+            .detach();
+
         let composer_field = cx.new(|cx| {
             TextField::new(cx)
                 .with_shape(bezel::ui::input::Shape::Grow { min: 3, max: 12 })
@@ -1601,14 +1607,12 @@ impl Chat {
             composer_placeholder_shown: String::new(),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
-            model_search_blink: caret::Blink::new(),
-            model_search_caret_visible: false,
+            model_search_field,
             question_answer: QuestionAnswerState {
                 focus: cx.focus_handle().tab_stop(true),
                 draft: String::new(),
                 for_request: None,
             },
-            model_picker_focus: cx.focus_handle().tab_stop(true),
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
@@ -1623,7 +1627,6 @@ impl Chat {
             model_config_id: None,
             selected_model: None,
             model_picker_open: false,
-            model_search: String::new(),
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
@@ -1806,6 +1809,9 @@ impl Chat {
             KeyBinding::new("tab", PopupAccept, Some("ChatComposer")),
             KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatTranscript")),
             KeyBinding::new("escape", Cancel, Some("ChatModelPicker")),
+            // The model picker's search field owns focus while the picker is
+            // open, so Escape has to resolve from its context too.
+            KeyBinding::new("escape", Cancel, Some("ChatModelSearch")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
             // F-CHAT-25: the question answer field owns Enter (send the
             // answer) and Escape (cancel the question) while it has focus.
@@ -2780,12 +2786,10 @@ impl Chat {
             // F-CHAT-16: a fresh search every time the picker opens, same as
             // Swift's `@State private var query` starting blank each time
             // the popover view is recreated.
-            self.model_search.clear();
-            let focus = self.model_picker_focus.clone();
+            self.model_search_field.update(cx, |field, cx| field.clear(cx));
+            let focus = self.model_search_field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
-            window.on_next_frame(move |window, _| {
-                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
-            });
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
         }
         cx.notify();
     }
@@ -3578,9 +3582,6 @@ impl Chat {
     }
 
     fn send_action(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model_picker_open {
-            return;
-        }
         if self.accept_active_popup_row(cx) {
             cx.notify();
             return;
@@ -3821,29 +3822,9 @@ impl Chat {
             }
             return;
         }
-        // F-CHAT-16: while the model picker is open, every key belongs to
-        // its search field, not the composer — printable characters type
-        // (Backspace has its own guard, since it's a bound action rather
-        // than a raw key this handler ever sees), Escape closes the picker
-        // the same way its own `Cancel` action binding does.
-        if self.model_picker_open {
-            self.model_search_blink.wake();
-            if event.keystroke.key == "escape" {
-                self.model_picker_open = false;
-                cx.notify();
-            } else if event.keystroke.key == "backspace" && !event.keystroke.modifiers.platform {
-                self.model_search.pop();
-                cx.notify();
-            } else if let Some(character) = event.keystroke.key_char.as_deref()
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.control
-                && character != "\n"
-            {
-                self.model_search.push_str(character);
-                cx.notify();
-            }
-            return;
-        }
+        // F-CHAT-16: the model picker's search is a real TextField — typing,
+        // Backspace and Escape are the field's own job; no raw-key redirect
+        // lives here any more.
         if event.keystroke.key == "c"
             && event.keystroke.modifiers.control
             && self.transcript_selection.is_some()
@@ -5650,12 +5631,6 @@ impl Chat {
         cx.notify();
     }
 
-    /// Blink timer tick for the model picker's search row.
-    fn flip_model_search_blink(&mut self, cx: &mut Context<Self>) {
-        self.model_search_blink.flip();
-        cx.notify();
-    }
-
     fn render_composer(
         &mut self,
         theme: &Theme,
@@ -5674,20 +5649,6 @@ impl Chat {
         let disabled = self.composer_disabled();
         let can_send = self.can_send();
         let entity = cx.entity();
-
-        // The model picker's search row rides this same render pass — it is
-        // drawn from here, and this is where a `Window` exists to ask the
-        // focus system.
-        let model_search_focused =
-            self.model_picker_open && self.model_picker_focus.is_focused(window);
-        caret::schedule(
-            &mut self.model_search_blink,
-            model_search_focused,
-            Self::flip_model_search_blink,
-            cx,
-        );
-        self.model_search_caret_visible = model_search_focused && self.model_search_blink.visible();
-        let model_search_caret_visible = self.model_search_caret_visible;
 
         // Swift's `modePill` (ComposerControlBar.swift) always pairs a
         // status dot with a label, whether that label is a raw state word
@@ -5912,7 +5873,8 @@ impl Chat {
                     .child(div().flex_none().text_color(theme.text_faint).child("⌄"))
             });
 
-        let model_picker = if self.model_picker_open {
+        let view = bezel::motion::Painter::of(cx);
+        let model_picker = self.model_picker_open.then(|| {
             let picker_entity = model_entity.clone();
             // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
             // has none, and the ACP layer never carries one — it is purely
@@ -5924,221 +5886,194 @@ impl Chat {
                 .available_models
                 .first()
                 .map(|option| option.id.clone());
+            let query = self.model_search_field.read(cx).content().to_string();
             let filtered_models: Vec<ModelOption> = self
                 .available_models
                 .iter()
-                .filter(|option| model_query_matches(option, &self.model_search))
+                .filter(|option| model_query_matches(option, &query))
                 .cloned()
                 .collect();
-            let search_placeholder = self.model_search.is_empty();
-            let search_text = self.model_search.clone();
-            Some(
+            let selected_id = self.selected_model.clone();
+            popover::anchored_menu_above(
+                "model-picker-menu",
                 div()
                     .id("model-picker")
                     .debug_selector(|| "model-picker".into())
                     .key_context("ChatModelPicker")
-                    .track_focus(&self.model_picker_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(42.0))
-                    .bottom(px(43.0))
                     .w(px(245.0))
-                    // #233: defence in depth — anything a future layout
-                    // change overflows the fixed popup clips at the border
-                    // instead of painting over the composer behind it.
-                    .overflow_hidden()
-                    .p(px(8.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.model_picker_open = false;
                         cx.notify();
                     }))
-                    .when(!self.available_models.is_empty(), |this| {
-                        this.child(
+                    .child(
+                        popover::popover_card(&bezel_theme).child(
                             div()
-                                .id("model-search-input")
-                                .debug_selector(|| "model-search-input".into())
-                                .w_full()
-                                .mb(px(6.0))
-                                .px(px(8.0))
-                                .py(px(5.0))
-                                .rounded(theme.radii.control)
-                                .bg(theme.surface_raised)
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_size(typography.footnote)
                                 .flex()
-                                .items_center()
-                                .overflow_hidden()
-                                .child(
-                                    caret::field_value(if search_placeholder {
+                                .flex_col()
+                                .when(!self.available_models.is_empty(), |this| {
+                                    this.child(
                                         div()
+                                            .id("model-search-input")
+                                            .debug_selector(|| "model-search-input".into())
+                                            .w_full()
+                                            .mb(px(6.0))
+                                            .child(self.model_search_field.clone()),
+                                    )
+                                })
+                                .when(self.available_models.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .p(px(8.0))
+                                            .text_size(typography.footnote)
                                             .text_color(theme.text_faint)
-                                            .child("Search models…")
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .text_color(theme.text)
-                                            .child(search_text)
-                                            .into_any_element()
-                                    })
-                                    .debug_selector(|| "model-search-text".into()),
+                                            .child(
+                                                "The connected agent did not report any models.",
+                                            ),
+                                    )
+                                })
+                                .when(
+                                    !self.available_models.is_empty() && filtered_models.is_empty(),
+                                    |this| {
+                                        this.child(
+                                            div()
+                                                .id("model-picker-no-match")
+                                                .debug_selector(|| "model-picker-no-match".into())
+                                                .p(px(8.0))
+                                                .text_size(typography.footnote)
+                                                .text_color(theme.text_faint)
+                                                .child("No models match"),
+                                        )
+                                    },
                                 )
-                                .child(div().debug_selector(|| "model-search-caret".into()).child(
-                                    caret::bar(
-                                        typography.body_line_height,
-                                        theme.text,
-                                        model_search_caret_visible,
-                                    ),
-                                )),
-                        )
-                    })
-                    .when(self.available_models.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .p(px(8.0))
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child("The connected agent did not report any models."),
-                        )
-                    })
-                    .when(
-                        !self.available_models.is_empty() && filtered_models.is_empty(),
-                        |this| {
-                            this.child(
-                                div()
-                                    .id("model-picker-no-match")
-                                    .debug_selector(|| "model-picker-no-match".into())
-                                    .p(px(8.0))
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.text_faint)
-                                    .child("No models match"),
-                            )
-                        },
-                    )
-                    .children(filtered_models.iter().cloned().map(|option| {
-                        let option_id = option.id.clone();
-                        let option_name = option.name.clone();
-                        let option_entity = picker_entity.clone();
-                        let is_recommended = recommended_id.as_deref() == Some(option_id.as_str());
-                        div()
-                            .id(format!("model-option-{option_id}"))
-                            .debug_selector(move || format!("model-option-{option_id}"))
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(8.0))
-                            .py(px(7.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(move |_, _, cx| {
-                                option_entity
-                                    .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
-                            })
-                            .child(div().flex_1().min_w_0().text_ellipsis().child(option_name))
-                            .when(is_recommended, |this| {
-                                this.child(
-                                    div()
-                                        .id("model-option-recommended")
-                                        .debug_selector(|| "model-option-recommended".into())
-                                        .flex_shrink_0()
-                                        .px(px(5.0))
-                                        .rounded(px(4.0))
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.text)
-                                        .bg(theme.overlay_strong)
-                                        .child("Recommended"),
-                                )
-                            })
-                    }))
-                    .when_some(self.effort.clone(), |this, effort| {
-                        if effort.choices.is_empty() {
-                            return this;
-                        }
-                        let effort_entity = picker_entity.clone();
-                        let effort_name =
-                            effort.name.clone().unwrap_or_else(|| "Effort".to_string());
-                        let current = effort.current_value.clone();
-                        let children: Vec<AnyElement> = vec![
-                            div()
-                                .w_full()
-                                .px(px(8.0))
-                                .pt(px(4.0))
-                                .text_size(typography.caption2)
-                                .text_color(theme.text_faint)
-                                .child(effort_name)
-                                .into_any_element(),
-                        ];
-                        let choices: Vec<AnyElement> = effort
-                            .choices
-                            .iter()
-                            .map(|choice| {
-                                let choice_value = choice.value.clone();
-                                let choice_name = choice.name.clone();
-                                let is_selected = current.as_deref() == Some(choice_value.as_str());
-                                let row_entity = effort_entity.clone();
-                                let choice_value_for_id = choice_value.clone();
-                                div()
-                                    .id(format!("effort-option-{}", choice_value))
-                                    .debug_selector(move || {
-                                        format!("effort-option-{}", choice_value_for_id)
-                                    })
-                                    .h(px(22.0))
-                                    .px(px(8.0))
-                                    .rounded(theme.radii.control)
-                                    .flex()
-                                    .items_center()
-                                    .text_size(typography.caption2)
-                                    .text_color(theme.text)
-                                    .when(is_selected, |this| this.bg(theme.element_active))
-                                    .hover(|style| style.bg(theme.overlay))
+                                .children(filtered_models.iter().cloned().map(|option| {
+                                    let option_id = option.id.clone();
+                                    let option_name = option.name.clone();
+                                    let option_entity = picker_entity.clone();
+                                    let is_recommended =
+                                        recommended_id.as_deref() == Some(option_id.as_str());
+                                    let is_selected =
+                                        selected_id.as_deref() == Some(option_id.as_str());
+                                    popover::menu_row_nav(
+                                        &bezel_theme,
+                                        is_selected,
+                                        false,
+                                        bezel::motion::Fade::new(
+                                            view,
+                                            format!("model-option-{option_id}"),
+                                        ),
+                                    )
+                                    .id(format!("model-option-{option_id}"))
+                                    .debug_selector(move || format!("model-option-{option_id}"))
                                     .on_click(move |_, _, cx| {
-                                        row_entity.update(cx, |chat, cx| {
-                                            chat.select_effort(choice_value.clone(), cx);
+                                        option_entity.update(cx, |chat, cx| {
+                                            chat.select_model(option.clone(), cx);
                                         });
                                     })
-                                    .child(choice_name)
-                                    .into_any_element()
-                            })
-                            .collect::<Vec<_>>();
-                        this.child(div().h(px(1.0)).w_full().bg(theme.border))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .children(children)
                                     .child(
-                                        // #233: the choice count is agent-reported
-                                        // and not under the picker's control (Claude
-                                        // Code advertises six, whose chips plus gaps
-                                        // exceed the popup's usable width), so the
-                                        // row wraps onto a second line instead of
-                                        // painting chips outside the picker border —
-                                        // same shape as the colour swatch row's
-                                        // `flex_wrap` in `controls::color_picker`
-                                        // (F-PRJ-13).
-                                        div().flex().flex_wrap().gap(px(4.0)).children(choices),
-                                    ),
-                            )
-                    }),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_ellipsis()
+                                            .child(option_name),
+                                    )
+                                    .when(is_recommended, |this| {
+                                        this.child(
+                                            div()
+                                                .id("model-option-recommended")
+                                                .debug_selector(|| "model-option-recommended".into())
+                                                .flex_shrink_0()
+                                                .px(px(5.0))
+                                                .rounded(px(4.0))
+                                                .text_size(typography.caption2)
+                                                .text_color(theme.text)
+                                                .bg(theme.overlay_strong)
+                                                .child("Recommended"),
+                                        )
+                                    })
+                                }))
+                                .when_some(self.effort.clone(), |this, effort| {
+                                    if effort.choices.is_empty() {
+                                        return this;
+                                    }
+                                    let effort_entity = picker_entity.clone();
+                                    let effort_name = effort
+                                        .name
+                                        .clone()
+                                        .unwrap_or_else(|| "Effort".to_string());
+                                    let current = effort.current_value.clone();
+                                    let choices: Vec<AnyElement> = effort
+                                        .choices
+                                        .iter()
+                                        .map(|choice| {
+                                            let choice_value = choice.value.clone();
+                                            let choice_name = choice.name.clone();
+                                            let is_selected =
+                                                current.as_deref() == Some(choice_value.as_str());
+                                            let row_entity = effort_entity.clone();
+                                            let choice_value_for_id = choice_value.clone();
+                                            div()
+                                                .id(format!("effort-option-{}", choice_value))
+                                                .debug_selector(move || {
+                                                    format!("effort-option-{}", choice_value_for_id)
+                                                })
+                                                .h(px(22.0))
+                                                .px(px(8.0))
+                                                .rounded(theme.radii.control)
+                                                .flex()
+                                                .items_center()
+                                                .text_size(typography.caption2)
+                                                .text_color(theme.text)
+                                                .when(is_selected, |this| {
+                                                    this.bg(theme.element_active)
+                                                })
+                                                .hover(|style| style.bg(theme.overlay))
+                                                .on_click(move |_, _, cx| {
+                                                    row_entity.update(cx, |chat, cx| {
+                                                        chat.select_effort(
+                                                            choice_value.clone(),
+                                                            cx,
+                                                        );
+                                                    });
+                                                })
+                                                .child(choice_name)
+                                                .into_any_element()
+                                        })
+                                        .collect::<Vec<_>>();
+                                    this.child(div().h(px(1.0)).w_full().bg(theme.border))
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .pt(px(4.0))
+                                                .text_size(typography.caption2)
+                                                .text_color(theme.text_faint)
+                                                .child(effort_name),
+                                        )
+                                        .child(
+                                            // #233: the choice count is agent-reported
+                                            // and not under the picker's control (Claude
+                                            // Code advertises six, whose chips plus gaps
+                                            // exceed the popup's usable width), so the
+                                            // row wraps onto a second line instead of
+                                            // painting chips outside the picker border —
+                                            // same shape as the colour swatch row's
+                                            // `flex_wrap` in `controls::color_picker`
+                                            // (F-PRJ-13).
+                                            div().flex().flex_wrap().gap(px(4.0)).children(choices),
+                                        )
+                                }),
+                        ),
+                    )
+                    .into_any_element(),
+                None,
             )
-        } else {
-            None
-        };
+        });
 
         // F-CHAT-15: the session-mode picker, anchored above the status
         // pill the same way `model_picker` anchors above the model chip.
         // No search field — mode lists are small and entirely agent-defined
         // (ask/plan/auto today), so a flat list of rows is enough.
-        let mode_picker = if self.mode_picker_open {
+        let mode_picker = self.mode_picker_open.then(|| {
             let mode_entity = entity.clone();
             let current_id = self
                 .mode_catalog
@@ -6150,64 +6085,59 @@ impl Chat {
                 .as_ref()
                 .map(|catalog| catalog.options.clone())
                 .unwrap_or_default();
-            Some(
+            popover::anchored_menu_above(
+                "mode-picker-menu",
                 div()
                     .id("mode-picker")
                     .debug_selector(|| "mode-picker".into())
                     .key_context("ChatModelPicker")
                     .track_focus(&self.mode_picker_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .left(px(0.0))
-                    .bottom(px(43.0))
                     .w(px(200.0))
-                    .p(px(6.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.mode_picker_open = false;
                         cx.notify();
                     }))
-                    .when(options.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .p(px(8.0))
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child("No modes offered"),
-                        )
-                    })
-                    .children(options.into_iter().map(|mode| {
-                        let mode_id = mode.id.clone();
-                        let mode_name = mode.name.clone();
-                        let row_entity = mode_entity.clone();
-                        let is_selected = mode.id == current_id;
+                    .child(popover::popover_card(&bezel_theme).child(
                         div()
-                            .id(format!("mode-option-{mode_id}"))
-                            .debug_selector(move || format!("mode-option-{mode_id}"))
-                            .w_full()
                             .flex()
-                            .items_center()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .when(is_selected, |this| this.bg(theme.element_active))
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(move |_, _, cx| {
-                                row_entity
-                                    .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
+                            .flex_col()
+                            .when(options.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .p(px(8.0))
+                                        .text_size(typography.footnote)
+                                        .text_color(theme.text_faint)
+                                        .child("No modes offered"),
+                                )
                             })
-                            .child(mode_name)
-                    })),
+                            .children(options.into_iter().map(|mode| {
+                                let mode_id = mode.id.clone();
+                                let mode_name = mode.name.clone();
+                                let row_entity = mode_entity.clone();
+                                let is_selected = mode.id == current_id;
+                                popover::menu_row_nav(
+                                    &bezel_theme,
+                                    is_selected,
+                                    false,
+                                    bezel::motion::Fade::new(
+                                        view,
+                                        format!("mode-option-{mode_id}"),
+                                    ),
+                                )
+                                .id(format!("mode-option-{mode_id}"))
+                                .debug_selector(move || format!("mode-option-{mode_id}"))
+                                .on_click(move |_, _, cx| {
+                                    row_entity
+                                        .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
+                                })
+                                .child(mode_name)
+                            })),
+                    ))
+                    .into_any_element(),
+                None,
             )
-        } else {
-            None
-        };
+        });
 
         let context_usage = self.context_usage.clone();
         let context_amount = context_usage
@@ -6314,23 +6244,15 @@ impl Chat {
 
         let context_popover = if self.context_popover_open {
             let usage = context_usage.clone();
-            Some(
+            Some(popover::anchored_menu_above_end(
+                "context-popover-menu",
                 div()
                     .id("context-popover")
                     .debug_selector(|| "context-popover".into())
                     .key_context("ChatContextPopover")
                     .track_focus(&self.context_popover_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(16.0))
-                    .bottom(px(43.0))
                     .w(px(285.0))
-                    .p(px(12.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.context_popover_open = false;
                         cx.notify();
@@ -6426,8 +6348,10 @@ impl Chat {
                                 .text_color(theme.text_faint)
                                 .child("The agent has not reported context usage yet."),
                         )
-                    }),
-            )
+                    })
+                    .into_any_element(),
+                None,
+            ))
         } else {
             None
         };
@@ -6598,23 +6522,15 @@ impl Chat {
             } else {
                 "Follow Edited Files"
             };
-            Some(
+            Some(popover::anchored_menu_above_end(
+                "composer-overflow-menu-menu",
                 div()
                     .id("composer-overflow-menu")
                     .debug_selector(|| "composer-overflow-menu".into())
                     .key_context("ChatOverflowMenu")
                     .track_focus(&self.overflow_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(60.0))
-                    .bottom(px(43.0))
                     .w(px(200.0))
-                    .p(px(6.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.overflow_open = false;
                         cx.notify();
@@ -6667,8 +6583,10 @@ impl Chat {
                                 this.toggle_chat_history(window, cx);
                             }))
                             .child("Chat History"),
-                    ),
-            )
+                    )
+                    .into_any_element(),
+                None,
+            ))
         } else {
             None
         };
@@ -6775,31 +6693,25 @@ impl Chat {
                     })
                     .collect()
             };
-            Some(
+            Some(popover::anchored_menu_above_end(
+                "chat-history-menu-menu",
                 div()
                     .id("chat-history-menu")
                     .debug_selector(|| "chat-history-menu".into())
                     .key_context("ChatHistoryMenu")
                     .track_focus(&self.history_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(60.0))
-                    .bottom(px(43.0))
                     .w(px(260.0))
                     .max_h(px(320.0))
                     .overflow_y_scroll()
-                    .p(px(6.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.history_open = false;
                         cx.notify();
                     }))
-                    .children(rows),
-            )
+                    .children(rows)
+                    .into_any_element(),
+                None,
+            ))
         } else {
             None
         };
@@ -7079,8 +6991,12 @@ impl Chat {
                             .items_center()
                             .gap(px(6.0))
                             .min_w_0()
-                            .child(status_pill)
-                            .child(model_control)
+                            .child(
+                                div().relative().child(status_pill).children(mode_picker),
+                            )
+                            .child(
+                                div().relative().child(model_control).children(model_picker),
+                            )
                             .children(effort_control)
                             .child(attach_button),
                     )
@@ -7092,6 +7008,7 @@ impl Chat {
                             .gap(px(6.0))
                             .child(
                                 div()
+                                    .relative()
                                     .flex()
                                     .flex_none()
                                     .items_center()
@@ -7124,19 +7041,21 @@ impl Chat {
                                             .debug_selector(|| "context-percent".into())
                                             .text_color(theme.text)
                                             .child(format!("{context_percent}%")),
-                                    ),
+                                    )
+                                    .children(context_popover),
                             )
-                            .child(overflow_button)
+                            .child(
+                                div()
+                                    .relative()
+                                    .child(overflow_button)
+                                    .children(overflow_menu)
+                                    .children(chat_history_menu),
+                            )
                             .child(send_disc),
                     ),
             )
             .children(slash_popup)
-            .children(mention_popup)
-            .children(overflow_menu)
-            .children(chat_history_menu)
-            .children(model_picker)
-            .children(mode_picker)
-            .children(context_popover);
+            .children(mention_popup);
 
         composer_card.into_any_element()
     }
@@ -11951,17 +11870,14 @@ let answer = 42;
             window.simulate_next_frame(cx);
         });
         assert!(cx.debug_bounds("model-search-input").is_some());
-        // The search row takes typed characters through `on_composer_key`'s
-        // model-picker redirect, so it is a text field and must say where
-        // the next character lands.
-        assert!(
-            cx.debug_bounds("model-search-caret").is_some(),
-            "the picker's search row draws an insertion bar"
-        );
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.model_search_caret_visible),
-            "and it is lit while the open picker holds focus"
-        );
+        // The search row is a real TextField: typing, Backspace and Escape
+        // are its own job, and the picker holds focus on it while open.
+        let search_focus = chat.read_with(&cx.cx, |chat, cx| {
+            chat.model_search_field.read(cx).focus_handle(cx)
+        });
+        let focused =
+            cx.update(|window, app| window.focused(app).is_some_and(|f| f == search_focus));
+        assert!(focused, "the open picker focuses its search field");
         assert!(
             cx.debug_bounds("model-option-recommended").is_some(),
             "the driver's first-listed model (opus) is badged Recommended"
@@ -12006,6 +11922,42 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty() && chat.attachments.is_empty()),
             "backspace inside the search field must not have eaten composer text"
         );
+    }
+
+    /// The model picker's search is a real field: typing filters, Backspace
+    /// edits, Escape closes — and none of it reaches the composer's draft.
+    #[gpui::test]
+    async fn model_search_is_a_text_field_that_never_touches_the_draft(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| {
+            configure_test_chat(chat);
+            chat.available_models.push(ModelOption {
+                id: "sonnet".into(),
+                name: "Sonnet".into(),
+                description: None,
+            });
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "draft stays");
+        let chip = cx.debug_bounds("model-chip").expect("model chip");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-picker").is_some());
+        cx.simulate_input("son");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-option-sonnet").is_some());
+        assert!(
+            cx.debug_bounds("model-option-opus").is_none(),
+            "the search narrows the list"
+        );
+        cx.simulate_keystrokes("backspace backspace backspace");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-option-opus").is_some());
+        cx.simulate_keystrokes("escape");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-picker").is_none());
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft stays");
     }
 
     /// #233: the effort row is a plain flex row inside a fixed 245px popup,
