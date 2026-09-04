@@ -9,11 +9,11 @@
 
 use bezel::ui::icons;
 use bezel::ui::widgets::{Status as _, step_row_hover};
-use gpui::{AnyElement, Entity, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, Div, Entity, FocusHandle, SharedString, div, prelude::*, px};
 
 use super::{
     Chat, DIFF_PREVIEW_MAX_LINES, DiffPreviewContext, DiffPreviewSelection, EditSummaryState,
-    TranscriptInteraction, diff_preview_lines, tool_call_plain_text,
+    Entry, TranscriptInteraction, diff_preview_lines, tool_call_plain_text,
 };
 use sirio_acp::{ToolCallContentInfo, ToolCallLocationInfo};
 use sirio_theme::Theme;
@@ -313,6 +313,169 @@ impl Chat {
             ));
         }
         body.into_any_element()
+    }
+
+    /// Destructures one tool-call entry and draws it as a row in its run.
+    pub(super) fn tool_row_from_entry(
+        &self,
+        entry_index: usize,
+        first: bool,
+        source_start: usize,
+        entry: &Entry,
+        transcript_focus: FocusHandle,
+        theme: &Theme,
+        bezel_theme: &bezel::theme::Theme,
+        entity: Entity<Chat>,
+    ) -> AnyElement {
+        let Entry::ToolCall {
+            title,
+            status,
+            kind,
+            content,
+            locations,
+            expanded,
+            duration_ms,
+            ..
+        } = entry
+        else {
+            return div().into_any_element();
+        };
+        Self::render_tool_row(
+            entry_index,
+            first,
+            title,
+            status,
+            kind,
+            *duration_ms,
+            content.clone(),
+            locations.clone(),
+            *expanded,
+            self.edit_summaries.get(&entry_index).cloned(),
+            source_start,
+            TranscriptInteraction {
+                chat: entity.clone(),
+                focus: transcript_focus,
+            },
+            theme,
+            bezel_theme,
+            entity,
+        )
+    }
+
+    /// The box a run shares: rounded, bordered, clipping whatever it holds.
+    fn run_box(bezel_theme: &bezel::theme::Theme) -> Div {
+        div()
+            .w_full()
+            .rounded(px(bezel::theme::Theme::panel_radius()))
+            .border_1()
+            .border_color(bezel_theme.border)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+    }
+
+    /// A run of consecutive calls, `members` in transcript order as
+    /// `(entry index, source start, entry)`: one row per call, and one
+    /// `Verb · N` header for each consecutive run of the same verb with two
+    /// or more calls, its members drawn under it only while the fold is open.
+    pub(super) fn render_tool_run(
+        &self,
+        members: Vec<(usize, usize, Entry)>,
+        transcript_focus: FocusHandle,
+        theme: &Theme,
+        bezel_theme: &bezel::theme::Theme,
+        entity: Entity<Chat>,
+    ) -> AnyElement {
+        let Some((run_start, _, _)) = members.first() else {
+            return div().into_any_element();
+        };
+        let run_start = *run_start;
+        let kinds: Vec<&str> = members
+            .iter()
+            .map(|(_, _, entry)| match entry {
+                Entry::ToolCall { kind, .. } => kind.as_str(),
+                _ => "",
+            })
+            .collect();
+        let mut children: Vec<AnyElement> = Vec::new();
+        let mut first_in_box = true;
+        for (offset, len) in verb_folds(&kinds) {
+            let slice = &members[offset..offset + len];
+            if len == 1 {
+                let (index, source_start, entry) = &slice[0];
+                children.push(self.tool_row_from_entry(
+                    *index,
+                    first_in_box,
+                    *source_start,
+                    entry,
+                    transcript_focus.clone(),
+                    theme,
+                    bezel_theme,
+                    entity.clone(),
+                ));
+                first_in_box = false;
+                continue;
+            }
+            let fold_start = slice[0].0;
+            let open = self.open_verb_folds.contains(&fold_start);
+            let any_failed = slice.iter().any(|(_, _, entry)| {
+                matches!(entry, Entry::ToolCall { status, .. } if is_failed_status(status))
+            });
+            let kind = kinds[offset];
+            let toggle_entity = entity.clone();
+            let header = bezel_theme
+                .step_row(
+                    tool_icon(kind),
+                    tool_verb(kind),
+                    Some(SharedString::from(format!("· {len}"))),
+                    None,
+                    any_failed,
+                    Some(open),
+                )
+                .id(("tool-fold", fold_start))
+                .debug_selector(move || format!("tool-fold-{fold_start}"))
+                .hover(step_row_hover)
+                .on_click(move |_, _, cx| {
+                    toggle_entity.update(cx, |chat, cx| chat.toggle_verb_fold(fold_start, cx));
+                });
+            let mut fold = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .when(!first_in_box, |fold| {
+                    fold.border_t_1().border_color(bezel_theme.border)
+                })
+                .child(header);
+            if open {
+                let mut inner = div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .border_t_1()
+                    .border_color(bezel_theme.border)
+                    .pl(px(16.0));
+                for (position, (index, source_start, entry)) in slice.iter().enumerate() {
+                    inner = inner.child(self.tool_row_from_entry(
+                        *index,
+                        position == 0,
+                        *source_start,
+                        entry,
+                        transcript_focus.clone(),
+                        theme,
+                        bezel_theme,
+                        entity.clone(),
+                    ));
+                }
+                fold = fold.child(inner);
+            }
+            children.push(fold.into_any_element());
+            first_in_box = false;
+        }
+        Self::run_box(bezel_theme)
+            .id(("tool-run", run_start))
+            .debug_selector(move || format!("tool-run-{run_start}"))
+            .children(children)
+            .into_any_element()
     }
 }
 
