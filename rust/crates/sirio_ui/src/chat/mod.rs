@@ -5840,7 +5840,8 @@ impl Chat {
         // carries its own label. Drawn only when the agent reports a value
         // AND the picker can actually open, so this is never a click target
         // that leads nowhere. `flex_none` keeps it intact while the model
-        // pill beside it absorbs the squeeze on a narrow pane.
+        // chip beside it absorbs the squeeze on a narrow pane — the effort
+        // chip is the row's clip victim, never the send disc's neighbour.
         let effort_control = effort_label
             .filter(|_| self.model_control_visible())
             .map(|label| {
@@ -6985,19 +6986,25 @@ impl Chat {
                     .justify_between()
                     .px(px(6.0))
                     .child(
+                        // The row degrades by shrinking, never by painting
+                        // over: the left cluster takes the slack (and clips
+                        // its last chip when there is none), the right
+                        // cluster never shrinks.
                         div()
                             .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
                             .items_center()
                             .gap(px(6.0))
-                            .min_w_0()
                             .child(
                                 div().relative().child(status_pill).children(mode_picker),
                             )
+                            .child(attach_button)
                             .child(
                                 div().relative().child(model_control).children(model_picker),
                             )
-                            .children(effort_control)
-                            .child(attach_button),
+                            .children(effort_control),
                     )
                     .child(
                         div()
@@ -8506,6 +8513,12 @@ mod tests {
             "attach is in the left cluster, send at the right end"
         );
         assert!(send.right() <= card.right() && card.left() <= attach.left());
+        if let Some(chip) = cx.debug_bounds("model-chip") {
+            assert!(
+                attach.right() <= chip.left(),
+                "the row order is pill · attach · model, attach before the shrinkable chips"
+            );
+        }
         assert!(
             cx.debug_bounds("send-ready").is_none(),
             "an empty draft leaves the disc inert"
@@ -8922,6 +8935,50 @@ two");
     }
 
     #[gpui::test]
+    /// At Sirio's real pane width the row degrades by shrinking the model
+    /// name and clipping the effort chip — never by painting the send disc
+    /// over a neighbour or pushing attach/overflow out of the card.
+    #[gpui::test]
+    async fn narrow_control_row_keeps_every_essential_control_reachable(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        chat.update(cx, |chat, _| {
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some("xhigh".into()),
+                choices: vec![EffortChoice {
+                    value: "xhigh".into(),
+                    name: "Xhigh".into(),
+                }],
+            });
+        });
+        cx.simulate_resize(size(px(420.0), px(600.0)));
+        refresh_frame(cx);
+
+        let card = cx.debug_bounds("composer").expect("card");
+        let send = cx.debug_bounds("send").expect("send");
+        let attach = cx.debug_bounds("attach-image").expect("attach");
+        let overflow = cx.debug_bounds("composer-overflow").expect("overflow");
+        let context = cx.debug_bounds("context-ring").expect("context ring");
+        let effort = cx.debug_bounds("effort-chip").expect("effort chip");
+        assert!(send.right() <= card.right());
+        assert!(attach.right() <= card.right() && attach.left() >= card.left());
+        assert!(overflow.right() <= send.left());
+        assert!(context.right() <= overflow.left());
+        assert!(
+            effort.left() >= attach.right(),
+            "attach precedes the shrinkable chips"
+        );
+        assert!(
+            send.left() >= context.left(),
+            "the right cluster is laid out as one run"
+        );
+    }
+
     async fn narrow_composer_stays_inside_chat_pane_and_keeps_send_reachable(
         cx: &mut TestAppContext,
     ) {
