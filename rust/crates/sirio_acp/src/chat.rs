@@ -270,7 +270,7 @@ impl ChatSession {
             }
             state.error = None;
             state.composer_text.clear();
-            state.current_turn = vec![ChatEntry::UserMessage { text: text.clone() }];
+            state.current_turn = vec![ChatEntry::UserMessage { text: text.clone(), at: None }];
             state.status = ChatStatus::Streaming;
         }
 
@@ -638,7 +638,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
                 if text.is_empty() {
                     None
                 } else {
-                    state.current_turn = vec![ChatEntry::UserMessage { text: text.clone() }];
+                    state.current_turn = vec![ChatEntry::UserMessage { text: text.clone(), at: None }];
                     state.status = ChatStatus::Streaming;
                     Some(text)
                 }

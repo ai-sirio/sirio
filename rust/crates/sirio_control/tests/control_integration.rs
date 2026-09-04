@@ -2100,7 +2100,7 @@ fn snapshot_result(snapshot: &ChatSnapshot) -> BTreeMap<String, String> {
 fn chat_entry_row(entry: &sirio_persistence::ChatEntry) -> BTreeMap<String, String> {
     let mut row = BTreeMap::new();
     match entry {
-        sirio_persistence::ChatEntry::UserMessage { text } => {
+        sirio_persistence::ChatEntry::UserMessage { text, .. } => {
             row.insert("kind".into(), "user".into());
             row.insert("text".into(), text.clone());
         }
@@ -2108,7 +2108,7 @@ fn chat_entry_row(entry: &sirio_persistence::ChatEntry) -> BTreeMap<String, Stri
             row.insert("kind".into(), "assistant".into());
             row.insert("text".into(), text.clone());
         }
-        sirio_persistence::ChatEntry::Thought { text } => {
+        sirio_persistence::ChatEntry::Thought { text, .. } => {
             row.insert("kind".into(), "thought".into());
             row.insert("text".into(), text.clone());
         }

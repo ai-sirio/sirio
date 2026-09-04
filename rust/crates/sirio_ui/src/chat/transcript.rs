@@ -130,7 +130,10 @@ mod tests {
     use chrono::TimeZone;
 
     fn user(text: &str) -> Entry {
-        Entry::User(text.into())
+        Entry::User {
+            text: text.into(),
+            at: None,
+        }
     }
     fn prose(text: &str) -> Entry {
         Entry::Assistant {
