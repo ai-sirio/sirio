@@ -1010,7 +1010,7 @@ pub enum ChatEvent {
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
 #[derive(Clone, Debug, Default)]
-struct EditSummaryState {
+pub(crate) struct EditSummaryState {
     confirming_path: Option<PathBuf>,
     reverted_paths: Vec<PathBuf>,
     revert_error: Option<String>,
@@ -1028,7 +1028,7 @@ impl TranscriptSelection {
 }
 
 #[derive(Clone)]
-struct TranscriptInteraction {
+pub(crate) struct TranscriptInteraction {
     chat: Entity<Chat>,
     focus: FocusHandle,
 }
@@ -4497,6 +4497,7 @@ impl Chat {
         edit_summary: Option<EditSummaryState>,
     ) -> impl IntoElement {
         let typography = theme.typography;
+        let bezel_theme = theme.to_bezel_theme();
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
             focus: transcript_focus,
@@ -4680,12 +4681,15 @@ impl Chat {
                 content,
                 locations,
                 expanded,
+                duration_ms,
                 ..
-            } => Self::render_tool_call_card(
+            } => Self::render_tool_row(
                 entry_index,
-                title,
-                status,
-                kind,
+                true,
+                &title,
+                &status,
+                &kind,
+                duration_ms,
                 content,
                 locations,
                 expanded,
@@ -4693,6 +4697,7 @@ impl Chat {
                 source_start,
                 interaction.clone(),
                 theme,
+                &bezel_theme,
                 entity.clone(),
             ),
             Entry::SubagentTask {
@@ -7319,6 +7324,7 @@ impl Render for Chat {
         // copy — never `Theme::dark()`, never a field.
         let theme = *Theme::get(cx);
         let transcript_theme = theme;
+        let _bezel_theme = bezel::theme::Theme::of(cx).clone();
         let entity = cx.entity();
         let entity_for_bar = entity.clone();
         let transcript_ranges = self.transcript_entry_ranges();
@@ -8612,8 +8618,10 @@ mod tests {
     /// A freshly drawn frame, so `debug_bounds` reads state that actually
     /// rendered rather than the last stale frame.
     fn refresh_frame(cx: &mut VisualTestContext) {
-        cx.update(|window, _| window.refresh());
-        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
     }
 
     fn chat_view<'a>(
@@ -9878,7 +9886,7 @@ let answer = 42;
                 locations: vec![],
                 raw_input: None,
                 raw_output: None,
-                expanded: false,
+                expanded: true,
                 group_expanded: false,
                 duration_ms: None,
             });
@@ -9895,7 +9903,7 @@ let answer = 42;
                 locations: vec![],
                 raw_input: None,
                 raw_output: None,
-                expanded: false,
+                expanded: true,
                 group_expanded: false,
                 duration_ms: None,
             });
@@ -12859,6 +12867,85 @@ let answer = 42;
         cx.simulate_click(toggle.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
+    }
+
+    /// A call is one `step_row`: icon and verb from its kind, the title as
+    /// the truncating detail, the duration (or the status word) pinned right,
+    /// and a chevron only when there is something to open.
+    #[gpui::test]
+    async fn a_tool_call_is_a_step_row_with_a_chevron_only_when_it_has_a_body(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            let mut bare = test_tool_call("bare");
+            if let Entry::ToolCall {
+                content,
+                locations,
+                duration_ms,
+                ..
+            } = &mut bare
+            {
+                content.clear();
+                locations.clear();
+                *duration_ms = Some(1412);
+            }
+            chat.push_entry(bare);
+            chat.push_entry(Entry::Assistant {
+                text: "x".into(),
+                document: parse_chat_markdown("x"),
+            });
+            let mut full = test_tool_call("full");
+            if let Entry::ToolCall {
+                content,
+                status,
+                duration_ms,
+                ..
+            } = &mut full
+            {
+                content.push(ToolCallContentInfo::Text("hello from the tool".into()));
+                *status = "failed".into();
+                *duration_ms = None;
+            }
+            chat.push_entry(full);
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("tool-call-toggle-0").is_some());
+        assert!(
+            cx.debug_bounds("tool-call-chevron-0").is_none(),
+            "nothing to open, no chevron"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-meta-0-1.4s").is_some(),
+            "a measured call shows its duration"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-chevron-2").is_some(),
+            "text output opens"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-meta-2-failed").is_some(),
+            "unmeasured shows the status word"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-failed-2").is_some(),
+            "a failed row is flagged"
+        );
+        assert!(
+            cx.debug_bounds("tool-output-2-0").is_none(),
+            "closed until clicked"
+        );
+        let row = cx.debug_bounds("tool-call-toggle-2").expect("row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("tool-output-2-0").is_some(),
+            "the row opens onto its output"
+        );
     }
 
     #[gpui::test]
