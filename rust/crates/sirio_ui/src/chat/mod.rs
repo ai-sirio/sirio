@@ -7001,21 +7001,30 @@ impl Chat {
             })
             .child(
                 // Two clusters on one row, spread to the edges: what you
-                // configure on the left, status and send on the right.
+                // configure on the left, status and send on the right. When
+                // the card is too narrow to hold both, the row wraps and the
+                // right cluster lands on its own line, pushed to the right
+                // edge of that line by `ml_auto`.
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
+                    .gap_y(px(4.0))
                     .items_center()
                     .justify_between()
                     .px(px(6.0))
                     .child(
-                        // The row degrades by shrinking, never by painting
-                        // over: the left cluster takes the slack (and clips
-                        // its last chip when there is none), the right
-                        // cluster never shrinks.
+                        // The row degrades by wrapping, never by painting
+                        // over: with no room the right cluster drops to its
+                        // own line and the left cluster clips its last chip
+                        // when there is none left even there. `flex_auto`,
+                        // not `flex_1` — `flex_1`'s zero basis makes the
+                        // cluster's hypothetical size 0, so the row would
+                        // never wrap and the cluster would just be squeezed
+                        // back down to the pill.
                         div()
                             .flex()
-                            .flex_1()
+                            .flex_auto()
                             .min_w_0()
                             .overflow_hidden()
                             .items_center()
@@ -7029,6 +7038,7 @@ impl Chat {
                         div()
                             .flex()
                             .flex_none()
+                            .ml_auto()
                             .items_center()
                             .gap(px(6.0))
                             .child(
@@ -8990,47 +9000,63 @@ two"
         let overflow = cx.debug_bounds("composer-overflow").expect("overflow");
         let context = cx.debug_bounds("context-ring").expect("context ring");
         let effort = cx.debug_bounds("effort-chip").expect("effort chip");
-        assert!(send.right() <= card.right());
-        assert!(attach.right() <= card.right() && attach.left() >= card.left());
-        assert!(overflow.right() <= send.left());
-        assert!(context.right() <= overflow.left());
-        assert!(
-            effort.left() >= attach.right(),
-            "attach precedes the shrinkable chips"
-        );
-        assert!(
-            send.left() >= context.left(),
-            "the right cluster is laid out as one run"
-        );
-        // flex children default to `flex_shrink: 1`, so without `flex_none`
-        // the fixed-size controls collapse to zero before the cluster's
-        // `overflow_hidden` ever gets to clip. Attach must keep its exact
-        // 24px and the effort chip must keep a usable width.
+        let chip = cx.debug_bounds("model-chip").expect("model chip");
+        // Every control keeps its full size at this width.
         assert_eq!(
             attach.size.width,
             px(24.0),
-            "attach never shrinks — the cluster clips instead: {attach:?}"
+            "attach keeps its exact size — the row wraps instead: {attach:?}"
+        );
+        assert_eq!(
+            send.size.width,
+            px(24.0),
+            "the send disc keeps its exact size: {send:?}"
         );
         assert!(
             effort.size.width >= px(60.0),
-            "the effort chip keeps its size and is clipped last: {effort:?}"
-        );
-
-        // Tighter still. Attach holds its 24px and the send disc stays
-        // inside the card.
-        cx.simulate_resize(size(px(360.0), px(600.0)));
-        refresh_frame(cx);
-        let card = cx.debug_bounds("composer").expect("card at 360");
-        let send = cx.debug_bounds("send").expect("send at 360");
-        let attach = cx.debug_bounds("attach-image").expect("attach at 360");
-        assert_eq!(
-            attach.size.width,
-            px(24.0),
-            "attach never shrinks, even at 360px: {attach:?}"
+            "the effort chip keeps a usable width: {effort:?}"
         );
         assert!(
+            chip.size.width >= px(56.0),
+            "the model chip keeps at least its floor: {chip:?}"
+        );
+        // Each line lays its controls out in order, none over a neighbour.
+        assert!(
+            attach.right() <= chip.left(),
+            "line order pill · attach · model: attach={attach:?} chip={chip:?}"
+        );
+        assert!(
+            chip.right() <= effort.left(),
+            "model precedes effort: chip={chip:?} effort={effort:?}"
+        );
+        assert!(
+            context.right() <= overflow.left(),
+            "context precedes overflow: {context:?} {overflow:?}"
+        );
+        assert!(
+            overflow.right() <= send.left(),
+            "overflow precedes send: {overflow:?} {send:?}"
+        );
+        // The send disc stays inside the card.
+        assert!(
             send.right() <= card.right(),
-            "the send disc stays inside the card at 360px: send={send:?} card={card:?}"
+            "the send disc stays inside the card: send={send:?} card={card:?}"
+        );
+        // Too narrow for both clusters: the right cluster wrapped under, so
+        // its line starts below attach's bottom edge.
+        assert!(
+            send.top() >= attach.bottom(),
+            "the right cluster wraps under the left at 420px: send={send:?} attach={attach:?}"
+        );
+
+        // Back to a wide pane, the row is one line again.
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        refresh_frame(cx);
+        let send = cx.debug_bounds("send").expect("send at 900");
+        let attach = cx.debug_bounds("attach-image").expect("attach at 900");
+        assert!(
+            send.top() < attach.bottom(),
+            "the row is one line again at 900px: send={send:?} attach={attach:?}"
         );
     }
 
