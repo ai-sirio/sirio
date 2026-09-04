@@ -104,7 +104,10 @@ mod tests {
         assert_eq!(text, "fix @src/main.rss and @other");
         assert!(paths.is_empty());
         let (text, paths) = assemble_prompt("mail me@example.com", &["example.com".to_string()]);
-        assert_eq!(text, "mail me@example.com", "an @ inside a word is not a token");
+        assert_eq!(
+            text, "mail me@example.com",
+            "an @ inside a word is not a token"
+        );
         assert!(paths.is_empty());
     }
 
@@ -132,8 +135,7 @@ pub(crate) fn menu_above_at(
     position: Point<Pixels>,
     content: AnyElement,
 ) -> AnyElement {
-    let content =
-        bezel::ui::surface::popover(bezel::theme::Theme::surface_radius(), content);
+    let content = bezel::ui::surface::popover(bezel::theme::Theme::surface_radius(), content);
     gpui::deferred(
         gpui::anchored()
             .position(position)

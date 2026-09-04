@@ -41,9 +41,9 @@ use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
-use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
+use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -403,7 +403,14 @@ fn push_legacy_inline(inline: &LegacyInline, text: &mut markdown::Text) {
 
 actions!(
     chat_composer,
-    [Send, Cancel, CopyTranscript, PopupPrevious, PopupNext, PopupAccept]
+    [
+        Send,
+        Cancel,
+        CopyTranscript,
+        PopupPrevious,
+        PopupNext,
+        PopupAccept
+    ]
 );
 
 actions!(chat_question_answer, [SendAnswer, CancelAnswer]);
@@ -1589,8 +1596,10 @@ impl Chat {
         });
         // Both content and caret changes notify, and the mention behind the
         // caret changes when either does.
-        cx.observe(&composer_field, |chat: &mut Self, _, cx| chat.reread_composer(cx))
-            .detach();
+        cx.observe(&composer_field, |chat: &mut Self, _, cx| {
+            chat.reread_composer(cx)
+        })
+        .detach();
 
         Self {
             client: None,
@@ -1800,8 +1809,16 @@ impl Chat {
         cx.bind_keys([
             KeyBinding::new("enter", Send, Some("ChatComposer")),
             KeyBinding::new("return", Send, Some("ChatComposer")),
-            KeyBinding::new("shift-enter", bezel::ui::input::InsertNewline, Some("ChatComposer")),
-            KeyBinding::new("shift-return", bezel::ui::input::InsertNewline, Some("ChatComposer")),
+            KeyBinding::new(
+                "shift-enter",
+                bezel::ui::input::InsertNewline,
+                Some("ChatComposer"),
+            ),
+            KeyBinding::new(
+                "shift-return",
+                bezel::ui::input::InsertNewline,
+                Some("ChatComposer"),
+            ),
             KeyBinding::new("escape", Cancel, Some("ChatComposer")),
             KeyBinding::new("up", PopupPrevious, Some("ChatComposer")),
             KeyBinding::new("down", PopupNext, Some("ChatComposer")),
@@ -2785,7 +2802,8 @@ impl Chat {
             // F-CHAT-16: a fresh search every time the picker opens, same as
             // Swift's `@State private var query` starting blank each time
             // the popover view is recreated.
-            self.model_search_field.update(cx, |field, cx| field.clear(cx));
+            self.model_search_field
+                .update(cx, |field, cx| field.clear(cx));
             let focus = self.model_search_field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
             window.on_next_frame(move |window, cx| window.focus(&focus, cx));
@@ -2906,8 +2924,7 @@ impl Chat {
                     .available_commands
                     .iter()
                     .find(|command| command.name == name)?;
-                let matches = query.is_empty()
-                    || command.name.to_lowercase().starts_with(&query);
+                let matches = query.is_empty() || command.name.to_lowercase().starts_with(&query);
                 matches.then_some(command)
             })
             .collect()
@@ -5637,7 +5654,11 @@ impl Chat {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let typography = theme.typography;
-        let focused = self.composer_field.read(cx).focus_handle(cx).is_focused(window);
+        let focused = self
+            .composer_field
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let placeholder = self.composer_placeholder();
         if placeholder != self.composer_placeholder_shown {
@@ -5971,36 +5992,35 @@ impl Chat {
                                         });
                                     })
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_ellipsis()
-                                            .child(option_name),
+                                        div().flex_1().min_w_0().text_ellipsis().child(option_name),
                                     )
-                                    .when(is_recommended, |this| {
-                                        this.child(
-                                            div()
-                                                .id("model-option-recommended")
-                                                .debug_selector(|| "model-option-recommended".into())
-                                                .flex_shrink_0()
-                                                .px(px(5.0))
-                                                .rounded(px(4.0))
-                                                .text_size(typography.caption2)
-                                                .text_color(theme.text)
-                                                .bg(theme.overlay_strong)
-                                                .child("Recommended"),
-                                        )
-                                    })
+                                    .when(
+                                        is_recommended,
+                                        |this| {
+                                            this.child(
+                                                div()
+                                                    .id("model-option-recommended")
+                                                    .debug_selector(|| {
+                                                        "model-option-recommended".into()
+                                                    })
+                                                    .flex_shrink_0()
+                                                    .px(px(5.0))
+                                                    .rounded(px(4.0))
+                                                    .text_size(typography.caption2)
+                                                    .text_color(theme.text)
+                                                    .bg(theme.overlay_strong)
+                                                    .child("Recommended"),
+                                            )
+                                        },
+                                    )
                                 }))
                                 .when_some(self.effort.clone(), |this, effort| {
                                     if effort.choices.is_empty() {
                                         return this;
                                     }
                                     let effort_entity = picker_entity.clone();
-                                    let effort_name = effort
-                                        .name
-                                        .clone()
-                                        .unwrap_or_else(|| "Effort".to_string());
+                                    let effort_name =
+                                        effort.name.clone().unwrap_or_else(|| "Effort".to_string());
                                     let current = effort.current_value.clone();
                                     let choices: Vec<AnyElement> = effort
                                         .choices
@@ -6098,42 +6118,45 @@ impl Chat {
                         this.mode_picker_open = false;
                         cx.notify();
                     }))
-                    .child(popover::popover_card(&bezel_theme).child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .when(options.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .p(px(8.0))
-                                        .text_size(typography.footnote)
-                                        .text_color(theme.text_faint)
-                                        .child("No modes offered"),
-                                )
-                            })
-                            .children(options.into_iter().map(|mode| {
-                                let mode_id = mode.id.clone();
-                                let mode_name = mode.name.clone();
-                                let row_entity = mode_entity.clone();
-                                let is_selected = mode.id == current_id;
-                                popover::menu_row_nav(
-                                    &bezel_theme,
-                                    is_selected,
-                                    false,
-                                    bezel::motion::Fade::new(
-                                        view,
-                                        format!("mode-option-{mode_id}"),
-                                    ),
-                                )
-                                .id(format!("mode-option-{mode_id}"))
-                                .debug_selector(move || format!("mode-option-{mode_id}"))
-                                .on_click(move |_, _, cx| {
-                                    row_entity
-                                        .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
+                    .child(
+                        popover::popover_card(&bezel_theme).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .when(options.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .p(px(8.0))
+                                            .text_size(typography.footnote)
+                                            .text_color(theme.text_faint)
+                                            .child("No modes offered"),
+                                    )
                                 })
-                                .child(mode_name)
-                            })),
-                    ))
+                                .children(options.into_iter().map(|mode| {
+                                    let mode_id = mode.id.clone();
+                                    let mode_name = mode.name.clone();
+                                    let row_entity = mode_entity.clone();
+                                    let is_selected = mode.id == current_id;
+                                    popover::menu_row_nav(
+                                        &bezel_theme,
+                                        is_selected,
+                                        false,
+                                        bezel::motion::Fade::new(
+                                            view,
+                                            format!("mode-option-{mode_id}"),
+                                        ),
+                                    )
+                                    .id(format!("mode-option-{mode_id}"))
+                                    .debug_selector(move || format!("mode-option-{mode_id}"))
+                                    .on_click(move |_, _, cx| {
+                                        row_entity.update(cx, |chat, cx| {
+                                            chat.select_mode(mode.clone(), cx)
+                                        });
+                                    })
+                                    .child(mode_name)
+                                })),
+                        ),
+                    )
                     .into_any_element(),
                 None,
             )
@@ -6375,143 +6398,136 @@ impl Chat {
         // on purpose (they are the same step above the page); what makes
         // this a card of its own is that it floats over the page, with the
         // gap below it.
-        let slash_popup =
-            if self.slash_popup_visible() {
-                let candidates = self.slash_candidates();
-                let active = self.slash_filter.active();
-                let view = bezel::motion::Painter::of(cx);
-                let anchor = self
-                    .composer_field
-                    .read(cx)
-                    .offset_bounds(0, window)
-                    .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
-                anchor.map(|anchor| {
-                    let rows: Vec<AnyElement> = candidates
-                        .into_iter()
-                        .enumerate()
-                        .map(|(position, command)| {
-                            let name = command.name.clone();
-                            let tooltip = slash_option_tooltip(&command.description);
-                            let row_entity = entity.clone();
-                            let accept_name = name.clone();
-                            let name_for_id = name.clone();
-                            let name_for_label_id = name.clone();
-                            // One line per row: the name. The description is
-                            // the row's tooltip, so ten rows stay ten lines
-                            // and the list does not fill the pane.
-                            popover::menu_row(
-                                &bezel_theme,
-                                Some(position) == active,
-                                bezel::motion::Fade::new(view, format!("slash-option-{name}")),
-                            )
-                            .id(SharedString::from(format!("slash-option-{name}")))
-                            .debug_selector(move || format!("slash-option-{name_for_id}"))
-                            .when_some(tooltip, |this, text| {
-                                this.tooltip(move |window, cx| {
-                                    Tooltip::text(text.clone(), window, cx)
-                                })
-                            })
-                            .on_click(move |_, _, cx| {
-                                row_entity.update(cx, |chat, cx| {
-                                    chat.accept_slash_command(&accept_name, cx);
-                                });
-                            })
-                            .child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("slash-option-name-{name_for_label_id}")
-                                    })
-                                    .text_size(typography.footnote)
-                                    .text_color(bezel_theme.text)
-                                    .child(format!("/{name}")),
-                            )
-                            .into_any_element()
+        let slash_popup = if self.slash_popup_visible() {
+            let candidates = self.slash_candidates();
+            let active = self.slash_filter.active();
+            let view = bezel::motion::Painter::of(cx);
+            let anchor = self
+                .composer_field
+                .read(cx)
+                .offset_bounds(0, window)
+                .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
+            anchor.map(|anchor| {
+                let rows: Vec<AnyElement> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, command)| {
+                        let name = command.name.clone();
+                        let tooltip = slash_option_tooltip(&command.description);
+                        let row_entity = entity.clone();
+                        let accept_name = name.clone();
+                        let name_for_id = name.clone();
+                        let name_for_label_id = name.clone();
+                        // One line per row: the name. The description is
+                        // the row's tooltip, so ten rows stay ten lines
+                        // and the list does not fill the pane.
+                        popover::menu_row(
+                            &bezel_theme,
+                            Some(position) == active,
+                            bezel::motion::Fade::new(view, format!("slash-option-{name}")),
+                        )
+                        .id(SharedString::from(format!("slash-option-{name}")))
+                        .debug_selector(move || format!("slash-option-{name_for_id}"))
+                        .when_some(tooltip, |this, text| {
+                            this.tooltip(move |window, cx| Tooltip::text(text.clone(), window, cx))
                         })
-                        .collect();
-                    div()
-                        .child(composer_view::menu_above_at(
-                            "slash-popup-menu",
-                            anchor,
-                            popover::popover_card(&bezel_theme)
-                                .debug_selector(|| "slash-popup".into())
-                                .w(px(280.0))
-                                .child(div().flex().flex_col().children(rows))
-                                .into_any_element(),
-                        ))
+                        .on_click(move |_, _, cx| {
+                            row_entity.update(cx, |chat, cx| {
+                                chat.accept_slash_command(&accept_name, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("slash-option-name-{name_for_label_id}")
+                                })
+                                .text_size(typography.footnote)
+                                .text_color(bezel_theme.text)
+                                .child(format!("/{name}")),
+                        )
                         .into_any_element()
-                })
-            } else {
-                None
-            };
+                    })
+                    .collect();
+                div()
+                    .child(composer_view::menu_above_at(
+                        "slash-popup-menu",
+                        anchor,
+                        popover::popover_card(&bezel_theme)
+                            .debug_selector(|| "slash-popup".into())
+                            .w(px(280.0))
+                            .child(div().flex().flex_col().children(rows))
+                            .into_any_element(),
+                    ))
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
 
         // @ file-mention popup (F-CHAT-10): the bounded filesystem walk's
         // results for the trailing `@token`, anchored above the token. Hidden
         // when the token matches nothing.
-        let mention_popup =
-            if mention_token(&self.draft, self.draft_caret).is_some()
-                && !self.mention_candidates.is_empty()
-            {
-                let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
-                let candidates = self.mention_candidates.clone();
-                let active = self.mention_filter.active();
-                let view = bezel::motion::Painter::of(cx);
-                let anchor = self
-                    .composer_field
-                    .read(cx)
-                    .offset_bounds(at, window)
-                    .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
-                anchor.map(|anchor| {
-                    let rows: Vec<AnyElement> = candidates
-                        .into_iter()
-                        .enumerate()
-                        .map(|(position, path)| {
-                            let row_entity = entity.clone();
-                            let path_for_id = path.clone();
-                            let path_for_accept = path.clone();
-                            popover::menu_row(
-                                &bezel_theme,
-                                Some(position) == active,
-                                bezel::motion::Fade::new(
-                                    view,
-                                    format!("mention-option-{path}"),
-                                ),
-                            )
-                            .id(SharedString::from(format!("mention-option-{path_for_id}")))
-                            .debug_selector(move || format!("mention-option-{path_for_id}"))
-                            .on_click(move |_, _, cx| {
-                                row_entity.update(cx, |chat, cx| {
-                                    chat.accept_mention(&path_for_accept, cx);
-                                });
-                            })
-                            .child(
-                                bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
-                                    .size(px(12.0))
-                                    .text_color(bezel_theme.text_faint),
-                            )
-                            .child(
-                                div()
-                                    .text_size(typography.footnote)
-                                    .text_color(bezel_theme.text)
-                                    .child(path),
-                            )
-                            .into_any_element()
+        let mention_popup = if mention_token(&self.draft, self.draft_caret).is_some()
+            && !self.mention_candidates.is_empty()
+        {
+            let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
+            let candidates = self.mention_candidates.clone();
+            let active = self.mention_filter.active();
+            let view = bezel::motion::Painter::of(cx);
+            let anchor = self
+                .composer_field
+                .read(cx)
+                .offset_bounds(at, window)
+                .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
+            anchor.map(|anchor| {
+                let rows: Vec<AnyElement> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, path)| {
+                        let row_entity = entity.clone();
+                        let path_for_id = path.clone();
+                        let path_for_accept = path.clone();
+                        popover::menu_row(
+                            &bezel_theme,
+                            Some(position) == active,
+                            bezel::motion::Fade::new(view, format!("mention-option-{path}")),
+                        )
+                        .id(SharedString::from(format!("mention-option-{path_for_id}")))
+                        .debug_selector(move || format!("mention-option-{path_for_id}"))
+                        .on_click(move |_, _, cx| {
+                            row_entity.update(cx, |chat, cx| {
+                                chat.accept_mention(&path_for_accept, cx);
+                            });
                         })
-                        .collect();
-                    div()
-                        .child(composer_view::menu_above_at(
-                            "mention-popup-menu",
-                            anchor,
-                            popover::popover_card(&bezel_theme)
-                                .debug_selector(|| "mention-popup".into())
-                                .w(px(360.0))
-                                .child(div().flex().flex_col().children(rows))
-                                .into_any_element(),
-                        ))
+                        .child(
+                            bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
+                                .size(px(12.0))
+                                .text_color(bezel_theme.text_faint),
+                        )
+                        .child(
+                            div()
+                                .text_size(typography.footnote)
+                                .text_color(bezel_theme.text)
+                                .child(path),
+                        )
                         .into_any_element()
-                })
-            } else {
-                None
-            };
+                    })
+                    .collect();
+                div()
+                    .child(composer_view::menu_above_at(
+                        "mention-popup-menu",
+                        anchor,
+                        popover::popover_card(&bezel_theme)
+                            .debug_selector(|| "mention-popup".into())
+                            .w(px(360.0))
+                            .child(div().flex().flex_col().children(rows))
+                            .into_any_element(),
+                    ))
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
 
         // Overflow menu (F-CHAT-14): Follow Edited Files toggle and New
         // Conversation, the two secondary composer actions the control row
@@ -6831,7 +6847,6 @@ impl Chat {
                 .child(disc)
         };
 
-
         // The composer is the gallery's `Composer` card: one frosted surface
         // at `surface_radius` carrying the field on top and a row of
         // controls under it.
@@ -6861,7 +6876,10 @@ impl Chat {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    this.composer_field.read(cx).focus_handle(cx).focus(window, cx);
+                    this.composer_field
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window, cx);
                 }),
             )
             .when(!self.attachments.is_empty(), |card| {
@@ -6997,13 +7015,9 @@ impl Chat {
                             .overflow_hidden()
                             .items_center()
                             .gap(px(6.0))
-                            .child(
-                                div().relative().child(status_pill).children(mode_picker),
-                            )
+                            .child(div().relative().child(status_pill).children(mode_picker))
                             .child(attach_button)
-                            .child(
-                                div().relative().child(model_control).children(model_picker),
-                            )
+                            .child(div().relative().child(model_control).children(model_picker))
                             .children(effort_control),
                     )
                     .child(
@@ -7635,9 +7649,9 @@ fn mention_candidates_on_disk(cwd: &Path, query: &str) -> Vec<String> {
                 && let Ok(relative) = path.strip_prefix(cwd)
             {
                 // Mention paths are `@`-token text and agent-side references,
-            // so they always use forward slashes regardless of the host
-            // filesystem's separator.
-            relative_paths.push(relative.to_string_lossy().replace('\\', "/"));
+                // so they always use forward slashes regardless of the host
+                // filesystem's separator.
+                relative_paths.push(relative.to_string_lossy().replace('\\', "/"));
             }
         }
     }
@@ -8507,7 +8521,10 @@ mod tests {
         let attach = cx.debug_bounds("attach-image").expect("attach");
         assert_eq!(send.size.width, px(24.0));
         assert_eq!(send.size.height, px(24.0));
-        assert!(input.bottom() <= send.top(), "the control row sits under the field");
+        assert!(
+            input.bottom() <= send.top(),
+            "the control row sits under the field"
+        );
         assert!(
             attach.left() < send.left(),
             "attach is in the left cluster, send at the right end"
@@ -8525,7 +8542,10 @@ mod tests {
         );
         focus_and_type(cx, "go");
         refresh_frame(cx);
-        assert!(cx.debug_bounds("send-ready").is_some(), "a draft arms the disc");
+        assert!(
+            cx.debug_bounds("send-ready").is_some(),
+            "a draft arms the disc"
+        );
     }
 
     /// `up`/`down` drive a picker while one is open and are the field's own
@@ -8540,8 +8560,11 @@ mod tests {
         cx.simulate_keystrokes("shift-enter");
         cx.simulate_input("two");
         cx.run_until_parked();
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "one
-two");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "one
+two"
+        );
         let end = chat.read_with(&cx.cx, |chat, _| chat.draft_caret);
         cx.simulate_keystrokes("up");
         cx.run_until_parked();
@@ -8939,9 +8962,7 @@ two");
     /// name and clipping the effort chip — never by painting the send disc
     /// over a neighbour or pushing attach/overflow out of the card.
     #[gpui::test]
-    async fn narrow_control_row_keeps_every_essential_control_reachable(
-        cx: &mut TestAppContext,
-    ) {
+    async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
         chat.update(cx, |chat, _| configure_test_chat(chat));
@@ -9922,7 +9943,8 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty() && chat.attachments.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "the disabled editor must refuse typed characters entirely"
         );
         assert_eq!(
@@ -9988,7 +10010,8 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty() && chat.attachments.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "the disabled editor must refuse typed characters entirely while offline"
         );
         assert_eq!(
@@ -10739,7 +10762,8 @@ let answer = 42;
         refresh_frame(cx);
         assert!(cx.debug_bounds("stop-glyph").is_none());
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()) != "Type to queue for the next turn…",
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder())
+                != "Type to queue for the next turn…",
             "the idle composer is not queueing"
         );
         assert!(
@@ -11975,7 +11999,8 @@ let answer = 42;
         assert!(cx.debug_bounds("model-option-haiku").is_some());
         assert!(cx.debug_bounds("model-picker-no-match").is_none());
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty() && chat.attachments.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "backspace inside the search field must not have eaten composer text"
         );
     }
@@ -12013,7 +12038,10 @@ let answer = 42;
         cx.simulate_keystrokes("escape");
         refresh_frame(cx);
         assert!(cx.debug_bounds("model-picker").is_none());
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft stays");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "draft stays"
+        );
     }
 
     /// #233: the effort row is a plain flex row inside a fixed 245px popup,
@@ -12852,7 +12880,10 @@ let answer = 42;
         cx.simulate_keystrokes("backspace");
         cx.run_until_parked();
         assert!(cx.debug_bounds("slash-popup").is_some());
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active().unwrap_or(0)), 0);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active().unwrap_or(0)),
+            0
+        );
         cx.simulate_keystrokes("down");
         cx.run_until_parked();
         assert_eq!(
@@ -12917,13 +12948,22 @@ let answer = 42;
             popup.left() >= input.left() - px(8.0),
             "and starts at the token's column"
         );
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()), Some(0));
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
+            Some(0)
+        );
         cx.simulate_keystrokes("down");
         cx.run_until_parked();
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()), Some(1));
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
+            Some(1)
+        );
         cx.simulate_keystrokes("up");
         cx.run_until_parked();
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()), Some(0));
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
+            Some(0)
+        );
     }
 
     /// The command popup is a card of its own, floated above the composer.
@@ -13110,8 +13150,12 @@ let answer = 42;
             "a supported image appears as an attachment chip"
         );
         assert!(cx.debug_bounds("attach-error").is_none());
-        let (count, mime) = chat
-            .read_with(&cx.cx, |chat, _| (chat.attachments.len(), chat.attachments[0].mime_type.clone()));
+        let (count, mime) = chat.read_with(&cx.cx, |chat, _| {
+            (
+                chat.attachments.len(),
+                chat.attachments[0].mime_type.clone(),
+            )
+        });
         assert_eq!(count, 1);
         assert_eq!(mime, "image/png");
 
@@ -13156,9 +13200,7 @@ let answer = 42;
             cx.debug_bounds("attachment-chip-0").is_none(),
             "removing the chip makes it disappear"
         );
-        assert!(chat.read_with(&cx.cx, |chat, _| {
-            chat.attachments.is_empty()
-        }));
+        assert!(chat.read_with(&cx.cx, |chat, _| { chat.attachments.is_empty() }));
 
         // F-CHAT-12: the × must also re-request composer focus. Type
         // immediately after the click, with no intervening click back into
@@ -13425,10 +13467,7 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
         focus_and_type(cx, "draft");
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
-            "draft"
-        );
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft");
 
         let overflow = cx
             .debug_bounds("composer-overflow")
@@ -13445,7 +13484,8 @@ let answer = 42;
             "New Conversation clears the transcript"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty() && chat.attachments.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "New Conversation clears the composer"
         );
         assert!(
