@@ -5790,9 +5790,12 @@ impl Chat {
                 // control row and stranded its own chevron ~200px from the
                 // model name, next to the overflow button -- so the chevron
                 // read as belonging to nothing and the model value read as a
-                // caption rather than a picker. `min_w_0` still lets it
-                // shrink, which is what keeps the name's ellipsis working.
-                .min_w_0()
+                // caption rather than a picker. It still shrinks on a tight
+                // row -- that is what keeps the name's ellipsis working --
+                // but a 56px floor stops it collapsing to nothing: the row
+                // degrades by clipping the chip behind the cluster's
+                // `overflow_hidden`, never by erasing the picker.
+                .min_w(px(56.0))
                 .hover(|style| style.bg(theme.overlay))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
@@ -8959,7 +8962,6 @@ two"
         );
     }
 
-    #[gpui::test]
     /// At Sirio's real pane width the row degrades by shrinking the model
     /// name and clipping the effort chip — never by painting the send disc
     /// over a neighbour or pushing attach/overflow out of the card.
@@ -8999,6 +9001,36 @@ two"
         assert!(
             send.left() >= context.left(),
             "the right cluster is laid out as one run"
+        );
+        // flex children default to `flex_shrink: 1`, so without `flex_none`
+        // the fixed-size controls collapse to zero before the cluster's
+        // `overflow_hidden` ever gets to clip. Attach must keep its exact
+        // 24px and the effort chip must keep a usable width.
+        assert_eq!(
+            attach.size.width,
+            px(24.0),
+            "attach never shrinks — the cluster clips instead: {attach:?}"
+        );
+        assert!(
+            effort.size.width >= px(60.0),
+            "the effort chip keeps its size and is clipped last: {effort:?}"
+        );
+
+        // Tighter still. Attach holds its 24px and the send disc stays
+        // inside the card.
+        cx.simulate_resize(size(px(360.0), px(600.0)));
+        refresh_frame(cx);
+        let card = cx.debug_bounds("composer").expect("card at 360");
+        let send = cx.debug_bounds("send").expect("send at 360");
+        let attach = cx.debug_bounds("attach-image").expect("attach at 360");
+        assert_eq!(
+            attach.size.width,
+            px(24.0),
+            "attach never shrinks, even at 360px: {attach:?}"
+        );
+        assert!(
+            send.right() <= card.right(),
+            "the send disc stays inside the card at 360px: send={send:?} card={card:?}"
         );
     }
 
