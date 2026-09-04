@@ -5664,6 +5664,7 @@ impl Chat {
     ) -> AnyElement {
         let typography = theme.typography;
         let focused = self.composer_field.read(cx).focus_handle(cx).is_focused(window);
+        let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let placeholder = self.composer_placeholder();
         if placeholder != self.composer_placeholder_shown {
             self.composer_placeholder_shown = placeholder.clone();
@@ -6825,11 +6826,15 @@ impl Chat {
             .flex()
             .items_center()
             .justify_center()
-            .hover(|style| style.bg(theme.overlay))
+            .hover(|style| style.bg(bezel_theme.element_hover))
             .on_click(move |_, window, cx| {
                 attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
             })
-            .child(IconElement::new(Icon::Plus, IconSize::XSmall).text_color(theme.text));
+            .child(
+                bezel::ui::icons::icon(bezel::ui::icons::PAPERCLIP)
+                    .size(px(14.0))
+                    .text_color(bezel_theme.text_faint),
+            );
 
         let overflow_button = div()
             .id("composer-overflow")
@@ -6858,31 +6863,101 @@ impl Chat {
             .map(|usage| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
             .unwrap_or(0);
 
+        // Three looks, one `AnyElement`: the ready arm is `Stateful` (it
+        // carries an id), the other two are plain `Div`s.
+        let ready = can_send;
+        let send_disc = {
+            let disc = div()
+                .size(px(24.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center();
+            let disc: AnyElement = if self.streaming {
+                // D-CHAT-02: while a turn runs the same control becomes
+                // stop -- its click dispatches the same path Escape uses.
+                disc.bg(bezel_theme.solid)
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .id("stop-glyph")
+                            .debug_selector(|| "stop-glyph".into())
+                            .child(
+                                bezel::ui::icons::icon(bezel::ui::icons::STOP)
+                                    .size(px(12.0))
+                                    .text_color(bezel_theme.on_solid),
+                            ),
+                    )
+                    .into_any_element()
+            } else if ready {
+                disc.id("send-ready")
+                    .debug_selector(|| "send-ready".into())
+                    .bg(bezel_theme.solid)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.9))
+                    .child(
+                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_UP)
+                            .size(px(14.0))
+                            .text_color(bezel_theme.on_solid),
+                    )
+                    .into_any_element()
+            } else {
+                // Present but not pressable: the shape keeps its place, the
+                // glyph goes faint, no hover and no pointer (gallery
+                // `send_button`).
+                disc.bg(bezel::theme::ink(0.06))
+                    .child(
+                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_UP)
+                            .size(px(14.0))
+                            .text_color(bezel_theme.text_faint),
+                    )
+                    .into_any_element()
+            };
+            div()
+                .id("send")
+                .debug_selector(|| "send".into())
+                .flex_none()
+                .cursor_pointer()
+                .when(self.streaming, |this| {
+                    this.on_click(move |_, _, cx| {
+                        stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
+                    })
+                })
+                .when(!self.streaming && ready, |this| {
+                    this.on_click(move |_, _, cx| {
+                        send_entity.update(cx, |chat, cx| chat.send(cx));
+                    })
+                })
+                .child(disc)
+        };
 
-        // The composer is the visual anchor: a raised card with a roomy
-        // input and one row of labelled chips — status, model, context —
-        // ending in the circular send control. The card is waku's: max
-        // 720px, 13px radius, `composer` fill, a hairline border that turns
-        // coral while focused.
+
+        // The composer is the gallery's `Composer` card: one frosted surface
+        // at `surface_radius` carrying the field on top and a row of
+        // controls under it.
         let composer_card = div()
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
-            // #242: the border is always present and the same color whether
-            // a turn is streaming or not, so the card's box never moves.
-            // The rotating ring that used to mark a streaming turn is
-            // retired (Task 7) — the shared Activity clock lives in the
-            // reasoning header now (Task 6).
+            // `Card variant="input"`. #242's rule survives the restyle: the
+            // border is always present and only its color reacts to focus,
+            // so the card's box never moves while streaming.
+            .rounded(px(bezel::theme::Theme::surface_radius()))
             .border_1()
-            .border_color(if focused { theme.text } else { theme.border })
-            .rounded(theme.radii.composer)
-            .bg(theme.surface_raised)
-            .p(px(10.0))
+            .border_color(if focused {
+                bezel_theme.text
+            } else {
+                bezel_theme.border
+            })
+            .bg(bezel_theme.card_glass_bg())
+            .px(px(4.0))
+            .pt(px(4.0))
+            .pb(px(6.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(4.0))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -7002,106 +7077,69 @@ impl Chat {
                 )
             })
             .child(
+                // Two clusters on one row, spread to the edges: what you
+                // configure on the left, status and send on the right.
                 div()
                     .flex()
+                    .flex_row()
                     .items_center()
-                    .gap(px(6.0))
-                    .child(attach_button)
-                    .child(status_pill)
-                    .child(model_control)
-                    .children(effort_control)
-                    // Splits the row into the two groups it always meant to
-                    // be: what you configure on the left, status and send on
-                    // the right. Without it every control drifts leftward and
-                    // the spacing carries no meaning.
-                    .child(div().flex_1())
-                    .child(overflow_button)
+                    .justify_between()
+                    .px(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .min_w_0()
+                            .child(status_pill)
+                            .child(model_control)
+                            .children(effort_control)
+                            .child(attach_button),
+                    )
                     .child(
                         div()
                             .flex()
                             .flex_none()
                             .items_center()
                             .gap(px(6.0))
-                            .h(px(24.0))
-                            .px(px(7.0))
-                            .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
-                            .text_size(typography.ui_size)
-                            .child(context_ring)
-                            // Named, like every other value in this row. A
-                            // blind review of the composer could read the
-                            // ring and the number but not what they measured
-                            // -- "context used? budget? direction
-                            // unreadable" -- and the answer only appeared
-                            // after clicking through to the popover, which
-                            // spells out "N% of context used". The field name
-                            // belongs where the value is.
                             .child(
                                 div()
-                                    .id("context-label")
-                                    .debug_selector(|| "context-label".into())
-                                    .text_color(theme.text_faint)
-                                    .child("Context"),
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .h(px(24.0))
+                                    .px(px(7.0))
+                                    .rounded(theme.radii.control)
+                                    .bg(theme.surface_raised)
+                                    .text_size(typography.ui_size)
+                                    .child(context_ring)
+                                    // Named, like every other value in this
+                                    // row. A blind review of the composer
+                                    // could read the ring and the number but
+                                    // not what they measured -- "context
+                                    // used? budget? direction unreadable" --
+                                    // and the answer only appeared after
+                                    // clicking through to the popover, which
+                                    // spells out "N% of context used". The
+                                    // field name belongs where the value is.
+                                    .child(
+                                        div()
+                                            .id("context-label")
+                                            .debug_selector(|| "context-label".into())
+                                            .text_color(theme.text_faint)
+                                            .child("Context"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("context-percent")
+                                            .debug_selector(|| "context-percent".into())
+                                            .text_color(theme.text)
+                                            .child(format!("{context_percent}%")),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .id("context-percent")
-                                    .debug_selector(|| "context-percent".into())
-                                    .text_color(theme.text)
-                                    .child(format!("{context_percent}%")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("send")
-                            .debug_selector(|| "send".into())
-                            .w(px(26.0))
-                            .h(px(26.0))
-                            .flex_none()
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(typography.scaled(15.0))
-                            .bg(if self.streaming || can_send {
-                                theme.overlay_strong
-                            } else {
-                                theme.overlay
-                            })
-                            .text_color(if self.streaming || can_send {
-                                theme.text
-                            } else {
-                                theme.text_dim
-                            })
-                            .hover(|style| style.bg(theme.surface_raised))
-                            .when(self.streaming, |this| {
-                                // D-CHAT-02: while a turn runs the same
-                                // control becomes stop — a filled square in
-                                // theme tokens — and its click dispatches the
-                                // same path Escape uses. The selector stays
-                                // `"send"`; tests target the control, not
-                                // the glyph.
-                                this.on_click(move |_, _, cx| {
-                                    stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
-                                })
-                                .child(
-                                    div()
-                                        .id("stop-glyph")
-                                        .debug_selector(|| "stop-glyph".into())
-                                        .w(px(9.0))
-                                        .h(px(9.0))
-                                        .rounded(px(2.0))
-                                        .bg(theme.text),
-                                )
-                            })
-                            .when(!self.streaming, |this| {
-                                this.when(can_send, |this| {
-                                    this.on_click(move |_, _, cx| {
-                                        send_entity.update(cx, |chat, cx| chat.send(cx));
-                                    })
-                                })
-                                .child("↑")
-                            }),
+                            .child(overflow_button)
+                            .child(send_disc),
                     ),
             )
             .children(slash_popup)
@@ -8539,6 +8577,36 @@ mod tests {
             Chat::from_test_command(command, std::env::temp_dir(), cx)
         });
         (chat, cx)
+    }
+
+    /// The card is the gallery's `Composer` card: a glass surface at
+    /// `surface_radius`, the field on top, one row of controls under it, and
+    /// a 24px send disc at the row's end — inert until there is something to
+    /// send.
+    #[gpui::test]
+    async fn composer_card_carries_the_control_row_and_a_send_disc(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        let card = cx.debug_bounds("composer").expect("card");
+        let input = cx.debug_bounds("composer-input").expect("field");
+        let send = cx.debug_bounds("send").expect("send disc");
+        let attach = cx.debug_bounds("attach-image").expect("attach");
+        assert_eq!(send.size.width, px(24.0));
+        assert_eq!(send.size.height, px(24.0));
+        assert!(input.bottom() <= send.top(), "the control row sits under the field");
+        assert!(
+            attach.left() < send.left(),
+            "attach is in the left cluster, send at the right end"
+        );
+        assert!(send.right() <= card.right() && card.left() <= attach.left());
+        assert!(
+            cx.debug_bounds("send-ready").is_none(),
+            "an empty draft leaves the disc inert"
+        );
+        focus_and_type(cx, "go");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("send-ready").is_some(), "a draft arms the disc");
     }
 
     /// `up`/`down` drive a picker while one is open and are the field's own
