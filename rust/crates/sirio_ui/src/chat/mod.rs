@@ -41,6 +41,7 @@ use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
+mod tool_calls;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
