@@ -34,7 +34,7 @@ impl InstallStore {
     }
 
     /// `$XDG_DATA_HOME/sirio/agents`, falling back to
-    /// `$HOME/.local/share`.
+    /// `$HOME/.local/share` on POSIX and to `%LOCALAPPDATA%` on Windows.
     ///
     /// This deliberately duplicates the shape of
     /// `sirio_control::protocol::default_socket_path` (`protocol.rs:98-139`)
@@ -45,9 +45,24 @@ impl InstallStore {
     /// copy is named so a future change to XDG handling can find both.
     pub fn default_root(environment: &BTreeMap<String, String>) -> PathBuf {
         let data_home = absolute(environment, "XDG_DATA_HOME").unwrap_or_else(|| {
-            absolute(environment, "HOME")
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".local/share")
+            #[cfg(windows)]
+            {
+                // Windows has no HOME/XDG layout: LOCALAPPDATA is the
+                // non-roaming data root, the same choice `sirio`'s own
+                // `xdg_data_home_for` and `app_support_root_for` make.
+                // HOME is never consulted — a native launch has none, and
+                // the `/c/Users/...` spelling Git Bash exports is not
+                // absolute to `std::path` here, so reading it sent every
+                // install to `/tmp`, i.e. `D:\tmp\.local\share\...`.
+                absolute(environment, "LOCALAPPDATA")
+                    .unwrap_or_else(|| std::env::temp_dir().join(".local/share"))
+            }
+            #[cfg(not(windows))]
+            {
+                absolute(environment, "HOME")
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+                    .join(".local/share")
+            }
         });
         data_home.join("sirio").join("agents")
     }
@@ -192,6 +207,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn the_default_root_falls_back_to_home_local_share() {
         let home = std::env::temp_dir();
@@ -202,20 +218,87 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn the_default_root_falls_back_to_localappdata_on_windows() {
+        // Windows has no XDG layout: LOCALAPPDATA is the non-roaming data
+        // root, the same choice `sirio`'s own resolvers make.
+        let local = std::env::temp_dir().join("local-appdata");
+        let env = BTreeMap::from([(
+            "LOCALAPPDATA".to_string(),
+            local.to_string_lossy().into_owned(),
+        )]);
+        assert_eq!(
+            InstallStore::default_root(&env),
+            local.join("sirio").join("agents")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn home_never_steers_the_default_root_on_windows() {
+        // Git Bash exports HOME as `/c/Users/...`, which `std::path` does
+        // not consider absolute on Windows; a native launch has no HOME at
+        // all. Consulting it sent every install to `/tmp` — a
+        // `D:\tmp\.local\share\...` tree beside the checkout — so HOME is
+        // ignored: LOCALAPPDATA wins when set, and the fallback is the temp
+        // directory, never a POSIX root.
+        let local = std::env::temp_dir().join("local-appdata");
+        let with_local = BTreeMap::from([
+            ("HOME".to_string(), "/c/Users/someone".to_string()),
+            (
+                "LOCALAPPDATA".to_string(),
+                local.to_string_lossy().into_owned(),
+            ),
+        ]);
+        assert_eq!(
+            InstallStore::default_root(&with_local),
+            local.join("sirio").join("agents")
+        );
+
+        let home_only = BTreeMap::from([(
+            "HOME".to_string(),
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        )]);
+        let root = InstallStore::default_root(&home_only);
+        assert!(
+            root.starts_with(std::env::temp_dir()),
+            "the fallback is the temp directory, got {}",
+            root.display()
+        );
+        assert!(
+            !root.to_string_lossy().starts_with("/tmp"),
+            "a POSIX /tmp root is never right on Windows, got {}",
+            root.display()
+        );
+    }
+
     #[test]
     fn a_relative_xdg_data_home_is_ignored() {
         // The XDG spec says a relative value is invalid and must be treated
         // as unset — the same filter `sirio_control` applies.
         // "relative/path" is relative on every host, so this holds
-        // everywhere unchanged.
-        let home = std::env::temp_dir();
-        let env = BTreeMap::from([
-            ("XDG_DATA_HOME".to_string(), "relative/path".to_string()),
-            ("HOME".to_string(), home.to_string_lossy().into_owned()),
+        // everywhere unchanged: the answer is whatever the platform
+        // fallback gives with no XDG_DATA_HOME at all.
+        let fallback_env = BTreeMap::from([
+            (
+                "HOME".to_string(),
+                std::env::temp_dir().to_string_lossy().into_owned(),
+            ),
+            (
+                "LOCALAPPDATA".to_string(),
+                std::env::temp_dir().to_string_lossy().into_owned(),
+            ),
         ]);
+        let mut env = fallback_env.clone();
+        env.insert("XDG_DATA_HOME".to_string(), "relative/path".to_string());
         assert_eq!(
             InstallStore::default_root(&env),
-            home.join(".local/share").join("sirio").join("agents")
+            InstallStore::default_root(&fallback_env)
+        );
+        assert!(
+            InstallStore::default_root(&env).starts_with(std::env::temp_dir()),
+            "the relative value must not leak into the root"
         );
     }
 
