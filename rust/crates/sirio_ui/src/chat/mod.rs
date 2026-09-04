@@ -1494,16 +1494,14 @@ impl Chat {
     }
 
     fn default_placeholder(&self) -> String {
-        let head = self
-            .agent_name
-            .as_deref()
-            .map_or_else(|| "Message…".to_string(), |name| format!("Message {name}"));
-        let commands = if self.available_commands.is_empty() {
-            ""
+        // The gallery's sentence with Sirio's tokens. The agent's name is
+        // not spelled out here — the pill and the model chip in the toolbar
+        // above the card already name it.
+        if self.available_commands.is_empty() {
+            "Ask anything, or @ to attach a file".into()
         } else {
-            ", / for commands"
-        };
-        format!("{head} — @ for files{commands}")
+            "Ask anything, / for commands, or @ to attach a file".into()
+        }
     }
 
     /// Launches an ACP chat whose completed turns are restored and saved in
@@ -6861,9 +6859,123 @@ impl Chat {
                 .child(disc)
         };
 
+        // The gallery's hint row lives under the field: a mono hint naming
+        // the state on the left, the send/stop disc on the right. A
+        // zero-size child carries the state as a selector so tests can read
+        // it without pixels.
+        let (hint_text, hint_state) = if slash_popup.is_some() {
+            ("↑↓ pick · enter insert · esc close", "pick")
+        } else if mention_popup.is_some() {
+            ("↑↓ pick · enter attach · esc close", "pick")
+        } else if self.streaming {
+            ("enter queue · shift-enter newline", "queue")
+        } else {
+            ("enter send · shift-enter newline", "send")
+        };
+        let composer_hint = div()
+            .id("composer-hint")
+            .debug_selector(|| "composer-hint".into())
+            .min_w_0()
+            .font_family(bezel_theme.font_mono.clone())
+            .text_size(typography.footnote)
+            .text_color(bezel_theme.text_faint)
+            .child(hint_text)
+            .child(
+                div()
+                    .size_0()
+                    .debug_selector(move || format!("composer-hint-{hint_state}")),
+            );
+
+        // The toolbar sits above the card, outside it: Sirio's controls —
+        // pill · model · effort · context on the left, attach · overflow on
+        // the right — while the card below is the gallery's. When the line
+        // is tight the right cluster wraps as one unit; nothing is ever
+        // clipped in half. Not drawn when no agent is configured: the card
+        // stands alone as in the gallery.
+        let composer_toolbar = div()
+            .id("composer-toolbar")
+            .debug_selector(|| "composer-toolbar".into())
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .px(px(4.0))
+            .pb(px(6.0))
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_auto()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().relative().child(status_pill).children(mode_picker))
+                    // The one shrinkable child: on a tight line the chip
+                    // ellipsizes its name down to its 56px floor, never to
+                    // nothing.
+                    .child(div().relative().child(model_control).children(model_picker))
+                    .children(effort_control)
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.0))
+                            .h(px(24.0))
+                            .px(px(7.0))
+                            .rounded(theme.radii.control)
+                            .bg(theme.surface_raised)
+                            .text_size(typography.ui_size)
+                            .child(context_ring)
+                            // Named, like every other value in this
+                            // row. A blind review of the composer
+                            // could read the ring and the number but
+                            // not what they measured -- "context
+                            // used? budget? direction unreadable" --
+                            // and the answer only appeared after
+                            // clicking through to the popover, which
+                            // spells out "N% of context used". The
+                            // field name belongs where the value is.
+                            .child(
+                                div()
+                                    .id("context-label")
+                                    .debug_selector(|| "context-label".into())
+                                    .text_color(theme.text_faint)
+                                    .child("Context"),
+                            )
+                            .child(
+                                div()
+                                    .id("context-percent")
+                                    .debug_selector(|| "context-percent".into())
+                                    .text_color(theme.text)
+                                    .child(format!("{context_percent}%")),
+                            )
+                            .children(context_popover),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .ml_auto()
+                    .child(attach_button)
+                    .child(
+                        div()
+                            .relative()
+                            .child(overflow_button)
+                            .children(overflow_menu)
+                            .children(chat_history_menu),
+                    ),
+            );
+
         // The composer is the gallery's `Composer` card: one frosted surface
-        // at `surface_radius` carrying the field on top and a row of
-        // controls under it.
+        // at `surface_radius` carrying the field on top and the hint row
+        // with the send disc under it — nothing else lives in the card.
         let composer_card = div()
             .id("composer")
             .debug_selector(|| "composer".into())
@@ -7009,95 +7121,31 @@ impl Chat {
                 )
             })
             .child(
-                // One wrapping row: pill · attach · model · effort, then
-                // context · overflow · send pushed to the right end of
-                // whichever line fits by `ml_auto`. No cluster wrappers and
-                // no `overflow_hidden` — nothing is ever clipped in half;
-                // when a line runs out, the next control wraps.
+                // The hint row: the state's hint on the left, the send/stop
+                // disc on the right — the gallery's own pair.
                 div()
                     .flex()
                     .flex_row()
-                    .flex_wrap()
                     .items_center()
-                    .gap(px(6.0))
-                    .gap_y(px(4.0))
+                    .justify_between()
                     .px(px(6.0))
-                    .child(
-                        div()
-                            .relative()
-                            .flex_none()
-                            .child(status_pill)
-                            .children(mode_picker),
-                    )
-                    .child(attach_button)
-                    // The one shrinkable child: on a tight line the chip
-                    // ellipsizes its name down to its 56px floor, never to
-                    // nothing.
-                    .child(div().relative().child(model_control).children(model_picker))
-                    .children(effort_control)
-                    // The right-hand trio wraps as one unit: context,
-                    // overflow and send never split across lines — when the
-                    // row is tight the whole group drops to its own line,
-                    // pushed to its right edge by `ml_auto`.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.0))
-                            .ml_auto()
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .h(px(24.0))
-                                    .px(px(7.0))
-                                    .rounded(theme.radii.control)
-                                    .bg(theme.surface_raised)
-                                    .text_size(typography.ui_size)
-                                    .child(context_ring)
-                                    // Named, like every other value in this
-                                    // row. A blind review of the composer
-                                    // could read the ring and the number but
-                                    // not what they measured -- "context
-                                    // used? budget? direction unreadable" --
-                                    // and the answer only appeared after
-                                    // clicking through to the popover, which
-                                    // spells out "N% of context used". The
-                                    // field name belongs where the value is.
-                                    .child(
-                                        div()
-                                            .id("context-label")
-                                            .debug_selector(|| "context-label".into())
-                                            .text_color(theme.text_faint)
-                                            .child("Context"),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("context-percent")
-                                            .debug_selector(|| "context-percent".into())
-                                            .text_color(theme.text)
-                                            .child(format!("{context_percent}%")),
-                                    )
-                                    .children(context_popover),
-                            )
-                            .child(
-                                div()
-                                    .relative()
-                                    .child(overflow_button)
-                                    .children(overflow_menu)
-                                    .children(chat_history_menu),
-                            )
-                            .child(send_disc),
-                    )
+                    .child(composer_hint)
+                    .child(send_disc),
             )
             .children(slash_popup)
             .children(mention_popup);
 
-        composer_card.into_any_element()
+        // Toolbar above, card below, in one column. The toolbar only exists
+        // when an agent is configured — with none, the card stands alone.
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .when(self.agent_command.is_some(), |column| {
+                column.child(composer_toolbar)
+            })
+            .child(composer_card)
+            .into_any_element()
     }
 }
 
@@ -8526,36 +8574,73 @@ mod tests {
         (chat, cx)
     }
 
-    /// The card is the gallery's `Composer` card: a glass surface at
-    /// `surface_radius`, the field on top, one row of controls under it, and
-    /// a 24px send disc at the row's end — inert until there is something to
-    /// send.
+    /// The card is the gallery's `Composer` card — field on top, the hint
+    /// row with the send disc under it — and Sirio's controls sit in a
+    /// toolbar above the card, outside it.
     #[gpui::test]
-    async fn composer_card_carries_the_control_row_and_a_send_disc(cx: &mut TestAppContext) {
+    async fn composer_card_is_the_gallery_card_and_the_controls_sit_above_it(
+        cx: &mut TestAppContext,
+    ) {
         let (chat, cx) = chat_view(cx, &["plain"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        chat.update(cx, |chat, _| {
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some("xhigh".into()),
+                choices: vec![EffortChoice {
+                    value: "xhigh".into(),
+                    name: "Xhigh".into(),
+                }],
+            });
+        });
         refresh_frame(cx);
+
         let card = cx.debug_bounds("composer").expect("card");
-        let input = cx.debug_bounds("composer-input").expect("field");
+        let hint = cx.debug_bounds("composer-hint").expect("hint");
         let send = cx.debug_bounds("send").expect("send disc");
-        let attach = cx.debug_bounds("attach-image").expect("attach");
-        assert_eq!(send.size.width, px(24.0));
-        assert_eq!(send.size.height, px(24.0));
+        // The hint row is the card's only row under the field, and the disc
+        // rides its right end.
         assert!(
-            input.bottom() <= send.top(),
-            "the control row sits under the field"
+            hint.top() < send.bottom() && send.top() < hint.bottom(),
+            "the hint and the send disc share one row: {hint:?} {send:?}"
         );
         assert!(
-            attach.left() < send.left(),
-            "attach is in the left cluster, send at the right end"
+            hint.right() <= send.left(),
+            "the hint sits left of the disc: {hint:?} {send:?}"
         );
-        assert!(send.right() <= card.right() && card.left() <= attach.left());
-        if let Some(chip) = cx.debug_bounds("model-chip") {
+        assert!(
+            hint.left() >= card.left() && send.right() <= card.right(),
+            "the hint row lives inside the card"
+        );
+        // The toolbar sits above the card, outside it, and carries every
+        // control the card no longer does.
+        let toolbar = cx
+            .debug_bounds("composer-toolbar")
+            .expect("the toolbar above the card is drawn");
+        assert!(
+            toolbar.bottom() <= card.top(),
+            "the toolbar is above the card, outside it: toolbar={toolbar:?} card={card:?}"
+        );
+        for (name, bounds) in [
+            ("model-chip", cx.debug_bounds("model-chip")),
+            ("effort-chip", cx.debug_bounds("effort-chip")),
+            ("context-ring", cx.debug_bounds("context-ring")),
+            ("attach-image", cx.debug_bounds("attach-image")),
+            ("composer-overflow", cx.debug_bounds("composer-overflow")),
+        ] {
+            let bounds = bounds.unwrap_or_else(|| panic!("{name} is drawn in the toolbar"));
             assert!(
-                attach.right() <= chip.left(),
-                "the row order is pill · attach · model, attach before the shrinkable chips"
+                bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right(),
+                "{name} lives inside the toolbar: {bounds:?} toolbar={toolbar:?}"
+            );
+            assert!(
+                bounds.bottom() <= card.top(),
+                "{name} stays above the card, outside it: {bounds:?} card={card:?}"
             );
         }
+        // The disc is still inert until there is something to send.
         assert!(
             cx.debug_bounds("send-ready").is_none(),
             "an empty draft leaves the disc inert"
@@ -8566,6 +8651,58 @@ mod tests {
             cx.debug_bounds("send-ready").is_some(),
             "a draft arms the disc"
         );
+    }
+
+    /// The hint row names the state it is in: the send hint by default, the
+    /// picker hint while a `/` popup is open, the queue hint while a turn
+    /// streams. A zero-size child carries the state as a selector, so the
+    /// test reads it without pixels.
+    #[gpui::test]
+    async fn the_hint_row_names_the_open_picker(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-hint-send").is_some(),
+            "the default hint names the send"
+        );
+        assert!(cx.debug_bounds("composer-hint-pick").is_none());
+
+        // Typing a slash command token opens the picker and the hint follows.
+        chat.update(cx, |chat, cx| chat.set_composer_text("/", cx));
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-hint-pick").is_some(),
+            "an open picker renames the hint"
+        );
+        assert!(cx.debug_bounds("composer-hint-send").is_none());
+
+        // Escape closes the popup; the send hint comes back. The key needs
+        // the field's focus, so click into the composer first.
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("esc");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-hint-send").is_some(),
+            "closing the picker restores the send hint"
+        );
+        assert!(cx.debug_bounds("composer-hint-pick").is_none());
+
+        // While a turn streams the hint names the queue instead.
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-hint-queue").is_some(),
+            "a streaming turn renames the hint"
+        );
+        assert!(cx.debug_bounds("composer-hint-send").is_none());
     }
 
     /// `up`/`down` drive a picker while one is open and are the field's own
@@ -8977,9 +9114,10 @@ two"
         );
     }
 
-    /// At Sirio's real pane width the row degrades by shrinking the model
-    /// name and clipping the effort chip — never by painting the send disc
-    /// over a neighbour or pushing attach/overflow out of the card.
+    /// At Sirio's real pane width the toolbar degrades by wrapping — the
+    /// model name shrinks first, the right cluster wraps as one unit — and
+    /// every essential control stays drawn and reachable, while the card's
+    /// hint row below never wraps.
     #[gpui::test]
     async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
@@ -9000,17 +9138,21 @@ two"
         refresh_frame(cx);
 
         let card = cx.debug_bounds("composer").expect("card");
+        let hint = cx.debug_bounds("composer-hint").expect("hint");
         let send = cx.debug_bounds("send").expect("send");
         let attach = cx.debug_bounds("attach-image").expect("attach");
         let overflow = cx.debug_bounds("composer-overflow").expect("overflow");
         let context = cx.debug_bounds("context-ring").expect("context ring");
         let effort = cx.debug_bounds("effort-chip").expect("effort chip");
         let chip = cx.debug_bounds("model-chip").expect("model chip");
-        // Every control keeps its full size at this width.
+        let toolbar = cx
+            .debug_bounds("composer-toolbar")
+            .expect("the toolbar is drawn");
+        // Every toolbar control keeps its full size at this width.
         assert_eq!(
             attach.size.width,
             px(24.0),
-            "attach keeps its exact size — the row wraps instead: {attach:?}"
+            "attach keeps its exact size — the toolbar wraps instead: {attach:?}"
         );
         assert_eq!(
             send.size.width,
@@ -9025,67 +9167,54 @@ two"
             chip.size.width >= px(56.0),
             "the model chip keeps at least its floor: {chip:?}"
         );
-        // Every control is fully inside the card — nothing clipped in half
-        // by a hidden-overflow cluster any more.
+        // Every toolbar control is fully inside the toolbar and inside the
+        // window — nothing clipped in half, nothing off screen.
         for (name, bounds) in [
-            ("attach", attach),
             ("model chip", chip),
             ("effort chip", effort),
             ("context", context),
-            ("overflow", overflow),
-            ("send", send),
-        ] {
-            assert!(
-                bounds.left() >= card.left() && bounds.right() <= card.right(),
-                "{name} is fully inside the card: {name}={bounds:?} card={card:?}"
-            );
-        }
-        // The send disc is the rightmost edge of all controls…
-        for (name, bounds) in [
             ("attach", attach),
-            ("model chip", chip),
-            ("effort chip", effort),
-            ("context", context),
             ("overflow", overflow),
         ] {
             assert!(
-                bounds.right() <= send.right(),
-                "send is the rightmost edge, {name} ends left of it: {bounds:?} send={send:?}"
+                bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right(),
+                "{name} is fully inside the toolbar: {name}={bounds:?} toolbar={toolbar:?}"
+            );
+            assert!(
+                bounds.left() >= px(0.0) && bounds.right() <= px(420.0),
+                "{name} is fully inside the window: {bounds:?}"
             );
         }
-        // …wrapped onto its own line below attach, as one unit: context,
-        // overflow and send share a line and never split across lines.
+        // The toolbar's own order survives the wrap: attach before overflow,
+        // model before effort.
         assert!(
-            send.top() > attach.top(),
-            "the send disc wraps under the left at 420px: send={send:?} attach={attach:?}"
+            attach.right() <= overflow.left(),
+            "attach precedes overflow: {attach:?} {overflow:?}"
         );
-        assert_eq!(
-            send.top(),
-            overflow.top(),
-            "overflow rides the same line as send: {overflow:?} {send:?}"
-        );
-        // The context ring is a 16px icon centred in the 24px cluster, so
-        // "same line" is vertical containment, not equal tops.
         assert!(
-            send.top() <= context.top() && context.bottom() <= send.bottom(),
-            "context rides the same line as the trio: {context:?} send={send:?}"
+            chip.right() <= effort.left(),
+            "model precedes effort: {chip:?} {effort:?}"
+        );
+        // The card's hint row never wraps: hint and disc share one line,
+        // the disc inside the card.
+        assert!(
+            send.top() < hint.bottom(),
+            "the hint row stays one line at 420px: hint={hint:?} send={send:?}"
+        );
+        assert!(
+            send.right() <= card.right(),
+            "the send disc stays inside the card: send={send:?} card={card:?}"
         );
 
-        // Back to a wide pane, the row is one line again.
+        // Back to a wide pane, the toolbar is one line again.
         cx.simulate_resize(size(px(900.0), px(600.0)));
         refresh_frame(cx);
-        let send = cx.debug_bounds("send").expect("send at 900");
         let attach = cx.debug_bounds("attach-image").expect("attach at 900");
         let effort = cx.debug_bounds("effort-chip").expect("effort chip at 900");
         assert_eq!(
-            send.top(),
-            attach.top(),
-            "the row is one line again at 900px: send={send:?} attach={attach:?}"
-        );
-        assert_eq!(
             effort.top(),
             attach.top(),
-            "the effort chip rides the same line at 900px: effort={effort:?}"
+            "the toolbar is one line again at 900px: effort={effort:?} attach={attach:?}"
         );
     }
 
@@ -11178,9 +11307,11 @@ let answer = 42;
             chat
         });
 
+        // The placeholder is the gallery's sentence; the agent's name lives
+        // in the toolbar's pill and model chip, not here.
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.default_placeholder()),
-            "Message OpenCode — @ for files"
+            "Ask anything, or @ to attach a file"
         );
     }
 
@@ -11200,7 +11331,7 @@ let answer = 42;
 
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.default_placeholder()),
-            "Message OpenCode — @ for files, / for commands"
+            "Ask anything, / for commands, or @ to attach a file"
         );
     }
 
@@ -11211,8 +11342,8 @@ let answer = 42;
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
 
         let placeholder = chat.read_with(cx, |chat, _| chat.default_placeholder());
-        assert!(placeholder.starts_with("Message…"));
-        assert!(placeholder.contains("@ for files"));
+        assert!(placeholder.starts_with("Ask anything"));
+        assert!(placeholder.contains("@ to attach a file"));
     }
 
     #[test]
@@ -13126,11 +13257,8 @@ let answer = 42;
             "rust/target/debug/incremental/o1o2o3o4o5/quirky-uid-slug/a-place-for-building-things/very",
         );
         std::fs::create_dir_all(&deep).expect("create deep dir");
-        std::fs::write(
-            deep.join("long-incremental-artifact-name.bin"),
-            "artifact",
-        )
-        .expect("write long-path file");
+        std::fs::write(deep.join("long-incremental-artifact-name.bin"), "artifact")
+            .expect("write long-path file");
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
@@ -13278,10 +13406,15 @@ let answer = 42;
         assert_eq!(count, 1);
         assert_eq!(mime, "image/png");
 
-        // An unsupported file is rejected with a transient message.
+        // An unsupported file is rejected with a transient message. The
+        // chip added above grew the card, which moved the toolbar above it
+        // — re-read the attach control's bounds before clicking again.
         chat.update(cx, |chat, _| {
             chat.attach_test_paths = vec![txt.clone()];
         });
+        let attach = cx
+            .debug_bounds("attach-image")
+            .expect("the attach control is drawn");
         cx.simulate_click(attach.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -13295,10 +13428,14 @@ let answer = 42;
         );
         pump_chat_until(cx, &chat, |chat| chat.attach_error.is_none());
 
-        // A multiple selection is rejected too.
+        // A multiple selection is rejected too. Re-read the bounds: the
+        // toolbar moved when the card grew.
         chat.update(cx, |chat, _| {
             chat.attach_test_paths = vec![jpeg.clone(), png.clone()];
         });
+        let attach = cx
+            .debug_bounds("attach-image")
+            .expect("the attach control is drawn");
         cx.simulate_click(attach.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
