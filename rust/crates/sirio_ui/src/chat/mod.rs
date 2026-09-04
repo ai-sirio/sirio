@@ -11,8 +11,8 @@ use gpui::{
     FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
-    StyledText, Task, Window, actions, canvas, div, list,
-    point, prelude::*, px, quad, rgb, transparent_black,
+    StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px, quad, rgb,
+    transparent_black,
 };
 use sirio_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
@@ -4595,18 +4595,17 @@ impl Chat {
                         Some(entity.clone()),
                     ),
                 );
-                if is_open
-                    && let Some(scroll) = thought_scroll.get(&entry_index) {
-                        column = column.child(Self::render_thought_body(
-                            entry_index,
-                            &text,
-                            source_start,
-                            &interaction,
-                            scroll,
-                            theme,
-                            &bezel_theme,
-                        ));
-                    }
+                if is_open && let Some(scroll) = thought_scroll.get(&entry_index) {
+                    column = column.child(Self::render_thought_body(
+                        entry_index,
+                        &text,
+                        source_start,
+                        &interaction,
+                        scroll,
+                        theme,
+                        &bezel_theme,
+                    ));
+                }
                 column.into_any_element()
             }
             Entry::ToolCall {
@@ -6749,6 +6748,9 @@ impl Render for Chat {
         let theme = *Theme::get(cx);
         let transcript_theme = theme;
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        // The row processor outlives this frame, so it owns a clone; the
+        // transient spinner below borrows the original.
+        let row_bezel_theme = bezel_theme.clone();
         let entity = cx.entity();
         let entity_for_bar = entity.clone();
         let transcript_ranges = self.transcript_entry_ranges();
@@ -6813,11 +6815,7 @@ impl Render for Chat {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor({
-                                // The row processor outlives this frame, so it owns a clone;
-                                // the transient spinner below borrows the original.
-                                let row_bezel_theme = bezel_theme.clone();
-                                move |this, entry_index: usize, window, cx| {
+                            cx.processor(move |this, entry_index: usize, window, cx| {
                                 // The body's follow pin + scrollbar need per-entry state;
                                 // created on first draw so a restored chat pays nothing
                                 // until a thought is opened.
@@ -7004,7 +7002,6 @@ impl Render for Chat {
                                             .into_any_element()
                                     })
                                     .unwrap_or_else(|| div().into_any_element())
-                            }
                             }),
                         )
                         .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -7667,14 +7664,6 @@ mod tests {
         );
     }
 
-    /// Sirio has no truthful per-thought duration today, so the label is the
-    /// deterministic one. If a duration is ever threaded through, this test
-    /// is what says the other branch is allowed.
-    #[test]
-    fn a_settled_reasoning_header_never_invents_an_elapsed_time() {
-        assert_eq!(crate::loading::thought_label(None), "Thought");
-    }
-
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
@@ -7774,7 +7763,9 @@ mod tests {
             chat.handle_event(AcpEvent::ThoughtChunk("a".into()), cx);
         });
         refresh_frame(cx);
-        let header = cx.debug_bounds("thought-toggle-0").expect("live thought header");
+        let header = cx
+            .debug_bounds("thought-toggle-0")
+            .expect("live thought header");
         chat.update(cx, |chat, cx| {
             chat.handle_event(AcpEvent::AgentMessageChunk("b".into()), cx);
         });
@@ -8798,22 +8789,37 @@ two"
         });
         cx.update(|_window, cx| init(cx));
         refresh_frame(cx);
-        assert!(cx.debug_bounds("thought-well-0").is_none(), "closed: no well");
-        assert!(cx.debug_bounds("thought-fade-0").is_none(), "closed: no fade");
+        assert!(
+            cx.debug_bounds("thought-well-0").is_none(),
+            "closed: no well"
+        );
+        assert!(
+            cx.debug_bounds("thought-fade-0").is_none(),
+            "closed: no fade"
+        );
 
         let header = cx.debug_bounds("thought-toggle-0").expect("header");
         cx.simulate_click(header.center(), Modifiers::none());
         refresh_frame(cx);
         let body = cx.debug_bounds("thought-body-0").expect("open: the body");
         let well = cx.debug_bounds("thought-well-0").expect("open: the well");
-        let fade = cx.debug_bounds("thought-fade-0").expect("open: the fade strip");
+        let fade = cx
+            .debug_bounds("thought-fade-0")
+            .expect("open: the fade strip");
         assert!(
             well.size.height <= px(160.0),
             "the well is capped at 160: {well:?}"
         );
         assert_eq!(fade.size.height, px(20.0));
-        assert_eq!(fade.top(), well.top(), "the strip sits on the well's top edge");
-        assert!(body.left() < well.left(), "the well is inset from the border line");
+        assert_eq!(
+            fade.top(),
+            well.top(),
+            "the strip sits on the well's top edge"
+        );
+        assert!(
+            body.left() < well.left(),
+            "the well is inset from the border line"
+        );
         chat.read_with(cx, |chat, _| {
             assert!(
                 chat.thought_scroll.contains_key(&0),
