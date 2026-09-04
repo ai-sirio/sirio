@@ -127,15 +127,19 @@ above it carries everything else. Not drawn when no agent is configured —
 the card stands alone as in the gallery.
 
 ```
-toolbar (above the card, outside it): flex_row items_center flex_wrap
-    gap 6 px 4 pb 6, id + selector `composer-toolbar`, w_full,
-    max_w(TRANSCRIPT_WIDTH)
-  ├ left  (flex_auto min_w_0, gap 6): status/mode pill · Model chip
-  │       (the shrinkable child: min_w_0 + text_ellipsis, 56 px floor)
-  │       · Effort chip (flex_none) · context ring + label + percent
-  └ right (flex_none ml_auto, gap 4): attach button · overflow button
-    — when the line is tight the right cluster wraps as one unit; nothing
-      is ever clipped in half.
+toolbar (above the card, outside it): one flat wrapping row (flex_row
+    flex_wrap items_center gap 6 gap_y 4 px 4 pb 6, id + selector
+    `composer-toolbar`, w_full max_w(TRANSCRIPT_WIDTH)) whose direct
+    children are, in order, the mode pill (flex_none), the Model chip
+    (the one shrinkable child: min_w_0 + text_ellipsis, 56 px floor),
+    the Effort chip (flex_none), the context chip (ring + label +
+    percent, flex_none), and last the attach · overflow pair as one
+    flex_none ml_auto group; when a line is full the next chip wraps to
+    the next line and the pair follows to the end of whichever line it
+    lands on; nothing is ever clipped.
+
+The toolbar and the card are centred with the transcript (`items_center`
+on their column).
 
 div rounded(Theme::surface_radius()) border_1 border_color(theme.border)
     bg(theme.card_glass_bg()) px 4 pt 4 pb 6 flex_col gap 4
