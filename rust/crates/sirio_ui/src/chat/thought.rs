@@ -8,14 +8,18 @@
 use std::time::Duration;
 
 use bezel::motion::Painter;
+use bezel::ui::scroll;
 use bezel::ui::scroll::{FollowState, ScrollbarState};
 use bezel::ui::widgets::Layout as _;
-use gpui::{AnyElement, App, Entity, ScrollHandle, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Entity, ScrollHandle, Window, div, linear_color_stop, linear_gradient,
+    prelude::*, px,
+};
 use sirio_theme::Theme;
 
 use crate::loading;
 
-use super::{Chat, Entry};
+use super::{Chat, Entry, TranscriptInteraction};
 
 /// The header's word: `Thinking` while the thought streams, then
 /// `Thought for Ns` when this process measured it, or a bare `Thought` for a
@@ -119,6 +123,81 @@ impl Chat {
             });
         }
         row.into_any_element()
+    }
+}
+
+/// The gallery's `LiveActivity.svelte` cap and mask.
+const BOX_MAX: f32 = 160.0;
+const FADE: f32 = 20.0;
+
+impl Chat {
+    /// The gallery's `Activity::reasoning`: a border line down the left, a
+    /// well capped at 160 px that scrolls past that, the 20 px fade painted
+    /// over its top edge, the follow pin and the scrollbar laid over the
+    /// same container.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_thought_body(
+        entry_index: usize,
+        text: &str,
+        source_start: usize,
+        interaction: &TranscriptInteraction,
+        scroll: &ThoughtScroll,
+        theme: &Theme,
+        bezel_theme: &bezel::theme::Theme,
+    ) -> AnyElement {
+        let typography = theme.typography;
+        div()
+            .id(("thought-body", entry_index))
+            .debug_selector(move || format!("thought-body-{entry_index}"))
+            .ml(px(10.0))
+            .pl(px(12.0))
+            .border_l_1()
+            .border_color(bezel_theme.border)
+            .child(
+                div()
+                    .relative()
+                    .max_h(px(BOX_MAX))
+                    .child(
+                        div()
+                            .id(("thought-well", entry_index))
+                            .debug_selector(move || format!("thought-well-{entry_index}"))
+                            .max_h(px(BOX_MAX))
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll.scroll)
+                            .pr(px(14.0))
+                            .text_size(typography.callout)
+                            .line_height(px(19.0))
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(Self::render_plain_text(
+                                text.to_string(),
+                                theme,
+                                format!("thought-entry-{entry_index}"),
+                                source_start,
+                                Some(interaction),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || format!("thought-fade-{entry_index}"))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(FADE))
+                            .bg(linear_gradient(
+                                180.0,
+                                linear_color_stop(bezel_theme.bg, 0.0),
+                                linear_color_stop(bezel_theme.bg.opacity(0.0), 1.0),
+                            )),
+                    )
+                    .child(scroll::follow(&scroll.scroll, &scroll.follow))
+                    .child(scroll::scrollbar(
+                        format!("thought-bar-{entry_index}"),
+                        &scroll.scroll,
+                        &scroll.bar,
+                    )),
+            )
+            .into_any_element()
     }
 
     /// A thought streams while the turn does and nothing has settled it.

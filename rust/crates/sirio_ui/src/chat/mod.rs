@@ -11,7 +11,7 @@ use gpui::{
     FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
-    StyledText, Task, Window, actions, canvas, div, linear_color_stop, linear_gradient, list,
+    StyledText, Task, Window, actions, canvas, div, list,
     point, prelude::*, px, quad, rgb, transparent_black,
 };
 use sirio_acp::{
@@ -1410,6 +1410,10 @@ pub struct Chat {
     /// that status; a call that never settles simply leaves its start here
     /// until the chat is dropped.
     tool_started: HashMap<String, std::time::Instant>,
+    /// Per-entry scroll state for open thought bodies, keyed by entry index.
+    /// Not persisted; created the first time a thought's body is drawn,
+    /// cleared with the entries.
+    thought_scroll: HashMap<usize, thought::ThoughtScroll>,
     persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
@@ -1665,6 +1669,7 @@ impl Chat {
             copied_target: None,
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
+            thought_scroll: HashMap::new(),
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
@@ -1896,6 +1901,9 @@ impl Chat {
                     existing.push_str(&text);
                     self.remeasure_entry(self.entries.len() - 1);
                 } else {
+                    // A new thought re-follows: drop any stale scroll state
+                    // for this index so the next draw starts pinned.
+                    self.thought_scroll.remove(&self.entries.len());
                     self.push_entry(Entry::Thought {
                         text,
                         open: Default::default(),
@@ -2627,6 +2635,7 @@ impl Chat {
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
         self.unfolded_turns.clear();
+        self.thought_scroll.clear();
         for turn in transcript.turns {
             for entry in turn.entries {
                 self.push_entry(restored_entry(entry));
@@ -2851,6 +2860,7 @@ impl Chat {
         });
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
+            self.thought_scroll.clear();
             self.list_state.splice(0..old_count, self.entries.len());
         }
     }
@@ -3281,6 +3291,7 @@ impl Chat {
         let old_count = self.entries.len();
         self.entries.clear();
         self.unfolded_turns.clear();
+        self.thought_scroll.clear();
         self.list_state.splice(0..old_count, 0);
         self.accepted_mentions.clear();
         self.attachments.clear();
@@ -4458,6 +4469,7 @@ impl Chat {
         card.into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_entry(
         entry: Entry,
         entry_index: usize,
@@ -4470,6 +4482,7 @@ impl Chat {
         copied_target: Option<CopyTarget>,
         edit_summary: Option<EditSummaryState>,
         thought_streaming: bool,
+        thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
@@ -4584,43 +4597,17 @@ impl Chat {
                     ),
                 );
                 if is_open {
-                    column = column.child(
-                        div()
-                            .id(("thought-body", entry_index))
-                            .debug_selector(move || format!("thought-body-{entry_index}"))
-                            .relative()
-                            .border_l_1()
-                            .border_color(theme.border)
-                            .pl(px(12.0))
-                            .pr(px(14.0))
-                            .max_h(px(160.0))
-                            .gap(px(4.0))
-                            .overflow_y_scroll()
-                            .text_size(typography.callout)
-                            .line_height(px(19.0))
-                            .text_color(theme.text_muted)
-                            .italic()
-                            .child(Self::render_plain_text(
-                                text,
-                                theme,
-                                format!("thought-entry-{entry_index}"),
-                                source_start,
-                                Some(&interaction),
-                            ))
-                            .child(
-                                // The 20px top fade is painted over the
-                                // scrollable body rather than masked, so
-                                // selection and the scrollbar hit-test still
-                                // see the full text underneath it.
-                                div().absolute().top_0().left_0().right_0().h(px(20.0)).bg(
-                                    linear_gradient(
-                                        180.0,
-                                        linear_color_stop(theme.surface, 0.0),
-                                        linear_color_stop(theme.surface.opacity(0.0), 1.0),
-                                    ),
-                                ),
-                            ),
-                    );
+                    if let Some(scroll) = thought_scroll.get(&entry_index) {
+                        column = column.child(Self::render_thought_body(
+                            entry_index,
+                            &text,
+                            source_start,
+                            &interaction,
+                            scroll,
+                            theme,
+                            &bezel_theme,
+                        ));
+                    }
                 }
                 column.into_any_element()
             }
@@ -6829,6 +6816,20 @@ impl Render for Chat {
                         list(
                             self.list_state.clone(),
                             cx.processor(move |this, entry_index: usize, window, cx| {
+                                // The body's follow pin + scrollbar need per-entry state;
+                                // created on first draw so a restored chat pays nothing
+                                // until a thought is opened.
+                                if let Some(Entry::Thought { open, .. }) =
+                                    this.entries.get(entry_index)
+                                {
+                                    let streaming = this.thought_is_streaming(entry_index);
+                                    if open.get(streaming) {
+                                        let painter = bezel::motion::Painter::of(cx);
+                                        this.thought_scroll.entry(entry_index).or_insert_with(
+                                            || thought::ThoughtScroll::new(painter),
+                                        );
+                                    }
+                                }
                                 // F-CHAT-22, turn half: an older turn stands
                                 // in for itself with one row. Resolved before
                                 // the tool-call grouping below, because a
@@ -6905,6 +6906,7 @@ impl Render for Chat {
                                                                     this.thought_is_streaming(
                                                                         entry_index,
                                                                     ),
+                                                                    &this.thought_scroll,
                                                                     &mut *window,
                                                                     &mut *cx,
                                                                 )
@@ -6993,6 +6995,7 @@ impl Render for Chat {
                                                 this.copied_target.clone(),
                                                 this.edit_summaries.get(&entry_index).cloned(),
                                                 this.thought_is_streaming(entry_index),
+                                                &this.thought_scroll,
                                                 &mut *window,
                                                 &mut *cx,
                                             ))
@@ -8747,6 +8750,50 @@ two"
             "no clock to offer"
         );
         assert!(cx.debug_bounds("thought-body-0").is_none());
+    }
+
+    /// An open body is the gallery's reasoning box: a capped scrolling well
+    /// with the fade strip along its top and the follow pin + scrollbar laid
+    /// over it. A closed thought draws none of it.
+    #[gpui::test]
+    async fn an_open_thought_body_is_a_capped_well_with_a_fade_strip(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.push_entry(Entry::Thought {
+                text: long,
+                open: Default::default(),
+                started: None,
+                duration_ms: Some(2_000),
+            });
+            chat
+        });
+        cx.update(|_window, cx| init(cx));
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("thought-well-0").is_none(), "closed: no well");
+        assert!(cx.debug_bounds("thought-fade-0").is_none(), "closed: no fade");
+
+        let header = cx.debug_bounds("thought-toggle-0").expect("header");
+        cx.simulate_click(header.center(), Modifiers::none());
+        refresh_frame(cx);
+        let body = cx.debug_bounds("thought-body-0").expect("open: the body");
+        let well = cx.debug_bounds("thought-well-0").expect("open: the well");
+        let fade = cx.debug_bounds("thought-fade-0").expect("open: the fade strip");
+        assert!(
+            well.size.height <= px(160.0),
+            "the well is capped at 160: {well:?}"
+        );
+        assert_eq!(fade.size.height, px(20.0));
+        assert_eq!(fade.top(), well.top(), "the strip sits on the well's top edge");
+        assert!(body.left() < well.left(), "the well is inset from the border line");
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                chat.thought_scroll.contains_key(&0),
+                "scroll state was created on first draw"
+            );
+        });
     }
 
     /// #173: a user message longer than the pane must wrap inside it. The
