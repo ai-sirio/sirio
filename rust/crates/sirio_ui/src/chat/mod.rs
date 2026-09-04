@@ -11517,6 +11517,10 @@ let answer = 42;
             "open while streaming"
         );
         assert!(cx.debug_bounds("tool-run-1").is_some());
+        assert!(
+            cx.debug_bounds("chat-generating-spinner").is_some(),
+            "the generating spinner is a sibling of the list, not a zone member"
+        );
         chat.update(cx, |chat, cx| {
             chat.handle_event(AcpEvent::AgentMessageChunk("done".into()), cx);
             chat.handle_event(
@@ -13851,6 +13855,14 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
         focus_and_type(cx, "draft");
         assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft");
+        // Seed zone state so the reset has something to forget.
+        chat.update(cx, |chat, cx| {
+            chat.toggle_work(0, cx);
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| !chat.work_open.is_empty()),
+            "the completed turn takes a work zone press"
+        );
 
         let overflow = cx
             .debug_bounds("composer-overflow")
@@ -13865,6 +13877,11 @@ let answer = 42;
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.entries.is_empty()),
             "New Conversation clears the transcript"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.work_open.is_empty()
+                && chat.unfolded_turns.is_empty()),
+            "New Conversation clears the turn fold and the work zone state"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
@@ -14389,6 +14406,10 @@ let answer = 42;
         });
         refresh_frame(cx);
 
+        assert!(
+            cx.debug_bounds("work-toggle-0").is_none(),
+            "a folded turn hides its Work header too"
+        );
         let fold = cx
             .debug_bounds("turn-fold-2")
             .expect("the oldest turn draws its collapsed stand-in row");
@@ -14408,6 +14429,10 @@ let answer = 42;
         cx.run_until_parked();
         refresh_frame(cx);
         // The unfolded turn's tool row lives inside its Work zone.
+        assert!(
+            cx.debug_bounds("work-toggle-0").is_some(),
+            "unfolding the turn brings its Work header back"
+        );
         let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
         cx.simulate_click(work.center(), Modifiers::none());
         cx.run_until_parked();
