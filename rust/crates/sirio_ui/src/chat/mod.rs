@@ -7137,9 +7137,13 @@ impl Chat {
 
         // Toolbar above, card below, in one column. The toolbar only exists
         // when an agent is configured — with none, the card stands alone.
+        // `items_center` keeps both where the transcript sits in a wide
+        // pane; each child carries its own `max_w(TRANSCRIPT_WIDTH)` cap, so
+        // they stay edge-aligned with each other at every width.
         div()
             .flex()
             .flex_col()
+            .items_center()
             .w_full()
             .when(self.agent_command.is_some(), |column| {
                 column.child(composer_toolbar)
@@ -9261,6 +9265,26 @@ two"
             card.size.width,
             px(TRANSCRIPT_WIDTH),
             "the composer stays capped below a wider pane: card={card:?}"
+        );
+        // The toolbar and the card sit where the transcript sits: centred in
+        // a wide pane, edge-aligned with each other at every width.
+        let toolbar = cx
+            .debug_bounds("composer-toolbar")
+            .expect("the composer toolbar is drawn");
+        let window_center_x = 1140.0 / 2.0;
+        assert!(
+            (card.center().x.as_f32() - window_center_x).abs() <= 1.0,
+            "the composer card is centred with the transcript: card={card:?}"
+        );
+        assert_eq!(
+            toolbar.left(),
+            card.left(),
+            "the toolbar shares the card's left edge: {toolbar:?} {card:?}"
+        );
+        assert_eq!(
+            toolbar.right(),
+            card.right(),
+            "the toolbar shares the card's right edge: {toolbar:?} {card:?}"
         );
     }
 
