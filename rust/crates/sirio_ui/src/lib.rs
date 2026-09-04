@@ -15,7 +15,6 @@ extern crate self as sirio_ui;
 pub mod caret;
 pub mod changes;
 pub mod chat;
-pub mod composer;
 pub mod controls;
 pub mod editor;
 pub mod file_view;

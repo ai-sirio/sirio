@@ -416,6 +416,8 @@ const TAB_ICON_WIDTH: f32 = 14.;
 const TAB_GAP: f32 = 6.;
 const TAB_STATUS_WIDTH: f32 = 16.;
 const TAB_CLOSE_WIDTH: f32 = 14.;
+/// The status mark and the dirty mark: one small dot, not a text glyph.
+const TAB_STATUS_DOT: f32 = 6.;
 const TAB_TITLE_ESTIMATED_CHAR_WIDTH: f32 = 7.5;
 
 /// Space the tab strip has left once the side panels, the gaps and the outer
@@ -3587,14 +3589,14 @@ struct WorktreeActivity {
     running: Vec<AgentMark>,
 }
 
-fn tab_status_glyph(status: ActivityStatus) -> &'static str {
-    match status {
-        ActivityStatus::Idle => "○",
-        ActivityStatus::Running => "●",
-        ActivityStatus::NeedsInput => "?",
-        ActivityStatus::Done => "✓",
-        ActivityStatus::Error => "!",
-    }
+/// Whether a tab draws the dirty mark in its trailing slot. `dirty` is
+/// `tab_is_dirty`'s answer, which is also the close-confirmation predicate,
+/// and by that rule a terminal is dirty from the moment its shell starts.
+/// A mark that is on every terminal always says nothing, so the mark is
+/// kept for the content that can actually be lost -- an unsaved editor, a
+/// streaming chat -- and a terminal keeps its close button in that slot.
+fn tab_shows_dirty_mark(kind: TabKind, dirty: bool) -> bool {
+    dirty && kind != TabKind::Terminal
 }
 
 fn tab_status_name(status: ActivityStatus) -> &'static str {
@@ -11371,21 +11373,32 @@ impl SirioWorkspace {
             id,
             group: None,
         };
+        // bezel's `theme.tab()` recipe, composed by hand because that widget
+        // takes a text label and this tab carries an icon, a status mark and
+        // a close button too: the tab fills the strip, is rounded only at the
+        // top and has no fill of its own. The active one is told apart by
+        // tone, weight and the underline drawn last below.
+        let hover_group = format!("workspace-tab-group-{id}");
+        let dirty_mark = tab_shows_dirty_mark(tab.kind, dirty);
         div()
             .id(format!("workspace-tab-{id}"))
             .debug_selector(move || format!("workspace-tab-{id}"))
+            .group(hover_group.clone())
             .relative()
-            .mt(px(4.0))
-            .h(px(30.0))
+            .h_full()
             .w(px(width))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(6.0))
             .px(px(10.0))
-            .overflow_hidden()
-            .rounded_t(px(6.0))
+            .rounded_t(theme.radii.control)
             .text_size(theme.typography.scaled(13.0))
+            .font_weight(if active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
             .text_color(if active { theme.text } else { theme.text_muted })
             .hover(|style| style.bg(theme.element_hover))
             // F-TAB-24: `on_drag` fires once, at the start of the gesture --
@@ -11446,7 +11459,6 @@ impl SirioWorkspace {
             .when(!renaming, |this| {
                 this.child(
                     div()
-                        .font_weight(FontWeight::NORMAL)
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
@@ -11509,8 +11521,11 @@ impl SirioWorkspace {
                                 .debug_selector(move || {
                                     format!("workspace-tab-status-{status_name}-{id}")
                                 })
-                                .text_color(right_panel::status_color(status, theme))
-                                .child(tab_status_glyph(status)),
+                                .w(px(TAB_STATUS_DOT))
+                                .h(px(TAB_STATUS_DOT))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(right_panel::status_color(status, theme)),
                         )
                     })
                     .when_some(exit_label, |this, label| {
@@ -11524,54 +11539,97 @@ impl SirioWorkspace {
                         )
                     }),
             )
+            // One trailing slot, `TAB_CLOSE_WIDTH` wide, shared by the close
+            // button and the dirty mark. The `×` is always laid out, so its
+            // hit target exists on every tab, but shown only where it is
+            // wanted: on the active tab, and on any tab under the pointer.
+            // Inactive tabs used to have no `×` at all -- the context menu
+            // was the only mouse route to closing one. A dirty tab shows its
+            // dot in the same slot instead, and hover swaps them: the mark
+            // yields to the control the moment it is reachable. Both are
+            // visibility, not presence -- the slot never changes width, so
+            // the title never shifts.
+            .child(
+                div()
+                    .relative()
+                    .w(px(TAB_CLOSE_WIDTH))
+                    .h(px(20.0))
+                    .flex_none()
+                    .child(
+                        div()
+                            .id(format!("workspace-tab-close-{id}"))
+                            .debug_selector(move || format!("workspace-tab-close-{id}"))
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radii.control)
+                            .text_color(theme.text_muted)
+                            .when(!active || dirty_mark, |this| {
+                                this.invisible()
+                                    .group_hover(hover_group.clone(), |style| style.visible())
+                            })
+                            .hover(|style| style.bg(theme.element_hover))
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                close_entity.update(cx, |this, cx| {
+                                    this.request_close_tab_by_id(id, window, cx)
+                                });
+                            })
+                            .child(
+                                IconElement::new(Icon::Close, IconSize::XSmall)
+                                    .text_color(theme.text_muted),
+                            ),
+                    )
+                    .when(dirty_mark, |this| {
+                        this.child(
+                            div()
+                                .id(format!("workspace-tab-dirty-{id}"))
+                                .debug_selector(move || format!("workspace-tab-dirty-{id}"))
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .group_hover(hover_group.clone(), |style| style.invisible())
+                                .child(
+                                    div()
+                                        .w(px(TAB_STATUS_DOT))
+                                        .h(px(TAB_STATUS_DOT))
+                                        .rounded_full()
+                                        .bg(theme.text),
+                                ),
+                        )
+                    }),
+            )
+            // The active mark: a 2px underline whose last pixel is the
+            // strip's last pixel, so it overlaps the hairline the strip
+            // draws (bezel's `theme.tab()`), pointing at the content below
+            // rather than capping the tab from above. #320: both halves
+            // always show which of their tabs is current, but only the
+            // focused half's underline is in the full text tone -- the other
+            // half's is faint, because only one half receives what you type
+            // next. The selector carries the state so a test can watch it
+            // flip without reading a colour.
             .when(active, |this| {
+                let (focus_state, color) = if pane_focused {
+                    ("focused", theme.text)
+                } else {
+                    ("unfocused", theme.text_faint)
+                };
                 this.child(
                     div()
-                        .id(format!("workspace-tab-close-{id}"))
-                        .debug_selector(move || format!("workspace-tab-close-{id}"))
-                        .w(px(14.0))
-                        .h(px(20.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(theme.typography.scaled(14.0))
-                        .text_color(theme.text_muted)
-                        .hover(|style| style.bg(theme.element_hover).rounded(px(4.0)))
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            close_entity.update(cx, |this, cx| {
-                                this.request_close_tab_by_id(id, window, cx)
-                            });
+                        .id(format!("workspace-tab-underline-{id}"))
+                        .debug_selector(move || {
+                            format!("workspace-tab-underline-{focus_state}-{id}")
                         })
-                        .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.text_muted),
-                        ),
-                )
-            })
-            .when(dirty, |this| {
-                this.child(
-                    div()
-                        .id(format!("workspace-tab-dirty-{id}"))
-                        .debug_selector(move || format!("workspace-tab-dirty-{id}"))
-                        .w(theme.spacing.titlebar_control_spacing)
-                        .h(theme.spacing.titlebar_control_spacing)
-                        .flex_none()
-                        .rounded(theme.radii.control)
-                        .bg(theme.text),
-                )
-            })
-            .when(active, |this| this.bg(theme.element_active))
-            .when(active && pane_focused, |this| {
-                this.child(
-                    div()
                         .absolute()
-                        .top(px(0.0))
+                        .bottom(px(-1.0))
                         .left_0()
                         .right_0()
                         .h(px(2.0))
-                        .bg(theme.text),
+                        .bg(color),
                 )
             })
     }
@@ -12523,8 +12581,8 @@ impl SirioWorkspace {
             .h_full()
             .right(theme.spacing.titlebar_control_frame.width)
             .flex()
-            .items_start()
-            .gap(px(1.0))
+            .items_center()
+            .gap(px(2.0))
             .bg(theme.surface)
             // F-TAB-24: a real drop commits the reorder that
             // `preview_tab_reorder` already applied live during hover --
@@ -12728,13 +12786,31 @@ impl SirioWorkspace {
             .min_h_0()
             .child(
                 div()
+                    .id("tab-bar-primary")
+                    .debug_selector(|| "tab-bar-primary".into())
                     .relative()
                     .h(px(TAB_BAR_HEIGHT))
                     .w_full()
+                    // The hairline every tab sits on (bezel's `tab_bar()`).
+                    // A border rather than a child so the `+` and the tabs
+                    // share one rule, and the active tab's underline can
+                    // overlap it from above.
+                    .border_b_1()
+                    .border_color(theme.border)
                     // The one `+`: it routes a new surface to its own half by
                     // what the surface is, so a second copy in the Secondary
                     // strip would be a button that sends you elsewhere.
-                    .child(self.child_view(self.tab_bar.clone()))
+                    // Clipped to the content box: the view sizes itself to
+                    // the full strip height and would otherwise paint its
+                    // surface over the hairline under the `+`. Its menu is
+                    // deferred, so the clip never reaches it.
+                    .child(
+                        div()
+                            .h_full()
+                            .w_full()
+                            .overflow_hidden()
+                            .child(self.child_view(self.tab_bar.clone())),
+                    )
                     .child(self.render_open_tabs(
                         PaneRole::Primary,
                         *theme,
@@ -12812,9 +12888,13 @@ impl SirioWorkspace {
                         .min_h_0()
                         .child(
                             div()
+                                .id("tab-bar-secondary")
+                                .debug_selector(|| "tab-bar-secondary".into())
                                 .relative()
                                 .h(px(TAB_BAR_HEIGHT))
                                 .w_full()
+                                .border_b_1()
+                                .border_color(theme.border)
                                 .child(self.render_open_tabs(
                                     PaneRole::Secondary,
                                     *theme,
@@ -16314,7 +16394,11 @@ fn main() {
     #[cfg(target_os = "windows")]
     ensure_windows_console();
 
-    application().run(|cx: &mut App| {
+    // bezel's icons are `svg().path("icons/…")`; without an asset source
+    // gpui finds nothing and paints nothing. Sirio's own icons embed their
+    // bytes and never needed this.
+    let app = application().with_assets(bezel::ui::icons::Assets);
+    app.run(|cx: &mut App| {
         // Must land before `Theme::init` — see `register_fonts`'s own doc
         // comment for why the order is load-bearing.
         register_fonts(cx);
@@ -21895,6 +21979,187 @@ mod tests {
         );
     }
 
+    /// The active tab is marked the way bezel's `theme.tab()` marks it: a 2px
+    /// underline whose last pixel is the strip's last pixel, so it overlaps
+    /// the strip's hairline and points at the content below. Not a filled
+    /// block with a line on top. `-focused-` because the Primary pane holds
+    /// focus in this fixture. Tabs also sit on the strip's full height: the
+    /// old 4px top offset is gone.
+    #[gpui::test]
+    async fn drawn_active_tab_wears_an_underline_that_overlaps_the_strip_hairline(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let strip = cx
+            .debug_bounds("tab-bar-primary")
+            .expect("the primary strip is drawn");
+        let tab = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("the active tab is drawn");
+        let underline = cx
+            .debug_bounds("workspace-tab-underline-focused-0")
+            .expect("the active tab in the focused pane draws its underline");
+
+        assert_eq!(underline.size.height, px(2.0));
+        assert_eq!(
+            underline.bottom(),
+            strip.bottom(),
+            "the underline's last pixel is the strip's last pixel: it overlaps the hairline"
+        );
+        assert_eq!(underline.origin.x, tab.origin.x);
+        assert_eq!(underline.size.width, tab.size.width);
+        assert_eq!(
+            tab.origin.y, strip.origin.y,
+            "tabs sit on the strip's full height, with no top offset"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-underline-focused-1")
+                .is_none()
+                && cx
+                    .debug_bounds("workspace-tab-underline-unfocused-1")
+                    .is_none(),
+            "an inactive tab has no underline at all"
+        );
+    }
+
+    /// #320: both halves always show which of their tabs is current, but
+    /// only the focused half's underline is in the full text colour; the
+    /// other half's is faint. The selector carries the state so the test
+    /// can watch it flip without reading a colour.
+    #[gpui::test]
+    async fn drawn_active_tab_underline_follows_pane_focus(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("tab workspace root")
+        });
+        let file_path =
+            std::env::temp_dir().join(format!("sirio-tab-underline-{}.md", std::process::id()));
+        std::fs::write(&file_path, b"hello").expect("write underline test file");
+
+        workspace.update(&mut cx, |workspace, cx| {
+            let view = cx.new(|cx| FileView::new(file_path.clone(), cx));
+            workspace.tabs.push(OpenTab {
+                id: 1,
+                persistence_id: "underline-doc".into(),
+                title: "note.md".into(),
+                kind: TabKind::Editor,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(1),
+                panes: PaneNode::leaf(1, TabContent::File { view }),
+                focused_pane: 1,
+                title_is_auto_named: true,
+            });
+            // #323: a tab pushed by hand never went through `add_file_tab`,
+            // so nothing opened the pane it is drawn in.
+            workspace.open_secondary_pane();
+            workspace.rebuild_center_split();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("workspace-tab-underline-focused-0")
+                .is_some(),
+            "the Primary half holds focus: its current tab wears the full underline"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-underline-unfocused-1")
+                .is_some(),
+            "the Secondary half's current tab is underlined faintly while Primary holds focus"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.set_focused_pane(PaneRole::Secondary);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("workspace-tab-underline-unfocused-0")
+                .is_some(),
+            "focus moved: the Primary half's current tab drops to the faint underline"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-underline-focused-1")
+                .is_some(),
+            "focus moved: the Secondary half's current tab wears the full underline"
+        );
+        let _ = std::fs::remove_file(file_path);
+    }
+
+    /// Inactive tabs used to carry no close button at all -- the only mouse
+    /// route to closing one was the context menu. Now every tab lays one
+    /// out; on an inactive tab it is revealed by hover, which is a style, so
+    /// the test drives the behaviour: point at it, click it, the tab goes.
+    #[gpui::test]
+    async fn drawn_inactive_tab_close_button_closes_that_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("tab workspace root")
+        });
+
+        let close = cx
+            .debug_bounds("workspace-tab-close-1")
+            .expect("an inactive tab lays out its close button");
+        cx.simulate_mouse_move(close.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(close.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            vec![0],
+            "clicking an inactive tab's close button closes that tab, not the active one"
+        );
+    }
+
+    /// The status cell is a 6px dot in the status colour, not a text glyph:
+    /// one small mark that reads at a glance beside the title.
+    #[gpui::test]
+    async fn drawn_tab_status_is_a_six_pixel_dot(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("tab workspace root")
+        });
+        // The fixture's terminal is a headless `TerminalView::failed`, which
+        // the tab reports as an error -- pinned here so the selector below
+        // is read against the status actually drawn, not an assumed idle.
+        let status = workspace.read_with(&cx.cx, |workspace, app| {
+            workspace.tab_status(&workspace.tabs[0], app)
+        });
+        assert_eq!(status, Some(ActivityStatus::Error));
+        let dot = cx
+            .debug_bounds("workspace-tab-status-error-0")
+            .expect("a terminal tab draws its status");
+        assert_eq!(dot.size, size(px(6.0), px(6.0)));
+    }
+
     #[gpui::test]
     async fn drawn_tab_status_cell_renders_idle_and_running_states(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -26654,6 +26919,19 @@ mod tests {
             browser_act_script("", None, None).is_err(),
             "an empty verb (no driving flag, no verb) is rejected"
         );
+    }
+
+    /// The dirty mark is for content that would be lost: an unsaved editor,
+    /// a streaming chat. A live terminal is "dirty" in the close-door sense
+    /// (`tab_is_dirty`) from the moment its shell starts, so a mark there
+    /// would sit on every terminal, always, and say nothing; the close
+    /// button keeps that slot instead.
+    #[test]
+    fn dirty_mark_is_for_editors_and_chats_not_live_terminals() {
+        assert!(tab_shows_dirty_mark(TabKind::Editor, true));
+        assert!(tab_shows_dirty_mark(TabKind::AgentChat, true));
+        assert!(!tab_shows_dirty_mark(TabKind::Terminal, true));
+        assert!(!tab_shows_dirty_mark(TabKind::Editor, false));
     }
 
     #[test]

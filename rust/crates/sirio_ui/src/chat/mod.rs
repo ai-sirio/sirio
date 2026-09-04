@@ -4,6 +4,7 @@
 //! session, same scope as `Sidebar`'s fixture model: the connection lifecycle
 //! and view model live here so the transcript renderer stays deterministic.
 
+use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
@@ -36,9 +37,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::caret;
-use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+
+mod composer_view;
+use bezel::ui::input::TextField;
+use bezel::ui::popover;
+use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -400,18 +405,11 @@ actions!(
     chat_composer,
     [
         Send,
-        Newline,
         Cancel,
-        Backspace,
-        Delete,
-        Left,
-        Right,
-        SelectLeft,
-        SelectRight,
-        SelectAll,
         CopyTranscript,
-        Home,
-        End,
+        PopupPrevious,
+        PopupNext,
+        PopupAccept
     ]
 );
 
@@ -1289,136 +1287,6 @@ impl Element for TranscriptSelectableText {
     }
 }
 
-/// What the composer's text runs painted in the last frame: the caret bar's
-/// bounds and every selection quad. A paint-time quad leaves no
-/// `debug_bounds` behind, so this is the seam the layout tests read caret
-/// and selection geometry through; the renderer clears it every frame.
-#[derive(Default)]
-struct ComposerPaintTrace {
-    caret: Cell<Option<Bounds<Pixels>>>,
-    selection: std::cell::RefCell<Vec<Bounds<Pixels>>>,
-}
-
-/// One `ComposerPart::Text` run of the draft: a single wrapping `StyledText`
-/// with the selection shading and the insertion caret painted over it at
-/// `position_for_index` — the same shape as `TranscriptSelectableText` above
-/// and `EditableLine` in `file_view.rs`.
-///
-/// The draft used to be cut into separate flex items at the caret and the
-/// selection edges. In the wrapping `composer-input` row a piece that wraps
-/// becomes a full-width block, so everything after it — the caret first of
-/// all — dropped onto a row of its own, and a mid-text caret split the word
-/// it sat in across two rows. Painting over one run keeps the text's own
-/// line breaks, and `position_for_index` already knows which wrapped line an
-/// offset landed on.
-struct ComposerText {
-    id: ElementId,
-    text: StyledText,
-    /// Selected byte range, local to this run.
-    selection: Option<Range<usize>>,
-    selection_fill: Rgba,
-    /// Byte offset of the insertion caret when this run hosts it.
-    caret: Option<usize>,
-    /// Blink phase: the caret's bounds are traced either way, the bar is
-    /// only painted while lit.
-    caret_visible: bool,
-    caret_color: Rgba,
-    trace: Rc<ComposerPaintTrace>,
-}
-
-impl IntoElement for ComposerText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for ComposerText {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        self.text.request_layout(id, inspector_id, window, cx)
-    }
-
-    fn prepaint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        state: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        self.text
-            .prepaint(id, inspector_id, bounds, state, window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        state: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if let Some(span) = self.selection.clone() {
-            let trace = self.trace.clone();
-            paint_wrapped_span(
-                self.text.layout(),
-                bounds,
-                span,
-                self.selection_fill,
-                window,
-                |quad_bounds| trace.selection.borrow_mut().push(quad_bounds),
-            );
-        }
-        // The caret goes under the glyphs, like the selection: a bar between
-        // two characters must not cover the stems it sits between.
-        if let Some(caret) = self.caret {
-            let layout = self.text.layout();
-            let line_height = layout.line_height();
-            let position = layout
-                .position_for_index(caret)
-                .unwrap_or(point(bounds.right(), bounds.bottom() - line_height));
-            let bar = Bounds::new(
-                point(position.x.min(bounds.right()), position.y),
-                gpui::size(caret::BAR_WIDTH, line_height),
-            );
-            self.trace.caret.set(Some(bar));
-            if self.caret_visible {
-                window.paint_quad(quad(
-                    bar,
-                    px(1.0),
-                    self.caret_color,
-                    Edges::default(),
-                    transparent_black(),
-                    BorderStyle::default(),
-                ));
-            }
-        }
-        self.text
-            .paint(id, inspector_id, bounds, state, &mut (), window, cx);
-    }
-}
-
 impl IntoElement for TranscriptSelectableText {
     type Element = Self;
 
@@ -1436,17 +1304,23 @@ pub struct Chat {
     agent_name: Option<String>,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
-    composer: Composer,
-    /// Blink state of the composer's insertion caret, and the cursor
-    /// signature it was last rendered against (part index, char offset,
-    /// part count) — a changed signature means the user moved/edited, so
-    /// the bar must wake instead of blinking off mid-interaction.
-    composer_blink: caret::Blink,
-    composer_caret_sig: (usize, usize, usize),
-    /// Where the composer's text runs painted the caret and the selection
-    /// last frame (see `ComposerPaintTrace`).
-    composer_paint: Rc<ComposerPaintTrace>,
-    composer_focus: FocusHandle,
+    /// The draft, as bezel's field: IME, selection, undo, wrapping and scroll
+    /// are its job. `Chat` observes it and reads `content()`/`cursor()` into
+    /// `draft`/`draft_caret` on every change — the popups and Send read the
+    /// cached pair rather than borrowing the entity mid-render.
+    composer_field: Entity<TextField>,
+    draft: SharedString,
+    draft_caret: usize,
+    /// File paths accepted from the `@` picker while their `@path` token is
+    /// still in the draft. Lifted into the prompt's mention paths on send;
+    /// cleared on send and on `control_compose`.
+    accepted_mentions: Vec<String>,
+    /// Images attached through the picker or a drop, drawn as a strip above
+    /// the field. Not persisted, as before.
+    attachments: Vec<ImageAttachment>,
+    /// The placeholder last pushed into the field, so render pushes a new
+    /// one only when the state it names changed.
+    composer_placeholder_shown: String,
     /// F-CHAT-25: the question answer field (focus, draft, owner request).
     question_answer: QuestionAnswerState,
     /// The answer field's own caret. It lives on `Chat` rather than inside
@@ -1455,10 +1329,10 @@ pub struct Chat {
     /// one surface, one `Blink`, one timer.
     answer_blink: caret::Blink,
     answer_caret_visible: bool,
-    /// The model picker's search row: a third editable surface, with its own
-    /// focus handle, so it gets its own blink and its own timer.
-    model_search_blink: caret::Blink,
-    model_search_caret_visible: bool,
+    /// The model picker's search row: a real bezel field (`Shape::Line`),
+    /// focused while the picker is open; typing filters, Backspace edits,
+    /// and none of it touches the composer's draft.
+    model_search_field: Entity<TextField>,
     streaming: bool,
     /// Retired with the rotating streaming border: the shared Bezel clock
     /// drives the reasoning header now, so this stays permanently `false`.
@@ -1482,11 +1356,10 @@ pub struct Chat {
     model_config_id: Option<String>,
     selected_model: Option<String>,
     model_picker_open: bool,
-    /// F-CHAT-16: the model picker's own search query, reset each time the
-    /// picker opens. Matches `ModelPickerFilter`'s Swift semantics — trimmed,
-    /// case-insensitive substring match against name/id/description, order
-    /// preserved, empty query keeps every model.
-    model_search: String,
+    /// F-CHAT-16: the model picker's own search query — live in the field,
+    /// read from it at render time. Matches `ModelPickerFilter`'s Swift
+    /// semantics — trimmed, case-insensitive substring match against
+    /// name/id/description, order preserved, empty query keeps every model.
     /// F-CHAT-15: the session-mode selector (ask/plan/auto, entirely
     /// agent-defined), re-read from `AcpClient::mode_catalog` on connect and
     /// after every event since the wire only pushes mode changes as an
@@ -1497,7 +1370,6 @@ pub struct Chat {
     mode_catalog: Option<ModeCatalog>,
     mode_picker_open: bool,
     context_popover_open: bool,
-    model_picker_focus: FocusHandle,
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
     transcript_focus: FocusHandle,
@@ -1528,8 +1400,10 @@ pub struct Chat {
     /// The `/token` the popup state (dismissal, selection) belongs to; any
     /// change resets both.
     last_slash_token: Option<String>,
-    /// Keyboard selection index into the slash candidates.
-    slash_selected: usize,
+    /// Ranked views over `available_commands` and `mention_candidates`, with
+    /// the keyboard's active row — bezel's own picker state.
+    slash_filter: popover::Filter,
+    mention_filter: popover::Filter,
     /// File-mention candidates for the current `@token`.
     mention_candidates: Vec<String>,
     /// The `@token` the in-flight candidate walk was started for.
@@ -1620,16 +1494,14 @@ impl Chat {
     }
 
     fn default_placeholder(&self) -> String {
-        let head = self
-            .agent_name
-            .as_deref()
-            .map_or_else(|| "Message…".to_string(), |name| format!("Message {name}"));
-        let commands = if self.available_commands.is_empty() {
-            ""
+        // The gallery's sentence with Sirio's tokens. The agent's name is
+        // not spelled out here — the pill and the model chip in the toolbar
+        // above the card already name it.
+        if self.available_commands.is_empty() {
+            "Ask anything, or @ to attach a file".into()
         } else {
-            ", / for commands"
-        };
-        format!("{head} — @ for files{commands}")
+            "Ask anything, / for commands, or @ to attach a file".into()
+        }
     }
 
     /// Launches an ACP chat whose completed turns are restored and saved in
@@ -1707,27 +1579,46 @@ impl Chat {
             });
         });
 
+        let model_search_field = cx.new(|cx| {
+            TextField::new(cx)
+                .with_placeholder("Search models\u{2026}")
+                .with_key_context("ChatModelSearch")
+        });
+        cx.observe(&model_search_field, |_, _, cx| cx.notify())
+            .detach();
+
+        let composer_field = cx.new(|cx| {
+            TextField::new(cx)
+                .with_shape(bezel::ui::input::Shape::Grow { min: 3, max: 12 })
+                .with_key_context("ChatComposer")
+        });
+        // Both content and caret changes notify, and the mention behind the
+        // caret changes when either does.
+        cx.observe(&composer_field, |chat: &mut Self, _, cx| {
+            chat.reread_composer(cx)
+        })
+        .detach();
+
         Self {
             client: None,
             agent_command: command,
             agent_name: None,
             agent_cwd: cwd,
             entries: Vec::new(),
-            composer: Composer::new(),
-            composer_blink: caret::Blink::new(),
-            composer_paint: Rc::new(ComposerPaintTrace::default()),
+            composer_field,
+            draft: SharedString::default(),
+            draft_caret: 0,
+            accepted_mentions: Vec::new(),
+            attachments: Vec::new(),
+            composer_placeholder_shown: String::new(),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
-            model_search_blink: caret::Blink::new(),
-            model_search_caret_visible: false,
-            composer_caret_sig: (0, 0, 0),
-            composer_focus: cx.focus_handle().tab_stop(true),
+            model_search_field,
             question_answer: QuestionAnswerState {
                 focus: cx.focus_handle().tab_stop(true),
                 draft: String::new(),
                 for_request: None,
             },
-            model_picker_focus: cx.focus_handle().tab_stop(true),
             mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
@@ -1742,7 +1633,6 @@ impl Chat {
             model_config_id: None,
             selected_model: None,
             model_picker_open: false,
-            model_search: String::new(),
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
@@ -1758,9 +1648,10 @@ impl Chat {
             available_commands: Vec::new(),
             slash_dismissed: false,
             last_slash_token: None,
-            slash_selected: 0,
+            slash_filter: popover::Filter::new(Vec::new()),
             mention_candidates: Vec::new(),
             mention_query: None,
+            mention_filter: popover::Filter::new(Vec::new()),
             mention_task: None,
             attach_error: None,
             attach_task: None,
@@ -1916,27 +1807,25 @@ impl Chat {
         cx.bind_keys([
             KeyBinding::new("enter", Send, Some("ChatComposer")),
             KeyBinding::new("return", Send, Some("ChatComposer")),
-            KeyBinding::new("shift-enter", Newline, Some("ChatComposer")),
-            KeyBinding::new("shift-return", Newline, Some("ChatComposer")),
+            KeyBinding::new(
+                "shift-enter",
+                bezel::ui::input::InsertNewline,
+                Some("ChatComposer"),
+            ),
+            KeyBinding::new(
+                "shift-return",
+                bezel::ui::input::InsertNewline,
+                Some("ChatComposer"),
+            ),
             KeyBinding::new("escape", Cancel, Some("ChatComposer")),
-            KeyBinding::new("backspace", Backspace, Some("ChatComposer")),
-            KeyBinding::new("delete", Delete, Some("ChatComposer")),
-            KeyBinding::new("left", Left, Some("ChatComposer")),
-            KeyBinding::new("right", Right, Some("ChatComposer")),
-            KeyBinding::new("shift-left", SelectLeft, Some("ChatComposer")),
-            KeyBinding::new("shift-right", SelectRight, Some("ChatComposer")),
-            // Linux spelling of the platform modifier (Super on Linux):
-            // Ctrl+A and Ctrl+C are what a Linux user presses; the mac
-            // `cmd-` forms would bind Super and be unreachable.
-            KeyBinding::new("ctrl-a", SelectAll, Some("ChatComposer")),
+            KeyBinding::new("up", PopupPrevious, Some("ChatComposer")),
+            KeyBinding::new("down", PopupNext, Some("ChatComposer")),
+            KeyBinding::new("tab", PopupAccept, Some("ChatComposer")),
             KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatTranscript")),
-            KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatComposer")),
-            KeyBinding::new("home", Home, Some("ChatComposer")),
-            KeyBinding::new("end", End, Some("ChatComposer")),
-            // No `cmd-left`/`cmd-right` here: Home/End above cover the same
-            // movement, and on Linux the Super variants are intercepted by
-            // the desktop's window tiling before the app ever sees them.
             KeyBinding::new("escape", Cancel, Some("ChatModelPicker")),
+            // The model picker's search field owns focus while the picker is
+            // open, so Escape has to resolve from its context too.
+            KeyBinding::new("escape", Cancel, Some("ChatModelSearch")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
             // F-CHAT-25: the question answer field owns Enter (send the
             // answer) and Escape (cancel the question) while it has focus.
@@ -2201,6 +2090,15 @@ impl Chat {
             }
             AcpEvent::AvailableCommands(commands) => {
                 self.available_commands = commands;
+                self.slash_filter = popover::Filter::new(
+                    self.available_commands
+                        .iter()
+                        .map(|command| SharedString::from(command.name.clone()))
+                        .collect(),
+                );
+                if let Some(query) = slash_token(&self.draft) {
+                    self.slash_filter.refilter(query);
+                }
             }
             AcpEvent::Effort(effort) => {
                 self.effort = Some(effort);
@@ -2418,7 +2316,7 @@ impl Chat {
         !self.streaming
             && !self.connecting
             && !self.is_offline()
-            && !self.composer.is_empty()
+            && (!self.draft.trim().is_empty() || !self.attachments.is_empty())
             && self.pending_question().is_none()
     }
 
@@ -2483,16 +2381,16 @@ impl Chat {
     /// rather than tracked incrementally) and pushed back through
     /// [`Self::control_compose`] on restore.
     pub fn draft_text(&self) -> String {
-        self.composer.text()
+        self.draft.to_string()
     }
 
     /// Replaces the visible composer's plain-text draft through the control
     /// socket route. Attachments deliberately remain a pointer-only concern.
     pub fn control_compose(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.composer = Composer::new();
-        self.composer.insert_text(text);
+        self.accepted_mentions.clear();
+        self.attachments.clear();
         self.reset_composer_popups();
-        self.refresh_token_popups(cx);
+        self.set_composer_text(text.to_string(), cx);
         cx.notify();
     }
 
@@ -2557,7 +2455,7 @@ impl Chat {
         };
         ChatControlSnapshot {
             status: status.to_string(),
-            composer_text: self.composer.text(),
+            composer_text: self.draft.to_string(),
             queued_text: self.queued_item.clone().unwrap_or_default(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
         }
@@ -2902,12 +2800,11 @@ impl Chat {
             // F-CHAT-16: a fresh search every time the picker opens, same as
             // Swift's `@State private var query` starting blank each time
             // the popover view is recreated.
-            self.model_search.clear();
-            let focus = self.model_picker_focus.clone();
+            self.model_search_field
+                .update(cx, |field, cx| field.clear(cx));
+            let focus = self.model_search_field.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
-            window.on_next_frame(move |window, _| {
-                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
-            });
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
         }
         cx.notify();
     }
@@ -3006,43 +2903,38 @@ impl Chat {
 
     // --- Slash-command popup (F-CHAT-09) ---
 
-    /// The popup's candidate list: all commands while the query is empty,
-    /// then the case-insensitive prefix matches — capped at ten rows like
-    /// the reference `slashCandidates`.
+    /// The popup's candidate list: the filter's ranked view, resolved back
+    /// to their commands, capped at ten rows like the reference
+    /// `slashCandidates`. The filter also ranks substring matches, but the
+    /// slash popup's contract is prefix-only, so those are dropped here.
     fn slash_candidates(&self) -> Vec<&AvailableCommandInfo> {
-        let Some(query) = self.composer.slash_token() else {
+        let Some(query) = slash_token(&self.draft) else {
             return Vec::new();
         };
         let query = query.to_lowercase();
-        let matching = |command: &&AvailableCommandInfo| {
-            query.is_empty() || command.name.to_lowercase().starts_with(&query)
-        };
-        let all: Vec<&AvailableCommandInfo> = self.available_commands.iter().collect();
-        all.into_iter().filter(matching).take(10).collect()
+        self.slash_filter
+            .filtered()
+            .iter()
+            .take(10)
+            .filter_map(|&item| {
+                let name = self.slash_filter.items()[item].as_ref();
+                let command = self
+                    .available_commands
+                    .iter()
+                    .find(|command| command.name == name)?;
+                let matches = query.is_empty() || command.name.to_lowercase().starts_with(&query);
+                matches.then_some(command)
+            })
+            .collect()
     }
 
     fn slash_popup_visible(&self) -> bool {
         !self.slash_candidates().is_empty() && !self.slash_dismissed
     }
 
-    /// Inserts the selected command as a skill token. The popup closes
-    /// because the draft is no longer a single `/token`.
-    fn accept_slash_selection(&mut self, cx: &mut Context<Self>) {
-        let candidates = self.slash_candidates();
-        if candidates.is_empty() {
-            return;
-        }
-        let selected = self.slash_selected.min(candidates.len() - 1);
-        let name = candidates[selected].name.clone();
-        self.composer.replace_slash_token(&name);
-        self.slash_dismissed = true;
-        self.refresh_token_popups(cx);
-    }
-
     fn accept_slash_command(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.composer.replace_slash_token(name);
         self.slash_dismissed = true;
-        self.refresh_token_popups(cx);
+        self.set_composer_text(format!("/{name} "), cx);
     }
 
     // --- @ file mentions (F-CHAT-10) ---
@@ -3065,6 +2957,12 @@ impl Chat {
             let _ = this.update(cx, |chat, cx| {
                 if chat.mention_query.as_deref() == Some(query.as_str()) {
                     chat.mention_candidates = hits;
+                    chat.mention_filter = popover::Filter::new(
+                        chat.mention_candidates
+                            .iter()
+                            .map(|path| SharedString::from(path.clone()))
+                            .collect(),
+                    );
                     cx.notify();
                 }
             });
@@ -3072,9 +2970,17 @@ impl Chat {
     }
 
     fn accept_mention(&mut self, path: &str, cx: &mut Context<Self>) {
-        self.composer.accept_mention(path);
+        let Some((at, _)) = mention_token(&self.draft, self.draft_caret) else {
+            return;
+        };
+        let caret = self.draft_caret.min(self.draft.len());
+        let text = format!("{}@{path} {}", &self.draft[..at], &self.draft[caret..]);
+        if !self.accepted_mentions.iter().any(|known| known == path) {
+            self.accepted_mentions.push(path.to_string());
+        }
         self.mention_candidates.clear();
-        self.refresh_token_popups(cx);
+        self.mention_filter = popover::Filter::new(Vec::new());
+        self.set_composer_text(text, cx);
     }
 
     // --- Attachments (F-CHAT-11 / F-CHAT-12) ---
@@ -3135,11 +3041,10 @@ impl Chat {
         };
         use base64::Engine as _;
         let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-        self.composer.insert_chip_at_cursor(ComposerChip::Image {
-            mime: mime.to_string(),
-            base64,
+        self.attachments.push(ImageAttachment {
+            mime_type: mime.to_string(),
+            base64_data: base64,
         });
-        self.refresh_token_popups(cx);
         cx.notify();
     }
 
@@ -3232,9 +3137,9 @@ impl Chat {
                 };
                 use base64::Engine as _;
                 let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-                self.composer.insert_chip_at_cursor(ComposerChip::Image {
-                    mime: mime.to_string(),
-                    base64,
+                self.attachments.push(ImageAttachment {
+                    mime_type: mime.to_string(),
+                    base64_data: base64,
                 });
             } else {
                 // Relative to the worktree when the file lives inside it
@@ -3244,21 +3149,26 @@ impl Chat {
                     .strip_prefix(&self.agent_cwd)
                     .map(|relative| relative.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| path.display().to_string());
-                self.composer
-                    .insert_chip_at_cursor(ComposerChip::File { path: chip_path });
+                // A file drop becomes a `@path ` mention token in the draft,
+                // the same thing the `@` picker inserts — no chip model any
+                // more, just text plus the recorded path.
+                let caret = self.draft_caret.min(self.draft.len());
+                let text = format!(
+                    "{}@{} {}",
+                    &self.draft[..caret],
+                    chip_path,
+                    &self.draft[caret..]
+                );
+                if !self.accepted_mentions.contains(&chip_path) {
+                    self.accepted_mentions.push(chip_path);
+                }
+                self.set_composer_text(text, cx);
             }
         }
         self.refresh_token_popups(cx);
         if !rejections.is_empty() {
             self.show_attach_error(rejections.join("; "), cx);
         }
-        cx.notify();
-    }
-
-    /// Removes one chip at the given part index (its × control).
-    fn remove_composer_chip(&mut self, part_index: usize, cx: &mut Context<Self>) {
-        self.composer.remove_chip(part_index);
-        self.refresh_token_popups(cx);
         cx.notify();
     }
 
@@ -3310,7 +3220,9 @@ impl Chat {
         self.entries.clear();
         self.unfolded_turns.clear();
         self.list_state.splice(0..old_count, 0);
-        self.composer = Composer::new();
+        self.accepted_mentions.clear();
+        self.attachments.clear();
+        self.set_composer_text("", cx);
         self.reset_composer_popups();
         self.overflow_open = false;
         self.streaming = false;
@@ -3369,10 +3281,12 @@ impl Chat {
         if !self.can_send() {
             return;
         }
-        let draft = self.composer.draft();
-        self.composer = Composer::new();
+        let (text, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        let images = std::mem::take(&mut self.attachments);
+        self.accepted_mentions.clear();
         self.reset_composer_popups();
-        self.submit_turn(draft.text, draft.mention_paths, draft.images, cx);
+        self.set_composer_text("", cx);
+        self.submit_turn(text, mention_paths, images, cx);
     }
 
     /// Pushes the user turn into the transcript and sends it to the live
@@ -3407,13 +3321,14 @@ impl Chat {
     /// consumption of the composer; an empty draft commits nothing and
     /// leaves any previous item in place.
     fn commit_queued_item(&mut self, cx: &mut Context<Self>) {
-        if self.composer.is_empty() {
+        if self.draft.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
-        let draft = self.composer.draft();
-        self.composer = Composer::new();
+        let (text, _) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        self.accepted_mentions.clear();
         self.reset_composer_popups();
-        self.queued_item = Some(draft.text);
+        self.set_composer_text("", cx);
+        self.queued_item = Some(text);
         cx.notify();
     }
 
@@ -3444,9 +3359,9 @@ impl Chat {
     fn reset_composer_popups(&mut self) {
         self.slash_dismissed = false;
         self.last_slash_token = None;
-        self.slash_selected = 0;
         self.mention_candidates.clear();
         self.mention_query = None;
+        self.mention_filter = popover::Filter::new(Vec::new());
         self.attach_error = None;
     }
 
@@ -3680,71 +3595,12 @@ impl Chat {
         self.question_answer.for_request = None;
     }
 
-    fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        // F-CHAT-05: the composer is out of service while a permission/plan
-        // question is unanswered — the whole editor is disabled, not just
-        // Send, mirroring the Swift original's `.disabled(!canInteract)`.
-        if self.pending_question().is_some() {
-            return;
-        }
-        // F-CHAT-05: same rule, offline half — `canInteract` excludes
-        // `.disconnected` too, so a disconnected composer refuses typed
-        // characters exactly like it refuses them during permission-wait.
-        // Returning here before ever touching `self.composer` is what keeps
-        // this safe for a draft typed *before* the connection dropped: see
-        // `offline_enter_never_discards_the_typed_draft`.
-        if self.is_offline() {
-            return;
-        }
-        // F-CHAT-16: the only remaining path into the composer while the
-        // model picker is open is Shift+Enter's bound `Newline` action
-        // (plain typing is already redirected to `model_search` in
-        // `on_composer_key`, before it ever reaches here).
-        if self.model_picker_open {
-            return;
-        }
-        self.composer.insert_text(text);
-        self.refresh_token_popups(cx);
-    }
-
-    /// Recomputes the token-driven popup state after any edit: the slash
-    /// token resets its dismissal/selection, the mention token starts or
-    /// cancels its candidate walk.
-    fn refresh_token_popups(&mut self, cx: &mut Context<Self>) {
-        let slash_token = self.composer.slash_token();
-        if slash_token != self.last_slash_token {
-            self.last_slash_token = slash_token;
-            self.slash_dismissed = false;
-            self.slash_selected = 0;
-        }
-        let mention_token = self.composer.mention_token();
-        if mention_token != self.mention_query {
-            self.mention_candidates.clear();
-            self.mention_query = mention_token;
-            self.schedule_mention_walk(cx);
-        }
-    }
-
     fn send_action(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
-        // F-CHAT-16: Enter is bound to `Send` for the whole "ChatComposer"
-        // context, which the model picker's search field inherits (it has
-        // no keybinding of its own to shadow it) — without this, pressing
-        // Enter while typing a search would actually send the composer's
-        // draft.
-        if self.model_picker_open {
-            return;
-        }
-        if self.slash_popup_visible() {
-            self.accept_slash_selection(cx);
+        if self.accept_active_popup_row(cx) {
             cx.notify();
             return;
         }
         self.send(cx);
-    }
-
-    fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        self.insert_text("\n", cx);
-        cx.notify();
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -3760,11 +3616,35 @@ impl Chat {
         } else if self.overflow_open {
             self.overflow_open = false;
             cx.notify();
-        } else if self.slash_popup_visible() {
+        } else if self.open_token_popup() != TokenPopup::None {
             self.slash_dismissed = true;
+            self.mention_candidates.clear();
+            self.mention_filter = popover::Filter::new(Vec::new());
             cx.notify();
         } else {
             self.cancel_turn(cx);
+        }
+    }
+
+    /// Recomputes the token-driven popup state after any edit: the slash
+    /// token resets its dismissal/selection, the mention token starts or
+    /// cancels its candidate walk.
+    fn refresh_token_popups(&mut self, cx: &mut Context<Self>) {
+        let slash = slash_token(&self.draft).map(str::to_string);
+        if slash != self.last_slash_token {
+            self.slash_dismissed = false;
+            if let Some(query) = &slash {
+                self.slash_filter.refilter(query);
+            }
+            self.last_slash_token = slash;
+        }
+        let mention =
+            mention_token(&self.draft, self.draft_caret).map(|(_, token)| token.to_string());
+        if mention != self.mention_query {
+            self.mention_candidates.clear();
+            self.mention_filter = popover::Filter::new(Vec::new());
+            self.mention_query = mention;
+            self.schedule_mention_walk(cx);
         }
     }
 
@@ -3929,73 +3809,6 @@ impl Chat {
         chat
     }
 
-    fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        // F-CHAT-16: Backspace is a bound action (chat-root's own
-        // `.on_action(Backspace)`), not a raw key `on_composer_key` ever
-        // sees, so its model-picker redirect has to live here instead —
-        // otherwise it would silently eat a character from the composer's
-        // draft while the user thinks they're correcting a search typo.
-        if self.model_picker_open {
-            self.model_search.pop();
-            cx.notify();
-            return;
-        }
-        // F-CHAT-05: see `insert_text` — the editor is fully disabled while
-        // a permission/plan question is unanswered, or while disconnected.
-        if self.pending_question().is_some() || self.is_offline() {
-            return;
-        }
-        self.composer.backspace();
-        self.refresh_token_popups(cx);
-        cx.notify();
-    }
-
-    fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        // F-CHAT-05: see `insert_text` — the editor is fully disabled while
-        // a permission/plan question is unanswered, or while disconnected.
-        if self.pending_question().is_some() || self.is_offline() {
-            return;
-        }
-        self.composer.delete_forward();
-        self.refresh_token_popups(cx);
-        cx.notify();
-    }
-
-    fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.move_left(false);
-        cx.notify();
-    }
-
-    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.move_right(false);
-        cx.notify();
-    }
-
-    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.move_left(true);
-        cx.notify();
-    }
-
-    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.move_right(true);
-        cx.notify();
-    }
-
-    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.select_all();
-        cx.notify();
-    }
-
-    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.move_home(false);
-        cx.notify();
-    }
-
-    fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer.move_end(false);
-        cx.notify();
-    }
-
     fn on_composer_key(
         &mut self,
         event: &KeyDownEvent,
@@ -4023,93 +3836,14 @@ impl Chat {
             }
             return;
         }
-        // F-CHAT-16: while the model picker is open, every key belongs to
-        // its search field, not the composer — printable characters type
-        // (Backspace has its own guard, since it's a bound action rather
-        // than a raw key this handler ever sees), Escape closes the picker
-        // the same way its own `Cancel` action binding does.
-        if self.model_picker_open {
-            self.model_search_blink.wake();
-            if event.keystroke.key == "escape" {
-                self.model_picker_open = false;
-                cx.notify();
-            } else if let Some(character) = event.keystroke.key_char.as_deref()
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.control
-                && character != "\n"
-            {
-                self.model_search.push_str(character);
-                cx.notify();
-            }
-            return;
-        }
+        // F-CHAT-16: the model picker's search is a real TextField — typing,
+        // Backspace and Escape are the field's own job; no raw-key redirect
+        // lives here any more.
         if event.keystroke.key == "c"
             && event.keystroke.modifiers.control
             && self.transcript_selection.is_some()
         {
             self.copy_transcript(&CopyTranscript, _window, cx);
-            return;
-        }
-        // Bound keys (enter, shift-enter, escape, …) are consumed by the
-        // keymap actions first — gpui stops propagation once an action
-        // listener fires — so these branches are fallbacks for hosts that
-        // never installed the keymap via [`Chat::bind_keys`]. Escape in
-        // particular must always cancel a streaming turn, whether it arrives
-        // as the `Cancel` action or as a raw key event.
-        if matches!(event.keystroke.key.as_str(), "enter" | "return") {
-            if event.keystroke.modifiers.shift {
-                self.insert_text("\n", cx);
-                cx.notify();
-            } else if self.slash_popup_visible() {
-                self.accept_slash_selection(cx);
-                cx.notify();
-            } else {
-                self.send(cx);
-            }
-            return;
-        }
-        if event.keystroke.key == "escape" {
-            if self.slash_popup_visible() {
-                self.slash_dismissed = true;
-                cx.notify();
-            } else {
-                self.cancel_turn(cx);
-            }
-            return;
-        }
-        // Slash-popup keyboard navigation: the popup keeps the composer's
-        // focus so typing keeps filtering, and up/down/tab steer the
-        // selection. Tab may be consumed by focus traversal in some hosts;
-        // Enter (bound to `Send`, handled above) accepts there too.
-        if self.slash_popup_visible() && !event.keystroke.modifiers.shift {
-            match event.keystroke.key.as_str() {
-                "up" => {
-                    self.slash_selected = self.slash_selected.saturating_sub(1);
-                    cx.notify();
-                    return;
-                }
-                "down" => {
-                    let last = self.slash_candidates().len().saturating_sub(1);
-                    self.slash_selected = (self.slash_selected + 1).min(last);
-                    cx.notify();
-                    return;
-                }
-                "tab" => {
-                    self.accept_slash_selection(cx);
-                    cx.notify();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(character) = event.keystroke.key_char.as_deref()
-            && !event.keystroke.modifiers.platform
-            && !event.keystroke.modifiers.control
-            && character != "\n"
-        {
-            self.insert_text(character, cx);
-            cx.notify();
         }
     }
 
@@ -5905,22 +5639,9 @@ impl Chat {
         column.into_any_element()
     }
 
-    /// Blink timer tick for the composer's insertion caret: flips the bar
-    /// and repaints (caret::schedule re-arms from the next render).
-    fn flip_composer_blink(&mut self, cx: &mut Context<Self>) {
-        self.composer_blink.flip();
-        cx.notify();
-    }
-
     /// Blink timer tick for the question answer field's caret.
     fn flip_answer_blink(&mut self, cx: &mut Context<Self>) {
         self.answer_blink.flip();
-        cx.notify();
-    }
-
-    /// Blink timer tick for the model picker's search row.
-    fn flip_model_search_blink(&mut self, cx: &mut Context<Self>) {
-        self.model_search_blink.flip();
         cx.notify();
     }
 
@@ -5931,72 +5652,21 @@ impl Chat {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let typography = theme.typography;
-        let focused = self.composer_focus.is_focused(window);
+        let focused = self
+            .composer_field
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        let placeholder = self.composer_placeholder();
+        if placeholder != self.composer_placeholder_shown {
+            self.composer_placeholder_shown = placeholder.clone();
+            self.composer_field
+                .update(cx, |field, cx| field.set_placeholder(placeholder, cx));
+        }
+        let disabled = self.composer_disabled();
         let can_send = self.can_send();
         let entity = cx.entity();
-        let entity_for_focus = entity.clone();
-
-        // The composer's insertion caret. A cursor move or edit since the
-        // last frame wakes the blink (the bar must be solid right after the
-        // user interacts), then exactly one toggle timer is armed while the
-        // composer owns focus.
-        let caret_sig = (
-            self.composer.cursor().0,
-            self.composer.cursor().1,
-            self.composer.parts().len(),
-        );
-        if caret_sig != self.composer_caret_sig {
-            self.composer_blink.wake();
-            self.composer_caret_sig = caret_sig;
-        }
-        caret::schedule(
-            &mut self.composer_blink,
-            focused,
-            Self::flip_composer_blink,
-            cx,
-        );
-        let caret_visible = focused && self.composer_blink.visible();
-        // The model picker's search row rides this same render pass — it is
-        // drawn from here, and this is where a `Window` exists to ask the
-        // focus system.
-        let model_search_focused =
-            self.model_picker_open && self.model_picker_focus.is_focused(window);
-        caret::schedule(
-            &mut self.model_search_blink,
-            model_search_focused,
-            Self::flip_model_search_blink,
-            cx,
-        );
-        self.model_search_caret_visible = model_search_focused && self.model_search_blink.visible();
-        let model_search_caret_visible = self.model_search_caret_visible;
-        let composer_paint = self.composer_paint.clone();
-        composer_paint.caret.set(None);
-        composer_paint.selection.borrow_mut().clear();
-        let caret_bar = || {
-            div()
-                .debug_selector(|| "composer-caret".into())
-                .child(caret::bar(
-                    typography.body_line_height,
-                    theme.text,
-                    caret_visible,
-                ))
-                .into_any_element()
-        };
-        // Where the insertion caret sits in the draft: `(part index, char
-        // offset inside that Text part)`, `part == parts.len()` at the end.
-        // The model's end-of-document position is folded onto the end of a
-        // trailing text run, so that run paints the caret at its last glyph
-        // (wherever the run wrapped to) instead of a standalone bar being
-        // laid out after the run's whole block — on a row of its own once
-        // the run spans more than one.
-        let (caret_part, caret_offset) = match self.composer.parts().last() {
-            Some(ComposerPart::Text(last))
-                if self.composer.cursor().0 == self.composer.parts().len() =>
-            {
-                (self.composer.parts().len() - 1, last.chars().count())
-            }
-            _ => self.composer.cursor(),
-        };
 
         // Swift's `modePill` (ComposerControlBar.swift) always pairs a
         // status dot with a label, whether that label is a raw state word
@@ -6118,9 +5788,12 @@ impl Chat {
                 // control row and stranded its own chevron ~200px from the
                 // model name, next to the overflow button -- so the chevron
                 // read as belonging to nothing and the model value read as a
-                // caption rather than a picker. `min_w_0` still lets it
-                // shrink, which is what keeps the name's ellipsis working.
-                .min_w_0()
+                // caption rather than a picker. It still shrinks on a tight
+                // row -- that is what keeps the name's ellipsis working --
+                // but a 56px floor stops it collapsing to nothing: the row
+                // degrades by clipping the chip behind the cluster's
+                // `overflow_hidden`, never by erasing the picker.
+                .min_w(px(56.0))
                 .hover(|style| style.bg(theme.overlay))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
@@ -6189,7 +5862,8 @@ impl Chat {
         // carries its own label. Drawn only when the agent reports a value
         // AND the picker can actually open, so this is never a click target
         // that leads nowhere. `flex_none` keeps it intact while the model
-        // pill beside it absorbs the squeeze on a narrow pane.
+        // chip beside it absorbs the squeeze on a narrow pane — the effort
+        // chip is the row's clip victim, never the send disc's neighbour.
         let effort_control = effort_label
             .filter(|_| self.model_control_visible())
             .map(|label| {
@@ -6221,7 +5895,8 @@ impl Chat {
                     .child(div().flex_none().text_color(theme.text_faint).child("⌄"))
             });
 
-        let model_picker = if self.model_picker_open {
+        let view = bezel::motion::Painter::of(cx);
+        let model_picker = self.model_picker_open.then(|| {
             let picker_entity = model_entity.clone();
             // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
             // has none, and the ACP layer never carries one — it is purely
@@ -6233,221 +5908,193 @@ impl Chat {
                 .available_models
                 .first()
                 .map(|option| option.id.clone());
+            let query = self.model_search_field.read(cx).content().to_string();
             let filtered_models: Vec<ModelOption> = self
                 .available_models
                 .iter()
-                .filter(|option| model_query_matches(option, &self.model_search))
+                .filter(|option| model_query_matches(option, &query))
                 .cloned()
                 .collect();
-            let search_placeholder = self.model_search.is_empty();
-            let search_text = self.model_search.clone();
-            Some(
+            let selected_id = self.selected_model.clone();
+            popover::anchored_menu_above(
+                "model-picker-menu",
                 div()
                     .id("model-picker")
                     .debug_selector(|| "model-picker".into())
                     .key_context("ChatModelPicker")
-                    .track_focus(&self.model_picker_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(42.0))
-                    .bottom(px(43.0))
                     .w(px(245.0))
-                    // #233: defence in depth — anything a future layout
-                    // change overflows the fixed popup clips at the border
-                    // instead of painting over the composer behind it.
-                    .overflow_hidden()
-                    .p(px(8.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.model_picker_open = false;
                         cx.notify();
                     }))
-                    .when(!self.available_models.is_empty(), |this| {
-                        this.child(
+                    .child(
+                        popover::popover_card(&bezel_theme).child(
                             div()
-                                .id("model-search-input")
-                                .debug_selector(|| "model-search-input".into())
-                                .w_full()
-                                .mb(px(6.0))
-                                .px(px(8.0))
-                                .py(px(5.0))
-                                .rounded(theme.radii.control)
-                                .bg(theme.surface_raised)
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_size(typography.footnote)
                                 .flex()
-                                .items_center()
-                                .overflow_hidden()
-                                .child(
-                                    caret::field_value(if search_placeholder {
+                                .flex_col()
+                                .when(!self.available_models.is_empty(), |this| {
+                                    this.child(
                                         div()
+                                            .id("model-search-input")
+                                            .debug_selector(|| "model-search-input".into())
+                                            .w_full()
+                                            .mb(px(6.0))
+                                            .child(self.model_search_field.clone()),
+                                    )
+                                })
+                                .when(self.available_models.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .p(px(8.0))
+                                            .text_size(typography.footnote)
                                             .text_color(theme.text_faint)
-                                            .child("Search models…")
-                                            .into_any_element()
-                                    } else {
-                                        div()
-                                            .text_color(theme.text)
-                                            .child(search_text)
-                                            .into_any_element()
-                                    })
-                                    .debug_selector(|| "model-search-text".into()),
+                                            .child(
+                                                "The connected agent did not report any models.",
+                                            ),
+                                    )
+                                })
+                                .when(
+                                    !self.available_models.is_empty() && filtered_models.is_empty(),
+                                    |this| {
+                                        this.child(
+                                            div()
+                                                .id("model-picker-no-match")
+                                                .debug_selector(|| "model-picker-no-match".into())
+                                                .p(px(8.0))
+                                                .text_size(typography.footnote)
+                                                .text_color(theme.text_faint)
+                                                .child("No models match"),
+                                        )
+                                    },
                                 )
-                                .child(div().debug_selector(|| "model-search-caret".into()).child(
-                                    caret::bar(
-                                        typography.body_line_height,
-                                        theme.text,
-                                        model_search_caret_visible,
-                                    ),
-                                )),
-                        )
-                    })
-                    .when(self.available_models.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .p(px(8.0))
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child("The connected agent did not report any models."),
-                        )
-                    })
-                    .when(
-                        !self.available_models.is_empty() && filtered_models.is_empty(),
-                        |this| {
-                            this.child(
-                                div()
-                                    .id("model-picker-no-match")
-                                    .debug_selector(|| "model-picker-no-match".into())
-                                    .p(px(8.0))
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.text_faint)
-                                    .child("No models match"),
-                            )
-                        },
-                    )
-                    .children(filtered_models.iter().cloned().map(|option| {
-                        let option_id = option.id.clone();
-                        let option_name = option.name.clone();
-                        let option_entity = picker_entity.clone();
-                        let is_recommended = recommended_id.as_deref() == Some(option_id.as_str());
-                        div()
-                            .id(format!("model-option-{option_id}"))
-                            .debug_selector(move || format!("model-option-{option_id}"))
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(8.0))
-                            .py(px(7.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(move |_, _, cx| {
-                                option_entity
-                                    .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
-                            })
-                            .child(div().flex_1().min_w_0().text_ellipsis().child(option_name))
-                            .when(is_recommended, |this| {
-                                this.child(
-                                    div()
-                                        .id("model-option-recommended")
-                                        .debug_selector(|| "model-option-recommended".into())
-                                        .flex_shrink_0()
-                                        .px(px(5.0))
-                                        .rounded(px(4.0))
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.text)
-                                        .bg(theme.overlay_strong)
-                                        .child("Recommended"),
-                                )
-                            })
-                    }))
-                    .when_some(self.effort.clone(), |this, effort| {
-                        if effort.choices.is_empty() {
-                            return this;
-                        }
-                        let effort_entity = picker_entity.clone();
-                        let effort_name =
-                            effort.name.clone().unwrap_or_else(|| "Effort".to_string());
-                        let current = effort.current_value.clone();
-                        let children: Vec<AnyElement> = vec![
-                            div()
-                                .w_full()
-                                .px(px(8.0))
-                                .pt(px(4.0))
-                                .text_size(typography.caption2)
-                                .text_color(theme.text_faint)
-                                .child(effort_name)
-                                .into_any_element(),
-                        ];
-                        let choices: Vec<AnyElement> = effort
-                            .choices
-                            .iter()
-                            .map(|choice| {
-                                let choice_value = choice.value.clone();
-                                let choice_name = choice.name.clone();
-                                let is_selected = current.as_deref() == Some(choice_value.as_str());
-                                let row_entity = effort_entity.clone();
-                                let choice_value_for_id = choice_value.clone();
-                                div()
-                                    .id(format!("effort-option-{}", choice_value))
-                                    .debug_selector(move || {
-                                        format!("effort-option-{}", choice_value_for_id)
-                                    })
-                                    .h(px(22.0))
-                                    .px(px(8.0))
-                                    .rounded(theme.radii.control)
-                                    .flex()
-                                    .items_center()
-                                    .text_size(typography.caption2)
-                                    .text_color(theme.text)
-                                    .when(is_selected, |this| this.bg(theme.element_active))
-                                    .hover(|style| style.bg(theme.overlay))
+                                .children(filtered_models.iter().cloned().map(|option| {
+                                    let option_id = option.id.clone();
+                                    let option_name = option.name.clone();
+                                    let option_entity = picker_entity.clone();
+                                    let is_recommended =
+                                        recommended_id.as_deref() == Some(option_id.as_str());
+                                    let is_selected =
+                                        selected_id.as_deref() == Some(option_id.as_str());
+                                    popover::menu_row_nav(
+                                        &bezel_theme,
+                                        is_selected,
+                                        false,
+                                        bezel::motion::Fade::new(
+                                            view,
+                                            format!("model-option-{option_id}"),
+                                        ),
+                                    )
+                                    .id(format!("model-option-{option_id}"))
+                                    .debug_selector(move || format!("model-option-{option_id}"))
                                     .on_click(move |_, _, cx| {
-                                        row_entity.update(cx, |chat, cx| {
-                                            chat.select_effort(choice_value.clone(), cx);
+                                        option_entity.update(cx, |chat, cx| {
+                                            chat.select_model(option.clone(), cx);
                                         });
                                     })
-                                    .child(choice_name)
-                                    .into_any_element()
-                            })
-                            .collect::<Vec<_>>();
-                        this.child(div().h(px(1.0)).w_full().bg(theme.border))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .children(children)
                                     .child(
-                                        // #233: the choice count is agent-reported
-                                        // and not under the picker's control (Claude
-                                        // Code advertises six, whose chips plus gaps
-                                        // exceed the popup's usable width), so the
-                                        // row wraps onto a second line instead of
-                                        // painting chips outside the picker border —
-                                        // same shape as the colour swatch row's
-                                        // `flex_wrap` in `controls::color_picker`
-                                        // (F-PRJ-13).
-                                        div().flex().flex_wrap().gap(px(4.0)).children(choices),
-                                    ),
-                            )
-                    }),
+                                        div().flex_1().min_w_0().text_ellipsis().child(option_name),
+                                    )
+                                    .when(
+                                        is_recommended,
+                                        |this| {
+                                            this.child(
+                                                div()
+                                                    .id("model-option-recommended")
+                                                    .debug_selector(|| {
+                                                        "model-option-recommended".into()
+                                                    })
+                                                    .flex_shrink_0()
+                                                    .px(px(5.0))
+                                                    .rounded(px(4.0))
+                                                    .text_size(typography.caption2)
+                                                    .text_color(theme.text)
+                                                    .bg(theme.overlay_strong)
+                                                    .child("Recommended"),
+                                            )
+                                        },
+                                    )
+                                }))
+                                .when_some(self.effort.clone(), |this, effort| {
+                                    if effort.choices.is_empty() {
+                                        return this;
+                                    }
+                                    let effort_entity = picker_entity.clone();
+                                    let effort_name =
+                                        effort.name.clone().unwrap_or_else(|| "Effort".to_string());
+                                    let current = effort.current_value.clone();
+                                    let choices: Vec<AnyElement> = effort
+                                        .choices
+                                        .iter()
+                                        .map(|choice| {
+                                            let choice_value = choice.value.clone();
+                                            let choice_name = choice.name.clone();
+                                            let is_selected =
+                                                current.as_deref() == Some(choice_value.as_str());
+                                            let row_entity = effort_entity.clone();
+                                            let choice_value_for_id = choice_value.clone();
+                                            div()
+                                                .id(format!("effort-option-{}", choice_value))
+                                                .debug_selector(move || {
+                                                    format!("effort-option-{}", choice_value_for_id)
+                                                })
+                                                .h(px(22.0))
+                                                .px(px(8.0))
+                                                .rounded(theme.radii.control)
+                                                .flex()
+                                                .items_center()
+                                                .text_size(typography.caption2)
+                                                .text_color(theme.text)
+                                                .when(is_selected, |this| {
+                                                    this.bg(theme.element_active)
+                                                })
+                                                .hover(|style| style.bg(theme.overlay))
+                                                .on_click(move |_, _, cx| {
+                                                    row_entity.update(cx, |chat, cx| {
+                                                        chat.select_effort(
+                                                            choice_value.clone(),
+                                                            cx,
+                                                        );
+                                                    });
+                                                })
+                                                .child(choice_name)
+                                                .into_any_element()
+                                        })
+                                        .collect::<Vec<_>>();
+                                    this.child(div().h(px(1.0)).w_full().bg(theme.border))
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .pt(px(4.0))
+                                                .text_size(typography.caption2)
+                                                .text_color(theme.text_faint)
+                                                .child(effort_name),
+                                        )
+                                        .child(
+                                            // #233: the choice count is agent-reported
+                                            // and not under the picker's control (Claude
+                                            // Code advertises six, whose chips plus gaps
+                                            // exceed the popup's usable width), so the
+                                            // row wraps onto a second line instead of
+                                            // painting chips outside the picker border —
+                                            // same shape as the colour swatch row's
+                                            // `flex_wrap` in `controls::color_picker`
+                                            // (F-PRJ-13).
+                                            div().flex().flex_wrap().gap(px(4.0)).children(choices),
+                                        )
+                                }),
+                        ),
+                    )
+                    .into_any_element(),
+                None,
             )
-        } else {
-            None
-        };
+        });
 
         // F-CHAT-15: the session-mode picker, anchored above the status
         // pill the same way `model_picker` anchors above the model chip.
         // No search field — mode lists are small and entirely agent-defined
         // (ask/plan/auto today), so a flat list of rows is enough.
-        let mode_picker = if self.mode_picker_open {
+        let mode_picker = self.mode_picker_open.then(|| {
             let mode_entity = entity.clone();
             let current_id = self
                 .mode_catalog
@@ -6459,64 +6106,62 @@ impl Chat {
                 .as_ref()
                 .map(|catalog| catalog.options.clone())
                 .unwrap_or_default();
-            Some(
+            popover::anchored_menu_above(
+                "mode-picker-menu",
                 div()
                     .id("mode-picker")
                     .debug_selector(|| "mode-picker".into())
                     .key_context("ChatModelPicker")
                     .track_focus(&self.mode_picker_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .left(px(0.0))
-                    .bottom(px(43.0))
                     .w(px(200.0))
-                    .p(px(6.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.mode_picker_open = false;
                         cx.notify();
                     }))
-                    .when(options.is_empty(), |this| {
-                        this.child(
+                    .child(
+                        popover::popover_card(&bezel_theme).child(
                             div()
-                                .p(px(8.0))
-                                .text_size(typography.footnote)
-                                .text_color(theme.text_faint)
-                                .child("No modes offered"),
-                        )
-                    })
-                    .children(options.into_iter().map(|mode| {
-                        let mode_id = mode.id.clone();
-                        let mode_name = mode.name.clone();
-                        let row_entity = mode_entity.clone();
-                        let is_selected = mode.id == current_id;
-                        div()
-                            .id(format!("mode-option-{mode_id}"))
-                            .debug_selector(move || format!("mode-option-{mode_id}"))
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(theme.radii.control)
-                            .text_size(typography.footnote)
-                            .text_color(theme.text)
-                            .when(is_selected, |this| this.bg(theme.element_active))
-                            .hover(|style| style.bg(theme.overlay))
-                            .on_click(move |_, _, cx| {
-                                row_entity
-                                    .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
-                            })
-                            .child(mode_name)
-                    })),
+                                .flex()
+                                .flex_col()
+                                .when(options.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .p(px(8.0))
+                                            .text_size(typography.footnote)
+                                            .text_color(theme.text_faint)
+                                            .child("No modes offered"),
+                                    )
+                                })
+                                .children(options.into_iter().map(|mode| {
+                                    let mode_id = mode.id.clone();
+                                    let mode_name = mode.name.clone();
+                                    let row_entity = mode_entity.clone();
+                                    let is_selected = mode.id == current_id;
+                                    popover::menu_row_nav(
+                                        &bezel_theme,
+                                        is_selected,
+                                        false,
+                                        bezel::motion::Fade::new(
+                                            view,
+                                            format!("mode-option-{mode_id}"),
+                                        ),
+                                    )
+                                    .id(format!("mode-option-{mode_id}"))
+                                    .debug_selector(move || format!("mode-option-{mode_id}"))
+                                    .on_click(move |_, _, cx| {
+                                        row_entity.update(cx, |chat, cx| {
+                                            chat.select_mode(mode.clone(), cx)
+                                        });
+                                    })
+                                    .child(mode_name)
+                                })),
+                        ),
+                    )
+                    .into_any_element(),
+                None,
             )
-        } else {
-            None
-        };
+        });
 
         let context_usage = self.context_usage.clone();
         let context_amount = context_usage
@@ -6623,23 +6268,15 @@ impl Chat {
 
         let context_popover = if self.context_popover_open {
             let usage = context_usage.clone();
-            Some(
+            Some(popover::anchored_menu_above_end(
+                "context-popover-menu",
                 div()
                     .id("context-popover")
                     .debug_selector(|| "context-popover".into())
                     .key_context("ChatContextPopover")
                     .track_focus(&self.context_popover_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(16.0))
-                    .bottom(px(43.0))
                     .w(px(285.0))
-                    .p(px(12.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.context_popover_open = false;
                         cx.notify();
@@ -6735,8 +6372,10 @@ impl Chat {
                                 .text_color(theme.text_faint)
                                 .child("The agent has not reported context usage yet."),
                         )
-                    }),
-            )
+                    })
+                    .into_any_element(),
+                None,
+            ))
         } else {
             None
         };
@@ -6751,125 +6390,156 @@ impl Chat {
         // longer a single unbroken prefix. Keyboard selection comes from the
         // composer key path (up/down/tab, enter accepts via `Send`); click
         // accepts directly.
-        let slash_popup =
-            if self.slash_popup_visible() {
-                let candidates = self.slash_candidates();
-                let selected = self.slash_selected.min(candidates.len().saturating_sub(1));
-                let slash_entity = entity.clone();
-                Some(
-                    div()
-                        .id("slash-popup")
-                        .debug_selector(|| "slash-popup".into())
-                        .absolute()
-                        .left(px(16.0))
-                        .bottom(px(43.0))
-                        .w(px(360.0))
-                        .p(px(6.0))
-                        .rounded(theme.radii.toast)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_lg()
-                        .children(candidates.into_iter().enumerate().map(
-                            move |(index, command)| {
-                                let name = command.name.clone();
-                                let description = command.description.clone();
-                                let row_entity = slash_entity.clone();
-                                let is_selected = index == selected;
-                                let name_for_id = name.clone();
-                                let accept_name = name.clone();
-                                div()
-                                    .id(format!("slash-option-{name}"))
-                                    .debug_selector(move || format!("slash-option-{name_for_id}"))
-                                    .w_full()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(theme.radii.control)
-                                    .flex()
-                                    .flex_col()
-                                    .when(is_selected, |this| this.bg(theme.element_active))
-                                    .on_click(move |_, _, cx| {
-                                        row_entity.update(cx, |chat, cx| {
-                                            chat.accept_slash_command(&accept_name, cx);
-                                        });
-                                    })
-                                    .child(
-                                        div()
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.text)
-                                            .child(format!("/{name}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(typography.caption2)
-                                            .text_color(theme.text_faint)
-                                            .child(description),
-                                    )
-                            },
-                        )),
-                )
-            } else {
-                None
-            };
+        //
+        // Anchored to the composer card's top edge (`bottom: 100%`), not a
+        // fixed distance up from its bottom: the card is taller than that
+        // distance, so the list used to sit *inside* it — over the input
+        // rows, in the card's own `surface_raised` fill, where it read as a
+        // transparent veil rather than a menu. The same token paints both
+        // on purpose (they are the same step above the page); what makes
+        // this a card of its own is that it floats over the page, with the
+        // gap below it.
+        let slash_popup = if self.slash_popup_visible() {
+            let candidates = self.slash_candidates();
+            let active = self.slash_filter.active();
+            let view = bezel::motion::Painter::of(cx);
+            let anchor = self
+                .composer_field
+                .read(cx)
+                .offset_bounds(0, window)
+                .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
+            anchor.map(|anchor| {
+                let rows: Vec<AnyElement> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, command)| {
+                        let name = command.name.clone();
+                        let tooltip = slash_option_tooltip(&command.description);
+                        let row_entity = entity.clone();
+                        let accept_name = name.clone();
+                        let name_for_id = name.clone();
+                        let name_for_label_id = name.clone();
+                        // One line per row: the name. The description is
+                        // the row's tooltip, so ten rows stay ten lines
+                        // and the list does not fill the pane.
+                        popover::menu_row(
+                            &bezel_theme,
+                            Some(position) == active,
+                            bezel::motion::Fade::new(view, format!("slash-option-{name}")),
+                        )
+                        .id(SharedString::from(format!("slash-option-{name}")))
+                        .debug_selector(move || format!("slash-option-{name_for_id}"))
+                        .when_some(tooltip, |this, text| {
+                            this.tooltip(move |window, cx| Tooltip::text(text.clone(), window, cx))
+                        })
+                        .on_click(move |_, _, cx| {
+                            row_entity.update(cx, |chat, cx| {
+                                chat.accept_slash_command(&accept_name, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("slash-option-name-{name_for_label_id}")
+                                })
+                                .text_size(typography.footnote)
+                                .text_color(bezel_theme.text)
+                                .child(format!("/{name}")),
+                        )
+                        .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .child(composer_view::menu_above_at(
+                        "slash-popup-menu",
+                        anchor,
+                        popover::popover_card(&bezel_theme)
+                            .debug_selector(|| "slash-popup".into())
+                            .w(px(280.0))
+                            .child(div().flex().flex_col().children(rows))
+                            .into_any_element(),
+                    ))
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
 
         // @ file-mention popup (F-CHAT-10): the bounded filesystem walk's
-        // results for the trailing `@token`. Hidden when the token matches
-        // nothing.
-        let mention_popup =
-            if self.composer.mention_token().is_some() && !self.mention_candidates.is_empty() {
-                let mention_entity = entity.clone();
-                let candidates = self.mention_candidates.clone();
-                Some(
-                    div()
-                        .id("mention-popup")
-                        .debug_selector(|| "mention-popup".into())
-                        .absolute()
-                        .left(px(16.0))
-                        .bottom(px(43.0))
-                        .w(px(360.0))
-                        .p(px(6.0))
-                        .rounded(theme.radii.toast)
-                        .bg(theme.surface_raised)
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_lg()
-                        .children(candidates.into_iter().map(move |path| {
-                            let row_entity = mention_entity.clone();
-                            let path_for_id = path.clone();
-                            let path_for_accept = path.clone();
+        // results for the trailing `@token`, anchored above the token. Hidden
+        // when the token matches nothing.
+        let mention_popup = if mention_token(&self.draft, self.draft_caret).is_some()
+            && !self.mention_candidates.is_empty()
+        {
+            let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
+            let candidates = self.mention_candidates.clone();
+            let active = self.mention_filter.active();
+            let view = bezel::motion::Painter::of(cx);
+            let anchor = self
+                .composer_field
+                .read(cx)
+                .offset_bounds(at, window)
+                .map(|row| gpui::point(row.left(), row.top() - px(8.0)));
+            anchor.map(|anchor| {
+                let rows: Vec<AnyElement> = candidates
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, path)| {
+                        let row_entity = entity.clone();
+                        let path_for_id = path.clone();
+                        let path_for_accept = path.clone();
+                        popover::menu_row(
+                            &bezel_theme,
+                            Some(position) == active,
+                            bezel::motion::Fade::new(view, format!("mention-option-{path}")),
+                        )
+                        .id(SharedString::from(format!("mention-option-{path_for_id}")))
+                        .debug_selector(move || format!("mention-option-{path_for_id}"))
+                        // Pin the row to the card's inner width instead of
+                        // trusting cross-axis stretch, so the path below has
+                        // a definite box to ellipsize inside.
+                        .w_full()
+                        .min_w_0()
+                        .on_click(move |_, _, cx| {
+                            row_entity.update(cx, |chat, cx| {
+                                chat.accept_mention(&path_for_accept, cx);
+                            });
+                        })
+                        .child(
+                            bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
+                                .size(px(12.0))
+                                .text_color(bezel_theme.text_faint),
+                        )
+                        .child(
                             div()
-                                .id(format!("mention-option-{path_for_id}"))
-                                .debug_selector(move || format!("mention-option-{path_for_id}"))
-                                .w_full()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .rounded(theme.radii.control)
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    row_entity.update(cx, |chat, cx| {
-                                        chat.accept_mention(&path_for_accept, cx);
-                                    });
-                                })
-                                .child(
-                                    div()
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.text_faint)
-                                        .child("▤"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(typography.footnote)
-                                        .text_color(theme.text)
-                                        .child(path),
-                                )
-                        })),
-                )
-            } else {
-                None
-            };
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(typography.footnote)
+                                .text_color(bezel_theme.text)
+                                .child(path),
+                        )
+                        .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .child(composer_view::menu_above_at(
+                        "mention-popup-menu",
+                        anchor,
+                        popover::popover_card(&bezel_theme)
+                            .id("mention-popup-card")
+                            .debug_selector(|| "mention-popup-card".into())
+                            .w(px(360.0))
+                            .child(div().flex().flex_col().children(rows))
+                            .into_any_element(),
+                    ))
+                    .into_any_element()
+            })
+        } else {
+            None
+        };
 
         // Overflow menu (F-CHAT-14): Follow Edited Files toggle and New
         // Conversation, the two secondary composer actions the control row
@@ -6880,23 +6550,15 @@ impl Chat {
             } else {
                 "Follow Edited Files"
             };
-            Some(
+            Some(popover::anchored_menu_above_end(
+                "composer-overflow-menu-menu",
                 div()
                     .id("composer-overflow-menu")
                     .debug_selector(|| "composer-overflow-menu".into())
                     .key_context("ChatOverflowMenu")
                     .track_focus(&self.overflow_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(60.0))
-                    .bottom(px(43.0))
                     .w(px(200.0))
-                    .p(px(6.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.overflow_open = false;
                         cx.notify();
@@ -6949,8 +6611,10 @@ impl Chat {
                                 this.toggle_chat_history(window, cx);
                             }))
                             .child("Chat History"),
-                    ),
-            )
+                    )
+                    .into_any_element(),
+                None,
+            ))
         } else {
             None
         };
@@ -7057,31 +6721,25 @@ impl Chat {
                     })
                     .collect()
             };
-            Some(
+            Some(popover::anchored_menu_above_end(
+                "chat-history-menu-menu",
                 div()
                     .id("chat-history-menu")
                     .debug_selector(|| "chat-history-menu".into())
                     .key_context("ChatHistoryMenu")
                     .track_focus(&self.history_focus)
                     .on_action(cx.listener(Self::cancel))
-                    .absolute()
-                    .right(px(60.0))
-                    .bottom(px(43.0))
                     .w(px(260.0))
                     .max_h(px(320.0))
                     .overflow_y_scroll()
-                    .p(px(6.0))
-                    .rounded(theme.radii.toast)
-                    .bg(theme.surface_raised)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.history_open = false;
                         cx.notify();
                     }))
-                    .children(rows),
-            )
+                    .children(rows)
+                    .into_any_element(),
+                None,
+            ))
         } else {
             None
         };
@@ -7096,11 +6754,15 @@ impl Chat {
             .flex()
             .items_center()
             .justify_center()
-            .hover(|style| style.bg(theme.overlay))
+            .hover(|style| style.bg(bezel_theme.element_hover))
             .on_click(move |_, window, cx| {
                 attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
             })
-            .child(IconElement::new(Icon::Plus, IconSize::XSmall).text_color(theme.text));
+            .child(
+                bezel::ui::icons::icon(bezel::ui::icons::PAPERCLIP)
+                    .size(px(14.0))
+                    .text_color(bezel_theme.text_faint),
+            );
 
         let overflow_button = div()
             .id("composer-overflow")
@@ -7129,230 +6791,281 @@ impl Chat {
             .map(|usage| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
             .unwrap_or(0);
 
-        // The composer text area renders the draft part by part: text runs
-        // inline, chips as removable tokens. The placeholder shows only when
-        // the whole draft is empty, so a chip-only draft still reads as
-        // content.
-        let mut composer_parts: Vec<AnyElement> = if self.composer.is_empty() {
-            // D-CHAT-03 / F-CHAT-05: the empty composer's placeholder names
-            // what state it's actually in — permission-wait is not ordinary
-            // mid-turn queueing, so it gets its own text, distinct selector,
-            // and (per `insert_text`/`backspace`/`delete`/`send` above)
-            // actually refuses input rather than merely describing itself
-            // that way.
-            if self.pending_question().is_some() {
-                vec![
-                    div()
-                        .id("permission-wait-placeholder")
-                        .debug_selector(|| "permission-wait-placeholder".into())
-                        .text_color(theme.text_faint)
-                        .child("Waiting for permission response…")
-                        .into_any_element(),
-                ]
-            } else if self.streaming {
-                vec![
-                    div()
-                        .id("queue-placeholder")
-                        .debug_selector(|| "queue-placeholder".into())
-                        .text_color(theme.text_faint)
-                        .child("Type to queue for the next turn…")
-                        .into_any_element(),
-                ]
-            } else if self.client.is_none() && !self.connecting {
-                // F-CHAT-05: sweep E03 drove the composer from the real
-                // `● offline` state (client died / never connected) and
-                // found typing + Enter genuinely inert -- `send()` routes an
-                // offline Enter into a silent reconnect-and-retry instead of
-                // submitting -- but nothing on screen said why nothing
-                // happened; the generic "Message…" placeholder gave no
-                // signal the agent was unreachable. Name the actual state,
-                // matching the permission-wait and queue placeholders above.
-                vec![
-                    div()
-                        .id("offline-placeholder")
-                        .debug_selector(|| "offline-placeholder".into())
-                        .text_color(theme.text_faint)
-                        .child("Agent offline — reconnecting when you send…")
-                        .into_any_element(),
-                ]
-            } else {
-                vec![
-                    div()
-                        .id("composer-placeholder")
-                        .debug_selector(|| "composer-placeholder".into())
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(theme.text_faint)
-                        .child(self.default_placeholder())
-                        .into_any_element(),
-                ]
-            }
-        } else {
-            self.composer
-                .parts()
-                .iter()
-                .enumerate()
-                .flat_map(|(index, part)| match part {
-                    ComposerPart::Text(text) => {
-                        // The model addresses a run in chars; `StyledText`
-                        // lays it out in bytes.
-                        let byte_at = |chars: usize| {
-                            text.char_indices()
-                                .nth(chars)
-                                .map_or(text.len(), |(byte, _)| byte)
-                        };
-                        let len = text.chars().count();
-                        let selection = self
-                            .composer
-                            .selected_span_in_part(index, len)
-                            .map(|(lo, hi)| byte_at(lo)..byte_at(hi));
-                        let caret = (index == caret_part).then(|| byte_at(caret_offset.min(len)));
-                        vec![
-                            div()
-                                .debug_selector(move || format!("composer-text-{index}"))
-                                .min_w_0()
-                                .text_color(theme.text)
-                                .child(ComposerText {
-                                    id: ElementId::from(("composer-text", index)),
-                                    text: StyledText::new(text.clone()),
-                                    selection,
-                                    selection_fill: theme.element_active,
-                                    caret,
-                                    caret_visible,
-                                    caret_color: theme.text,
-                                    trace: composer_paint.clone(),
-                                })
-                                .into_any_element(),
-                        ]
-                    }
-                    ComposerPart::Chip(chip) => {
-                        // On a chip part the caret always sits just before it.
-                        let mut run: Vec<AnyElement> = Vec::new();
-                        if index == caret_part {
-                            run.push(caret_bar());
-                        }
-                        let remove_entity = entity.clone();
-                        let (glyph, kind) = match chip {
-                            ComposerChip::Skill { .. } => ("✦", "skill"),
-                            ComposerChip::File { .. } => ("▤", "file"),
-                            ComposerChip::Image { .. } => ("▣", "image"),
-                        };
-                        let label = chip.label();
-                        let chip_div = div()
-                            .id(format!("composer-chip-{kind}"))
-                            .debug_selector(move || format!("composer-chip-{kind}"))
-                            .flex()
-                            .items_center()
-                            .mx(px(4.0))
-                            .gap(px(4.0))
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(5.0))
-                            // A chip is one atomic position, so it takes the
-                            // selection fill whole or not at all — the same
-                            // rule `chip_is_selected` encodes in the model.
-                            .bg(if self.composer.chip_is_selected(index) {
-                                theme.element_active
-                            } else {
-                                theme.surface_raised
-                            })
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(typography.caption2)
-                            .child(div().text_color(theme.text_faint).child(glyph))
-                            .child(div().text_color(theme.text).child(label))
+        // Three looks, one `AnyElement`: the ready arm is `Stateful` (it
+        // carries an id), the other two are plain `Div`s.
+        let ready = can_send;
+        let send_disc = {
+            let disc = div()
+                .size(px(24.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center();
+            let disc: AnyElement = if self.streaming {
+                // D-CHAT-02: while a turn runs the same control becomes
+                // stop -- its click dispatches the same path Escape uses.
+                disc.bg(bezel_theme.solid)
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .id("stop-glyph")
+                            .debug_selector(|| "stop-glyph".into())
                             .child(
-                                div()
-                                    .id(format!("chip-remove-{index}"))
-                                    .debug_selector(move || format!("chip-remove-{index}"))
-                                    .px(px(2.0))
-                                    .rounded(px(2.0))
-                                    .text_size(typography.caption2)
-                                    .text_color(theme.text_faint)
-                                    .hover(|style| style.bg(theme.overlay))
-                                    .on_click(move |_, window, cx| {
-                                        // F-CHAT-12: the × removes the chip
-                                        // from the model correctly on its
-                                        // own, but nothing else in the click
-                                        // path re-requests composer focus —
-                                        // the ancestor container only grabs
-                                        // it on its own on_mouse_down, which
-                                        // this click never reaches (the chip
-                                        // stops propagation). Without this,
-                                        // the composer is left keyboard-dead
-                                        // until the user clicks the text
-                                        // area again.
-                                        remove_entity.update(cx, |chat, cx| {
-                                            chat.remove_composer_chip(index, cx);
-                                            chat.composer_focus.focus(window, cx);
-                                        });
-                                    })
-                                    .child("×"),
-                            )
-                            .into_any_element();
-                        run.push(chip_div);
-                        run
-                    }
+                                bezel::ui::icons::icon(bezel::ui::icons::STOP)
+                                    .size(px(12.0))
+                                    .text_color(bezel_theme.on_solid),
+                            ),
+                    )
+                    .into_any_element()
+            } else if ready {
+                disc.id("send-ready")
+                    .debug_selector(|| "send-ready".into())
+                    .bg(bezel_theme.solid)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.9))
+                    .child(
+                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_UP)
+                            .size(px(14.0))
+                            .text_color(bezel_theme.on_solid),
+                    )
+                    .into_any_element()
+            } else {
+                // Present but not pressable: the shape keeps its place, the
+                // glyph goes faint, no hover and no pointer (gallery
+                // `send_button`).
+                disc.bg(bezel::theme::ink(0.06))
+                    .child(
+                        bezel::ui::icons::icon(bezel::ui::icons::ARROW_UP)
+                            .size(px(14.0))
+                            .text_color(bezel_theme.text_faint),
+                    )
+                    .into_any_element()
+            };
+            div()
+                .id("send")
+                .debug_selector(|| "send".into())
+                .flex_none()
+                .cursor_pointer()
+                .when(self.streaming, |this| {
+                    this.on_click(move |_, _, cx| {
+                        stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
+                    })
                 })
-                .collect()
+                .when(!self.streaming && ready, |this| {
+                    this.on_click(move |_, _, cx| {
+                        send_entity.update(cx, |chat, cx| chat.send(cx));
+                    })
+                })
+                .child(disc)
         };
-        // End-of-document caret (part index past the last part), and the
-        // empty-draft caret beside the placeholder — a permission-wait
-        // refuses input by design, so its placeholder stands alone.
-        if self.composer.is_empty() {
-            if focused && self.pending_question().is_none() {
-                composer_parts.insert(0, caret_bar());
-            }
-        } else if caret_part >= self.composer.parts().len() {
-            composer_parts.push(caret_bar());
-        }
 
-        // The composer is the visual anchor: a raised card with a roomy
-        // input and one row of labelled chips — status, model, context —
-        // ending in the circular send control. The card is waku's: max
-        // 720px, 13px radius, `composer` fill, a hairline border that turns
-        // coral while focused.
+        // The gallery's hint row lives under the field: a mono hint naming
+        // the state on the left, the send/stop disc on the right. A
+        // zero-size child carries the state as a selector so tests can read
+        // it without pixels.
+        let (hint_text, hint_state) = if slash_popup.is_some() {
+            ("↑↓ pick · enter insert · esc close", "pick")
+        } else if mention_popup.is_some() {
+            ("↑↓ pick · enter attach · esc close", "pick")
+        } else if self.streaming {
+            ("enter queue · shift-enter newline", "queue")
+        } else {
+            ("enter send · shift-enter newline", "send")
+        };
+        let composer_hint = div()
+            .id("composer-hint")
+            .debug_selector(|| "composer-hint".into())
+            .min_w_0()
+            .font_family(bezel_theme.font_mono.clone())
+            .text_size(typography.footnote)
+            .text_color(bezel_theme.text_faint)
+            .child(hint_text)
+            .child(
+                div()
+                    .size_0()
+                    .debug_selector(move || format!("composer-hint-{hint_state}")),
+            );
+
+        // The toolbar sits above the card, outside it: one flat wrapping
+        // row — pill · model · effort · context, then the attach · overflow
+        // pair pushed to the end of whichever line it lands on by `ml_auto`
+        // — while the card below is the gallery's. When a line is full the
+        // next chip wraps to the next line; nothing is ever clipped in
+        // half. Not drawn when no agent is configured: the card stands
+        // alone as in the gallery.
+        let composer_toolbar = div()
+            .id("composer-toolbar")
+            .debug_selector(|| "composer-toolbar".into())
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .px(px(4.0))
+            .pb(px(6.0))
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.0))
+            .gap_y(px(4.0))
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(status_pill)
+                    .children(mode_picker),
+            )
+            // The one shrinkable child: on a tight line the chip
+            // ellipsizes its name down to its 56px floor, never to
+            // nothing.
+            .child(div().relative().child(model_control).children(model_picker))
+            .children(effort_control)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .px(px(7.0))
+                    .rounded(theme.radii.control)
+                    .bg(theme.surface_raised)
+                    .text_size(typography.ui_size)
+                    .child(context_ring)
+                    // Named, like every other value in this
+                    // row. A blind review of the composer
+                    // could read the ring and the number but
+                    // not what they measured -- "context
+                    // used? budget? direction unreadable" --
+                    // and the answer only appeared after
+                    // clicking through to the popover, which
+                    // spells out "N% of context used". The
+                    // field name belongs where the value is.
+                    .child(
+                        div()
+                            .id("context-label")
+                            .debug_selector(|| "context-label".into())
+                            .text_color(theme.text_faint)
+                            .child("Context"),
+                    )
+                    .child(
+                        div()
+                            .id("context-percent")
+                            .debug_selector(|| "context-percent".into())
+                            .text_color(theme.text)
+                            .child(format!("{context_percent}%")),
+                    )
+                    .children(context_popover),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .ml_auto()
+                    .child(attach_button)
+                    .child(
+                        div()
+                            .relative()
+                            .child(overflow_button)
+                            .children(overflow_menu)
+                            .children(chat_history_menu),
+                    ),
+            );
+
+        // The composer is the gallery's `Composer` card: one frosted surface
+        // at `surface_radius` carrying the field on top and the hint row
+        // with the send disc under it — nothing else lives in the card.
         let composer_card = div()
             .id("composer")
             .debug_selector(|| "composer".into())
             .relative()
             .w_full()
             .max_w(px(TRANSCRIPT_WIDTH))
-            // #242: the border is always present and the same color whether
-            // a turn is streaming or not, so the card's box never moves.
-            // The rotating ring that used to mark a streaming turn is
-            // retired (Task 7) — the shared Activity clock lives in the
-            // reasoning header now (Task 6).
+            // `Card variant="input"`. #242's rule survives the restyle: the
+            // border is always present and only its color reacts to focus,
+            // so the card's box never moves while streaming.
+            .rounded(px(bezel::theme::Theme::surface_radius()))
             .border_1()
-            .border_color(if focused { theme.text } else { theme.border })
-            .rounded(theme.radii.composer)
-            .bg(theme.surface_raised)
-            .p(px(10.0))
+            .border_color(if focused {
+                bezel_theme.text
+            } else {
+                bezel_theme.border
+            })
+            .bg(bezel_theme.card_glass_bg())
+            .px(px(4.0))
+            .pt(px(4.0))
+            .pb(px(6.0))
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(px(4.0))
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.composer_focus.focus(window, cx);
-                    let _ = &entity_for_focus;
+                cx.listener(|this, _, window, cx| {
+                    this.composer_field
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window, cx);
                 }),
             )
+            .when(!self.attachments.is_empty(), |card| {
+                let remove_entity = entity.clone();
+                card.child(
+                    div()
+                        .id("attachment-strip")
+                        .debug_selector(|| "attachment-strip".into())
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(6.0))
+                        .px(px(4.0))
+                        .children(self.attachments.iter().enumerate().map(|(index, _)| {
+                            let remove_entity = remove_entity.clone();
+                            div()
+                                .id(("attachment-chip", index))
+                                .debug_selector(move || format!("attachment-chip-{index}"))
+                                .h(px(24.0))
+                                .px(px(8.0))
+                                .rounded(theme.radii.control)
+                                .bg(theme.surface_raised)
+                                .border_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .text_size(typography.caption2)
+                                .child(div().text_color(theme.text_faint).child("▣"))
+                                .child(div().text_color(theme.text).child("Image"))
+                                .child(
+                                    div()
+                                        .id(("attachment-remove", index))
+                                        .debug_selector(move || {
+                                            format!("attachment-remove-{index}")
+                                        })
+                                        .px(px(2.0))
+                                        .rounded(px(2.0))
+                                        .text_color(theme.text_faint)
+                                        .hover(|style| style.bg(theme.overlay))
+                                        .on_click(move |_, window, cx| {
+                                            remove_entity.update(cx, |chat, cx| {
+                                                chat.remove_attachment(index, cx);
+                                                chat.composer_field
+                                                    .read(cx)
+                                                    .focus_handle(cx)
+                                                    .focus(window, cx);
+                                            });
+                                        })
+                                        .child("×"),
+                                )
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("composer-input")
                     .debug_selector(|| "composer-input".into())
-                    .px(px(4.0))
-                    .pt(px(2.0))
-                    .min_h(px(44.0))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_y(px(4.0))
-                    .text_size(typography.headline)
-                    .line_height(typography.body_line_height)
-                    .children(composer_parts),
+                    .w_full()
+                    .when(disabled, |input| input.opacity(0.6))
+                    .child(self.composer_field.clone()),
             )
             .when_some(self.queued_item.clone(), |this, queued| {
                 // D-CHAT-03: the committed next-turn item, its text and a
@@ -7408,117 +7121,35 @@ impl Chat {
                 )
             })
             .child(
+                // The hint row: the state's hint on the left, the send/stop
+                // disc on the right — the gallery's own pair.
                 div()
                     .flex()
+                    .flex_row()
                     .items_center()
-                    .gap(px(6.0))
-                    .child(attach_button)
-                    .child(status_pill)
-                    .child(model_control)
-                    .children(effort_control)
-                    // Splits the row into the two groups it always meant to
-                    // be: what you configure on the left, status and send on
-                    // the right. Without it every control drifts leftward and
-                    // the spacing carries no meaning.
-                    .child(div().flex_1())
-                    .child(overflow_button)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.0))
-                            .h(px(24.0))
-                            .px(px(7.0))
-                            .rounded(theme.radii.control)
-                            .bg(theme.surface_raised)
-                            .text_size(typography.ui_size)
-                            .child(context_ring)
-                            // Named, like every other value in this row. A
-                            // blind review of the composer could read the
-                            // ring and the number but not what they measured
-                            // -- "context used? budget? direction
-                            // unreadable" -- and the answer only appeared
-                            // after clicking through to the popover, which
-                            // spells out "N% of context used". The field name
-                            // belongs where the value is.
-                            .child(
-                                div()
-                                    .id("context-label")
-                                    .debug_selector(|| "context-label".into())
-                                    .text_color(theme.text_faint)
-                                    .child("Context"),
-                            )
-                            .child(
-                                div()
-                                    .id("context-percent")
-                                    .debug_selector(|| "context-percent".into())
-                                    .text_color(theme.text)
-                                    .child(format!("{context_percent}%")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("send")
-                            .debug_selector(|| "send".into())
-                            .w(px(26.0))
-                            .h(px(26.0))
-                            .flex_none()
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(typography.scaled(15.0))
-                            .bg(if self.streaming || can_send {
-                                theme.overlay_strong
-                            } else {
-                                theme.overlay
-                            })
-                            .text_color(if self.streaming || can_send {
-                                theme.text
-                            } else {
-                                theme.text_dim
-                            })
-                            .hover(|style| style.bg(theme.surface_raised))
-                            .when(self.streaming, |this| {
-                                // D-CHAT-02: while a turn runs the same
-                                // control becomes stop — a filled square in
-                                // theme tokens — and its click dispatches the
-                                // same path Escape uses. The selector stays
-                                // `"send"`; tests target the control, not
-                                // the glyph.
-                                this.on_click(move |_, _, cx| {
-                                    stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
-                                })
-                                .child(
-                                    div()
-                                        .id("stop-glyph")
-                                        .debug_selector(|| "stop-glyph".into())
-                                        .w(px(9.0))
-                                        .h(px(9.0))
-                                        .rounded(px(2.0))
-                                        .bg(theme.text),
-                                )
-                            })
-                            .when(!self.streaming, |this| {
-                                this.when(can_send, |this| {
-                                    this.on_click(move |_, _, cx| {
-                                        send_entity.update(cx, |chat, cx| chat.send(cx));
-                                    })
-                                })
-                                .child("↑")
-                            }),
-                    ),
+                    .justify_between()
+                    .px(px(6.0))
+                    .child(composer_hint)
+                    .child(send_disc),
             )
             .children(slash_popup)
-            .children(mention_popup)
-            .children(overflow_menu)
-            .children(chat_history_menu)
-            .children(model_picker)
-            .children(mode_picker)
-            .children(context_popover);
+            .children(mention_popup);
 
-        composer_card.into_any_element()
+        // Toolbar above, card below, in one column. The toolbar only exists
+        // when an agent is configured — with none, the card stands alone.
+        // `items_center` keeps both where the transcript sits in a wide
+        // pane; each child carries its own `max_w(TRANSCRIPT_WIDTH)` cap, so
+        // they stay edge-aligned with each other at every width.
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .w_full()
+            .when(self.agent_command.is_some(), |column| {
+                column.child(composer_toolbar)
+            })
+            .child(composer_card)
+            .into_any_element()
     }
 }
 
@@ -7612,9 +7243,17 @@ impl Chat {
 }
 
 impl Focusable for Chat {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.composer_focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.composer_field.read(cx).focus_handle(cx)
     }
+}
+
+/// The tooltip a command row carries: its description, trimmed, or nothing
+/// when the agent published none — an empty tooltip is a blank card that
+/// pops up for no reason.
+fn slash_option_tooltip(description: &str) -> Option<SharedString> {
+    let description = description.trim();
+    (!description.is_empty()).then(|| SharedString::from(description.to_owned()))
 }
 
 impl Render for Chat {
@@ -7659,21 +7298,12 @@ impl Render for Chat {
             .flex_col()
             .items_center()
             .bg(theme.surface)
-            .key_context("ChatComposer")
-            .track_focus(&self.composer_focus)
             .on_action(cx.listener(Self::send_action))
-            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_transcript))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::popup_previous))
+            .on_action(cx.listener(Self::popup_next))
+            .on_action(cx.listener(Self::popup_accept))
             .on_action(cx.listener(Self::send_answer_action))
             .on_action(cx.listener(Self::cancel_answer_action))
             .on_key_down(cx.listener(Self::on_composer_key))
@@ -8090,7 +7720,10 @@ fn mention_candidates_on_disk(cwd: &Path, query: &str) -> Vec<String> {
                 && !is_hidden
                 && let Ok(relative) = path.strip_prefix(cwd)
             {
-                relative_paths.push(relative.to_string_lossy().into_owned());
+                // Mention paths are `@`-token text and agent-side references,
+                // so they always use forward slashes regardless of the host
+                // filesystem's separator.
+                relative_paths.push(relative.to_string_lossy().replace('\\', "/"));
             }
         }
     }
@@ -8618,6 +8251,7 @@ mod tests {
 
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -8646,23 +8280,6 @@ mod tests {
             cx.debug_bounds("chat-generating-spinner").is_some(),
             "a streaming turn shows the Activity-derived indicator"
         );
-    }
-
-    #[gpui::test]
-    async fn the_composer_arms_no_repaint_timer_while_streaming(cx: &mut TestAppContext) {
-        let (chat, cx) = spinner_test_chat(cx);
-        chat.update(cx, |chat, cx| {
-            chat.streaming = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        chat.read_with(cx, |chat, _| {
-            assert!(
-                !chat.streaming_border_timer_pending,
-                "the streaming border timer is retired; the shared clock drives the indicator"
-            );
-        });
     }
 
     /// #239: the indicator is shown for exactly as long as a turn is in
@@ -8948,6 +8565,7 @@ mod tests {
         fixture_args: &[&str],
     ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         cx.update(init);
         let args = fixture_args.to_vec();
         let (chat, cx) = cx.add_window_view(|_, cx| {
@@ -8958,6 +8576,165 @@ mod tests {
             Chat::from_test_command(command, std::env::temp_dir(), cx)
         });
         (chat, cx)
+    }
+
+    /// The card is the gallery's `Composer` card — field on top, the hint
+    /// row with the send disc under it — and Sirio's controls sit in a
+    /// toolbar above the card, outside it.
+    #[gpui::test]
+    async fn composer_card_is_the_gallery_card_and_the_controls_sit_above_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        chat.update(cx, |chat, _| {
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some("xhigh".into()),
+                choices: vec![EffortChoice {
+                    value: "xhigh".into(),
+                    name: "Xhigh".into(),
+                }],
+            });
+        });
+        refresh_frame(cx);
+
+        let card = cx.debug_bounds("composer").expect("card");
+        let hint = cx.debug_bounds("composer-hint").expect("hint");
+        let send = cx.debug_bounds("send").expect("send disc");
+        // The hint row is the card's only row under the field, and the disc
+        // rides its right end.
+        assert!(
+            hint.top() < send.bottom() && send.top() < hint.bottom(),
+            "the hint and the send disc share one row: {hint:?} {send:?}"
+        );
+        assert!(
+            hint.right() <= send.left(),
+            "the hint sits left of the disc: {hint:?} {send:?}"
+        );
+        assert!(
+            hint.left() >= card.left() && send.right() <= card.right(),
+            "the hint row lives inside the card"
+        );
+        // The toolbar sits above the card, outside it, and carries every
+        // control the card no longer does.
+        let toolbar = cx
+            .debug_bounds("composer-toolbar")
+            .expect("the toolbar above the card is drawn");
+        assert!(
+            toolbar.bottom() <= card.top(),
+            "the toolbar is above the card, outside it: toolbar={toolbar:?} card={card:?}"
+        );
+        for (name, bounds) in [
+            ("model-chip", cx.debug_bounds("model-chip")),
+            ("effort-chip", cx.debug_bounds("effort-chip")),
+            ("context-ring", cx.debug_bounds("context-ring")),
+            ("attach-image", cx.debug_bounds("attach-image")),
+            ("composer-overflow", cx.debug_bounds("composer-overflow")),
+        ] {
+            let bounds = bounds.unwrap_or_else(|| panic!("{name} is drawn in the toolbar"));
+            assert!(
+                bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right(),
+                "{name} lives inside the toolbar: {bounds:?} toolbar={toolbar:?}"
+            );
+            assert!(
+                bounds.bottom() <= card.top(),
+                "{name} stays above the card, outside it: {bounds:?} card={card:?}"
+            );
+        }
+        // The disc is still inert until there is something to send.
+        assert!(
+            cx.debug_bounds("send-ready").is_none(),
+            "an empty draft leaves the disc inert"
+        );
+        focus_and_type(cx, "go");
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("send-ready").is_some(),
+            "a draft arms the disc"
+        );
+    }
+
+    /// The hint row names the state it is in: the send hint by default, the
+    /// picker hint while a `/` popup is open, the queue hint while a turn
+    /// streams. A zero-size child carries the state as a selector, so the
+    /// test reads it without pixels.
+    #[gpui::test]
+    async fn the_hint_row_names_the_open_picker(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-hint-send").is_some(),
+            "the default hint names the send"
+        );
+        assert!(cx.debug_bounds("composer-hint-pick").is_none());
+
+        // Typing a slash command token opens the picker and the hint follows.
+        chat.update(cx, |chat, cx| chat.set_composer_text("/", cx));
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-hint-pick").is_some(),
+            "an open picker renames the hint"
+        );
+        assert!(cx.debug_bounds("composer-hint-send").is_none());
+
+        // Escape closes the popup; the send hint comes back. The key needs
+        // the field's focus, so click into the composer first.
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("esc");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-hint-send").is_some(),
+            "closing the picker restores the send hint"
+        );
+        assert!(cx.debug_bounds("composer-hint-pick").is_none());
+
+        // While a turn streams the hint names the queue instead.
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("composer-hint-queue").is_some(),
+            "a streaming turn renames the hint"
+        );
+        assert!(cx.debug_bounds("composer-hint-send").is_none());
+    }
+
+    /// `up`/`down` drive a picker while one is open and are the field's own
+    /// vertical motion otherwise — the handlers propagate when no popup is
+    /// on screen, so gpui reaches the TextField's binding next.
+    #[gpui::test]
+    async fn arrows_move_the_caret_when_no_popup_is_open(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "one");
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("two");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "one
+two"
+        );
+        let end = chat.read_with(&cx.cx, |chat, _| chat.draft_caret);
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        let moved = chat.read_with(&cx.cx, |chat, _| chat.draft_caret);
+        assert!(
+            moved < end,
+            "up without a popup moves the caret to the first row ({moved} < {end})"
+        );
+        assert!(chat.read_with(&cx.cx, |chat, _| chat.entries.is_empty()));
     }
 
     fn focus_and_type(cx: &mut VisualTestContext, text: &str) {
@@ -8985,6 +8762,7 @@ mod tests {
 
     fn markdown_view(cx: &mut TestAppContext, markdown: String) -> VisualTestContext {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         cx.update(init);
         let window = cx.open_window(size(px(900.0), px(900.0)), move |_, _| MarkdownHarness {
             document: parse_chat_markdown(&markdown),
@@ -9061,17 +8839,27 @@ mod tests {
         );
         refresh_frame(cx);
 
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
         let input = cx
             .debug_bounds("composer-input")
             .expect("the composer input row is drawn");
-        let text = cx
-            .debug_bounds("composer-text-0")
-            .expect("the typed draft is drawn");
+        let idle_height = input.size.height;
 
         assert!(
-            text.origin.x + text.size.width <= input.origin.x + input.size.width,
-            "the draft must stay inside the composer's writing area, not spill \
-             past its right edge: text={text:?} input={input:?}"
+            input.origin.x + input.size.width <= card.origin.x + card.size.width,
+            "the field must stay inside the composer card, not spill past its              right edge: input={input:?} card={card:?}"
+        );
+
+        focus_and_type(cx, &"word ".repeat(200));
+        refresh_frame(cx);
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input row is drawn");
+        assert!(
+            input.size.height > idle_height,
+            "typing 200 words grows the field: before={idle_height:?} after={input:?}"
         );
     }
 
@@ -9085,34 +8873,6 @@ mod tests {
     /// system stubs every glyph at one width (see `conformance.rs`), so this
     /// checks the layout contract — the bar ends where the run ends — and
     /// not glyph-level alignment, which only a screenshot can.
-    #[gpui::test]
-    async fn the_caret_sits_flush_against_the_character_it_follows(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        focus_and_type(cx, "ciao");
-        refresh_frame(cx);
-
-        let text = cx
-            .debug_bounds("composer-text-0")
-            .expect("the typed draft is drawn");
-        let caret = chat
-            .read_with(cx, |chat, _| chat.composer_paint.caret.get())
-            .expect("a focused composer paints its insertion caret on the draft");
-
-        assert_eq!(
-            caret.origin.x,
-            text.origin.x + text.size.width,
-            "the caret must touch the last typed character, with no gap \
-             between them: text={text:?} caret={caret:?}"
-        );
-        assert_eq!(
-            caret.origin.y, text.origin.y,
-            "a one-line draft keeps its caret on that line: text={text:?} caret={caret:?}"
-        );
-    }
-
     /// A draft that wraps keeps its caret on the text: the end-of-draft bar
     /// used to be a separate flex item after the text run, and a wrapped
     /// item in a `flex_wrap` row lands on a row of its own — the bar dropped
@@ -9120,65 +8880,6 @@ mod tests {
     /// text element at the layout position of its last character, so it sits
     /// inside the run's bounds on the last wrapped line, and a caret moved
     /// back into the run sits on the first line.
-    #[gpui::test]
-    async fn the_caret_of_a_wrapped_draft_stays_on_the_draft(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        cx.simulate_resize(size(px(1715.0), px(972.0)));
-        refresh_frame(cx);
-
-        let draft = "un messaggio abbastanza lungo da andare a capo dentro il composer, \
-                     con parole che proseguono ben oltre la larghezza della scheda e \
-                     che quindi devono essere spezzate su una seconda riga visiva";
-        focus_and_type(cx, draft);
-        refresh_frame(cx);
-
-        let input = cx
-            .debug_bounds("composer-input")
-            .expect("the composer input row is drawn");
-        let text = cx
-            .debug_bounds("composer-text-0")
-            .expect("the typed draft is drawn");
-        let caret = chat
-            .read_with(cx, |chat, _| chat.composer_paint.caret.get())
-            .expect("a focused composer paints its insertion caret on the draft");
-        let line_height = caret.size.height;
-
-        assert!(
-            text.size.height >= line_height * 2.0,
-            "fixture invariant: the draft wraps onto more than one line: \
-             text={text:?} line_height={line_height:?}"
-        );
-        assert!(
-            caret.origin.y + caret.size.height <= text.origin.y + text.size.height,
-            "the end-of-draft caret sits on the draft's last line, not on a \
-             row of its own below it: caret={caret:?} text={text:?}"
-        );
-        assert!(
-            caret.origin.y >= text.origin.y + line_height,
-            "the end-of-draft caret is on a wrapped line, not the first: \
-             caret={caret:?} text={text:?}"
-        );
-        assert!(
-            caret.origin.x + caret.size.width <= input.origin.x + input.size.width,
-            "the caret stays inside the writing area: caret={caret:?} input={input:?}"
-        );
-
-        chat.update(cx, |chat, cx| {
-            chat.composer.move_home(false);
-            cx.notify();
-        });
-        refresh_frame(cx);
-        let caret = chat
-            .read_with(cx, |chat, _| chat.composer_paint.caret.get())
-            .expect("the caret is still painted after moving it");
-        assert_eq!(
-            (caret.origin.x, caret.origin.y),
-            (text.origin.x, text.origin.y),
-            "Home puts the caret at the start of the first line: caret={caret:?} text={text:?}"
-        );
-    }
-
     /// The composer has always *had* a selection — `SelectLeft`,
     /// `SelectRight` and `SelectAll` all mutate it, and `delete_selected`
     /// acts on it — but nothing ever drew it. Select-all followed by one
@@ -9186,43 +8887,6 @@ mod tests {
     /// that anything had been selected: a destructive edit with an
     /// invisible precondition. The fill is painted by the text element, one
     /// quad per wrapped line, behind the text it covers.
-    #[gpui::test]
-    async fn the_composer_paints_the_run_it_has_selected(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        refresh_frame(cx);
-
-        focus_and_type(cx, "ciao");
-        refresh_frame(cx);
-        assert!(
-            chat.read_with(cx, |chat, _| chat
-                .composer_paint
-                .selection
-                .borrow()
-                .is_empty()),
-            "fixture invariant: a freshly typed draft has nothing selected"
-        );
-
-        chat.update(cx, |chat, cx| {
-            chat.composer.select_all();
-            cx.notify();
-        });
-        refresh_frame(cx);
-
-        let text = cx
-            .debug_bounds("composer-text-0")
-            .expect("select-all keeps the draft drawn");
-        let selected = chat.read_with(cx, |chat, _| chat.composer_paint.selection.borrow().clone());
-        let [fill] = selected.as_slice() else {
-            panic!("a one-line select-all paints exactly one filled run: {selected:?}");
-        };
-        assert_eq!(
-            (fill.origin.x, fill.size.width),
-            (text.origin.x, text.size.width),
-            "the filled run covers the whole selected draft: fill={fill:?} text={text:?}"
-        );
-    }
-
     /// F-CHAT-25's answer field takes typed characters through
     /// `on_composer_key`, so it is a text field by every measure except the
     /// one the user checks: it drew no insertion bar at all.
@@ -9440,16 +9104,79 @@ mod tests {
         let card = cx
             .debug_bounds("composer")
             .expect("the composer card is drawn");
-        let placeholder = cx
-            .debug_bounds("composer-placeholder")
-            .expect("the default placeholder is drawn");
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
         assert!(
-            placeholder.left() >= card.left() && placeholder.right() <= card.right(),
-            "the placeholder must truncate inside the composer card: card={card:?} placeholder={placeholder:?}"
+            input.left() >= card.left() && input.right() <= card.right(),
+            "the field must stay inside the composer card: card={card:?} input={input:?}"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            chat.read_with(&cx.cx, |chat, _| chat.default_placeholder()),
+            "the default placeholder is what the field shows"
         );
     }
 
+    /// At Sirio's real pane width the toolbar degrades by wrapping chip by
+    /// chip — never by clipping a chip at the pane's edge — and every
+    /// essential control stays drawn and reachable.
     #[gpui::test]
+    async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        chat.update(cx, |chat, _| {
+            chat.effort = Some(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some("xhigh".into()),
+                choices: vec![EffortChoice {
+                    value: "xhigh".into(),
+                    name: "Xhigh".into(),
+                }],
+            });
+        });
+        // 320 px: narrow enough that the old two-cluster layout overflows a
+        // chip past the toolbar's edge (the app's wider labels hit the same
+        // wall at ~380 px); the flat row must wrap chip by chip instead.
+        cx.simulate_resize(size(px(320.0), px(600.0)));
+        refresh_frame(cx);
+
+        let card = cx.debug_bounds("composer").expect("card");
+        let send = cx.debug_bounds("send").expect("send");
+        let attach = cx.debug_bounds("attach-image").expect("attach");
+        let overflow = cx.debug_bounds("composer-overflow").expect("overflow");
+        let context = cx.debug_bounds("context-ring").expect("context ring");
+        let effort = cx.debug_bounds("effort-chip").expect("effort chip");
+        let chip = cx.debug_bounds("model-chip").expect("model chip");
+        let toolbar = cx
+            .debug_bounds("composer-toolbar")
+            .expect("the toolbar is drawn");
+        // Chip by chip, nothing is clipped by the pane: every chip stays
+        // inside the toolbar's own edges.
+        for (name, bounds) in [
+            ("model chip", chip),
+            ("effort chip", effort),
+            ("context", context),
+            ("attach", attach),
+            ("overflow", overflow),
+        ] {
+            assert!(
+                bounds.left() >= toolbar.left() && bounds.right() <= toolbar.right(),
+                "{name} is fully inside the toolbar: {name}={bounds:?} toolbar={toolbar:?}"
+            );
+        }
+        assert!(
+            attach.right() <= overflow.left(),
+            "attach precedes overflow: {attach:?} {overflow:?}"
+        );
+        assert!(
+            send.right() <= card.right(),
+            "the send disc stays inside the card: send={send:?} card={card:?}"
+        );
+    }
+
     async fn narrow_composer_stays_inside_chat_pane_and_keeps_send_reachable(
         cx: &mut TestAppContext,
     ) {
@@ -9493,6 +9220,26 @@ mod tests {
             card.size.width,
             px(TRANSCRIPT_WIDTH),
             "the composer stays capped below a wider pane: card={card:?}"
+        );
+        // The toolbar and the card sit where the transcript sits: centred in
+        // a wide pane, edge-aligned with each other at every width.
+        let toolbar = cx
+            .debug_bounds("composer-toolbar")
+            .expect("the composer toolbar is drawn");
+        let window_center_x = 1140.0 / 2.0;
+        assert!(
+            (card.center().x.as_f32() - window_center_x).abs() <= 1.0,
+            "the composer card is centred with the transcript: card={card:?}"
+        );
+        assert_eq!(
+            toolbar.left(),
+            card.left(),
+            "the toolbar shares the card's left edge: {toolbar:?} {card:?}"
+        );
+        assert_eq!(
+            toolbar.right(),
+            card.right(),
+            "the toolbar shares the card's right edge: {toolbar:?} {card:?}"
         );
     }
 
@@ -9598,7 +9345,7 @@ let answer = 42;
 
         focus_and_type(cx, "hello");
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "hello",
             "typing fills the composer"
         );
@@ -9621,7 +9368,7 @@ let answer = 42;
         refresh_frame(cx);
 
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "MARKER_P107",
             "the visible composer owns socket-driven draft text"
         );
@@ -9660,7 +9407,7 @@ let answer = 42;
         cx.simulate_input("line two");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "line one\nline two",
             "Shift+Return inserts a newline into the composer"
         );
@@ -9843,6 +9590,7 @@ let answer = 42;
     #[gpui::test]
     async fn assistant_response_copy_writes_text_and_confirms(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -9886,6 +9634,7 @@ let answer = 42;
     #[gpui::test]
     async fn code_block_copy_writes_code_and_confirms(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
@@ -9963,6 +9712,7 @@ let answer = 42;
         std::fs::write(dir.0.join("edited.rs"), "new\n").expect("modify tracked file");
 
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -10377,13 +10127,10 @@ let answer = 42;
         });
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("permission-wait-placeholder").is_some(),
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            "Waiting for permission response…".to_string(),
             "the permission-wait placeholder replaces the ordinary queue placeholder"
-        );
-        assert!(
-            cx.debug_bounds("queue-placeholder").is_none(),
-            "permission-wait must not read as ordinary mid-turn queueing"
         );
 
         let entries_before = chat.read_with(&*cx, |chat, _| chat.entries.len());
@@ -10393,7 +10140,8 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "the disabled editor must refuse typed characters entirely"
         );
         assert_eq!(
@@ -10401,8 +10149,9 @@ let answer = 42;
             entries_before,
             "Enter must not send or queue while a permission is pending"
         );
-        assert!(
-            cx.debug_bounds("permission-wait-placeholder").is_some(),
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            "Waiting for permission response…".to_string(),
             "the placeholder survives the blocked keystrokes"
         );
     }
@@ -10424,6 +10173,7 @@ let answer = 42;
     #[gpui::test]
     async fn offline_composer_shows_its_own_placeholder(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -10444,17 +10194,10 @@ let answer = 42;
         });
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("offline-placeholder").is_some(),
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            "Agent offline — reconnecting when you send…".to_string(),
             "an empty, disconnected composer must name the offline state"
-        );
-        assert!(
-            cx.debug_bounds("queue-placeholder").is_none(),
-            "offline must not read as ordinary mid-turn queueing"
-        );
-        assert!(
-            cx.debug_bounds("permission-wait-placeholder").is_none(),
-            "offline must not read as a pending permission"
         );
 
         let entries_before = chat.read_with(cx, |chat, _| chat.entries.len());
@@ -10464,7 +10207,8 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "the disabled editor must refuse typed characters entirely while offline"
         );
         assert_eq!(
@@ -10476,8 +10220,9 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| !chat.connecting),
             "a blocked Enter must not itself trigger a new connection attempt"
         );
-        assert!(
-            cx.debug_bounds("offline-placeholder").is_some(),
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            "Agent offline — reconnecting when you send…".to_string(),
             "the placeholder survives the blocked keystrokes"
         );
     }
@@ -10501,6 +10246,7 @@ let answer = 42;
     #[gpui::test]
     async fn offline_enter_never_discards_the_typed_draft(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -10517,12 +10263,12 @@ let answer = 42;
             );
         });
 
-        chat.update(cx, |chat, _| {
-            chat.composer.insert_text("hello offline test");
+        chat.update(cx, |chat, cx| {
+            chat.set_composer_text("hello offline test", cx);
         });
         refresh_frame(cx);
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "hello offline test",
             "a draft already in the composer when disconnect happened must render untouched"
         );
@@ -10534,7 +10280,7 @@ let answer = 42;
         cx.run_until_parked();
         refresh_frame(cx);
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "hello offline test",
             "a disabled offline composer must never silently discard or extend the user's draft"
         );
@@ -11211,10 +10957,11 @@ let answer = 42;
             )
         });
         refresh_frame(cx);
+        assert!(cx.debug_bounds("stop-glyph").is_none());
         assert!(
-            cx.debug_bounds("stop-glyph").is_none()
-                && cx.debug_bounds("queue-placeholder").is_none(),
-            "the idle composer is neither stop nor queueing"
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder())
+                != "Type to queue for the next turn…",
+            "the idle composer is not queueing"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.has_completed_turn),
@@ -11248,8 +10995,9 @@ let answer = 42;
                 )
         });
         refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("queue-placeholder").is_some(),
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            "Type to queue for the next turn…".to_string(),
             "the empty composer shows the queue placeholder while streaming"
         );
 
@@ -11286,7 +11034,7 @@ let answer = 42;
         cx.run_until_parked();
         cx.simulate_input("half a thought");
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "half a thought",
             "the composer stays editable while streaming"
         );
@@ -11319,7 +11067,7 @@ let answer = 42;
                 (
                     queued_count,
                     uncommitted_sent,
-                    chat.composer.text(),
+                    chat.draft_text(),
                     chat.queued_item.is_none(),
                     chat.has_completed_turn,
                 )
@@ -11495,6 +11243,7 @@ let answer = 42;
     #[gpui::test]
     fn the_agent_badge_names_the_chats_own_agent(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.set_agent_name("Codex");
@@ -11516,6 +11265,7 @@ let answer = 42;
     #[gpui::test]
     fn an_unknown_agent_is_not_silently_named_claude_code(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
 
         let badge = chat.read_with(cx, |chat, _| chat.agent_badge_name());
@@ -11529,21 +11279,25 @@ let answer = 42;
     #[gpui::test]
     fn default_placeholder_names_agent_without_commands(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.set_agent_name("OpenCode");
             chat
         });
 
+        // The placeholder is the gallery's sentence; the agent's name lives
+        // in the toolbar's pill and model chip, not here.
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.default_placeholder()),
-            "Message OpenCode — @ for files"
+            "Ask anything, or @ to attach a file"
         );
     }
 
     #[gpui::test]
     fn default_placeholder_names_agent_commands(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.set_agent_name("OpenCode");
@@ -11556,18 +11310,19 @@ let answer = 42;
 
         assert_eq!(
             chat.read_with(cx, |chat, _| chat.default_placeholder()),
-            "Message OpenCode — @ for files, / for commands"
+            "Ask anything, / for commands, or @ to attach a file"
         );
     }
 
     #[gpui::test]
     fn default_placeholder_without_agent_keeps_file_affordance(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
 
         let placeholder = chat.read_with(cx, |chat, _| chat.default_placeholder());
-        assert!(placeholder.starts_with("Message…"));
-        assert!(placeholder.contains("@ for files"));
+        assert!(placeholder.starts_with("Ask anything"));
+        assert!(placeholder.contains("@ to attach a file"));
     }
 
     #[test]
@@ -11887,6 +11642,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -11942,6 +11698,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let command = AgentCommand::new("/bin/sh").args([
             "-c",
             r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
@@ -12002,6 +11759,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let command = AgentCommand::new("/bin/sh").args([
             "-c",
             r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
@@ -12073,6 +11831,7 @@ let answer = 42;
     #[gpui::test]
     async fn a_disconnected_agent_offers_restart_agent_not_retry(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         // Answers initialize and session/new successfully, then on the
         // first prompt replies with a line the protocol layer cannot parse
         // as a response to anything, and exits — a transport failure, not
@@ -12174,6 +11933,7 @@ let answer = 42;
     #[gpui::test]
     async fn an_mcp_warning_offers_ok_to_dismiss(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12232,6 +11992,7 @@ let answer = 42;
     #[gpui::test]
     async fn a_retryable_turn_error_offers_ok_alongside_retry(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12285,6 +12046,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -12348,6 +12110,7 @@ let answer = 42;
     #[gpui::test]
     async fn model_picker_search_filters_and_badges_the_recommended_model(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -12386,17 +12149,14 @@ let answer = 42;
             window.simulate_next_frame(cx);
         });
         assert!(cx.debug_bounds("model-search-input").is_some());
-        // The search row takes typed characters through `on_composer_key`'s
-        // model-picker redirect, so it is a text field and must say where
-        // the next character lands.
-        assert!(
-            cx.debug_bounds("model-search-caret").is_some(),
-            "the picker's search row draws an insertion bar"
-        );
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.model_search_caret_visible),
-            "and it is lit while the open picker holds focus"
-        );
+        // The search row is a real TextField: typing, Backspace and Escape
+        // are its own job, and the picker holds focus on it while open.
+        let search_focus = chat.read_with(&cx.cx, |chat, cx| {
+            chat.model_search_field.read(cx).focus_handle(cx)
+        });
+        let focused =
+            cx.update(|window, app| window.focused(app).is_some_and(|f| f == search_focus));
+        assert!(focused, "the open picker focuses its search field");
         assert!(
             cx.debug_bounds("model-option-recommended").is_some(),
             "the driver's first-listed model (opus) is badged Recommended"
@@ -12438,8 +12198,48 @@ let answer = 42;
         assert!(cx.debug_bounds("model-option-haiku").is_some());
         assert!(cx.debug_bounds("model-picker-no-match").is_none());
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "backspace inside the search field must not have eaten composer text"
+        );
+    }
+
+    /// The model picker's search is a real field: typing filters, Backspace
+    /// edits, Escape closes — and none of it reaches the composer's draft.
+    #[gpui::test]
+    async fn model_search_is_a_text_field_that_never_touches_the_draft(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| {
+            configure_test_chat(chat);
+            chat.available_models.push(ModelOption {
+                id: "sonnet".into(),
+                name: "Sonnet".into(),
+                description: None,
+            });
+        });
+        refresh_frame(cx);
+        focus_and_type(cx, "draft stays");
+        let chip = cx.debug_bounds("model-chip").expect("model chip");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-picker").is_some());
+        cx.simulate_input("son");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-option-sonnet").is_some());
+        assert!(
+            cx.debug_bounds("model-option-opus").is_none(),
+            "the search narrows the list"
+        );
+        cx.simulate_keystrokes("backspace backspace backspace");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-option-opus").is_some());
+        cx.simulate_keystrokes("escape");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-picker").is_none());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "draft stays"
         );
     }
 
@@ -12453,6 +12253,7 @@ let answer = 42;
     #[gpui::test]
     async fn every_effort_chip_stays_inside_the_picker_border(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -12536,6 +12337,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -12583,6 +12385,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -12635,6 +12438,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -12680,6 +12484,7 @@ let answer = 42;
         // F-CHAT-21: thinking renders collapsed to a summary until clicked,
         // live or historical, and clicking again folds it back.
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12727,6 +12532,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12792,6 +12598,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12856,6 +12663,7 @@ let answer = 42;
         // F-CHAT-23: a tool call's detail (kind, content, locations) is
         // hidden until the reader clicks it open, same control as F-CHAT-21.
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12911,6 +12719,7 @@ let answer = 42;
         // group, not three separate cards — and expanding it reveals every
         // member as its own full card, keyed by its own transcript index.
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12978,6 +12787,7 @@ let answer = 42;
     #[gpui::test]
     async fn collapsed_tool_call_rows_stay_single_line_with_long_paths(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let cwd = std::env::temp_dir();
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, cwd.clone(), cx);
@@ -13009,6 +12819,7 @@ let answer = 42;
     #[gpui::test]
     async fn transcript_only_lays_out_rows_near_the_viewport(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -13042,6 +12853,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -13079,6 +12891,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -13131,8 +12944,8 @@ let answer = 42;
         // cross the deterministic test scheduler boundary.
         cx.executor().allow_parking();
         cx.run_until_parked();
-        chat.update(cx, |chat, _| {
-            chat.composer.insert_text("draft that must survive");
+        chat.update(cx, |chat, cx| {
+            chat.set_composer_text("draft that must survive", cx);
         });
         chat.read_with(cx, |chat, _| {
             assert!(
@@ -13174,7 +12987,7 @@ let answer = 42;
                 "a recovered connection must not retain its startup error"
             );
             assert_eq!(
-                chat.composer.text(),
+                chat.draft_text(),
                 "draft that must survive",
                 "reconnecting on its own must not touch the still-unsent draft"
             );
@@ -13184,8 +12997,7 @@ let answer = 42;
         // Now that the composer is enabled again, an ordinary Send goes
         // through exactly as it would have while never disconnected.
         chat.update(cx, |chat, cx| {
-            chat.composer = Composer::new();
-            chat.composer.insert_text("hello");
+            chat.set_composer_text("hello", cx);
             chat.send(cx);
         });
 
@@ -13206,6 +13018,7 @@ let answer = 42;
     #[gpui::test]
     async fn connecting_state_renders_while_startup_is_in_flight(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -13266,11 +13079,14 @@ let answer = 42;
         cx.simulate_keystrokes("backspace");
         cx.run_until_parked();
         assert!(cx.debug_bounds("slash-popup").is_some());
-        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_selected), 0);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active().unwrap_or(0)),
+            0
+        );
         cx.simulate_keystrokes("down");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.slash_selected),
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active().unwrap_or(0)),
             1,
             "down moves the keyboard selection"
         );
@@ -13281,8 +13097,8 @@ let answer = 42;
             "accepting the selection closes the popup"
         );
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().text),
-            "/create-plan  ",
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "/create-plan ",
             "the accepted command lands as a skill token"
         );
 
@@ -13306,26 +13122,126 @@ let answer = 42;
         cx.run_until_parked();
         assert!(cx.debug_bounds("slash-popup").is_none());
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().text),
-            "/cr  ",
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "/cr ",
             "clicking a row inserts that command's skill token"
         );
     }
 
+    /// The pickers hang above the token that opened them, not above the
+    /// card: as the field grows a row, the menu follows the caret.
+    #[gpui::test]
+    async fn slash_popup_hangs_above_the_slash_and_steps_with_the_arrows(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "/");
+        refresh_frame(cx);
+        let popup = cx.debug_bounds("slash-popup").expect("popup");
+        let input = cx.debug_bounds("composer-input").expect("field");
+        assert!(
+            popup.bottom() <= input.top() + px(4.0),
+            "the menu opens upward from the token row"
+        );
+        assert!(
+            popup.left() >= input.left() - px(8.0),
+            "and starts at the token's column"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
+            Some(0)
+        );
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
+            Some(1)
+        );
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_filter.active()),
+            Some(0)
+        );
+    }
+
+    /// The command popup is a card of its own, floated above the composer.
+    /// It used to be anchored 43px up from the composer's *bottom* — inside
+    /// the card, in the card's own `surface_raised` fill — so it covered the
+    /// input rows and, being the same colour as what it lay on, read as a
+    /// transparent veil. A row carries only the command name; the
+    /// description is its tooltip, so a row is exactly one line tall.
+    #[gpui::test]
+    async fn slash_popup_floats_above_the_composer_with_single_line_rows(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "/");
+        refresh_frame(cx);
+        let popup = cx
+            .debug_bounds("slash-popup")
+            .expect("typing / opens the command popup");
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert!(
+            popup.bottom() <= composer.top(),
+            "the popup must float above the composer, never over its input rows \
+             (popup bottom {:?}, composer top {:?})",
+            popup.bottom(),
+            composer.top()
+        );
+
+        let row = cx
+            .debug_bounds("slash-option-cr")
+            .expect("a command row is drawn");
+        let name = cx
+            .debug_bounds("slash-option-name-cr")
+            .expect("the row draws the command name");
+        // One line: bezel's `menu_row` adds 6px of vertical padding to the
+        // name's line box; anything meaningfully taller means a second line
+        // — the description — crept back into the row.
+        assert!(
+            row.size.height <= name.size.height + px(13.0),
+            "a row is the command name alone, one line tall \
+             (row {:?}, name {:?})",
+            row.size.height,
+            name.size.height
+        );
+    }
+
+    #[test]
+    fn slash_option_tooltip_carries_the_description_and_skips_a_blank_one() {
+        assert_eq!(
+            slash_option_tooltip("  Deep research harness.  ").as_deref(),
+            Some("Deep research harness.")
+        );
+        assert_eq!(slash_option_tooltip(""), None);
+        assert_eq!(slash_option_tooltip("   "), None);
+    }
+
     /// F-CHAT-10: typing `@` opens the mention popup fed by a real bounded
     /// filesystem walk over the chat's working directory; clicking a listed
-    /// file inserts a file chip at the token's position, the chip survives
-    /// further typing, and sending carries the path as a mention rather than
-    /// text.
+    /// file inserts a `@path ` mention token at the token's position, the
+    /// token survives further typing, and sending carries the path as a
+    /// mention rather than text.
     #[gpui::test]
-    async fn at_mention_popup_lists_files_and_inserts_a_file_chip(cx: &mut TestAppContext) {
+    async fn at_mention_popup_lists_files_and_inserts_a_mention_token(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         std::fs::create_dir_all(dir.0.join("src")).expect("create src dir");
         std::fs::write(dir.0.join("src/main.rs"), "fn main() {}").expect("write main.rs");
         std::fs::write(dir.0.join("README.md"), "# readme").expect("write readme");
+        // A relative path long enough that an unconstrained row would paint
+        // the card far past its own 360px width.
+        let deep = dir.0.join(
+            "rust/target/debug/incremental/o1o2o3o4o5/quirky-uid-slug/a-place-for-building-things/very",
+        );
+        std::fs::create_dir_all(&deep).expect("create deep dir");
+        std::fs::write(deep.join("long-incremental-artifact-name.bin"), "artifact")
+            .expect("write long-path file");
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
             Chat::from_test_command(command, cwd, cx)
@@ -13341,9 +13257,38 @@ let answer = 42;
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
         refresh_frame(cx);
-        assert!(cx.debug_bounds("mention-popup").is_some());
+        let popup = cx
+            .debug_bounds("mention-popup-card")
+            .expect("typing @ opens the mention popup");
+        // The card's width is a cap, not a suggestion: a 90+-character path
+        // must ellipsize inside it, never stretch the card. Measured on the
+        // card itself — the deferred layer's wrapper is zero-size and would
+        // prove nothing.
+        assert!(
+            popup.size.width <= px(372.0),
+            "the mention popup is capped at its 360px card (plus border/shadow allowance): {popup:?}"
+        );
+        let long_row = cx
+            .debug_bounds(
+                "mention-option-rust/target/debug/incremental/o1o2o3o4o5/quirky-uid-slug/a-place-for-building-things/very/long-incremental-artifact-name.bin",
+            )
+            .expect("the long-path row is drawn");
+        // The row fills the card's inner width (360 − 2×4 card pad) and the
+        // path ellipsizes inside it — it never overflows the card.
+        assert!(
+            long_row.size.width <= px(352.0),
+            "the long-path row stays inside the card and ellipsizes: {long_row:?}"
+        );
         assert!(cx.debug_bounds("mention-option-README.md").is_some());
         assert!(cx.debug_bounds("mention-option-src/main.rs").is_some());
+        // Same anchor as the command popup: a card above the composer, not a
+        // list drawn over its input rows.
+        assert!(
+            popup.bottom() <= composer.top(),
+            "the mention popup must float above the composer              (popup bottom {:?}, composer top {:?})",
+            popup.bottom(),
+            composer.top()
+        );
 
         let row = cx
             .debug_bounds("mention-option-src/main.rs")
@@ -13351,27 +13296,30 @@ let answer = 42;
         cx.simulate_click(row.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("mention-popup").is_none(),
+            cx.debug_bounds("mention-popup-card").is_none(),
             "choosing a file closes the popup"
         );
-        assert!(
-            cx.debug_bounds("composer-chip-file").is_some(),
-            "a file chip is rendered in the composer"
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "@src/main.rs ",
+            "the accepted file lands as a mention token"
         );
 
-        // The chip survives editing after it and serializes as a mention
+        // The token survives editing after it and serializes as a mention
         // path, not text.
         cx.simulate_input(" check");
         cx.run_until_parked();
-        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
-        assert_eq!(draft.text, " check");
-        assert_eq!(draft.mention_paths, vec!["src/main.rs".to_string()]);
+        let (text, paths) = chat.read_with(&cx.cx, |chat, _| {
+            assemble_prompt(&chat.draft, &chat.accepted_mentions)
+        });
+        assert_eq!(text.trim(), "check");
+        assert_eq!(paths, vec!["src/main.rs".to_string()]);
 
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| {
             chat.entries
                 .iter()
-                .any(|entry| matches!(entry, Entry::User(text) if text == " check"))
+                .any(|entry| matches!(entry, Entry::User(text) if text.trim() == "check"))
         });
         assert!(
             !chat.read_with(&cx.cx, |chat, _| {
@@ -13424,18 +13372,28 @@ let answer = 42;
         cx.simulate_click(attach.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("composer-chip-image").is_some(),
+            cx.debug_bounds("attachment-chip-0").is_some(),
             "a supported image appears as an attachment chip"
         );
         assert!(cx.debug_bounds("attach-error").is_none());
-        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
-        assert_eq!(draft.images.len(), 1);
-        assert_eq!(draft.images[0].mime_type, "image/png");
+        let (count, mime) = chat.read_with(&cx.cx, |chat, _| {
+            (
+                chat.attachments.len(),
+                chat.attachments[0].mime_type.clone(),
+            )
+        });
+        assert_eq!(count, 1);
+        assert_eq!(mime, "image/png");
 
-        // An unsupported file is rejected with a transient message.
+        // An unsupported file is rejected with a transient message. The
+        // chip added above grew the card, which moved the toolbar above it
+        // — re-read the attach control's bounds before clicking again.
         chat.update(cx, |chat, _| {
             chat.attach_test_paths = vec![txt.clone()];
         });
+        let attach = cx
+            .debug_bounds("attach-image")
+            .expect("the attach control is drawn");
         cx.simulate_click(attach.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -13443,16 +13401,20 @@ let answer = 42;
             "an unsupported selection shows the rejection"
         );
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().images.len()),
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.len()),
             1,
             "the rejected file adds no chip"
         );
         pump_chat_until(cx, &chat, |chat| chat.attach_error.is_none());
 
-        // A multiple selection is rejected too.
+        // A multiple selection is rejected too. Re-read the bounds: the
+        // toolbar moved when the card grew.
         chat.update(cx, |chat, _| {
             chat.attach_test_paths = vec![jpeg.clone(), png.clone()];
         });
+        let attach = cx
+            .debug_bounds("attach-image")
+            .expect("the attach control is drawn");
         cx.simulate_click(attach.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
@@ -13463,19 +13425,17 @@ let answer = 42;
 
         // F-CHAT-12: the chip's removal control removes it before sending.
         refresh_frame(cx);
-        assert!(cx.debug_bounds("composer-chip-image").is_some());
+        assert!(cx.debug_bounds("attachment-chip-0").is_some());
         let remove = cx
-            .debug_bounds("chip-remove-0")
+            .debug_bounds("attachment-remove-0")
             .expect("the chip removal control is drawn");
         cx.simulate_click(remove.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("composer-chip-image").is_none(),
+            cx.debug_bounds("attachment-chip-0").is_none(),
             "removing the chip makes it disappear"
         );
-        assert!(chat.read_with(&cx.cx, |chat, _| {
-            chat.composer.draft().images.is_empty()
-        }));
+        assert!(chat.read_with(&cx.cx, |chat, _| { chat.attachments.is_empty() }));
 
         // F-CHAT-12: the × must also re-request composer focus. Type
         // immediately after the click, with no intervening click back into
@@ -13484,7 +13444,7 @@ let answer = 42;
         cx.simulate_input("still here");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().text),
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "still here",
             "the composer must accept keystrokes right after chip removal, with no re-click"
         );
@@ -13515,6 +13475,7 @@ let answer = 42;
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
             Chat::from_test_command(command, cwd, cx)
@@ -13544,19 +13505,25 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            cx.debug_bounds("composer-chip-image").is_some(),
+            cx.debug_bounds("attachment-chip-0").is_some(),
             "the supported image becomes an attachment chip"
         );
-        assert!(
-            cx.debug_bounds("composer-chip-file").is_some(),
-            "the non-image file becomes a @-style file chip"
-        );
-        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
-        assert_eq!(draft.images.len(), 1, "only the one valid image attaches");
         assert_eq!(
-            draft.mention_paths,
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "@src/notes.txt ",
+            "the non-image file becomes a @-style mention token"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.len()),
+            1,
+            "only the one valid image attaches"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| {
+                assemble_prompt(&chat.draft, &chat.accepted_mentions).1
+            }),
             vec!["src/notes.txt".to_string()],
-            "the file chip's path is relative to the agent's cwd"
+            "the file token's path is relative to the agent's cwd"
         );
         assert!(
             cx.debug_bounds("attach-error").is_some(),
@@ -13585,6 +13552,7 @@ let answer = 42;
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
             Chat::from_test_command(command, cwd, cx)
@@ -13607,12 +13575,19 @@ let answer = 42;
         cx.run_until_parked();
         refresh_frame(cx);
 
-        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
         assert_eq!(
-            draft.mention_paths,
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "@BRAVO.txt @ALPHA.txt ",
+            "the tokens land in drop order"
+        );
+        let (text, paths) = chat.read_with(&cx.cx, |chat, _| {
+            assemble_prompt(&chat.draft, &chat.accepted_mentions)
+        });
+        assert_eq!(text, "", "the dropped text files are mentions, not text");
+        assert_eq!(
+            paths,
             vec!["BRAVO.txt".to_string(), "ALPHA.txt".to_string()],
-            "mention_paths must preserve the literal drop order (BRAVO then ALPHA), \
-             not alphabetise to ALPHA-then-BRAVO"
+            "mention_paths must preserve the literal drop order (BRAVO then ALPHA),              not alphabetise to ALPHA-then-BRAVO"
         );
     }
 
@@ -13631,6 +13606,7 @@ let answer = 42;
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "permission"]);
             Chat::from_test_command(command, cwd, cx)
@@ -13667,12 +13643,16 @@ let answer = 42;
         refresh_frame(cx);
 
         assert!(
-            cx.debug_bounds("composer-chip-image").is_none(),
+            cx.debug_bounds("attachment-chip-0").is_none(),
             "a drop during permission-wait must not add a chip"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().images.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.is_empty()),
             "a drop during permission-wait must not touch the draft"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text().is_empty()),
+            "a drop during permission-wait must not insert a mention token"
         );
     }
 
@@ -13722,10 +13702,7 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
         focus_and_type(cx, "draft");
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
-            "draft"
-        );
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft");
 
         let overflow = cx
             .debug_bounds("composer-overflow")
@@ -13742,7 +13719,8 @@ let answer = 42;
             "New Conversation clears the transcript"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
+                && chat.attachments.is_empty()),
             "New Conversation clears the composer"
         );
         assert!(
@@ -13773,6 +13751,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -14090,6 +14069,7 @@ let answer = 42;
     #[gpui::test]
     async fn no_models_fallback_shows_a_plain_agent_badge(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 AgentCommand::new("/definitely/missing/sirio-acp-agent"),
@@ -14205,6 +14185,7 @@ let answer = 42;
     #[gpui::test]
     async fn a_real_click_unfolds_an_older_turn_and_folds_it_back(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -14290,6 +14271,7 @@ let answer = 42;
     #[gpui::test]
     async fn a_real_click_on_a_tool_call_location_opens_the_file(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -14365,6 +14347,7 @@ let answer = 42;
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -14534,6 +14517,7 @@ let answer = 42;
     #[gpui::test]
     async fn an_unavailable_chat_states_the_reason_and_never_connects(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::unavailable(
                 "Codex chat cannot start: it is not installed yet — install it \
@@ -14591,6 +14575,7 @@ let answer = 42;
     #[gpui::test]
     fn mode_selectable_is_true_with_catalog_before_first_turn(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, _| {
             chat.has_completed_turn = false;
@@ -14627,6 +14612,7 @@ let answer = 42;
     #[gpui::test]
     fn model_control_visible_with_models_before_first_turn(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, _| {
             chat.has_completed_turn = false;

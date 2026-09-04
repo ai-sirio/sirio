@@ -418,7 +418,55 @@ impl Drop for InstallGuard {
 /// directory (`codex` beside `codex-acp` from `@openai/codex`) and must
 /// never be preferred. Falls back to the longest entry contained in the
 /// package name.
+///
+/// On Windows npm writes every bin three times — the bare POSIX shell
+/// script, a `.cmd` shim and a `.ps1` shim — and only the `.cmd` one is
+/// something `CreateProcess` can start (through `cmd /c`, which
+/// `sirio_acp::command_for_process` adds for that extension). The bare
+/// name fails at launch with os error 193, "not a valid Win32 application".
+/// So there the three spellings are one candidate, and the winner is
+/// recorded as its `.cmd` shim.
 pub(crate) fn resolve_bin_name(entries: &[String], package: &str) -> Option<String> {
+    resolve_bin_name_on(entries, package, cfg!(windows))
+}
+
+/// The shim extensions npm writes beside each bin on Windows.
+const WINDOWS_SHIM_EXTENSIONS: [&str; 2] = [".cmd", ".ps1"];
+
+/// [`resolve_bin_name`] with the host made explicit, so both branches are
+/// exercised by the tests on every platform.
+fn resolve_bin_name_on(entries: &[String], package: &str, windows: bool) -> Option<String> {
+    if !windows {
+        return select_bin_name(entries, package);
+    }
+    let mut stems: Vec<String> = entries
+        .iter()
+        .map(|entry| windows_shim_stem(entry).to_string())
+        .collect();
+    stems.sort();
+    stems.dedup();
+    let chosen = select_bin_name(&stems, package)?;
+    let shim = format!("{chosen}.cmd");
+    if entries.contains(&shim) {
+        return Some(shim);
+    }
+    Some(chosen)
+}
+
+/// `tool.cmd` and `tool.ps1` are spellings of `tool`; anything else is its
+/// own name. An entry that is *only* an extension keeps it, so it still
+/// falls to the dotfile filter below.
+fn windows_shim_stem(entry: &str) -> &str {
+    WINDOWS_SHIM_EXTENSIONS
+        .iter()
+        .find_map(|extension| entry.strip_suffix(extension))
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(entry)
+}
+
+/// The platform-independent selection rule described on
+/// [`resolve_bin_name`], over names that are already one-per-bin.
+fn select_bin_name(entries: &[String], package: &str) -> Option<String> {
     let mut candidates: Vec<&String> = entries
         .iter()
         .filter(|entry| !entry.starts_with('.'))
@@ -1135,6 +1183,78 @@ mod tests {
         // answer is None, and the caller turns that into an error.
         let entries = vec!["alpha".to_string(), "zeta".to_string()];
         assert_eq!(resolve_bin_name(&entries, "totally-unrelated@2.0.0"), None);
+    }
+
+    /// The `.bin` directory npm 10 wrote for claude-agent-acp 0.73.0 on a
+    /// Windows host, verbatim: three spellings per bin, dependency bins
+    /// beside the package's own.
+    fn windows_bin_listing() -> Vec<String> {
+        [
+            "anthropic-ai-sdk",
+            "anthropic-ai-sdk.cmd",
+            "anthropic-ai-sdk.ps1",
+            "claude-agent-acp",
+            "claude-agent-acp.cmd",
+            "claude-agent-acp.ps1",
+            "node-which",
+            "node-which.cmd",
+            "node-which.ps1",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    #[test]
+    fn on_windows_the_cmd_shim_is_chosen_over_the_posix_script() {
+        // The bare `claude-agent-acp` is a POSIX shell script there;
+        // `CreateProcess` rejects it with os error 193 ("not a valid Win32
+        // application"). Only the `.cmd` spelling launches — through
+        // `cmd /c`, which `sirio_acp::command_for_process` adds for
+        // exactly that extension.
+        assert_eq!(
+            resolve_bin_name_on(
+                &windows_bin_listing(),
+                "@agentclientprotocol/claude-agent-acp@0.73.0",
+                true
+            ),
+            Some("claude-agent-acp.cmd".to_string())
+        );
+    }
+
+    #[test]
+    fn on_windows_the_three_spellings_of_one_bin_count_as_a_single_entry() {
+        // A lone bin is still "a single entry wins", even though npm wrote
+        // it three times — the package name need not match at all.
+        let entries = ["tool", "tool.cmd", "tool.ps1"].map(String::from);
+        assert_eq!(
+            resolve_bin_name_on(&entries, "@scope/something-else@1.0.0", true),
+            Some("tool.cmd".to_string())
+        );
+    }
+
+    #[test]
+    fn on_windows_a_bin_without_a_cmd_shim_keeps_its_bare_name() {
+        // Nothing to prefer: hand back what is there rather than inventing
+        // a shim that does not exist.
+        let entries = ["tool".to_string()];
+        assert_eq!(
+            resolve_bin_name_on(&entries, "tool@1.0.0", true),
+            Some("tool".to_string())
+        );
+    }
+
+    #[test]
+    fn off_windows_shim_extensions_are_ordinary_names() {
+        // The POSIX branch is untouched: npm writes no shims there, and an
+        // entry that happens to end in `.cmd` is just another candidate.
+        assert_eq!(
+            resolve_bin_name_on(
+                &windows_bin_listing(),
+                "@agentclientprotocol/claude-agent-acp@0.73.0",
+                false
+            ),
+            Some("claude-agent-acp".to_string())
+        );
     }
 
     #[test]
