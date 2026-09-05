@@ -992,8 +992,6 @@ dependencies = [
 [[package]]
 name = "bezel-gpui-windows"
 version = "0.3.8+zed.82aeef"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8147cd73aa620a249c42320b9d4baf8a3661653171b2f2ca4cc1899807a59467"
 dependencies = [
  "accesskit",
  "accesskit_windows",

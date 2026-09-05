@@ -1,0 +1,231 @@
+# Local override of the published `bezel-gpui-windows` crate (Bezel GPUI family, release 0.3.8),
+# substituted in via the `[patch.crates-io]` section of ../../Cargo.toml. See ../README.md for
+# what changed and why. Everything below mirrors the released manifest field-for-field except
+# the `[workspace]` table (so this path resolves as an independent workspace root rather than an
+# implicit member of the enclosing one) and `publish = false`. `[package] name` stays
+# `bezel-gpui-windows` so this path matches the crates.io package name the `[patch.crates-io]`
+# entry targets; `[lib] name` stays `gpui_windows` so it keeps resolving as the same import path
+# every consumer already uses.
+
+[workspace]
+
+[package]
+edition = "2024"
+publish = false
+name = "bezel-gpui-windows"
+version = "0.3.8+zed.82aeef"
+build = "build.rs"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "gpui_windows from zed-industries/zed, republished for the bezel gpui fork"
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/crabtalk/zed"
+resolver = "2"
+
+[package.metadata.cargo-shear]
+ignored = ["scap"]
+
+[features]
+default = ["gpui/default"]
+screen-capture = [
+    "gpui/screen-capture",
+    "scap",
+]
+test-support = ["gpui/test-support"]
+
+[lib]
+name = "gpui_windows"
+path = "src/gpui_windows.rs"
+
+[dependencies.gpui]
+version = "0.3.8+zed.82aeef"
+default-features = false
+package = "bezel-gpui"
+
+[target.'cfg(target_os = "windows")'.dependencies.accesskit]
+version = "0.24.0"
+features = ["enumn"]
+
+[target.'cfg(target_os = "windows")'.dependencies.accesskit_windows]
+version = "0.33.1"
+
+[target.'cfg(target_os = "windows")'.dependencies.anyhow]
+version = "1.0.86"
+
+[target.'cfg(target_os = "windows")'.dependencies.collections]
+version = "0.3.8+zed.82aeef"
+package = "bezel-zed-collections"
+
+[target.'cfg(target_os = "windows")'.dependencies.dunce]
+version = "1.0"
+
+[target.'cfg(target_os = "windows")'.dependencies.etagere]
+version = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies.futures]
+version = "0.3.32"
+
+[target.'cfg(target_os = "windows")'.dependencies.gpui_util]
+version = "0.3.8+zed.82aeef"
+package = "bezel-gpui-util"
+
+[target.'cfg(target_os = "windows")'.dependencies.image]
+version = "0.25.1"
+features = [
+    "bmp",
+    "dds",
+    "exr",
+    "ff",
+    "gif",
+    "hdr",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "rayon",
+    "tga",
+    "tiff",
+    "webp",
+]
+default-features = false
+
+[target.'cfg(target_os = "windows")'.dependencies.itertools]
+version = "0.14.0"
+
+[target.'cfg(target_os = "windows")'.dependencies.log]
+version = "0.4.16"
+features = [
+    "kv_unstable_serde",
+    "serde",
+]
+
+[target.'cfg(target_os = "windows")'.dependencies.parking_lot]
+version = "0.12.1"
+
+[target.'cfg(target_os = "windows")'.dependencies.rand]
+version = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies.raw-window-handle]
+version = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies.scap]
+version = "0.0.8-zed"
+optional = true
+default-features = false
+package = "zed-scap"
+
+[target.'cfg(target_os = "windows")'.dependencies.smallvec]
+version = "1.6"
+features = [
+    "union",
+    "const_new",
+]
+
+[target.'cfg(target_os = "windows")'.dependencies.uuid]
+version = "1.1.2"
+features = [
+    "v4",
+    "v5",
+    "v7",
+    "serde",
+]
+
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.61"
+features = [
+    "Data_Xml_Dom",
+    "Foundation_Numerics",
+    "Globalization_DateTimeFormatting",
+    "Storage_Search",
+    "Storage_Streams",
+    "System_Threading",
+    "UI_Notifications",
+    "UI_ViewManagement",
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_DirectManipulation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Graphics_Hlsl",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_RestartManager",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media",
+]
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-core]
+version = "0.61"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-numerics]
+version = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-registry]
+version = "0.5"
+
+[target.'cfg(target_os = "windows")'.build-dependencies.windows-registry]
+version = "0.5"
+
+[lints.clippy]
+dbg_macro = "deny"
+declare_interior_mutable_const = "deny"
+disallowed_methods = "deny"
+large_enum_variant = "allow"
+let_underscore_future = "allow"
+nonminimal_bool = "allow"
+redundant_clone = "deny"
+single_range_in_vec_init = "allow"
+todo = "deny"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[lints.clippy.style]
+level = "allow"
+priority = -1
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
+priority = 0
