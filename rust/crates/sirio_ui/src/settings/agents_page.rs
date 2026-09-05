@@ -13,6 +13,31 @@ use bezel::ui::widgets::{
 use gpui::Focusable;
 
 impl Settings {
+    /// Ids with an Update to offer, in row order: Installed rows whose
+    /// registry version moved ahead, skipping rows with an install in
+    /// flight (their action is hidden too, so they must not count).
+    fn outdated_agent_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for availability in &self.provider_availability {
+            if matches!(
+                self.install_states.get(availability.id),
+                Some(InstallState::InFlight)
+            ) {
+                continue;
+            }
+            if let sirio_registry::LaunchSource::Installed(installed) =
+                self.launch_source_for_row(availability.id)
+                && self
+                    .registry_versions
+                    .get(availability.id)
+                    .is_some_and(|latest| latest != &installed.version)
+            {
+                ids.push(availability.id.to_string());
+            }
+        }
+        ids
+    }
+
     pub(crate) fn render_agents(
         &self,
         theme: Theme,
@@ -34,6 +59,7 @@ impl Settings {
         let first_load = self.provider_availability.is_empty()
             && self.agent_registry_error.is_none()
             && query.is_empty();
+        let outdated = self.outdated_agent_ids();
         let mut card = bezel_theme
             .group_box()
             .debug_selector(|| "settings-agents-card".to_string());
@@ -103,6 +129,17 @@ impl Settings {
                             // `sirio_registry` — never the CLI binary's.
                             format!("ACP v{version}")
                         ))
+                        .into_any_element(),
+                );
+            }
+            if let sirio_registry::LaunchSource::Installed(installed) = &source
+                && let Some(latest) = self.registry_versions.get(availability.id)
+                && latest != &installed.version
+            {
+                fragments.push(
+                    div()
+                        .debug_selector(move || format!("settings-agent-latest-{index}"))
+                        .child(text!(format!("v{latest} available")))
                         .into_any_element(),
                 );
             }
@@ -194,16 +231,16 @@ impl Settings {
                         SettingsEvent::InstallAgent(availability.id.to_string()),
                         "Install",
                     )),
-                    sirio_registry::LaunchSource::Installed(installed) => self
-                        .registry_versions
-                        .get(availability.id)
-                        .filter(|latest| *latest != &installed.version)
-                        .map(|_| {
-                            (
+                    sirio_registry::LaunchSource::Installed(_) => {
+                        if outdated.iter().any(|id| id == availability.id) {
+                            Some((
                                 SettingsEvent::UpdateAgent(availability.id.to_string()),
                                 "Update",
-                            )
-                        }),
+                            ))
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 }
             };
@@ -319,6 +356,7 @@ impl Settings {
         let agent_count = self.provider_availability.len();
         let focus_search_field = self.agent_search_field.clone();
         let search_field = self.agent_search_field.clone();
+        let update_all_entity = entity.clone();
         let refresh_entity = entity;
 
         let mut surface = div()
@@ -421,6 +459,27 @@ impl Settings {
                                             bezel_theme.text_muted.opacity(0.65),
                                         )
                                         .child(text!(format!("Refreshed {stamp}"))),
+                                );
+                            }
+                            // One Update per outdated row, in row order —
+                            // the host serialises per agent with its
+                            // in-flight lock, so no new event is needed.
+                            if !outdated.is_empty() {
+                                toolbar = toolbar.child(
+                                    bezel_theme
+                                        .button("Update All", ButtonStyle::Ghost, None)
+                                        .border_1()
+                                        .border_color(bezel_theme.border)
+                                        .hover(|s| s.bg(bezel_theme.element_hover))
+                                        .id("agents-update-all")
+                                        .debug_selector(|| "agents-update-all".to_string())
+                                        .on_click(move |_, _, cx| {
+                                            update_all_entity.update(cx, |this, cx| {
+                                                for id in this.outdated_agent_ids() {
+                                                    cx.emit(SettingsEvent::UpdateAgent(id));
+                                                }
+                                            });
+                                        }),
                                 );
                             }
                             toolbar.child(
@@ -800,6 +859,190 @@ mod tests {
         assert!(
             note.origin.x >= version.origin.x + version.size.width,
             "the note follows the version on the meta line: version={version:?} note={note:?}"
+        );
+    }
+
+    fn outdated_fixture() -> (
+        Vec<AgentAvailability>,
+        Vec<(String, sirio_registry::LaunchSource)>,
+        std::collections::BTreeMap<String, String>,
+    ) {
+        use sirio_registry::{InstalledAgent, Integrity, LaunchSource};
+        let fixture = vec![
+            AgentAvailability {
+                id: "claude",
+                display_name: "Claude Code",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            },
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/opencode")),
+            },
+        ];
+        let sources = vec![
+            (
+                "claude".to_string(),
+                LaunchSource::Installed(InstalledAgent {
+                    id: "claude-acp".into(),
+                    version: "1.0.0".into(),
+                    executable: "/opt/sirio/claude-acp".into(),
+                    args: vec![],
+                    integrity: Integrity::Sha256,
+                }),
+            ),
+            (
+                "opencode".to_string(),
+                LaunchSource::Installed(InstalledAgent {
+                    id: "opencode".into(),
+                    version: "2.0.0".into(),
+                    executable: "/opt/sirio/opencode-acp".into(),
+                    args: vec![],
+                    integrity: Integrity::Sha256,
+                }),
+            ),
+        ];
+        let versions = std::collections::BTreeMap::from([
+            ("claude".to_string(), "1.1.0".to_string()),
+            ("opencode".to_string(), "2.0.0".to_string()),
+        ]);
+        (fixture, sources, versions)
+    }
+
+    #[gpui::test]
+    async fn an_outdated_installed_agent_shows_update_instead_of_installed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (fixture, sources, versions) = outdated_fixture();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |settings, cx| {
+                settings.apply_launch_sources(sources, versions);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        assert!(
+            cx.debug_bounds("settings-agent-update-0").is_some(),
+            "the outdated row offers Update"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-acp-claude").is_none(),
+            "the Update control replaces the Installed badge, not accompanies it"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-latest-0").is_some(),
+            "the row names the registry version as v1.1.0 available"
+        );
+
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let recorder = events.clone();
+        cx.update(|window, app| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let subscription = app.subscribe(
+                &settings,
+                move |_entity, event: &SettingsEvent, _| match event {
+                    SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
+                    SettingsEvent::InstallAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                },
+            );
+            std::mem::forget(subscription);
+        });
+        let update = cx
+            .debug_bounds("settings-agent-update-0")
+            .expect("Update renders for claude");
+        cx.simulate_click(update.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["claude".to_string()],
+            "the click emits UpdateAgent for the outdated row"
+        );
+    }
+
+    #[gpui::test]
+    async fn update_all_emits_one_update_per_outdated_agent(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (fixture, sources, versions) = outdated_fixture();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |settings, cx| {
+                settings.apply_launch_sources(sources, versions);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let update_all = cx
+            .debug_bounds("agents-update-all")
+            .expect("Update All renders while one row is outdated");
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let recorder = events.clone();
+        cx.update(|window, app| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let subscription = app.subscribe(
+                &settings,
+                move |_entity, event: &SettingsEvent, _| match event {
+                    SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
+                    SettingsEvent::InstallAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                },
+            );
+            std::mem::forget(subscription);
+        });
+        cx.simulate_click(update_all.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["claude".to_string()],
+            "Update All emits exactly one UpdateAgent, for the outdated id"
+        );
+    }
+
+    #[gpui::test]
+    async fn update_all_is_absent_when_nothing_is_outdated(cx: &mut TestAppContext) {
+        use sirio_registry::LaunchSource;
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let fixture = vec![AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+        }];
+        let sources = vec![(
+            "claude".to_string(),
+            LaunchSource::Builtin {
+                program: "claude".into(),
+                args: vec!["acp".into()],
+            },
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        assert!(
+            cx.debug_bounds("agents-update-all").is_none(),
+            "no Update All without an outdated row"
         );
     }
 
