@@ -5,7 +5,11 @@
 //! `installed_integrity_note` stay in `settings.rs`.
 
 use super::*;
-use bezel::ui::widgets::{ButtonStyle, Buttons as _, Scaffolding as _};
+use bezel::ui::tooltip::Tooltip;
+use bezel::ui::widgets::{
+    ButtonStyle, Buttons as _, Content as _, Scaffolding as _, Status as _, card_row_hover,
+    status_dot,
+};
 use gpui::Focusable;
 
 impl Settings {
@@ -20,6 +24,7 @@ impl Settings {
         // the ones that stay — `settings-agent-row-{index}` ids are keyed to
         // the original `provider_availability` position, and an existing
         // test asserts against those exact indices.
+        let bezel_theme = theme.to_bezel_theme();
         let query = self
             .agent_search_field
             .read(cx)
@@ -29,7 +34,9 @@ impl Settings {
         let first_load = self.provider_availability.is_empty()
             && self.agent_registry_error.is_none()
             && query.is_empty();
-        let mut agent_rows = controls::card(theme);
+        let mut card = bezel_theme
+            .group_box()
+            .debug_selector(|| "settings-agents-card".to_string());
         let mut first_visible_row = true;
         for (index, availability) in self.provider_availability.iter().enumerate() {
             let source = self.launch_source_for_row(availability.id);
@@ -41,54 +48,128 @@ impl Settings {
                 continue;
             }
             if !first_visible_row {
-                agent_rows = agent_rows.child(controls::separator(theme));
+                // `card_row` draws its own top border past the first row.
             }
+            let first = first_visible_row;
             first_visible_row = false;
-            let label = div()
+            let install_state = self.install_states.get(availability.id);
+
+            // The quiet meta line under the name: the CLI path (or the
+            // install hint), the ACP version, the checksum note, the
+            // unavailable reason, install progress — in that order.
+            let mut fragments: Vec<AnyElement> = Vec::new();
+            if let Some(path) = &availability.executable {
+                let shown = sirio_project::display_path(path);
+                let full = path.to_string_lossy().into_owned();
+                fragments.push(
+                    div()
+                        .debug_selector(move || format!("settings-agent-description-{index}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id(("settings-agent-path", index))
+                                .debug_selector(move || format!("settings-agent-path-{index}"))
+                                .tooltip(move |window, cx| Tooltip::text(full.clone(), window, cx))
+                                .font_family(bezel_theme.font_mono.clone())
+                                .text_size(px(11.0))
+                                .max_w(px(300.0))
+                                .overflow_hidden()
+                                .child(caret::field_value(text!(shown))),
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                fragments.push(
+                    div()
+                        .debug_selector(move || format!("settings-agent-description-{index}"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(text!(
+                            id = ("settings-agent-description", index),
+                            format!("Install the {} CLI to use it", row.name)
+                        ))
+                        .into_any_element(),
+                );
+            }
+            if let Some(version) = row.version.as_ref() {
+                fragments.push(
+                    div()
+                        .debug_selector(move || format!("settings-agent-version-{index}"))
+                        .child(text!(
+                            id = ("settings-agent-version", index),
+                            // #197: name the subject. This is the
+                            // ACP server package's version, from
+                            // `sirio_registry` — never the CLI binary's.
+                            format!("ACP v{version}")
+                        ))
+                        .into_any_element(),
+                );
+            }
+            if let Some(note) = installed_integrity_note(&source) {
+                fragments.push(
+                    div()
+                        .id(("settings-agent-integrity", index))
+                        .debug_selector(move || format!("settings-agent-integrity-{index}"))
+                        .child(text!(note))
+                        .into_any_element(),
+                );
+            }
+            if let sirio_registry::LaunchSource::Unavailable(reason) = &source {
+                let label = match reason {
+                    sirio_registry::UnavailableReason::NotInRegistry => "No ACP server",
+                    sirio_registry::UnavailableReason::NoArtifactForPlatform => {
+                        "Not available for this platform"
+                    }
+                    sirio_registry::UnavailableReason::UnsupportedDistribution => {
+                        "Unsupported install format"
+                    }
+                };
+                fragments.push(
+                    div()
+                        .debug_selector(move || format!("settings-agent-acp-reason-{index}"))
+                        .child(text!(label))
+                        .into_any_element(),
+                );
+            }
+            if matches!(install_state, Some(InstallState::InFlight)) {
+                fragments.push(
+                    div()
+                        .id(("settings-agent-install-status", index))
+                        .debug_selector(move || format!("settings-agent-install-status-{index}"))
+                        .child(text!("Installing… this can take up to ten minutes."))
+                        .into_any_element(),
+                );
+            }
+            let tile = div()
+                .debug_selector(move || format!("settings-agent-tile-{index}"))
+                .flex_none()
+                .size(px(36.0))
+                .rounded(px(BezelTheme::panel_radius()))
+                .border_1()
+                .border_color(bezel_theme.border)
+                .bg(bezel_theme.ink(0.03))
                 .flex()
                 .items_center()
-                .gap(px(10.0))
+                .justify_center()
                 .child(
-                    div()
-                        .w(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            IconElement::new(row.icon, IconSize::Small)
-                                .text_color(provider_glyph_color(theme, row.id)),
-                        ),
+                    IconElement::new(row.icon, IconSize::Small)
+                        .text_color(provider_glyph_color(theme, row.id)),
+                );
+            let body = div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    bezel_theme
+                        .row_title(row.name)
+                        .debug_selector(move || format!("settings-agent-name-{index}")),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .debug_selector(move || format!("settings-agent-name-{index}"))
-                                .text_size(theme.typography.headline)
-                                .text_color(theme.text)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(text!(id = ("settings-agent-name", index), row.name)),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("settings-agent-description-{index}")
-                                })
-                                .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(text!(
-                                    id = ("settings-agent-description", index),
-                                    row.description
-                                )),
-                        ),
+                    bezel_theme
+                        .meta_line(fragments)
+                        .debug_selector(move || format!("settings-agent-meta-{index}")),
                 );
             // F-SET-18: a not-installed agent with a known install command
             // gets a real Install control, not just a red status pill —
@@ -103,7 +184,8 @@ impl Settings {
             // this row's install is in flight the action disappears: the
             // per-agent lock would refuse a second click anyway, and a
             // dead-looking button invites exactly that click.
-            let install_state = self.install_states.get(availability.id);
+            // (The Update control keeps the predicate Task 9 gave it; the
+            // `v{latest} available` fragment and Update All land next.)
             let action = if matches!(install_state, Some(InstallState::InFlight)) {
                 None
             } else {
@@ -125,119 +207,115 @@ impl Settings {
                     _ => None,
                 }
             };
-            let install_control = if matches!(install_state, Some(InstallState::InFlight)) {
-                Some(
+            let install_control: Option<AnyElement> =
+                if matches!(install_state, Some(InstallState::InFlight)) {
+                    Some(
+                        div()
+                            .id(("settings-agent-install-spinner", index))
+                            .debug_selector(move || {
+                                format!("settings-agent-install-spinner-{index}")
+                            })
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(loading::compact("settings-install-spinner", window, cx))
+                            .into_any_element(),
+                    )
+                } else {
+                    action.map(|(event, label)| {
+                        if label == "Update" {
+                            let control_entity = entity.clone();
+                            bezel_theme
+                                .button("Update", ButtonStyle::Ghost, None)
+                                .border_1()
+                                .border_color(bezel_theme.border)
+                                .hover(|s| s.bg(bezel_theme.element_hover))
+                                .id(("settings-agent-update", index))
+                                .debug_selector(move || format!("settings-agent-update-{index}"))
+                                .on_click(move |_, _, cx| {
+                                    control_entity.update(cx, |_, cx| {
+                                        cx.emit(event.clone());
+                                    });
+                                })
+                                .into_any_element()
+                        } else {
+                            let control_entity = entity.clone();
+                            bezel_theme
+                                .button("Install", ButtonStyle::Prominent, None)
+                                .id(("settings-agent-install", index))
+                                .debug_selector(move || format!("settings-agent-install-{index}"))
+                                .on_click(move |_, _, cx| {
+                                    control_entity.update(cx, |_, cx| {
+                                        cx.emit(event.clone());
+                                    });
+                                })
+                                .into_any_element()
+                        }
+                    })
+                };
+            let status_id = format!("settings-agent-status-{}", availability.id);
+            let status = div()
+                .id(status_id.clone())
+                .debug_selector(move || status_id.clone())
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(status_dot(if availability.is_available() {
+                    bezel_theme.success
+                } else {
+                    bezel_theme.danger
+                }))
+                .child(
                     div()
-                        .id(("settings-agent-install-spinner", index))
-                        .debug_selector(move || format!("settings-agent-install-spinner-{index}"))
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(loading::compact("settings-install-spinner", window, cx)),
-                )
-            } else {
-                action.map(|(event, label)| {
-                    let install_entity = entity.clone();
-                    div()
-                        .id(("settings-agent-install", index))
-                        .debug_selector(move || format!("settings-agent-install-{index}"))
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(theme.radii.row_card)
-                        .text_size(theme.typography.caption2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .bg(theme.element_active)
-                        .hover(|style| style.bg(theme.element_hover))
-                        .on_click(move |_, _, cx| {
-                            install_entity.update(cx, |_, cx| {
-                                cx.emit(event.clone());
-                            });
-                        })
-                        .child(text!(id = ("settings-agent-install-label", index), label))
-                })
-            };
-            let mut row_container = div()
+                        .text_size(px(12.0))
+                        .text_color(bezel_theme.text_muted)
+                        .child(text!(availability.status_label())),
+                );
+            let mut tail = div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(status);
+            if let Some(control) = install_control {
+                tail = tail.child(control);
+            } else if matches!(
+                &source,
+                sirio_registry::LaunchSource::Builtin { .. }
+                    | sirio_registry::LaunchSource::Installed(_)
+            ) {
+                let badge_id = format!("settings-agent-acp-{}", availability.id);
+                tail = tail.child(
+                    bezel_theme
+                        .badge_active("Installed")
+                        .id(badge_id.clone())
+                        .debug_selector(move || badge_id.clone()),
+                );
+            }
+            let mut row_el = bezel_theme
+                .card_row(first)
+                .hover(card_row_hover)
                 .id(("settings-agent-row", index))
                 .debug_selector(move || format!("settings-agent-row-{index}"))
-                .flex()
-                .flex_col()
-                .child(controls::row_view(
-                    label,
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(Self::render_provider_status(availability, theme))
-                        .children(row.version.as_ref().map(|version| {
-                            div()
-                                .px(px(6.0))
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.text_faint)
-                                .child(text!(
-                                    id = ("settings-agent-version", index),
-                                    // #197: name the subject. This is the
-                                    // ACP server package's version, from
-                                    // `sirio_registry` -- the same thing
-                                    // the badge and Install button beside
-                                    // it are about. Bare, it sat next to
-                                    // the CLI's path in the same colour at
-                                    // the same size and read as that
-                                    // binary's version, which it never was:
-                                    // this row said "v0.70.0" beside a
-                                    // claude.exe reporting 2.1.247.
-                                    format!("ACP v{version}")
-                                ))
-                        }))
-                        .child(Self::render_acp_badge(
-                            availability.id.to_string(),
-                            &source,
-                            theme,
-                        ))
-                        .children(install_control),
-                    theme,
-                ));
-            if let Some(note) = installed_integrity_note(&source) {
-                row_container = row_container.child(
-                    div()
-                        .id(("settings-agent-integrity", index))
-                        .debug_selector(move || format!("settings-agent-integrity-{index}"))
-                        .px(px(BezelTheme::SPACE_MD))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
-                        .child(text!(note)),
+                .flex_wrap()
+                .child(tile)
+                .child(body)
+                .child(tail);
+            if let Some(InstallState::Failed(message)) = install_state {
+                row_el = row_el.child(
+                    bezel_theme
+                        .error_strip(message.clone())
+                        .mt(px(8.0))
+                        .w_full()
+                        .id(("settings-agent-install-reason", index))
+                        .debug_selector(move || format!("settings-agent-install-reason-{index}")),
                 );
             }
-            if let Some(state) = install_state {
-                let (kind, label): (&'static str, String) = match state {
-                    InstallState::InFlight => (
-                        "status",
-                        "Installing… this can take up to ten minutes.".to_string(),
-                    ),
-                    InstallState::Failed(message) => ("reason", message.clone()),
-                };
-                let failed = matches!(state, InstallState::Failed(_));
-                row_container = row_container.child(
-                    div()
-                        .id((kind, index))
-                        .debug_selector(move || format!("settings-agent-install-{kind}-{index}"))
-                        .px(px(BezelTheme::SPACE_MD))
-                        .text_size(theme.typography.footnote)
-                        .font_weight(if failed {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(theme.text_muted)
-                        .child(text!(label)),
-                );
-            }
-            agent_rows = agent_rows.child(row_container);
+            card = card.child(row_el);
         }
 
-        let bezel_theme = theme.to_bezel_theme();
         let agent_count = self.provider_availability.len();
         let focus_search_field = self.agent_search_field.clone();
         let search_field = self.agent_search_field.clone();
@@ -402,7 +480,7 @@ impl Settings {
                     .child("Loading agents…"),
             )
         } else {
-            surface.child(agent_rows)
+            surface.child(card)
         }
     }
 }
@@ -411,6 +489,8 @@ impl Settings {
 mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn open_agents_category(
         window: &gpui::WindowHandle<Settings>,
@@ -590,5 +670,630 @@ mod tests {
             refresh.origin.x >= field.origin.x + field.size.width,
             "Refresh sits right of the field: field={field:?} refresh={refresh:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn an_available_agent_reads_available_with_a_green_dot_and_installed_badge(
+        cx: &mut TestAppContext,
+    ) {
+        use sirio_registry::LaunchSource;
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let fixture = vec![AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+        }];
+        let sources = vec![(
+            "claude".to_string(),
+            LaunchSource::Builtin {
+                program: "claude".into(),
+                args: vec!["acp".into()],
+            },
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        assert!(
+            cx.debug_bounds("settings-agent-status-claude").is_some(),
+            "an available CLI renders its status"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-acp-claude").is_some(),
+            "a builtin ACP server renders the Installed badge"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_none(),
+            "no Install control beside the badge"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-update-0").is_none(),
+            "no Update control beside the badge"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_missing_acp_server_puts_the_reason_in_the_meta_line_not_a_badge(
+        cx: &mut TestAppContext,
+    ) {
+        use sirio_registry::{LaunchSource, UnavailableReason};
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let fixture = vec![AgentAvailability {
+            id: "omp",
+            display_name: "Oh-My-Pi",
+            executable: None,
+        }];
+        let sources = vec![(
+            "omp".to_string(),
+            LaunchSource::Unavailable(UnavailableReason::NotInRegistry),
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        assert!(
+            cx.debug_bounds("settings-agent-acp-reason-0").is_some(),
+            "the missing server reads as a meta fragment under the name"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-acp-omp").is_none(),
+            "no badge claims a server that is not there"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_checksum_note_is_a_meta_fragment_on_the_rows_line(cx: &mut TestAppContext) {
+        use sirio_registry::{InstalledAgent, Integrity, LaunchSource};
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let fixture = vec![AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+        }];
+        let sources = vec![(
+            "claude".to_string(),
+            LaunchSource::Installed(InstalledAgent {
+                id: "claude-acp".into(),
+                version: "1.0.0".into(),
+                executable: "/opt/sirio/claude-acp".into(),
+                args: vec![],
+                integrity: Integrity::None,
+            }),
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the row renders");
+        let version = cx
+            .debug_bounds("settings-agent-version-0")
+            .expect("the ACP version renders");
+        let note = cx
+            .debug_bounds("settings-agent-integrity-0")
+            .expect("the checksum note renders");
+        assert!(
+            note.origin.x + note.size.width <= row.origin.x + row.size.width
+                && note.origin.y >= row.origin.y
+                && note.origin.y + note.size.height <= row.origin.y + row.size.height,
+            "the note sits inside the row's bounds: note={note:?} row={row:?}"
+        );
+        assert!(
+            note.origin.x >= version.origin.x + version.size.width,
+            "the note follows the version on the meta line: version={version:?} note={note:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn agent_rows_render_what_discovery_found(cx: &mut gpui::TestAppContext) {
+        // The Agents screen renders the discovery list, not a fixed set of
+        // "Available" claims: the fixture below mirrors this machine's
+        // reality (opencode/omp absent) and must render absent rows too.
+        cx.update(Theme::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "claude",
+                display_name: "Claude Code",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            },
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: None,
+            },
+            AgentAvailability {
+                id: "omp",
+                display_name: "Oh-My-Pi",
+                executable: None,
+            },
+        ];
+        let expected = fixture.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-row-0").is_some(),
+            "the first provider row renders"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-2").is_some(),
+            "the third provider row renders"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-3").is_none(),
+            "rows follow the discovery list, not a fixed count"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-status-claude").is_some(),
+            "an installed CLI renders its status pill"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-status-opencode").is_some(),
+            "an absent CLI still renders its status pill"
+        );
+        assert!(cx.debug_bounds("settings-agent-status-omp").is_some());
+
+        let rendered = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .provider_availability
+                .clone()
+        });
+        assert_eq!(
+            rendered, expected,
+            "the surface renders exactly what discovery returned"
+        );
+    }
+
+    #[gpui::test]
+    async fn agent_description_stays_within_its_row(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex agent with a deliberately long display name that exceeds the available row width",
+            executable: None,
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Codex row renders");
+        let description = cx
+            .debug_bounds("settings-agent-description-0")
+            .expect("the Codex description renders");
+        assert!(
+            description.origin.x + description.size.width <= row.origin.x + row.size.width,
+            "agent description must stay inside its row: description={description:?} row={row:?}"
+        );
+    }
+
+    /// #334: the path fragment carries the resolved binary's full path at
+    /// a capped width, clipped from its *start*, so a deep install prefix
+    /// gives way before the binary's name does — and long before the row's
+    /// own name, which is the row's identity and must keep its full width.
+    /// The fragment lives in the meta line now, capped at 300 wide.
+    #[gpui::test]
+    async fn a_long_binary_path_never_squeezes_the_agent_name_out_of_its_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "pi",
+            display_name: "Pi",
+            executable: Some(std::path::PathBuf::from(
+                "/home/user/.local/share/pi-node/node-v22.23.2-linux-x64/lib/node_modules/\
+                 @mariozechner/pi-coding-agent/node_modules/.bin/some-very-deeply-nested/\
+                 vendor/runtime/bin/pi",
+            )),
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Pi row renders");
+        let name = cx
+            .debug_bounds("settings-agent-name-0")
+            .expect("the Pi name renders");
+        let path = cx
+            .debug_bounds("settings-agent-path-0")
+            .expect("the resolved-path fragment renders");
+
+        assert!(
+            name.size.width >= px(7.8 * 2.0),
+            "the agent's name keeps its full width — it is the row's identity: \
+             name={name:?} path={path:?}"
+        );
+        assert!(
+            path.size.width <= px(300.0),
+            "the path fragment never grows past its 300 cap: path={path:?}"
+        );
+        assert!(
+            path.origin.x + path.size.width <= row.origin.x + row.size.width,
+            "the path fragment stays inside the row: path={path:?} row={row:?}"
+        );
+    }
+
+    /// F-SET-18 (closed): an Installable row draws a real Install button
+    /// whose click emits [`SettingsEvent::InstallAgent`] — the host owns
+    /// the actual install (Task 8); this crate only renders and emits. A
+    /// row with nothing to offer offers no button at all — never a
+    /// fabricated one.
+    #[gpui::test]
+    async fn agent_install_click_emits_the_install_request(cx: &mut gpui::TestAppContext) {
+        use sirio_registry::{Distribution, LaunchSource};
+        cx.update(Theme::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: None,
+            },
+            AgentAvailability {
+                id: "omp",
+                display_name: "Oh-My-Pi",
+                executable: None,
+            },
+        ];
+        let sources = vec![
+            (
+                "opencode".to_string(),
+                LaunchSource::Installable {
+                    agent: sirio_registry::RegistryAgent {
+                        id: "opencode".into(),
+                        name: "OpenCode".into(),
+                        version: "1.18.21".into(),
+                        description: None,
+                        repository: None,
+                        website: None,
+                        license: None,
+                        icon: None,
+                        distributions: vec![Distribution::Binary(Default::default())],
+                    },
+                },
+            ),
+            (
+                "omp".to_string(),
+                LaunchSource::Unavailable(sirio_registry::UnavailableReason::NotInRegistry),
+            ),
+        ];
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let recorder = events.clone();
+        let window = cx.add_window(move |_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let subscription = app.subscribe(
+                &settings,
+                move |_entity, event: &SettingsEvent, _| match event {
+                    SettingsEvent::InstallAgent(id) => recorder.borrow_mut().push(id.clone()),
+                    SettingsEvent::UpdateAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                },
+            );
+            // The subscription must outlive this update scope for the whole
+            // test; forgetting it pins it to the entities' lifetimes.
+            std::mem::forget(subscription);
+        });
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_some(),
+            "an Installable row offers Install"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-1").is_none(),
+            "a row with nothing to offer draws no button"
+        );
+
+        let install = cx
+            .debug_bounds("settings-agent-install-0")
+            .expect("Install renders for opencode");
+
+        // The click below proves nothing unless the control is inside
+        // the card that clips it: `group_box` sets
+        // `overflow_hidden`, so a button pushed past the row's right
+        // edge is invisible AND unhittable while still reporting real
+        // `debug_bounds`. That is not hypothetical — the button already
+        // overflowed the 720px column once. Assert the containment the
+        // click depends on, so drift fails here instead of in the app.
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the opencode row draws");
+        assert!(
+            install.origin.x + install.size.width <= row.origin.x + row.size.width,
+            "Install must sit inside the row that clips it, not past its \
+             right edge: install={install:?} row={row:?}"
+        );
+
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["opencode".to_string()],
+            "the click emits InstallAgent for the row's adapter id"
+        );
+    }
+
+    /// An Installable opencode row, for the install-state tests below.
+    fn install_state_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::WindowHandle<Settings>, gpui::Entity<Settings>) {
+        use sirio_registry::{Distribution, LaunchSource};
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "opencode",
+            display_name: "OpenCode",
+            executable: None,
+        }];
+        let sources = vec![(
+            "opencode".to_string(),
+            LaunchSource::Installable {
+                agent: sirio_registry::RegistryAgent {
+                    id: "opencode".into(),
+                    name: "OpenCode".into(),
+                    version: "1.18.21".into(),
+                    description: None,
+                    repository: None,
+                    website: None,
+                    license: None,
+                    icon: None,
+                    distributions: vec![Distribution::Binary(Default::default())],
+                },
+            },
+        )];
+        let window = cx.add_window(move |_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let entity = window.entity(cx).expect("settings entity");
+        (window, entity)
+    }
+
+    #[gpui::test]
+    async fn an_in_flight_install_hides_the_action_and_shows_progress(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, settings) = install_state_window(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state("opencode", Some(InstallState::InFlight));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_none(),
+            "the action is not clickable while the install is in flight"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-status-0").is_some(),
+            "progress replaces the action"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_failed_install_shows_the_reason_and_allows_retry(cx: &mut gpui::TestAppContext) {
+        let (window, settings) = install_state_window(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state(
+                "opencode",
+                Some(InstallState::Failed(
+                    "opencode: checksum did not match; nothing was installed".into(),
+                )),
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_some(),
+            "a failed install offers the action again"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-reason-0").is_some(),
+            "the failure names its reason instead of disappearing"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_settled_install_returns_to_the_normal_row(cx: &mut gpui::TestAppContext) {
+        let (window, settings) = install_state_window(cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state("opencode", Some(InstallState::InFlight));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_install_state("opencode", None);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_some(),
+            "success returns the normal action"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-status-0").is_none()
+                && cx.debug_bounds("settings-agent-install-reason-0").is_none(),
+            "no progress or failure line survives a settled install"
+        );
+    }
+
+    /// F-SET-17: a failed discovery sweep renders the registry error banner
+    /// over the rows from the last successful sweep — never five false
+    /// "Not found on PATH" claims and never a blanked list — and the next
+    /// successful sweep clears the banner and replaces the rows. The retry
+    /// gesture itself is the Agents screen's existing "↻ Refresh" button,
+    /// whose wiring `refresh_agents_re_runs_agent_discovery` already pins.
+    #[gpui::test]
+    async fn registry_error_renders_over_stale_rows_and_clears_on_recovery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+        }];
+        let stale = fixture.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-registry-error").is_none(),
+            "no banner renders while the sweep has not failed"
+        );
+
+        // A sweep that cannot answer.
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |this, cx| {
+                this.apply_agent_discovery(Err(DiscoveryError::Probe {
+                    program: "claude".to_string(),
+                    path: PathBuf::from("/locked/claude"),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "permission denied",
+                    ),
+                }));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-registry-error").is_some(),
+            "the failed sweep renders the registry error banner"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-0").is_some(),
+            "the rows from the last successful sweep stay on screen"
+        );
+        let (rendered, message) = cx.update(|window, cx| {
+            let settings = window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx);
+            (
+                settings.provider_availability.clone(),
+                settings.agent_registry_error.clone(),
+            )
+        });
+        assert_eq!(rendered, stale, "a failed sweep never rewrites the rows");
+        let message = message.expect("the failure is recorded renderably");
+        assert!(
+            message.starts_with("Could not load the agent registry:"),
+            "the message keeps the Swift registry's shape: {message}"
+        );
+
+        // The next successful sweep replaces the rows and clears the banner.
+        let recovered = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex",
+            executable: None,
+        }];
+        let applied = recovered.clone();
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |this, cx| {
+                this.apply_agent_discovery(Ok(applied));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-registry-error").is_none(),
+            "a successful sweep clears the banner"
+        );
+        let rendered = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .provider_availability
+                .clone()
+        });
+        assert_eq!(rendered, recovered, "recovery replaces the stale rows");
     }
 }
