@@ -92,7 +92,9 @@ pub enum UsageReason {
     /// the fault; this means there was never anything to run here, which is
     /// not a fault and not actionable. Windows reported the Claude fetch as
     /// `Error` for want of this variant, so the status bar said "Claude
-    /// error" beside a settings surface saying "Signed in".
+    /// error" beside a settings surface saying "Signed in". No provider
+    /// returns it today — the Windows Claude fetch runs under ConPTY since
+    /// — but the vocabulary stays for the next platform gap.
     Unsupported,
     /// The provider exists but could not be read.
     Error,
