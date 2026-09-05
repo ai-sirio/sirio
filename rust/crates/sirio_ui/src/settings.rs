@@ -800,18 +800,68 @@ fn terminate_login_process_group(pid: u32) {
     }
 }
 
-/// Windows stand-in for [`terminate_login_process_group`]. `/proc/<pid>/task/<tid>/children`
-/// and the `kill` binary are both Unix-only; the Windows counterpart is the same pairing
-/// used elsewhere in this wave — Toolhelp32 (`CreateToolhelp32Snapshot`, walking
-/// `th32ParentProcessID`) to find descendants, `TerminateProcess` to end each one — or,
-/// more idiomatically, a Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) created at
-/// launch so closing the job kills the whole tree without an enumerate step at all.
-/// Neither is implemented; this is a real no-op; the caller (`cancel_account_login`) only
-/// fires it from a detached background task with no return value to observe, so the only
-/// user-visible effect of the gap is that a canceled login's terminal process is not
-/// force-killed on Windows yet.
-#[cfg(not(unix))]
-fn terminate_login_process_group(_pid: u32) {}
+/// Windows twin of [`terminate_login_process_group`]. There is no
+/// descendant walk to do here: [`login_launcher`] runs the login command
+/// itself in a fresh console, so the recorded pid *is* the login command
+/// (no terminal-emulator launcher sits in front of it), and one
+/// `TerminateProcess` ends it and closes its console window with it. A
+/// pid that no longer exists (the login already finished) opens no handle
+/// and is left alone.
+#[cfg(windows)]
+fn terminate_login_process_group(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    // SAFETY: plain Win32 calls on a handle this function opens, checks
+    // for null, and closes itself; nothing is dereferenced.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            return;
+        }
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+/// The process that opens a provider's interactive login for
+/// [`Settings::launch_account_login`]. Unix delegates to the desktop's
+/// terminal emulator (`x-terminal-emulator -e <program> <args>`), so the
+/// child is the emulator and the login command runs inside it.
+#[cfg(not(windows))]
+fn login_launcher(program: &str, args: &[&str]) -> Command {
+    let mut command = Command::new("x-terminal-emulator");
+    command.arg("-e").arg(program).args(args);
+    command
+}
+
+/// Windows twin of [`login_launcher`]: there is no terminal-emulator
+/// alternatives name to delegate to, and a console program started from a
+/// GUI process gets no window of its own unless asked — so the login
+/// command runs directly, in a fresh console (`CREATE_NEW_CONSOLE`). The
+/// child *is* the login command: `wait` ends when the login ends, and the
+/// pid handed to Cancel is the one [`terminate_login_process_group`] ends.
+#[cfg(windows)]
+fn login_launcher(program: &str, args: &[&str]) -> Command {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    let mut command = Command::new(program);
+    command.args(args).creation_flags(CREATE_NEW_CONSOLE);
+    command
+}
+
+/// The card's message when the login could not even be started. Names the
+/// launcher only when it is a different program from the login itself —
+/// on Linux a missing `x-terminal-emulator` is what fails, and blaming
+/// `claude` for it sent a reader to check the wrong install.
+fn login_start_failure(program: &str, launcher: &str, error: &std::io::Error) -> String {
+    if launcher == program {
+        format!("could not start {program} login: {error}")
+    } else {
+        format!("could not start {program} login via {launcher}: {error}")
+    }
+}
 
 /// Small settings view model. The real application can replace these values
 /// with its persistence layer without changing the reusable settings UI.
@@ -1796,10 +1846,11 @@ impl Settings {
         cx.notify();
     }
 
-    /// Opens the provider's own interactive login flow in the desktop
-    /// terminal. Sirio waits off the render thread and re-reads the local
-    /// account stores when that terminal session ends, so cancel/retry and a
-    /// successful login all leave the card truthful.
+    /// Opens the provider's own interactive login flow in a terminal (the
+    /// desktop's emulator on Unix, a fresh console on Windows — see
+    /// [`login_launcher`]). Sirio waits off the render thread and re-reads
+    /// the local account stores when that terminal session ends, so
+    /// cancel/retry and a successful login all leave the card truthful.
     ///
     /// F-SET-14: while the terminal is up, [`Self::account_login_pending`]
     /// is set so the card can render "Signing in…" and a Cancel button
@@ -1822,24 +1873,21 @@ impl Settings {
         cx.spawn(async move |_, cx| {
             let spawned = cx
                 .background_spawn(async move {
-                    Command::new("x-terminal-emulator")
-                        .arg("-e")
-                        .arg(program)
-                        .args(&args)
+                    let mut command = login_launcher(program, &args);
+                    let launcher = command.get_program().to_string_lossy().into_owned();
+                    command
                         .spawn()
+                        .map_err(|error| login_start_failure(program, &launcher, &error))
                 })
                 .await;
 
             let mut child = match spawned {
                 Ok(child) => child,
-                Err(error) => {
+                Err(message) => {
                     entity.update(cx, |settings, cx| {
                         settings.account_login_pending = None;
                         settings.account_login_pid = None;
-                        settings.account_action_error = Some((
-                            provider,
-                            format!("could not start {program} login: {error}"),
-                        ));
+                        settings.account_action_error = Some((provider, message));
                         cx.notify();
                     });
                     return;
@@ -4746,6 +4794,75 @@ mod tests {
         // F-SET-13: Ollama Cloud is cookie-only — no CLI login flow
         // exists to delegate to, and its card renders no Add Account.
         assert_eq!(provider_login_command(ProviderKind::OllamaCloud), None);
+    }
+
+    /// Windows has no `x-terminal-emulator`: Add Account used to die with
+    /// "could not start claude login: program not found" (the launcher was
+    /// what was missing, not `claude`). The login now runs itself, in a
+    /// console of its own, so the spawned child *is* the login command.
+    #[cfg(windows)]
+    #[test]
+    fn login_launcher_runs_the_login_itself_on_windows() {
+        let command = login_launcher("claude", &["auth", "login"]);
+        assert_eq!(command.get_program(), "claude");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["auth", "login"]);
+    }
+
+    /// Unix keeps delegating to the desktop's terminal emulator, with the
+    /// login command as its `-e` payload.
+    #[cfg(not(windows))]
+    #[test]
+    fn login_launcher_delegates_to_the_terminal_emulator_on_unix() {
+        let command = login_launcher("claude", &["auth", "login"]);
+        assert_eq!(command.get_program(), "x-terminal-emulator");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-e", "claude", "auth", "login"]);
+    }
+
+    /// The failure message blames the launcher only when a separate one
+    /// failed; a login that is its own launcher is named once.
+    #[test]
+    fn login_start_failure_names_a_separate_launcher_only() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+        assert_eq!(
+            login_start_failure("claude", "x-terminal-emulator", &error),
+            "could not start claude login via x-terminal-emulator: program not found"
+        );
+        assert_eq!(
+            login_start_failure("claude", "claude", &error),
+            "could not start claude login: program not found"
+        );
+    }
+
+    /// F-SET-14 on Windows: Cancel really ends the recorded login process.
+    /// `ping` stands in for the login command as a process that would
+    /// otherwise outlive the test by half a minute.
+    #[cfg(windows)]
+    #[test]
+    fn terminate_login_process_group_ends_the_recorded_process_on_windows() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a long-lived stand-in for the login");
+        terminate_login_process_group(child.id());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match child.try_wait().expect("poll the stand-in") {
+                Some(status) => {
+                    assert!(!status.success(), "terminated, not finished: {status}");
+                    break;
+                }
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                None => {
+                    let _ = child.kill();
+                    panic!("the stand-in login was still running after terminate");
+                }
+            }
+        }
     }
 
     fn cookie_test_states() -> ProviderAccountStates {
