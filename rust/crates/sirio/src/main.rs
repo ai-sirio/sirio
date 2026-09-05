@@ -16429,6 +16429,20 @@ fn register_fonts(cx: &App) {
     }
 }
 
+/// Sirio is watched from elsewhere: an agent runs for minutes while the user
+/// works in another window or on another monitor, and the sidebar spinner and
+/// the chat's thinking orb are what says it is still going. bezel parks its
+/// animation clock while no window of the app is active, and names this exact
+/// case — a window that must keep moving while something else has focus — as
+/// the one to turn that off for. Left on, the pause does not even freeze the
+/// orb: the chat re-renders on every ACP chunk regardless, and each of those
+/// renders samples the live phase, so the orb jumps from chunk to chunk
+/// instead of turning.
+fn init_motion(cx: &mut App) {
+    use bezel::motion::AppExt as _;
+    cx.set_pause_when_inactive(false);
+}
+
 /// #364: the binary is a `windows_subsystem = "windows"` GUI app, so it
 /// starts with no console of its own. Reuse the parent console when there
 /// is one (terminal launch) so `eprintln!` logs stay visible; otherwise
@@ -16518,6 +16532,7 @@ fn main() {
         // comment for why the order is load-bearing.
         register_fonts(cx);
         Theme::init(cx);
+        init_motion(cx);
         bezel::ui::input::init(cx);
         bezel::ui::tree::init(cx);
         sirio_ui::chat::init(cx);
@@ -20708,6 +20723,54 @@ mod tests {
         cx: &VisualTestContext,
     ) -> Option<AgentStatus> {
         workspace.read_with(&cx.cx, |workspace, _| workspace.activity.status("pane-0"))
+    }
+
+    /// A view holding nothing but the chat's thinking orb, counting its own
+    /// renders so a test can tell whether the shared clock is driving it.
+    struct ThinkingOrbFixture {
+        renders: usize,
+    }
+
+    impl Render for ThinkingOrbFixture {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            let theme = Theme::light();
+            div().child(sirio_ui::loading::thinking_indicator(
+                "thinking-orb-fixture",
+                &theme,
+                window,
+                cx,
+            ))
+        }
+    }
+
+    /// The thinking orb is watched from another window while an agent works.
+    /// bezel's clock refuses to drive a window that is not active, but that
+    /// does not freeze the orb: the chat re-renders on every ACP chunk whether
+    /// or not the window is active, and each render samples the orb's live
+    /// phase — so the orb jumps from chunk to chunk instead of turning. The
+    /// app therefore keeps the drive on: an inactive window's orb is still
+    /// owed its frames.
+    #[gpui::test]
+    async fn the_thinking_orb_keeps_turning_while_the_window_is_inactive(cx: &mut TestAppContext) {
+        cx.update(init_motion);
+        let (fixture, cx) = cx.add_window_view(|_, _| ThinkingOrbFixture { renders: 0 });
+        cx.deactivate_window();
+        // One render on the inactive window, as an ACP chunk provokes.
+        fixture.update(&mut cx.cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let before = fixture.read_with(&cx.cx, |fixture, _| fixture.renders);
+        // Half a second of clock, at the 30 fps the orb claims.
+        for _ in 0..15 {
+            cx.background_executor
+                .advance_clock(Duration::from_millis(33));
+            cx.run_until_parked();
+        }
+        let after = fixture.read_with(&cx.cx, |fixture, _| fixture.renders);
+        assert!(
+            after >= before + 10,
+            "an inactive window's orb must keep being driven: {before} -> {after} renders"
+        );
     }
 
     /// A running agent mounts the sidebar's spinner, whose lease re-renders
