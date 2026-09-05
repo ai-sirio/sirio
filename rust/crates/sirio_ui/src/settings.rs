@@ -605,25 +605,6 @@ pub fn provider_row(
     }
 }
 
-/// The pill for one agent row. Every arm is a rendering of a resolved fact:
-/// the previous version asked `acp_program()`, a compile-time claim, which
-/// is why OpenCode and Oh-My-Pi were labelled "No ACP server" while their
-/// binaries served one.
-pub(crate) fn launch_badge_label(source: &sirio_registry::LaunchSource) -> &'static str {
-    use sirio_registry::{LaunchSource, UnavailableReason};
-    match source {
-        LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => "ACP chat available",
-        LaunchSource::Installable { .. } => "Available to install",
-        LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform) => {
-            "Not available for this platform"
-        }
-        LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution) => {
-            "Unsupported install format"
-        }
-        LaunchSource::Unavailable(UnavailableReason::NotInRegistry) => "No ACP server",
-    }
-}
-
 /// What an installed agent could not prove about itself, or `None` when it
 /// could.
 pub(crate) fn installed_integrity_note(
@@ -670,6 +651,10 @@ impl ProviderKind {
 /// chip's own lightness and vanishes. The page ground is the neutral that
 /// actually contrasts with both fills, and it is already what the granted
 /// permission badge uses two screens over.
+///
+/// macOS-only in production (the permission rows it serves are macOS
+/// gates); the contrast test below uses it on every platform.
+#[cfg(any(test, target_os = "macos"))]
 fn on_status_fill(theme: &Theme) -> Rgba {
     theme.surface
 }
@@ -3148,48 +3133,6 @@ impl Settings {
         page
     }
 
-    /// The status pill for one provider row: the resolved executable when
-    /// the CLI is installed, the crate's own "not found" wording when it
-    /// is absent. A badge that claimed a binary not on PATH was installed
-    /// would be the exact lie this screen used to tell.
-    fn render_provider_status(availability: &AgentAvailability, theme: Theme) -> impl IntoElement {
-        /// Widest the resolved-path pill may grow: room for a typical
-        /// `~/.local/bin/<cli>` whole, while a node-hosted CLI's install
-        /// prefix is clipped instead of the row's identity.
-        const PATH_PILL_MAX_WIDTH: f32 = 240.0;
-        let status_id = format!("settings-agent-status-{}", availability.id);
-        match &availability.executable {
-            // #334: the path is capped, and clipped from its *start*, so a
-            // deep install prefix gives way before the binary's name does
-            // — and long before the row's own name and description, which
-            // are the only other shrinkable items in the row and used to
-            // collapse to nothing under a max-content pill.
-            Some(path) => div()
-                .id(status_id.clone())
-                .debug_selector(move || status_id.clone())
-                .max_w(px(PATH_PILL_MAX_WIDTH))
-                .overflow_hidden()
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .text_color(theme.text_muted)
-                .bg(theme.surface_raised)
-                .child(caret::field_value(text!(sirio_project::display_path(path)))),
-            None => div()
-                .id(status_id.clone())
-                .debug_selector(move || status_id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(on_status_fill(&theme))
-                .bg(theme.danger)
-                .child(text!(availability.status_label())),
-        }
-    }
-
     /// Resolves one adapter row's source from the last applied sweep.
     /// Rows without a known source resolve honestly to NotInRegistry.
     fn launch_source_for_row(&self, id: &str) -> sirio_registry::LaunchSource {
@@ -3202,48 +3145,6 @@ impl Settings {
                     sirio_registry::UnavailableReason::NotInRegistry,
                 )
             })
-    }
-
-    /// The ACP chat badge for one provider row — a rendering of the row's
-    /// resolved [`sirio_registry::LaunchSource`] rather than a compiled
-    /// claim. Colours are theme tokens: the neutral raised pill for
-    /// Builtin/Installed, the waku warning tone for everything else.
-    fn render_acp_badge(
-        badge_key: String,
-        source: &sirio_registry::LaunchSource,
-        theme: Theme,
-    ) -> impl IntoElement {
-        let badge_id = format!("settings-agent-acp-{badge_key}");
-        let label = launch_badge_label(source);
-        let neutral = matches!(
-            source,
-            sirio_registry::LaunchSource::Builtin { .. }
-                | sirio_registry::LaunchSource::Installed(_)
-        );
-        if neutral {
-            div()
-                .id(badge_id.clone())
-                .debug_selector(move || badge_id.clone())
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .text_color(theme.text_muted)
-                .bg(theme.surface_raised)
-                .child(text!(label))
-        } else {
-            div()
-                .id(badge_id.clone())
-                .debug_selector(move || badge_id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(on_status_fill(&theme))
-                .bg(theme.warning)
-                .child(text!(label))
-        }
     }
 
     /// The summarizer agent trigger (F-SET-05): a button showing the
@@ -4632,56 +4533,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_badge_reports_the_resolved_source_rather_than_a_compiled_claim() {
-        use sirio_registry::{LaunchSource, UnavailableReason};
-
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Builtin {
-                program: "opencode".into(),
-                args: vec!["acp".into()],
-            }),
-            "ACP chat available",
-            "OpenCode serves ACP from its own binary; the old pill said the opposite"
-        );
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Unavailable(UnavailableReason::NotInRegistry)),
-            "No ACP server",
-        );
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Unavailable(
-                UnavailableReason::NoArtifactForPlatform
-            )),
-            "Not available for this platform",
-            "an undifferentiated grey pill is the failure mode this work removes"
-        );
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Unavailable(
-                UnavailableReason::UnsupportedDistribution
-            )),
-            "Unsupported install format",
-        );
-    }
-
-    #[test]
-    fn an_installable_row_offers_install_and_says_when_it_cannot_be_verified() {
-        use sirio_registry::{Distribution, LaunchSource, RegistryAgent};
-
-        let agent = RegistryAgent {
-            id: "cursor".into(),
-            name: "Cursor".into(),
-            version: "1.0.0".into(),
-            description: None,
-            repository: None,
-            website: None,
-            license: None,
-            icon: None,
-            distributions: vec![Distribution::Binary(Default::default())],
-        };
-        let source = LaunchSource::Installable { agent };
-        assert_eq!(launch_badge_label(&source), "Available to install");
-    }
-
     /// #197: the version in an agent row belongs to the **ACP server
     /// package**, never to the CLI whose path sits beside it. Rendered bare
     /// as `v0.70.0`, in the same colour and size as that path and six pixels
@@ -4747,29 +4598,6 @@ mod tests {
         };
 
         assert_eq!(provider_row(&availability, Some(&source)).version, None);
-    }
-
-    #[test]
-    fn the_state_pill_never_repeats_the_action_button_label() {
-        use sirio_registry::{LaunchSource, RegistryAgent};
-
-        let source = LaunchSource::Installable {
-            agent: RegistryAgent {
-                id: "cursor".into(),
-                name: "Cursor".into(),
-                version: "1.0.0".into(),
-                description: None,
-                repository: None,
-                website: None,
-                license: None,
-                icon: None,
-                distributions: vec![],
-            },
-        };
-        let action_label = "Install";
-
-        assert_ne!(launch_badge_label(&source), "Install");
-        assert_ne!(launch_badge_label(&source), action_label);
     }
 
     #[test]

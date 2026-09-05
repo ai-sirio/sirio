@@ -5,6 +5,7 @@
 //! `installed_integrity_note` stay in `settings.rs`.
 
 use super::*;
+use bezel::ui::icons;
 use bezel::ui::tooltip::Tooltip;
 use bezel::ui::widgets::{
     ButtonStyle, Buttons as _, Content as _, Scaffolding as _, Status as _, card_row_hover,
@@ -497,23 +498,14 @@ impl Settings {
                         }),
                 );
         // F-SET-17: the registry error state, rendered over the rows from
-        // the last successful sweep, with the "↻ Refresh" button above as
-        // the retry — the Swift original's warning label in
-        // `AgentsSettingsView`.
+        // the last successful sweep, with the Refresh button above as
+        // the retry.
         if let Some(error) = self.agent_registry_error.clone() {
             surface = surface.child(
-                div()
+                bezel_theme
+                    .warning_strip(error)
                     .id("settings-agents-registry-error")
-                    .debug_selector(|| "settings-agents-registry-error".to_string())
-                    .w_full()
-                    .mb(px(14.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.warning)
-                    .child(text!("⚠"))
-                    .child(text!(error)),
+                    .debug_selector(|| "settings-agents-registry-error".to_string()),
             );
         }
         if first_load {
@@ -537,6 +529,18 @@ impl Settings {
                         cx,
                     ))
                     .child("Loading agents…"),
+            )
+        } else if !query.is_empty() && first_visible_row {
+            surface.child(
+                card.child(
+                    bezel_theme
+                        .empty_state(
+                            icons::MAGNIFER,
+                            format!("No agents match \u{201c}{query}\u{201d}"),
+                            format!("Clear the search to see all {agent_count} agents."),
+                        )
+                        .debug_selector(|| "settings-agents-empty".to_string()),
+                ),
             )
         } else {
             surface.child(card)
@@ -862,6 +866,9 @@ mod tests {
         );
     }
 
+    // A test-only triple with no better name: the two rows, their
+    // sources and the registry versions behind them.
+    #[allow(clippy::type_complexity)]
     fn outdated_fixture() -> (
         Vec<AgentAvailability>,
         Vec<(String, sirio_registry::LaunchSource)>,
@@ -1538,5 +1545,53 @@ mod tests {
                 .clone()
         });
         assert_eq!(rendered, recovered, "recovery replaces the stale rows");
+    }
+
+    #[gpui::test]
+    async fn a_search_with_no_match_shows_the_empty_state(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "claude",
+                display_name: "Claude Code",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            },
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: None,
+            },
+            AgentAvailability {
+                id: "omp",
+                display_name: "Oh-My-Pi",
+                executable: None,
+            },
+        ];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let search = cx
+            .debug_bounds("agent-search-field")
+            .expect("the search field is drawn");
+        cx.simulate_click(search.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("gemini");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-empty").is_some(),
+            "a query with no match renders the empty state"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-0").is_none()
+                && cx.debug_bounds("settings-agent-row-1").is_none()
+                && cx.debug_bounds("settings-agent-row-2").is_none(),
+            "no row survives a query with no match"
+        );
     }
 }
