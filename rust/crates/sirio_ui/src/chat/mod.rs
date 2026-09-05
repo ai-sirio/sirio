@@ -5294,7 +5294,7 @@ impl Chat {
             .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
             .child(div().text_color(theme.text).child(label))
             .when(mode_selectable, |this| {
-                this.child(div().text_color(theme.text_faint).child("⌄"))
+                this.child(picker_chevron(theme))
             });
 
         let selected_model_name = self
@@ -5383,9 +5383,11 @@ impl Chat {
                     div()
                         .id("model-chip-chevron")
                         .debug_selector(|| "model-chip-chevron".into())
+                        .flex()
                         .flex_none()
-                        .text_color(theme.text_faint)
-                        .child("⌄"),
+                        .items_center()
+                        .justify_center()
+                        .child(picker_chevron(theme)),
                 )
         } else {
             // #206: this badge names the *agent*, so it reads the agent.
@@ -5452,7 +5454,14 @@ impl Chat {
                             .text_color(theme.text)
                             .child(label),
                     )
-                    .child(div().flex_none().text_color(theme.text_faint).child("⌄"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .child(picker_chevron(theme)),
+                    )
             });
 
         let view = bezel::motion::Painter::of(cx);
@@ -6508,9 +6517,25 @@ impl Chat {
                 div()
                     .id("composer-input")
                     .debug_selector(|| "composer-input".into())
+                    .relative()
                     .w_full()
                     .when(disabled, |input| input.opacity(0.6))
-                    .child(self.composer_field.clone()),
+                    .child(self.composer_field.clone())
+                    .when(focused, |this| {
+                        // Covers bezel's own focus ring with the composer's
+                        // dark edge: same box, same radius, painted later so
+                        // on top. Absolute, so it never moves layout; no
+                        // handlers, so clicks still reach the field (and the
+                        // card refocuses it anyway).
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(bezel::theme::Theme::button_radius()))
+                                .border_1()
+                                .border_color(composer_field_edge(&bezel_theme)),
+                        )
+                    }),
             )
             .when_some(self.queued_item.clone(), |this, queued| {
                 // D-CHAT-03: the committed next-turn item, its text and a
@@ -7712,15 +7737,42 @@ fn split_diff_lines(text: &str) -> Vec<String> {
     lines
 }
 
+/// The chevron for the composer's picker chips (mode, model, effort).
+///
+/// The shared `ChevronDown` SVG rather than the old `⌄` text glyph: a text
+/// glyph rides the font baseline and sat low next to its label, while the
+/// icon paints from its own centered box, so it sits on the row's optical
+/// center beside the text.
+fn picker_chevron(theme: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .child(IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.text_faint))
+}
+
+/// The edge drawn over the composer text field while it is focused.
+///
+/// Bezel's `TextField` paints its own 1px border — `theme.ring` on focus —
+/// with no opt-out, so the composer covers it with a border of its own in
+/// exactly the same box (see `composer-input`): opaque `surface_card`, the
+/// tone the field sits closest to, so the bright ring never shows through.
+/// Idle is untouched — the field's own subtle `border` still shows — only
+/// the focus flash is replaced by a dark hairline.
+fn composer_field_edge(theme: &bezel::theme::Theme) -> gpui::Hsla {
+    theme.surface_card
+}
+
 /// The composer card's border colour for the given focus state.
 ///
-/// Focus is marked with bezel's `ring` — the translucent hairline every bezel
-/// input, select and control lights up with — so it follows the appearance the
-/// user chose: a faint white wash over the dark surface, a faint black one over
-/// the light. It used to be the body `text` colour, which on the dark theme
-/// painted a solid white frame around the card.
-fn composer_border(focused: bool, theme: &bezel::theme::Theme) -> gpui::Hsla {
-    if focused { theme.ring } else { theme.border }
+/// Focus does not brighten the card: the border stays `border` either way,
+/// the hairline closest to the background, so the composer never lights up.
+/// It used to be the body `text` colour, which on the dark theme painted a
+/// solid white frame around the card, and later `border_strong`, still
+/// visibly brighter than the surface.
+fn composer_border(_focused: bool, theme: &bezel::theme::Theme) -> gpui::Hsla {
+    theme.border
 }
 
 #[cfg(test)]
@@ -7733,16 +7785,42 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     #[test]
+    fn composer_field_edge_hides_the_bright_focus_ring() {
+        for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
+            let edge = composer_field_edge(&theme);
+            // Opaque: the bezel ring underneath must not show through.
+            assert_eq!(
+                edge.a, 1.0,
+                "the field edge must be opaque, got {edge:?}"
+            );
+            // Distinct from the focus ring it covers, in both appearances
+            // (white ring on dark, black ring on light).
+            let gap = (edge.l - theme.ring.l).abs();
+            assert!(
+                gap > 0.05,
+                "the field edge must read apart from the bezel ring, edge={edge:?} ring={:?}",
+                theme.ring
+            );
+        }
+    }
+
+    #[test]
     fn composer_focus_border_is_the_theme_ring_not_body_text() {
         for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
             assert_eq!(composer_border(false, &theme), theme.border);
             let focused = composer_border(true, &theme);
-            assert_eq!(focused, theme.ring);
+            // Focus never brightens the card: same hairline as idle, close
+            // to the background, never the body text colour.
+            assert_eq!(focused, theme.border);
             assert_ne!(focused, theme.text);
-            // A hairline wash over the surface, never an opaque frame.
             assert!(
                 focused.a < 1.0,
-                "the focus ring must be translucent, got {focused:?}"
+                "the focus border must be translucent, got {focused:?}"
+            );
+            assert!(
+                focused.a < theme.ring.a,
+                "the composer focus must stay darker than the bezel ring, got {focused:?} vs {:?}",
+                theme.ring
             );
         }
     }

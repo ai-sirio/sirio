@@ -18,12 +18,15 @@
 //! - the conflict banner, Markdown toolbar, and Code/Preview switch are
 //!   rendered here as interactive controls over the model operations.
 
+use bezel::motion::Painter;
+use bezel::ui::scroll::{self, ScrollbarState};
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
     ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
-    InspectorElementId, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, Rgba, StyledText, Subscription, Task, UnderlineStyle, Window,
-    div, point, prelude::*, px, quad, size, transparent_black,
+    InspectorElementId, KeyDownEvent, LayoutId, ListHorizontalSizingBehavior, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, ScrollHandle, StyledText,
+    Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window, canvas, div, point,
+    prelude::*, px, quad, size, transparent_black, uniform_list,
 };
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::{display_absolute_path, resolve_file_link};
@@ -108,6 +111,32 @@ pub struct FileView {
     /// `field_caret_visible`/`modal_caret_visible` shape the other editable
     /// surfaces keep, so the blink is observable without reading pixels.
     editor_caret_visible: bool,
+    /// Scroll state of the two scrolling surfaces, so each can wear bezel's
+    /// bar.
+    scroll: SurfaceScroll,
+}
+
+/// The scroll handles of the source list and the Markdown preview, plus the
+/// bar state each bezel scrollbar carries its drag in. Tracked because an
+/// untracked surface scrolls just as well but reports no viewport and no
+/// overflow — a bar with nothing to draw from. Held by the view, never
+/// rebuilt per frame: the handle *is* the scroll position across frames.
+struct SurfaceScroll {
+    source: UniformListScrollHandle,
+    source_bar: ScrollbarState,
+    preview: ScrollHandle,
+    preview_bar: ScrollbarState,
+}
+
+impl SurfaceScroll {
+    fn new(painter: Painter) -> Self {
+        Self {
+            source: UniformListScrollHandle::new(),
+            source_bar: ScrollbarState::new(painter),
+            preview: ScrollHandle::new(),
+            preview_bar: ScrollbarState::new(painter),
+        }
+    }
 }
 
 /// Emitted so the shell can act on a gesture that started inside this tab
@@ -176,6 +205,7 @@ impl FileView {
             editor_blink: caret::Blink::new(),
             editor_caret_sig: (0, None),
             editor_caret_visible: false,
+            scroll: SurfaceScroll::new(Painter::of(cx)),
         }
     }
 
@@ -409,8 +439,7 @@ impl FileView {
             let Some(editor) = self.editor() else {
                 return;
             };
-            if editor.status() != &LoadStatus::Loaded
-                || self.effective_mode() != MarkdownMode::Code
+            if editor.status() != &LoadStatus::Loaded || self.effective_mode() != MarkdownMode::Code
             {
                 return;
             }
@@ -784,6 +813,7 @@ impl FileView {
                             caret_visible,
                             caret_offset,
                             bezel::theme::Theme::of(cx).syntax.clone(),
+                            &self.scroll,
                         ))
                         .into_any_element()
                 }
@@ -998,10 +1028,7 @@ fn render_conflict_banner(
 /// The Markdown formatting toolbar (F-EDIT-02). It is deliberately shown in
 /// edit mode; Preview remains a reading surface. The link URL is a
 /// deterministic placeholder until the view has a text prompt seam of its own.
-fn render_markdown_toolbar(
-    theme: Theme,
-    file_view: gpui::Entity<FileView>,
-) -> impl IntoElement {
+fn render_markdown_toolbar(theme: Theme, file_view: gpui::Entity<FileView>) -> impl IntoElement {
     div()
         .id("file-format-toolbar")
         .debug_selector(|| "file-format-toolbar".into())
@@ -1087,6 +1114,7 @@ fn render_content(
     caret_visible: bool,
     caret_offset: usize,
     syntax_palette: bezel::theme::SyntaxPalette,
+    scroll: &SurfaceScroll,
 ) -> AnyElement {
     let is_markdown = editor.language() == Language::Markdown;
     // Preview renders the parsed document; a locked preview (large file,
@@ -1119,66 +1147,113 @@ fn render_content(
                 },
             );
         return div()
-            .id("file-markdown-scroll")
-            .debug_selector(|| "file-markdown-scroll".into())
             .size_full()
-            .overflow_y_scroll()
+            .relative()
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(MARKDOWN_COLUMN_WIDTH))
-                    .mx_auto()
-                    .p(px(24.0))
-                    .child(Chat::render_markdown_document_with_link_override(
-                        document.clone(),
-                        &theme,
-                        link_click,
-                    )),
+                    .id("file-markdown-scroll")
+                    .debug_selector(|| "file-markdown-scroll".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll.preview)
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(MARKDOWN_COLUMN_WIDTH))
+                            .mx_auto()
+                            .p(px(24.0))
+                            .child(Chat::render_markdown_document_with_link_override(
+                                document.clone(),
+                                &theme,
+                                link_click,
+                            )),
+                    ),
             )
+            .child(scrollbar(
+                "file-markdown-bar",
+                &scroll.preview,
+                &scroll.preview_bar,
+            ))
             .into_any_element();
     }
 
+    // One row per line, materialized only for the visible range (the same
+    // `uniform_list` the history panel scrolls thousands of commits with).
+    // The old surface built an element for *every* line on *every* frame —
+    // each with its own tree-sitter pass and text shaping — and since gpui
+    // draws the window in one pass, one long file stalled the whole app.
+    // The buffer is segmented exactly as `split_inclusive('\n')` does: a
+    // trailing newline does not open an extra empty line, and an empty
+    // buffer still hosts one empty line so a freshly opened file shows an
+    // insertion point instead of nothing.
+    let buffer = editor.buffer();
+    let mut line_ranges: Vec<(usize, usize)> = Vec::new();
     let mut offset = 0;
-    let mut lines: Vec<(usize, String, Selection)> = editor
-        .buffer()
-        .split_inclusive('\n')
-        .enumerate()
-        .map(|(index, raw)| {
-            let line = raw.strip_suffix('\n').unwrap_or(raw).to_owned();
-            let start = offset;
-            let end = start + line.len();
-            offset += raw.len();
-            (
-                index,
-                line,
-                Selection::new(editor.buffer(), start, end).expect("line range is valid"),
-            )
-        })
-        .collect();
-    // An empty buffer still hosts a caret: synthesize its one empty line so
-    // a freshly opened file shows an insertion point instead of nothing.
-    if lines.is_empty() {
-        lines.push((
-            0,
-            String::new(),
-            Selection::new(editor.buffer(), 0, 0).expect("empty range is valid"),
-        ));
+    for raw in buffer.split_inclusive('\n') {
+        let line_len = raw.strip_suffix('\n').unwrap_or(raw).len();
+        line_ranges.push((offset, offset + line_len));
+        offset += raw.len();
     }
-    let mut source = div()
-        .id("file-text-scroll")
-        .debug_selector(|| "file-text-scroll".into())
-        .size_full()
-        .overflow_x_scroll()
-        .overflow_y_scroll()
-        .p(px(16.0));
+    if line_ranges.is_empty() {
+        line_ranges.push((0, 0));
+    }
+    // Every row is as wide as the list's measured item, so measure the
+    // longest line (F-EDIT-07: no wrapping, the horizontal scroller owns
+    // the overflow) — measuring row 0 would clip everything wider than it.
+    let longest_line = line_ranges
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (start, end))| end - start)
+        .map(|(index, _)| index);
+    let line_count = line_ranges.len();
+    let line_ranges = Rc::new(line_ranges);
+    let language = editor.language();
+    let row_entity = entity.clone();
+    let lines = uniform_list("file-text-scroll", line_count, move |range, _window, cx| {
+        // Read the buffer back through the entity instead of cloning up
+        // to a mebibyte of text into the closure every frame. The
+        // ranges were cut from this same buffer this same frame; the
+        // checked slice only guards a mutation that cannot happen
+        // between render and prepaint.
+        let view = row_entity.read(cx);
+        let Some(editor) = view.editor() else {
+            return Vec::new();
+        };
+        let buffer = editor.buffer();
+        range
+            .filter_map(|index| line_ranges.get(index).map(|range| (index, *range)))
+            .map(|(index, (start, end))| {
+                render_source_line(
+                    index,
+                    buffer.get(start..end).unwrap_or_default().to_owned(),
+                    start,
+                    end,
+                    language,
+                    theme,
+                    row_entity.clone(),
+                    selection,
+                    caret_visible,
+                    caret_offset,
+                    &syntax_palette,
+                )
+            })
+            .collect()
+    })
+    .debug_selector(|| "file-text-scroll".into())
+    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+    .with_width_from_item(longest_line)
+    .track_scroll(&scroll.source)
+    .size_full()
+    .p(px(16.0));
+    let mut source = div().size_full().flex().flex_col();
     if is_markdown && mode == MarkdownMode::Code && editor.preview_locked() {
         let preview_entity = entity.clone();
         source = source.child(
             div()
                 .id("file-manual-preview")
                 .debug_selector(|| "file-manual-preview".into())
-                .w_full()
-                .mb(px(8.0))
+                .mx(px(16.0))
+                .mt(px(16.0))
                 .px(px(10.0))
                 .py(px(6.0))
                 .rounded(theme.radii.control)
@@ -1206,56 +1281,130 @@ fn render_content(
                 ),
         );
     }
+    // The bar overlays the list's own box, so it spans exactly the viewport
+    // it reports on and never reflows the rows beneath it. It reads the
+    // list handle's base `ScrollHandle`: the same offset and overflow the
+    // list itself scrolls by.
+    let source_handle = scroll.source.0.borrow().base_handle.clone();
     source
         .child(
             div()
-                .flex()
-                .flex_col()
-                .font_family(theme.typography.code_family)
-                .text_size(theme.typography.code_size)
-                .text_color(theme.text)
-                .children(lines.iter().map(|(index, line, line_selection)| {
-                    div()
-                        .id(("file-line", *index))
-                        .debug_selector({
-                            let selector = format!("file-source-line-{index}");
-                            move || selector.clone()
-                        })
-                        .w_full()
-                        .min_h(px(18.0))
-                        .flex()
-                        .whitespace_nowrap()
-                        .child(
-                            div()
-                                .w(px(52.0))
-                                .flex_none()
-                                .text_color(theme.text_faint)
-                                .child(format!("{:>5} ", index + 1)),
-                        )
-                        .child(EditableLine::new(
-                            ("file-line-text", *index),
-                            line.clone(),
-                            line_selection.start,
-                            editor.language(),
-                            theme,
-                            entity.clone(),
-                            selection,
-                            syntax_palette.clone(),
-                            // The caret bar lives on exactly one line: the
-                            // one containing `caret_offset`, collapsed to
-                            // this line's own byte range.
-                            if caret_visible
-                                && caret_offset >= line_selection.start
-                                && caret_offset <= line_selection.end
-                            {
-                                Some((caret_offset - line_selection.start).min(line.len()))
-                            } else {
-                                None
-                            },
-                        ))
-                })),
+                .flex_1()
+                .min_h(px(0.0))
+                .relative()
+                .child(lines)
+                .child(scrollbar(
+                    "file-text-bar",
+                    &source_handle,
+                    &scroll.source_bar,
+                )),
         )
         .into_any_element()
+}
+
+/// bezel's vertical bar over one tracked surface, under a selector the
+/// drawn-frame tests can find. bezel's strip carries no selector of its own,
+/// so the tag goes on a full-surface overlay that exists only while there is
+/// overflow to show — the same guard bezel applies before it paints a thumb
+/// — and that registers no hitbox, so the pointer still reaches the rows
+/// beneath it.
+///
+/// While there is nothing to show, a canvas watches the handle instead:
+/// the bar can only draw from the geometry the *previous* frame left, so
+/// the frame that first lays the content out taller than its viewport
+/// would otherwise end with no bar and nothing asking for the frame that
+/// paints it (Preview has no caret blink to repaint on). The canvas
+/// prepaints after its sibling has, sees this frame's overflow, and asks
+/// for one more frame. Self-limiting: once the bar is up it is not here.
+fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) -> AnyElement {
+    let has_overflow = |handle: &ScrollHandle| {
+        scroll::thumb(
+            handle.bounds().size.height,
+            handle.max_offset().y,
+            handle.offset().y,
+            scroll::MIN_THUMB,
+        )
+        .is_some()
+    };
+    if !has_overflow(handle) {
+        let watched = handle.clone();
+        return canvas(
+            move |_, window, _| {
+                if has_overflow(&watched) {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .into_any_element();
+    }
+    div()
+        .debug_selector(move || id.to_string())
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
+        .left_0()
+        .child(scroll::scrollbar(id, handle, state))
+        .into_any_element()
+}
+
+/// One row of the virtualized source surface: the gutter number plus the
+/// editable text run for the buffer bytes `start..end` (the line without
+/// its newline). The caret bar lives on exactly one row — the one whose
+/// range contains `caret_offset` — collapsed to that row's own bytes.
+#[allow(clippy::too_many_arguments)]
+fn render_source_line(
+    index: usize,
+    line: String,
+    start: usize,
+    end: usize,
+    language: Language,
+    theme: Theme,
+    entity: gpui::Entity<FileView>,
+    selection: Option<Selection>,
+    caret_visible: bool,
+    caret_offset: usize,
+    syntax_palette: &bezel::theme::SyntaxPalette,
+) -> gpui::Stateful<gpui::Div> {
+    let caret = if caret_visible && caret_offset >= start && caret_offset <= end {
+        Some((caret_offset - start).min(line.len()))
+    } else {
+        None
+    };
+    div()
+        .id(("file-line", index))
+        .debug_selector({
+            let selector = format!("file-source-line-{index}");
+            move || selector.clone()
+        })
+        .w_full()
+        .min_h(px(18.0))
+        .flex()
+        .whitespace_nowrap()
+        .font_family(theme.typography.code_family)
+        .text_size(theme.typography.code_size)
+        .text_color(theme.text)
+        .child(
+            div()
+                .w(px(52.0))
+                .flex_none()
+                .text_color(theme.text_faint)
+                .child(format!("{:>5} ", index + 1)),
+        )
+        .child(EditableLine::new(
+            ("file-line-text", index),
+            line,
+            start,
+            language,
+            theme,
+            entity,
+            selection,
+            syntax_palette.clone(),
+            caret,
+        ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2221,9 +2370,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn markdown_code_mode_edits_and_saves_the_raw_source(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn markdown_code_mode_edits_and_saves_the_raw_source(cx: &mut gpui::TestAppContext) {
         let original = "<p align=\"center\">\r\n  *A fork with its own terms.*\r\n</p>\r\n";
         let file = TempFile::with_extension("md", original);
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
@@ -2255,7 +2402,10 @@ mod tests {
         });
 
         let expected = format!("{original}qa-edit-probe");
-        assert_eq!(std::fs::read(file.path()).expect("saved file"), expected.as_bytes());
+        assert_eq!(
+            std::fs::read(file.path()).expect("saved file"),
+            expected.as_bytes()
+        );
     }
 
     /// Drives one blink cycle of the source surface's insertion bar.
@@ -2617,5 +2767,121 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A long file costs a frame only what fits the viewport: rows are
+    /// materialized from the visible range, so the first line is drawn and
+    /// a line thousands of rows below is never laid out. Before this, every
+    /// line became an element on every frame — each with its own
+    /// tree-sitter pass and text shaping — and since gpui draws the window
+    /// in one pass, one long file stalled the whole app, not just the tab.
+    #[gpui::test]
+    async fn a_long_file_draws_only_the_visible_lines(cx: &mut gpui::TestAppContext) {
+        let mut source = String::new();
+        for i in 0..4000 {
+            source.push_str(&format!(
+                "fn function_{i}(value: u32) -> u32 {{ let result = value * {i}; // comment\n    result + 1 }}\n"
+            ));
+        }
+        assert_eq!(source.lines().count(), 8000);
+        let file = TempFile::with_extension("rs", &source);
+        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let start = std::time::Instant::now();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        eprintln!(
+            "[file_view] one frame over 8000 lines took {:?}",
+            start.elapsed()
+        );
+
+        assert!(
+            cx.debug_bounds("file-source-line-0").is_some(),
+            "the first line is drawn"
+        );
+        assert!(
+            cx.debug_bounds("file-source-line-7999").is_none(),
+            "a line far below the viewport is not laid out at all"
+        );
+    }
+
+    /// F-EDIT: a file taller than its viewport shows bezel's scrollbar over
+    /// the source, and one that fits shows none — the bar reports how far
+    /// down the reader is, so a document with nowhere to go has nothing to
+    /// report. `file-text-bar` is the strip's own selector; bezel returns an
+    /// empty element (no selector at all) when there is no overflow.
+    #[gpui::test]
+    async fn a_long_source_file_shows_a_scrollbar_and_a_short_one_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut long = String::new();
+        for i in 0..400 {
+            long.push_str(&format!("let line_{i} = {i};\n"));
+        }
+        let file = TempFile::with_extension("rs", &long);
+        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+        // The bar draws from the handle as the previous frame left it, so
+        // give the list one frame to report its overflow before asking.
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-text-scroll").is_some(),
+            "the source surface is drawn"
+        );
+        assert!(
+            cx.debug_bounds("file-text-bar").is_some(),
+            "a source taller than the viewport shows its scrollbar"
+        );
+
+        let short = TempFile::with_extension("rs", "fn main() {}\n");
+        let (mut cx, _view) = mounted_file_view(&mut cx.cx, short.path().to_path_buf());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-text-bar").is_none(),
+            "a source that fits its viewport shows no scrollbar"
+        );
+    }
+
+    /// The same contract for the rendered Markdown document in Preview.
+    #[gpui::test]
+    async fn a_long_markdown_preview_shows_a_scrollbar_and_a_short_one_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut long = String::from("# Title\n\n");
+        for i in 0..300 {
+            long.push_str(&format!("Paragraph {i} with a few words in it.\n\n"));
+        }
+        let file = TempFile::with_extension("md", &long);
+        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-markdown-scroll").is_some(),
+            "the Markdown document is drawn in Preview"
+        );
+        assert!(
+            cx.debug_bounds("file-markdown-bar").is_some(),
+            "a document taller than the viewport shows its scrollbar"
+        );
+
+        let short = TempFile::with_extension("md", "# Title\n\nOne line.\n");
+        let (mut cx, _view) = mounted_file_view(&mut cx.cx, short.path().to_path_buf());
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-markdown-bar").is_none(),
+            "a document that fits its viewport shows no scrollbar"
+        );
     }
 }
