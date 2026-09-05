@@ -5,7 +5,7 @@ resolver = "2"
 # `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml` can run its tests standalone;
 # excluded here so `cargo build/test --workspace` does not also try to treat it as a member
 # (which conflicts with its own `[workspace]` table).
-exclude = ["vendor/gpui_linux"]
+exclude = ["vendor/gpui_linux", "vendor/gpui_windows"]
 members = [
     "crates/sirio",
     "crates/sirio_theme",
@@ -111,6 +111,13 @@ sirio_apply = { path = "crates/sirio_apply" }
 # `bezel-gpui-platform`'s published manifest. See rust/vendor/README.md for the full arrangement.
 [patch.crates-io]
 bezel-gpui-linux = { path = "vendor/gpui_linux" }
+# Local override for Windows translucency: upstream `gpui_windows`'s no-DirectComposition path
+# (the one Sirio forces via GPUI_DISABLE_DIRECT_COMPOSITION so the WebView2 child HWND paints,
+# ADR 0002) creates a flip-model HWND swap chain, which the DWM composes as opaque, so
+# `WindowBackgroundAppearance::Blurred` could never show anything behind the window. The vendored
+# copy presents through a bitblt swap chain instead; its alpha reaches the redirection surface and
+# the acrylic accent policy shows through. One function changed; see rust/vendor/README.md.
+bezel-gpui-windows = { path = "vendor/gpui_windows" }
 
 [profile.dev]
 # Keep dev links and debug-info I/O light; remove this line when full debug info is needed.
