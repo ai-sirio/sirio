@@ -2935,7 +2935,7 @@ impl Sidebar {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(if focused { theme.text } else { theme.border })
+            .border_color(if focused { theme.ring } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
             .text_color(if value.is_empty() {
@@ -4335,7 +4335,7 @@ impl Render for Sidebar {
                     .bg(theme.input_bg)
                     .border_1()
                     .border_color(if filter_is_focused {
-                        theme.text
+                        theme.ring
                     } else {
                         theme.border
                     })
