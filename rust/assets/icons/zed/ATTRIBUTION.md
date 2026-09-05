@@ -10,5 +10,7 @@ The accompanying `LICENSES` file is the license notice distributed by Zed
 for this icon directory. The icon geometry must remain unchanged; update the
 commit and provenance together when refreshing these files.
 
-Agent logos are used nominatively to identify their respective products and
-remain trademarks of their owners.
+The agent marks (`ai_claude.svg`, `ai_open_ai.svg`, `ai_open_code.svg`) that
+used to live here were replaced on 2026-09-05 by the Codicons and Simple
+Icons assets in `../codicons/` and `../simple-icons/`; this directory now
+holds generic UI glyphs only.
