@@ -1433,7 +1433,7 @@ impl Theme {
     /// Applies the persisted interface font size to the installed theme.
     pub fn set_interface_font_size(value: i32, cx: &mut App) {
         let mut theme = *cx.global::<Self>();
-        theme.typography = Typography::for_interface_size(value.clamp(10, 20) as f32);
+        theme.typography = Typography::for_interface_size(value.clamp(12, 18) as f32);
         cx.set_global(theme);
     }
 

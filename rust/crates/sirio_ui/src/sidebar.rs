@@ -2979,6 +2979,7 @@ impl Sidebar {
             Icon::SquareTerminal => "terminal",
             Icon::Close => "close",
             Icon::ChevronDown => "alt-arrow-down",
+            Icon::ChevronUp => "alt-arrow-up",
             Icon::ChevronRight => "alt-arrow-right",
             Icon::ChevronLeft => "alt-arrow-left",
             Icon::Settings => "settings-minimalistic",
