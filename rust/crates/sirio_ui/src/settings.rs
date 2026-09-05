@@ -1,11 +1,12 @@
 //! Full-window settings surface and its small fixture model.
 
-use bezel::theme::Theme as BezelTheme;
 use crate::caret;
 use crate::controls;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
+use bezel::theme::Theme as BezelTheme;
+use bezel::ui::input::TextField;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
     KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, Window, actions, div, point, prelude::*,
@@ -27,6 +28,8 @@ use std::{collections::BTreeSet, path::PathBuf, process::Command};
 // Scoped to the menu's key context so the shell's own Escape handling is
 // untouched whenever the menu is not the focused thing.
 actions!(settings_summarizer, [CloseSummarizerPicker]);
+
+mod agents_page;
 
 /// The settings content column — the frozen 720px content column of
 /// `docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` (waku
@@ -143,7 +146,6 @@ impl SettingsCategory {
         }
     }
 }
-
 
 /// The agent used to summarize sessions into short tab titles
 /// (F-SET-05's summarizer picker). The choice is one of the five supported
@@ -1033,14 +1035,11 @@ pub struct Settings {
     browser_origins: BTreeSet<String>,
     on_revoke_browser_origin: Option<Rc<dyn Fn(String)>>,
     on_revoke_all_browser_origins: Option<Rc<dyn Fn()>>,
-    /// Live text of the Agents screen's search field (F-SET-16). Transient
-    /// UI state, not part of the persistence contract — nothing durable
-    /// depends on what was last typed into a filter box.
-    agent_search: String,
-    /// Focus handle for the Agents screen's search field, the same
-    /// click-to-focus + raw-keystroke pattern `sidebar.rs`'s project filter
-    /// already uses and tests successfully.
-    agent_search_focus: FocusHandle,
+    /// The Agents screen's search field (F-SET-16): a bezel `TextField`
+    /// whose content is the filter query. Transient UI state, not part of
+    /// the persistence contract — nothing durable depends on what was last
+    /// typed into a filter box.
+    agent_search_field: Entity<TextField>,
     /// Shared blink state for every settings text field's insertion caret
     /// (search, both cookies, workspace override). One is enough: window
     /// focus is unique, so at most one field can show a caret. Computed
@@ -1185,8 +1184,15 @@ impl Settings {
             browser_origins: BTreeSet::new(),
             on_revoke_browser_origin: None,
             on_revoke_all_browser_origins: None,
-            agent_search: String::new(),
-            agent_search_focus: cx.focus_handle(),
+            agent_search_field: {
+                let field = cx.new(|cx| {
+                    TextField::new(cx)
+                        .with_placeholder("Search agents")
+                        .with_key_context("SettingsAgentSearch")
+                });
+                cx.observe(&field, |_, _, cx| cx.notify()).detach();
+                field
+            },
             field_blink: caret::Blink::new(),
             field_caret_visible: false,
             database_path: None,
@@ -1993,31 +1999,9 @@ impl Settings {
             .filter(|text| !text.is_empty())
     }
 
-    /// Raw-keystroke handling for the Agents screen's search field
-    /// (F-SET-16), the same backspace/character pattern `sidebar.rs`'s
-    /// project filter already uses.
     /// Blink timer tick shared by every settings text field's caret.
     fn flip_field_blink(&mut self, cx: &mut Context<Self>) {
         self.field_blink.flip();
-        cx.notify();
-    }
-
-    fn on_agent_search_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.field_blink.wake();
-        let key = event.keystroke.key.as_str();
-        if key == "backspace" || key == "delete" {
-            self.agent_search.pop();
-        } else if let Some(character) = event.keystroke.key_char.as_deref()
-            && !event.keystroke.modifiers.platform
-            && !event.keystroke.modifiers.control
-        {
-            self.agent_search.push_str(character);
-        }
         cx.notify();
     }
 
@@ -3262,379 +3246,6 @@ impl Settings {
         }
     }
 
-    fn render_agents(
-        &self,
-        theme: Theme,
-        entity: Entity<Self>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        // F-SET-16: filtering hides non-matching rows but must not renumber
-        // the ones that stay — `settings-agent-row-{index}` ids are keyed to
-        // the original `provider_availability` position, and an existing
-        // test asserts against those exact indices.
-        let query = self.agent_search.trim().to_lowercase();
-        let first_load = self.provider_availability.is_empty()
-            && self.agent_registry_error.is_none()
-            && query.is_empty();
-        let mut agent_rows = controls::card(theme);
-        let mut first_visible_row = true;
-        for (index, availability) in self.provider_availability.iter().enumerate() {
-            let source = self.launch_source_for_row(availability.id);
-            let row = provider_row(availability, Some(&source));
-            if !query.is_empty()
-                && !row.name.to_lowercase().contains(&query)
-                && !row.description.to_lowercase().contains(&query)
-            {
-                continue;
-            }
-            if !first_visible_row {
-                agent_rows = agent_rows.child(controls::separator(theme));
-            }
-            first_visible_row = false;
-            let label = div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            IconElement::new(row.icon, IconSize::Small)
-                                .text_color(provider_glyph_color(theme, row.id)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .debug_selector(move || format!("settings-agent-name-{index}"))
-                                .text_size(theme.typography.headline)
-                                .text_color(theme.text)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(text!(id = ("settings-agent-name", index), row.name)),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("settings-agent-description-{index}")
-                                })
-                                .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(text!(
-                                    id = ("settings-agent-description", index),
-                                    row.description
-                                )),
-                        ),
-                );
-            // F-SET-18: a not-installed agent with a known install command
-            // gets a real Install control, not just a red status pill —
-            // clicking it hands the command to the host (a spawned
-            // terminal, mirroring the Agent Skill card) and leaves a
-            // confirmation line under the row so the click's effect is
-            // visible on this screen even though this crate cannot watch
-            // the spawned install finish.
-            // F-SET-18 (closed): Install/Update are renderings of the row's
-            // resolved source. The button emits only — `sirio` owns the
-            // installer, and this crate never runs installs itself. While
-            // this row's install is in flight the action disappears: the
-            // per-agent lock would refuse a second click anyway, and a
-            // dead-looking button invites exactly that click.
-            let install_state = self.install_states.get(availability.id);
-            let action = if matches!(install_state, Some(InstallState::InFlight)) {
-                None
-            } else {
-                match &source {
-                    sirio_registry::LaunchSource::Installable { .. } => Some((
-                        SettingsEvent::InstallAgent(availability.id.to_string()),
-                        "Install",
-                    )),
-                    sirio_registry::LaunchSource::Installed(installed) => self
-                        .registry_versions
-                        .get(availability.id)
-                        .filter(|latest| *latest != &installed.version)
-                        .map(|_| {
-                            (
-                                SettingsEvent::UpdateAgent(availability.id.to_string()),
-                                "Update",
-                            )
-                        }),
-                    _ => None,
-                }
-            };
-            let install_control = if matches!(install_state, Some(InstallState::InFlight)) {
-                Some(
-                    div()
-                        .id(("settings-agent-install-spinner", index))
-                        .debug_selector(move || format!("settings-agent-install-spinner-{index}"))
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(loading::compact("settings-install-spinner", window, cx)),
-                )
-            } else {
-                action.map(|(event, label)| {
-                    let install_entity = entity.clone();
-                    div()
-                        .id(("settings-agent-install", index))
-                        .debug_selector(move || format!("settings-agent-install-{index}"))
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(theme.radii.row_card)
-                        .text_size(theme.typography.caption2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .bg(theme.element_active)
-                        .hover(|style| style.bg(theme.element_hover))
-                        .on_click(move |_, _, cx| {
-                            install_entity.update(cx, |_, cx| {
-                                cx.emit(event.clone());
-                            });
-                        })
-                        .child(text!(id = ("settings-agent-install-label", index), label))
-                })
-            };
-            let mut row_container = div()
-                .id(("settings-agent-row", index))
-                .debug_selector(move || format!("settings-agent-row-{index}"))
-                .flex()
-                .flex_col()
-                .child(controls::row_view(
-                    label,
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(Self::render_provider_status(availability, theme))
-                        .children(row.version.as_ref().map(|version| {
-                            div()
-                                .px(px(6.0))
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.text_faint)
-                                .child(text!(
-                                    id = ("settings-agent-version", index),
-                                    // #197: name the subject. This is the
-                                    // ACP server package's version, from
-                                    // `sirio_registry` -- the same thing
-                                    // the badge and Install button beside
-                                    // it are about. Bare, it sat next to
-                                    // the CLI's path in the same colour at
-                                    // the same size and read as that
-                                    // binary's version, which it never was:
-                                    // this row said "v0.70.0" beside a
-                                    // claude.exe reporting 2.1.247.
-                                    format!("ACP v{version}")
-                                ))
-                        }))
-                        .child(Self::render_acp_badge(
-                            availability.id.to_string(),
-                            &source,
-                            theme,
-                        ))
-                        .children(install_control),
-                    theme,
-                ));
-            if let Some(note) = installed_integrity_note(&source) {
-                row_container = row_container.child(
-                    div()
-                        .id(("settings-agent-integrity", index))
-                        .debug_selector(move || format!("settings-agent-integrity-{index}"))
-                        .px(px(BezelTheme::SPACE_MD))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
-                        .child(text!(note)),
-                );
-            }
-            if let Some(state) = install_state {
-                let (kind, label): (&'static str, String) = match state {
-                    InstallState::InFlight => (
-                        "status",
-                        "Installing… this can take up to ten minutes.".to_string(),
-                    ),
-                    InstallState::Failed(message) => ("reason", message.clone()),
-                };
-                let failed = matches!(state, InstallState::Failed(_));
-                row_container = row_container.child(
-                    div()
-                        .id((kind, index))
-                        .debug_selector(move || format!("settings-agent-install-{kind}-{index}"))
-                        .px(px(BezelTheme::SPACE_MD))
-                        .text_size(theme.typography.footnote)
-                        .font_weight(if failed {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(theme.text_muted)
-                        .child(text!(label)),
-                );
-            }
-            agent_rows = agent_rows.child(row_container);
-        }
-
-        let search_focus = self.agent_search_focus.clone();
-        let search_is_focused = search_focus.is_focused(window);
-        let search_text = self.agent_search.clone();
-        let search_click_entity = entity.clone();
-        let search_key_entity = entity.clone();
-        let refresh_entity = entity;
-
-        let mut surface = div()
-            .w(px(CONTENT_WIDTH))
-            .pt(px(DETAIL_TOP_PADDING))
-            .pb(px(DETAIL_BOTTOM_PADDING))
-            .child(
-                div()
-                    .w_full()
-                    .mb(px(14.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .id("agent-search-field")
-                            .debug_selector(|| "agent-search-field".to_string())
-                            .track_focus(&search_focus)
-                            .w(px(260.0))
-                            .h(px(28.0))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            // No `gap`: flex gap goes between *every* pair of
-                            // items, the value and its caret included, and
-                            // held the bar a phantom space off the text.
-                            .rounded(theme.radii.control)
-                            .bg(theme.input_bg)
-                            .border_1()
-                            .border_color(if search_is_focused {
-                                theme.text
-                            } else {
-                                theme.border
-                            })
-                            .cursor(gpui::CursorStyle::IBeam)
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                search_click_entity.update(cx, |this, cx| {
-                                    this.agent_search_focus.focus(window, cx);
-                                });
-                            })
-                            .on_key_down(move |event, window, cx| {
-                                search_key_entity.update(cx, |this, cx| {
-                                    this.on_agent_search_key(event, window, cx);
-                                });
-                            })
-                            .text_size(theme.typography.callout)
-                            .text_color(if search_text.is_empty() {
-                                theme.text_faint
-                            } else {
-                                theme.text
-                            })
-                            // #212: see the field above.
-                            .overflow_hidden()
-                            .child(
-                                caret::field_value(text!(if search_text.is_empty() {
-                                    "Search agents".to_string()
-                                } else {
-                                    search_text
-                                }))
-                                .id("settings-agent-search-text")
-                                .debug_selector(|| "settings-agent-search-text".to_owned()),
-                            )
-                            .when(search_is_focused, |this| {
-                                this.child(caret::bar(
-                                    px(16.0),
-                                    theme.text,
-                                    self.field_caret_visible,
-                                ))
-                            }),
-                    )
-                    .child({
-                        // F-SET-16: a "Refreshed …" stamp next to the
-                        // button — the conjunct a byte-identical
-                        // before/after capture read as absent, since
-                        // Search and Refresh were themselves already wired
-                        // and tested.
-                        let mut refresh_area = div().flex().items_center().gap(px(8.0));
-                        if let Some(stamp) = self.agent_last_refreshed.as_ref() {
-                            refresh_area = refresh_area.child(
-                                div()
-                                    .id("agents-last-refreshed")
-                                    .debug_selector(|| "agents-last-refreshed".to_string())
-                                    .text_size(theme.typography.footnote)
-                                    .text_color(theme.text_muted)
-                                    .child(text!(format!("Refreshed {stamp}"))),
-                            );
-                        }
-                        refresh_area.child(controls::button(
-                            "refresh-agents",
-                            "↻ Refresh",
-                            theme,
-                            move |_, _, cx| {
-                                refresh_entity
-                                    .update(cx, |this, cx| this.refresh_agent_availability(cx));
-                            },
-                        ))
-                    }),
-            );
-        // F-SET-17: the registry error state, rendered over the rows from
-        // the last successful sweep, with the "↻ Refresh" button above as
-        // the retry — the Swift original's warning label in
-        // `AgentsSettingsView`.
-        if let Some(error) = self.agent_registry_error.clone() {
-            surface = surface.child(
-                div()
-                    .id("settings-agents-registry-error")
-                    .debug_selector(|| "settings-agents-registry-error".to_string())
-                    .w_full()
-                    .mb(px(14.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.warning)
-                    .child(text!("⚠"))
-                    .child(text!(error)),
-            );
-        }
-        if first_load {
-            surface.child(
-                div()
-                    .id("settings-agents-loading")
-                    .debug_selector(|| "settings-agents-loading".to_string())
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(theme.spacing.card_gap)
-                    .text_size(theme.typography.headline)
-                    .text_color(theme.text_muted)
-                    .child(loading::indeterminate(
-                        "settings-agents-loading-orb",
-                        loading::GENERIC_ORB,
-                        &theme,
-                        window,
-                        cx,
-                    ))
-                    .child("Loading agents…"),
-            )
-        } else {
-            surface.child(agent_rows)
-        }
-    }
-
     /// The summarizer agent trigger (F-SET-05): a button showing the
     /// current choice. The menu itself is rendered at the surface level
     /// (see [`Settings::render_summarizer_menu`]) — a card's `overflow_hidden`
@@ -4442,7 +4053,6 @@ impl Render for Settings {
         // unique, so at most one caret is ever visible. The computed bar
         // visibility is stashed for this frame's field builders.
         let field_focused = [
-            &self.agent_search_focus,
             &self.opencode_cookie_focus,
             &self.ollama_cookie_focus,
             &self.opencode_override_focus,
@@ -5317,97 +4927,7 @@ mod tests {
         );
     }
 
-    /// F-SET-16: typing in the Agents screen's search field narrows the
-    /// drawn rows to the matching agent, and clearing it restores every
-    /// row — the same contract `sidebar.rs`'s project filter already has.
-    /// Filtering must not renumber surviving rows: ids stay keyed to the
-    /// original discovery position, so a filtered-out row 1 does not
-    /// become the new row 0.
-    #[gpui::test]
-    async fn agent_search_narrows_rows_and_clearing_restores_them(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let fixture = vec![
-            AgentAvailability {
-                id: "claude",
-                display_name: "Claude Code",
-                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
-            },
-            AgentAvailability {
-                id: "opencode",
-                display_name: "OpenCode",
-                executable: None,
-            },
-            AgentAvailability {
-                id: "omp",
-                display_name: "Oh-My-Pi",
-                executable: None,
-            },
-        ];
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        // Focus the search field the way a user does: click it.
-        let search = cx
-            .debug_bounds("agent-search-field")
-            .expect("the search field is drawn");
-        cx.simulate_click(search.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        cx.simulate_input("claude");
-        cx.run_until_parked();
-
-        let search_state = cx.update(|window, cx| {
-            window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx)
-                .agent_search
-                .clone()
-        });
-        assert_eq!(
-            search_state, "claude",
-            "the keystrokes reached the search state"
-        );
-
-        assert!(
-            cx.debug_bounds("settings-agent-row-0").is_some(),
-            "the matching row stays drawn"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-1").is_none(),
-            "row 1 is filtered out while the search reads 'claude'"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-2").is_none(),
-            "row 2 is filtered out while the search reads 'claude'"
-        );
-
-        // Clearing the search restores every row.
-        cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace");
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("settings-agent-row-0").is_some());
-        assert!(
-            cx.debug_bounds("settings-agent-row-1").is_some(),
-            "row 1 returns after the search is cleared"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-2").is_some(),
-            "row 2 returns after the search is cleared"
-        );
-    }
-
-    /// F-SET-16: the Agents screen's "↻ Refresh" button re-runs agent
+    /// F-SET-16: the Agents screen's "Refresh" button re-runs agent
     /// discovery, the same re-read-from-disk meaning "Refresh now" already
     /// has on the AI Providers screen — a pinned fixture is replaced by a
     /// fresh read.
