@@ -39,9 +39,11 @@ use crate::caret;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 mod composer_view;
+mod list_scroll;
 mod thought;
 mod tool_calls;
 mod transcript;
+mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
@@ -1404,6 +1406,8 @@ pub struct Chat {
     transcript_focus: FocusHandle,
     context_usage: Option<ContextUsage>,
     list_state: ListState,
+    /// The transcript scrollbar's grab state (bezel's bar over the list).
+    transcript_bar: list_scroll::ListScrollbarState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
     /// F-CHAT-22, turn half: turns the reader has explicitly re-opened,
@@ -1678,6 +1682,7 @@ impl Chat {
             context_popover_open: false,
             context_usage: None,
             list_state,
+            transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
             transcript_selection: None,
             transcript_dragging: false,
             unfolded_turns: BTreeSet::new(),
@@ -6847,6 +6852,8 @@ impl Render for Chat {
                     .py(px(28.0))
                     .flex_1()
                     .flex()
+                    // The jump-to-latest disc is laid inside, over the list.
+                    .relative()
                     .key_context("ChatTranscript")
                     .track_focus(&self.transcript_focus)
                     .on_action(cx.listener(Self::copy_transcript))
@@ -7120,7 +7127,8 @@ impl Render for Chat {
                         )
                         .with_sizing_behavior(ListSizingBehavior::Auto)
                         .flex_grow_1(),
-                    ),
+                    )
+                    .child(self.render_jump_to_latest(&bezel_theme, cx)),
             )
             // #239: the generating spinner, transient by construction. It is a
             // sibling of the transcript rather than an entry in it: the list is
@@ -7254,6 +7262,18 @@ impl Render for Chat {
                     overlay
                 }
             })
+            // bezel's scrollbar over the list, on the root's right edge and
+            // as tall as the list's viewport (the transcript's own top
+            // padding below the root's top edge).
+            .child(list_scroll::list_scrollbar(
+                "chat-transcript",
+                px(28.0),
+                &self.list_state,
+                &self.transcript_bar,
+            ))
+            // The turn rail, over the root's left margin; last, so it sits
+            // above everything it is laid over.
+            .child(self.render_turn_rail(&bezel_theme, cx))
     }
 }
 
@@ -9008,6 +9028,217 @@ two"
         assert!(
             bubble.size.width <= px(420.0),
             "the bubble must be no wider than the pane it lives in: {bubble:?}"
+        );
+    }
+
+    /// The turn rail: one tick per user message along the transcript's left
+    /// edge, and a click on a tick scrolls the list to that message.
+    #[gpui::test]
+    async fn the_turn_rail_draws_a_tick_per_user_message_and_jumps_on_click(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            for turn in 0..3 {
+                chat.push_entry(Entry::User {
+                    text: format!("question {turn}"),
+                    at: None,
+                });
+                // Tall enough that three turns overflow a 300px pane, so a
+                // jump has somewhere to go.
+                let body = (0..12).map(|_| "line").collect::<Vec<_>>().join("\n\n");
+                chat.push_entry(Entry::Assistant {
+                    document: parse_chat_markdown(&body),
+                    text: body,
+                });
+            }
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        refresh_frame(cx);
+
+        let transcript = cx.debug_bounds("chat-transcript").expect("transcript");
+        let ticks: Vec<_> = (0..3)
+            .map(|index| {
+                let selector: &'static str =
+                    Box::leak(format!("turn-tick-{index}").into_boxed_str());
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("tick {index} is drawn"))
+            })
+            .collect();
+        assert!(
+            cx.debug_bounds("turn-tick-3").is_none(),
+            "no tick beyond the last user message"
+        );
+        for tick in &ticks {
+            assert!(
+                tick.right() <= transcript.left() + px(24.0),
+                "ticks sit in the left margin, not over the prose: {tick:?} vs {transcript:?}"
+            );
+        }
+        assert!(
+            ticks[0].top() < ticks[1].top() && ticks[1].top() < ticks[2].top(),
+            "ticks follow transcript order top to bottom"
+        );
+
+        // The fixture opens with a status entry of its own, so the target
+        // index is read off the entries rather than assumed.
+        let second_user = chat.read_with(cx, |chat, _| {
+            chat.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| matches!(entry, Entry::User { .. }))
+                .nth(1)
+                .map(|(index, _)| index)
+                .expect("three user messages were pushed")
+        });
+        cx.simulate_click(ticks[1].center(), Modifiers::none());
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(
+                chat.list_state.logical_scroll_top().item_ix,
+                second_user,
+                "the second tick scrolls the list to the second user message"
+            );
+        });
+    }
+
+    /// Three tall turns for a 300px pane: enough to overflow the transcript.
+    fn push_overflowing_turns(chat: &gpui::Entity<Chat>, cx: &mut VisualTestContext) {
+        chat.update(cx, |chat, cx| {
+            for turn in 0..3 {
+                chat.push_entry(Entry::User {
+                    text: format!("question {turn}"),
+                    at: None,
+                });
+                let body = (0..12).map(|_| "line").collect::<Vec<_>>().join("\n\n");
+                chat.push_entry(Entry::Assistant {
+                    document: parse_chat_markdown(&body),
+                    text: body,
+                });
+            }
+            cx.notify();
+        });
+    }
+
+    /// The transcript's scrollbar: bezel's bar geometry laid over the list.
+    /// Nothing is drawn while the content fits; once it overflows the thumb
+    /// hugs the root's right edge and travels with the list.
+    #[gpui::test]
+    async fn the_transcript_scrollbar_appears_on_overflow_and_tracks_the_list(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &[]);
+        // Tall enough that the fixture's opening status entry fits.
+        cx.simulate_resize(size(px(600.0), px(700.0)));
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("chat-transcript-thumb").is_none(),
+            "nothing to scroll: no thumb"
+        );
+
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        push_overflowing_turns(&chat, cx);
+        // The bar reads the list's geometry as the last frame left it.
+        refresh_frame(cx);
+        refresh_frame(cx);
+        let root = cx.debug_bounds("chat-root").expect("root");
+        let viewport = chat.read_with(cx, |chat, _| chat.list_state.viewport_bounds());
+        let thumb = cx
+            .debug_bounds("chat-transcript-thumb")
+            .expect("overflow: the thumb is drawn");
+        assert!(
+            thumb.right() <= root.right() && thumb.right() >= root.right() - px(12.0),
+            "the thumb sits on the root's right edge: {thumb:?} vs {root:?}"
+        );
+        assert!(
+            thumb.size.height < viewport.size.height,
+            "the thumb is shorter than the viewport it reports on: {thumb:?} vs {viewport:?}"
+        );
+        assert!(
+            thumb.top() >= viewport.top() && thumb.bottom() <= viewport.bottom() + px(1.0),
+            "the track spans the list's viewport: {thumb:?} vs {viewport:?}"
+        );
+
+        // Following the tail, the thumb rests at the bottom; scrolling the
+        // list back to its first row moves the thumb up.
+        let at_tail = thumb.top();
+        chat.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        let at_top = cx
+            .debug_bounds("chat-transcript-thumb")
+            .expect("still overflowing")
+            .top();
+        assert!(
+            at_top < at_tail,
+            "the thumb travels with the list: tail {at_tail:?}, top {at_top:?}"
+        );
+    }
+
+    /// The jump-to-latest disc: nothing while the list follows its tail,
+    /// a centred disc over the transcript's bottom edge once the reader
+    /// scrolls away, and a click that re-pins the transcript.
+    #[gpui::test]
+    async fn the_jump_to_latest_disc_appears_when_the_reader_leaves_the_tail(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &[]);
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        push_overflowing_turns(&chat, cx);
+        refresh_frame(cx);
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                chat.list_state.is_following_tail(),
+                "a fresh push follows the tail"
+            );
+        });
+        assert!(
+            cx.debug_bounds("chat-jump-latest").is_none(),
+            "following the tail: no disc"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let disc = cx
+            .debug_bounds("chat-jump-latest")
+            .expect("scrolled away: the disc is drawn");
+        let transcript = cx.debug_bounds("chat-transcript").expect("transcript");
+        assert!(
+            (disc.center().x - transcript.center().x).abs() <= px(1.0),
+            "the disc is centred on the transcript: {disc:?} vs {transcript:?}"
+        );
+        assert!(
+            disc.bottom() <= transcript.bottom() && disc.top() >= transcript.top(),
+            "the disc floats inside the transcript's bottom edge: {disc:?} vs {transcript:?}"
+        );
+
+        cx.simulate_click(disc.center(), Modifiers::none());
+        refresh_frame(cx);
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                chat.list_state.is_following_tail(),
+                "the click re-pins the transcript to its tail"
+            );
+        });
+        assert!(
+            cx.debug_bounds("chat-jump-latest").is_none(),
+            "re-pinned: the disc is gone"
         );
     }
 
