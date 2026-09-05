@@ -1660,6 +1660,44 @@ impl SessionStore {
         }
     }
 
+    /// The tabs actually persisted for a worktree, in strip order, and
+    /// nothing else: empty for a worktree with no row, no tabs, or a database
+    /// in fallback mode. Unlike [`Self::restore_tabs_for`] this never
+    /// invents the default Chat + Terminal strip — it answers "what does this
+    /// worktree hold?", for the sidebar's parked rows, where a worktree the
+    /// user never opened must show nothing rather than a strip that would
+    /// only come into being on selection.
+    pub fn persisted_tabs_for(&self, working_directory: &Path) -> Vec<SessionTab> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return Vec::new();
+        };
+        let worktree_id = match worktree_id_for_database(db, working_directory) {
+            Ok(Some(worktree_id)) => worktree_id,
+            Ok(None) => return Vec::new(),
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to resolve worktree identity for {}: {error}; listing no tabs",
+                    working_directory.display()
+                );
+                return Vec::new();
+            }
+        };
+        match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
+            Ok(restored) => restored.tabs,
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to read tabs for {worktree_id}: {error}; listing no tabs"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     /// #323: whether this worktree's Secondary centre pane was open when the
     /// session was last written. `false` for a worktree with no row yet, and
     /// for a database in fallback mode -- a closed pane is the safe answer,
