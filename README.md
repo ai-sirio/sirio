@@ -1,52 +1,133 @@
 <p align="center">
-  <img src="assets/sirio-logo.png" width="120" alt="Sirio logo" />
+  <a href="https://sirioai.app"><img src="assets/sirio-logo.png" width="112" alt="Sirio logo" /></a>
 </p>
 
 <h1 align="center">Sirio</h1>
 
 <p align="center">
-  <strong>Steer every coding agent from one native Linux window.</strong>
+  <a href="https://github.com/ai-sirio/sirio/stargazers"><img src="https://img.shields.io/github/stars/ai-sirio/sirio?style=flat-square&label=%E2%98%85&color=4c71f2" alt="GitHub stars" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" /></a>
+  <img src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-4493F8?style=flat-square" alt="Runs on macOS, Linux and Windows" />
+  <img src="https://img.shields.io/badge/Rust%20%2B%20gpui-orange?style=flat-square&logo=rust&logoColor=white" alt="Built in Rust on gpui" />
+  <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-0077B5?style=flat-square&logo=linkedin&logoColor=white" alt="Enzo Palmisano on LinkedIn" /></a>
 </p>
 
 <p align="center">
-  A lightweight native Linux app for running Claude Code, Codex, OpenCode, Pi and Oh-My-Pi<br/>
-  side by side — one sidebar per project, one terminal per worktree, one glance at who needs you.
+  <strong>Every coding agent. One native window.</strong><br/>
+  Run Claude Code, Codex, OpenCode, Pi and Oh-My-Pi side by side — one sidebar per project,<br/>
+  one terminal per git worktree, one glance at who needs you.
 </p>
+
+<h3 align="center">
+  <a href="https://sirioai.app"><ins>sirioai.app</ins></a>
+  &nbsp;·&nbsp; <a href="https://sirioai.app/docs/get-started/what-sirio-is">Docs</a>
+  &nbsp;·&nbsp; <a href="https://sirioai.app/changelog">Changelog</a>
+</h3>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Linux" />
-  <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square" alt="MIT license" />
-  <img src="https://img.shields.io/badge/Rust-2024%20edition-orange?style=flat-square" alt="Rust 2024 edition" />
-  <a href="https://github.com/ai-sirio/sirio"><img src="https://img.shields.io/github/stars/ai-sirio/sirio?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
-  <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" /></a>
+  <img src="assets/readme/hero.png" alt="Sirio with two projects in the sidebar, Claude Code and Pi running in separate worktrees, and a rendered Markdown file open beside the agent" width="960" />
 </p>
-
----
-
-> Sirio started as a native macOS app (SwiftUI/Swift 6) and has been rewritten in Rust on
-> [gpui](https://github.com/zed-industries/zed) for Linux. The Swift original is retired at
-> commit `5430d7bfdb4a295be8ce072526ae5108259b80f8` — read its source with
-> `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`.
 
 ## Features
 
-- 🗂️ **Sidebar of projects & worktrees** — local git worktrees, one row per branch, sorted by urgency
-- 🖥️ **Native terminal** — built on [alacritty_terminal](https://github.com/alacritty/alacritty), tabs and recursive splits
-- 📝 **Markdown editor** — click a `.md` link in the terminal (or drag & drop / `Ctrl+O`) to open it in a tab: rendered preview + code mode, live reload while agents write
-- 🌐 **Embedded browser tab** — a native WebKitGTK surface composited alongside the terminal, for previewing a running dev server without leaving the window
-- 📋 **Diff/changes viewer** — a git-status-aware Changes surface: stage, unstage, discard, and open a path-specific diff tab
-- 🤖 **5 agent adapters** — Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, each with lifecycle hooks
-- 🔌 **Control socket** — `sirioctl` CLI for scripted create/write/read/wait/notify against any pane
-- 🔔 **Tray roster** — a `StatusNotifierItem` tray icon with a live pulse on every active agent; click to jump straight back into the right worktree, even with the window closed
-- 🔕 **Desktop notifications** — a heads-up when an agent finishes or stalls
-- 💾 **Session persistence** — agent sessions survive an app restart (SQLite-backed)
-- 📊 **Provider usage tracking** — Claude / Codex / OpenCode / Ollama usage at a glance
+<table>
+<tr>
+<td width="50%" valign="middle">
 
-**Deliberately not doing:** remote SSH / mobile relay, scheduling — Sirio stays a focused terminal + agent hub, not an IDE.
+### One sidebar, every worktree
+
+Each project lists its git worktrees, one row per branch, sorted by who needs you. Agents appear under the worktree they run in with a live status dot — running, idle, waiting for input — and selecting a row switches the centre column while the terminals underneath keep running.
+
+[Docs →](https://sirioai.app/docs/agents/activity-states)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/agents/activity-states"><img src="assets/readme/feature-sidebar.png" alt="Sidebar with two projects, their worktrees, and Claude Code, Pi and OpenCode rows with status dots" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### A real terminal, split any way
+
+Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the VT core behind Ghostty, with tabs and recursive splits per worktree. Closing the window flushes state and nothing else: agent PTYs live on until you quit.
+
+[Docs →](https://sirioai.app/docs/workspace/tabs)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/workspace/tabs"><img src="assets/readme/feature-terminal.png" alt="Terminal panes split side by side inside one worktree" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Markdown that keeps up with your agents
+
+Click a `.md` link in the terminal, drag a file in, or press `Ctrl+O`: it opens in a tab as a rendered preview or in code mode, and reloads live while an agent is still writing to it.
+
+[Docs →](https://sirioai.app/docs/workspace/surfaces)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/workspace/surfaces"><img src="assets/readme/feature-markdown.png" alt="A Markdown file rendered in a tab, with headings, lists and a code block" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Review what the agent changed
+
+A git-status-aware Changes surface for every worktree: stage, unstage, discard, and open a path-specific diff tab — without leaving the window or the agent's terminal.
+
+[Docs →](https://sirioai.app/docs/workspace/surfaces)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/workspace/surfaces"><img src="assets/readme/feature-changes.png" alt="The Changes surface listing modified files with stage and discard actions" width="100%" /></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Agents drive Sirio too
+
+`sirioctl` talks to Sirio over its control socket: create a pane, write a prompt, wait for the agent to finish, read what it printed. It is also how agent lifecycle hooks report status back — and the [`skills/sirio`](skills/sirio/SKILL.md) skill provisioned in every launched worktree teaches agents to use it.
+
+[Docs →](https://sirioai.app/docs/sirioctl/overview)
+
+</td>
+<td width="50%">
+
+```bash
+WORKER=$(sirioctl panel create --cmd 'claude')
+sirioctl panel write --id "$WORKER" \
+  --input 'Implement the parser change' --enter
+sirioctl panel wait --id "$WORKER"
+sirioctl panel read --id "$WORKER"
+sirioctl panel close --id "$WORKER"
+```
+
+</td>
+</tr>
+</table>
+
+**Also in the box:**
+
+- **[Embedded browser](https://sirioai.app/docs/workspace/surfaces)** — a native web view beside the terminal, for previewing a dev server without leaving the window.
+- **[Tray roster](https://sirioai.app/docs/workspace/tray)** — a tray icon that reflects the worst status across every active agent; click to land in the right worktree, even with the window closed.
+- **Desktop notifications** — a heads-up when an agent finishes or stalls.
+- **Sessions that survive restarts** — SQLite-backed: reopen Sirio and your projects, worktrees and tabs are back.
+- **Usage at a glance** — Claude, Codex, OpenCode and Ollama usage in the status bar.
+- **[Signed updates](https://sirioai.app/docs/settings/updates)** — Ed25519-signed release manifests, verified before anything touches the install.
+
+**Deliberately not doing:** remote SSH, mobile relay, scheduling. Sirio is a terminal and agent hub, not an IDE.
 
 ---
 
 ## Supported Agents
+
+Five adapters, each aware of its CLI's lifecycle — startup banners, resume flags, exit signals, title conventions.
 
 <p>
   <a href="https://docs.anthropic.com/claude/docs/claude-code"><kbd><img src="https://www.google.com/s2/favicons?domain=docs.anthropic.com&sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a>&nbsp;
@@ -56,55 +137,23 @@
   <a href="https://omp.sh"><kbd><img src="https://www.google.com/s2/favicons?domain=omp.sh&sz=64" alt="Oh-My-Pi logo" width="16" valign="middle" /> Oh-My-Pi</kbd></a>
 </p>
 
----
-
-## Agent Orchestration
-
-Sirio automatically provisions [`skills/sirio/SKILL.md`](skills/sirio/SKILL.md) inside every launched worktree for all five Sirio harnesses: Claude Code, Codex, OpenCode, Pi, and Oh-My-Pi. No manual install is needed in those worktrees.
-
-For supported Skills CLI agents outside a launched Sirio worktree, install the public package with:
-
-```bash
-npx skills add ai-sirio/sirio --skill sirio -a claude-code,codex,opencode,pi -y
-```
-
-`sirioctl panel` returns panel UUIDs. Capture them and address every operation explicitly with `--id`; use `--from` only to identify the UUID of the panel being split.
-
-```bash
-WORKER=$(sirioctl panel create --cmd 'claude')
-PEER=$(sirioctl panel split right --from "$SIRIO_PANE_ID" --cmd 'codex')
-
-sirioctl panel write --id "$WORKER" --input 'Implement the parser change' --enter
-sirioctl panel wait --id "$WORKER"
-sirioctl panel read --id "$WORKER"
-sirioctl panel close --id "$WORKER"
-```
-
-The eleven panel subcommands are:
-
-- `create` — create a panel and return its UUID.
-- `split` — split an existing panel identified by `--from` and return the new UUID.
-- `list` — list panel UUIDs and their state.
-- `write` — write text to a panel UUID.
-- `key` — send a key to a panel UUID.
-- `read` — read a panel UUID's output.
-- `state` — report a panel UUID's current state.
-- `scrollback` — read a panel UUID's scrollback buffer.
-- `wait` — wait for a panel UUID to exit.
-- `focus` — focus a panel UUID.
-- `close` — close a panel UUID.
+[How adapters work →](https://sirioai.app/docs/agents/adapters)
 
 ---
 
 ## Install
 
-Sirio doesn't ship prebuilt binaries yet — build it from source (see below). It's a Cargo workspace of 13 crates; first build takes a few minutes.
+Sirio is pre-release. Every tagged release publishes a macOS `.dmg`, a Linux AppImage and a Windows installer to [GitHub Releases](https://github.com/ai-sirio/sirio/releases) — macOS first, Linux and Windows behind it. Until the first tag lands, build from source:
 
----
+```bash
+git clone https://github.com/ai-sirio/sirio
+cd sirio/rust
+cargo run -p sirio --release
+```
 
-## First Launch
+You need a stable Rust toolchain and **Zig exactly 0.15.2** (libghostty-vt pins it — a newer Zig fails too), plus the MSVC toolchain on Windows or GTK 3 + WebKitGTK 4.1 headers on Linux. Full details in [CONTRIBUTING.md](CONTRIBUTING.md) and the [build guide](https://sirioai.app/docs/contributing/build-from-source).
 
-Sirio needs no special permission prompts on Linux — it runs with no elevated access, no telemetry, and no network calls beyond what your agents themselves make. Desktop notifications go through the freedesktop D-Bus notification service, and the tray roster needs a `StatusNotifierItem`-capable panel (KDE, GNOME/COSMIC and most other desktops via their SNI/AppIndicator bridge).
+Sirio asks for no elevated access and sends no telemetry. The only network calls it makes on its own are the signed update check on release builds, which you can switch off in Settings.
 
 ---
 
@@ -123,113 +172,29 @@ Sirio needs no special permission prompts on Linux — it runs with no elevated 
 | Restore previous launch | `Ctrl+Shift+O` |
 | Settings | `Ctrl+,` |
 
-On Windows, three chords differ: Toggle sidebar is `Ctrl+Shift+D`, Toggle
-right panel is `Ctrl+Shift+R`, Restore previous launch is `Ctrl+Shift+H`.
-`Ctrl+Shift+S` / `Ctrl+Shift+I` / `Ctrl+Shift+O` never reach the app there —
-they are already taken as system-wide hotkeys — so the same actions moved
-one family chord over (the command palette always shows the chord that
-works on your platform).
-
-The tray icon is always one click away — it reflects the worst status across every active agent and opens straight into a full roster.
+On Windows three chords move one family over, because the originals are system-wide hotkeys there: toggle sidebar is `Ctrl+Shift+D`, toggle right panel `Ctrl+Shift+R`, restore previous launch `Ctrl+Shift+H`. The command palette always shows the chord that works on your platform.
 
 ---
 
-## Repository Layout
+## Community & Support
 
-| Path | Role |
-|------|------|
-| `rust/crates/sirio/` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
-| `rust/crates/sirio_ui/` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings) |
-| `rust/crates/sirio_terminal/` | Terminal panes backed by `alacritty_terminal`, PTY handling, splits |
-| `rust/crates/sirio_activity/` | Layered agent-activity detection (hooks / title / content / process), no GPUI dependency |
-| `rust/crates/sirio_control/` | `ControlServer` (unix socket) + `PaneRegistry` + `sirioctl` CLI |
-| `rust/crates/sirio_agents/` | Adapters for the 5 supported agents, with lifecycle hooks |
-| `rust/crates/sirio_acp/` | Agent Client Protocol transport for chat-hosted agents |
-| `rust/crates/sirio_git/` | Shell-out to git for local worktrees |
-| `rust/crates/sirio_persistence/` | SQLite (`rusqlite`) schema, migrations, records |
-| `rust/crates/sirio_project/` | Workspace/project domain logic, update-check state machine |
-| `rust/crates/sirio_theme/` | Color palette and theme tokens |
-| `rust/crates/sirio_markdown/` | Markdown parsing/rendering for the editor and chat |
-| `rust/crates/sirio_usage/` | Provider usage-tracking (Claude/Codex/OpenCode/Ollama) |
-
-See `CLAUDE.md`'s Architecture section for the dependency graph between them.
+- **Bugs and ideas:** open an [issue](https://github.com/ai-sirio/sirio/issues) — small fixes can go straight to a PR, bigger changes start as an issue.
+- **What's new:** the [changelog](https://sirioai.app/changelog) on sirioai.app.
+- **Author:** [Enzo Palmisano](https://www.linkedin.com/in/enzo-palmisano-b16363147/).
+- **Show support:** [star the repo](https://github.com/ai-sirio/sirio) to follow along.
 
 ---
 
-## Building from Source
+## Developing
 
-```bash
-cd rust
-cargo build --workspace
-cargo run -p sirio
-```
-
-Requires a Rust toolchain (2024 edition) and, on Linux, GTK/WebKit development headers for the embedded browser surface (`gtk`, `webkit2gtk` — package names vary by distro).
-
-Single verification gate for the whole repo:
-
-```bash
-Scripts/ci.sh    # → "CI OK" if everything passes
-```
-
-To iterate on a single crate:
-
-```bash
-cd rust && cargo test -p <crate>
-```
-
----
-
-## FAQ
-
-**Why 5 agent adapters instead of one generic CLI wrapper?**
-Each agent CLI (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) has its own lifecycle quirks — startup banners, resume flags, exit signals. A thin per-agent adapter behind a shared trait keeps that mess contained instead of leaking into the terminal or sidebar code.
-
-**Does closing the window stop my agents?**
-No. Every agent session runs in its own PTY, and closing the window only flushes session state — it does not tear panes down. The tray icon keeps tracking them and can bring you straight back. Only quitting the app ends everything.
-
-**What's `sirioctl` for?**
-It's the CLI side of Sirio's control socket — create a pane, write to it, read its output, wait for a state, or send a notification, all scriptable from outside the app. It's also how agent lifecycle hooks talk back to Sirio.
-
----
-
-## Contributing
-
-Bug reports and pull requests are welcome.
-
-### Before you start
-
-- **For bug fixes and small improvements** — open a PR directly.
-- **For new features or significant changes** — open an issue first to discuss the approach.
-
-### Rules
-
-1. **Tests first.** New logic needs `#[test]` coverage before implementation.
-   ```bash
-   cd rust && cargo test -p <crate>
-   ```
-
-2. **Respect the crate boundaries.** See `CLAUDE.md`'s Architecture section for the current dependency graph between `rust/crates/*`. `sirio` (the app) is the only crate that depends on everything; nothing underneath depends back up.
-
-3. **Keep pure logic pure.** State machines, parsers, and merge/filter logic that don't need a window belong in a crate with no `gpui` dependency (see `sirio_activity` for the pattern) — that is what keeps them unit-testable without spinning up a window.
-
-4. **Commit messages.** Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`. Lower-case, imperative subject.
-
-5. **Verification gate.** `Scripts/ci.sh` must print `CI OK` before you open a PR.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE) for details.
+Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the toolchain, the 17-crate workspace layout, the verification gate and the rules a change has to follow. The architecture notes an agent needs live in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
 ## Acknowledgements
 
-Sirio is a fork of [Orca](https://github.com/stability-ai/orca) with a deliberately reduced scope, designed and built with the help of AI pair programmers:
+Sirio began as a fork of [Orca](https://github.com/stablyai/orca), in its original Swift/macOS form and with a deliberately reduced scope, and was then rewritten in Rust on [gpui](https://github.com/zed-industries/zed). The UI is built from [bezel](https://github.com/crabtalk/bezel); the terminal runs on [libghostty-vt](https://github.com/ghostty-org/ghostty) with [portable-pty](https://github.com/wez/wezterm). Designed and built with [Claude Code](https://claude.ai/code) and [OpenCode](https://opencode.ai/) as pair programmers.
 
-- **[Claude Code](https://claude.ai/code)** by Anthropic — architecture, implementation, and review throughout the project, including the Rust/gpui Linux port.
-- **[OpenCode](https://opencode.ai/)** — parallel subagent execution for isolated, independently-verified feature branches.
+## License
 
-> *A fork with its own name and its own terms.*
+Sirio is free and open source under the [MIT License](LICENSE).
