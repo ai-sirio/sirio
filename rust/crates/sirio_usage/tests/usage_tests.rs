@@ -77,6 +77,25 @@ fn expected_usage() -> ProviderUsage {
     }
 }
 
+/// The same usage with every window's reset time cleared. The panel's
+/// `Resets …` lines are anchored to the wall clock at parse time, so the
+/// percent-and-label comparisons below strip them and the reset times are
+/// asserted separately as "read" rather than as a value.
+fn without_resets(mut usage: ProviderUsage) -> ProviderUsage {
+    for window in [
+        &mut usage.session,
+        &mut usage.weekly,
+        &mut usage.monthly,
+        &mut usage.fable_weekly,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        window.resets_at = None;
+    }
+    usage
+}
+
 #[test]
 fn a_well_formed_state_file_parses_into_the_expected_windows() {
     let dir = TempDir::new();
@@ -84,9 +103,21 @@ fn a_well_formed_state_file_parses_into_the_expected_windows() {
     let path = dir.file("usage-panel.txt", WELL_FORMED_TRANSCRIPT);
     let raw = std::fs::read_to_string(&path).expect("read fixture");
 
+    let usage = parse_claude_usage(&raw).expect("well-formed panel parses");
+    assert!(
+        usage
+            .session
+            .as_ref()
+            .is_some_and(|w| w.resets_at.is_some()),
+        "the session's `Resets 8:50am` line is read into resets_at"
+    );
+    assert!(
+        usage.weekly.as_ref().is_some_and(|w| w.resets_at.is_some()),
+        "the weekly `Resets Aug 16 at 10am` line is read into resets_at"
+    );
     assert_eq!(
-        parse_claude_usage(&raw),
-        Some(expected_usage()),
+        without_resets(usage),
+        expected_usage(),
         "session 12%, weekly 10%, Fable 0% — the values the CLI reports"
     );
 }
@@ -102,7 +133,7 @@ fn a_real_capture_with_carriage_return_line_separators_parses() {
     let path = dir.file("real-capture.txt", real);
     let text = std::fs::read_to_string(&path).expect("read fixture");
 
-    let usage = parse_claude_usage(&text).expect("real capture parses");
+    let usage = without_resets(parse_claude_usage(&text).expect("real capture parses"));
     assert_eq!(
         usage.session,
         Some(UsageWindow::new("5h", 25)),
@@ -152,7 +183,7 @@ fn a_truncated_state_file_never_panics_and_loses_nothing_complete() {
     let text = std::fs::read_to_string(&path).expect("read fixture");
 
     // No panic; whatever parsed before the cut survives.
-    if let Some(parsed) = parse_claude_usage(&text) {
+    if let Some(parsed) = parse_claude_usage(&text).map(without_resets) {
         assert_eq!(
             parsed.session,
             Some(UsageWindow::new("5h", 12)),
@@ -193,12 +224,20 @@ fn data_old_enough_to_count_as_stale_is_marked_stale_not_current() {
 
     // The provider reported fine a while ago…
     let loaded = reduce(transcript_outcome(&raw), &ProviderUsageState::Loading);
-    assert_eq!(loaded, ProviderUsageState::Loaded(expected_usage()));
+    match &loaded {
+        ProviderUsageState::Loaded(usage) => {
+            assert_eq!(without_resets(usage.clone()), expected_usage());
+        }
+        other => panic!("a parseable panel loads, got {other:?}"),
+    }
 
     // …the next refresh fails to reach it (bounded timeout): the last good
     // value is kept, but as `.stale`, which the bar renders dimmed.
     let stale = reduce(UsageFetchOutcome::TimedOut, &loaded);
-    assert_eq!(stale, ProviderUsageState::Stale(expected_usage()));
+    match stale {
+        ProviderUsageState::Stale(usage) => assert_eq!(without_resets(usage), expected_usage()),
+        other => panic!("a timed-out refresh keeps the last value as stale, got {other:?}"),
+    }
 }
 
 #[test]

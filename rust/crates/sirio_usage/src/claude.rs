@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
+use std::time::SystemTime;
+
+use chrono::{DateTime, Datelike, Local, TimeDelta, TimeZone};
 
 use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
 use crate::user_home_dir;
@@ -82,6 +85,14 @@ const MAX_BUFFER_BYTES: usize = 512 * 1024;
 /// Parses the `claude /usage` TUI text into usage windows. Returns `None`
 /// when no window could be read (e.g. the TUI has not rendered yet).
 pub fn parse_claude_usage(raw: &str) -> Option<ProviderUsage> {
+    parse_claude_usage_at(raw, Local::now())
+}
+
+/// [`parse_claude_usage`] with the clock injected. The panel prints reset
+/// times without a day (`Resets 8:50am`) or without a year (`Resets Aug 16
+/// at 10am`); `now` anchors them to the next such moment so each window's
+/// `resets_at` can be counted down from.
+pub fn parse_claude_usage_at(raw: &str, now: DateTime<Local>) -> Option<ProviderUsage> {
     // The TUI redraws the panel in place: lines are separated by carriage
     // returns, not newlines (the Swift splits on both — this port must
     // too, or the whole panel collapses into one line and every window
@@ -91,14 +102,16 @@ pub fn parse_claude_usage(raw: &str) -> Option<ProviderUsage> {
         .map(str::to_string)
         .collect();
 
-    let session = first_percent(&lines, is_session_label)
-        .map(|percent| UsageWindow::new(SESSION_LABEL, percent));
-    let weekly = first_percent(&lines, |line| {
-        is_weekly_label(line) && !contains_fable(line)
-    })
-    .map(|percent| UsageWindow::new(WEEKLY_LABEL, percent));
-    let fable =
-        first_percent(&lines, is_fable_label).map(|percent| UsageWindow::new(FABLE_LABEL, percent));
+    let session = first_window(&lines, is_session_label, now)
+        .map(|(percent, resets_at)| window(SESSION_LABEL, percent, resets_at));
+    let weekly = first_window(
+        &lines,
+        |line| is_weekly_label(line) && !contains_fable(line),
+        now,
+    )
+    .map(|(percent, resets_at)| window(WEEKLY_LABEL, percent, resets_at));
+    let fable = first_window(&lines, is_fable_label, now)
+        .map(|(percent, resets_at)| window(FABLE_LABEL, percent, resets_at));
 
     let usage = ProviderUsage {
         session,
@@ -107,6 +120,13 @@ pub fn parse_claude_usage(raw: &str) -> Option<ProviderUsage> {
         fable_weekly: fable,
     };
     usage.has_any().then_some(usage)
+}
+
+fn window(label: &str, percent: u8, resets_at: Option<DateTime<Local>>) -> UsageWindow {
+    UsageWindow {
+        resets_at: resets_at.map(SystemTime::from),
+        ..UsageWindow::new(label, percent)
+    }
 }
 
 /// Removes CSI and OSC escape sequences, mirroring Swift's `stripANSI`:
@@ -198,8 +218,14 @@ fn is_section_label(line: &str) -> bool {
 }
 
 /// Finds the label line, then returns the first percent token on that line
-/// or the next few lines, stopping at the next (different) section heading.
-fn first_percent(lines: &[String], is_label: impl Fn(&str) -> bool) -> Option<u8> {
+/// or the next few lines, stopping at the next (different) section heading,
+/// together with the section's own `Resets …` line when one follows the
+/// percent before the next heading. A window never borrows another's reset.
+fn first_window(
+    lines: &[String],
+    is_label: impl Fn(&str) -> bool,
+    now: DateTime<Local>,
+) -> Option<(u8, Option<DateTime<Local>>)> {
     for (i, line) in lines.iter().enumerate() {
         if !is_label(line) {
             continue;
@@ -209,11 +235,132 @@ fn first_percent(lines: &[String], is_label: impl Fn(&str) -> bool) -> Option<u8
                 break;
             }
             if let Some(percent) = percent_token(candidate) {
-                return Some(percent);
+                let resets_at = lines
+                    .iter()
+                    .skip(i + offset + 1)
+                    .take(3)
+                    .take_while(|line| !is_section_label(line))
+                    .find_map(|line| parse_reset_line(line, now));
+                return Some((percent, resets_at));
             }
         }
     }
     None
+}
+
+/// Parses the panel's `Resets …` line into the next such moment in local
+/// time, or `None` for any other line. Two forms are printed, both without
+/// a year and with an optional `(Zone/Name)` note that is dropped — the
+/// panel already renders in the machine's own zone:
+///
+/// - `Resets 8:50am (Europe/Rome)` — clock only: today, or tomorrow once
+///   that time has passed.
+/// - `Resets Aug 16 at 10am (Europe/Rome)` — month and day: this year, or
+///   next year when the date is far enough behind `now` to have wrapped.
+fn parse_reset_line(line: &str, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    let trimmed = line.trim();
+    let rest = trimmed
+        .get(..6)
+        .filter(|head| head.eq_ignore_ascii_case("resets"))
+        .map(|_| trimmed[6..].trim_start())?;
+    let rest = rest.split('(').next().unwrap_or(rest).trim();
+
+    let mut tokens = rest.split_whitespace().peekable();
+    let mut date = None;
+    if let Some(month) = tokens.peek().and_then(|token| month_number(token)) {
+        tokens.next();
+        let day: u32 = tokens.next()?.trim_end_matches(',').parse().ok()?;
+        date = Some((month, day));
+        if tokens
+            .peek()
+            .is_some_and(|token| token.eq_ignore_ascii_case("at"))
+        {
+            tokens.next();
+        }
+    }
+    let mut clock = tokens.next()?.to_ascii_lowercase();
+    if let Some(meridiem) = tokens
+        .peek()
+        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| token == "am" || token == "pm")
+    {
+        clock.push_str(&meridiem);
+    }
+    let (hour, minute) = parse_clock(&clock)?;
+
+    match date {
+        Some((month, day)) => {
+            let this_year = local_at(now.year(), month, day, hour, minute)?;
+            // Dec → Jan: a reset that reads as a month or more in the past
+            // is next year's; anything closer is left alone so a stale
+            // panel counts down to "now" instead of jumping a year ahead.
+            if this_year + TimeDelta::days(30) < now {
+                local_at(now.year() + 1, month, day, hour, minute)
+            } else {
+                Some(this_year)
+            }
+        }
+        None => {
+            let today = now.date_naive();
+            let candidate = local_at(today.year(), today.month(), today.day(), hour, minute)?;
+            if candidate > now {
+                Some(candidate)
+            } else {
+                let tomorrow = today.succ_opt()?;
+                local_at(
+                    tomorrow.year(),
+                    tomorrow.month(),
+                    tomorrow.day(),
+                    hour,
+                    minute,
+                )
+            }
+        }
+    }
+}
+
+fn local_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> Option<DateTime<Local>> {
+    Local
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .earliest()
+}
+
+/// `"8:50am"` → (8, 50), `"10am"` → (10, 0), `"12am"` → (0, 0),
+/// `"12pm"` → (12, 0); a 24-hour `"14:05"` is accepted as-is.
+fn parse_clock(clock: &str) -> Option<(u32, u32)> {
+    let (digits, meridiem) = match clock.strip_suffix("am") {
+        Some(digits) => (digits, Some(false)),
+        None => match clock.strip_suffix("pm") {
+            Some(digits) => (digits, Some(true)),
+            None => (clock, None),
+        },
+    };
+    let (hour, minute) = match digits.split_once(':') {
+        Some((hour, minute)) => (hour.parse::<u32>().ok()?, minute.parse::<u32>().ok()?),
+        None => (digits.parse::<u32>().ok()?, 0),
+    };
+    if minute > 59 {
+        return None;
+    }
+    let hour = match meridiem {
+        Some(_) if !(1..=12).contains(&hour) => return None,
+        Some(false) => hour % 12,
+        Some(true) => hour % 12 + 12,
+        None if hour > 23 => return None,
+        None => hour,
+    };
+    Some((hour, minute))
+}
+
+fn month_number(token: &str) -> Option<u32> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let lower = token.trim_end_matches(',').to_ascii_lowercase();
+    MONTHS
+        .iter()
+        .position(|month| lower.starts_with(month))
+        .map(|index| index as u32 + 1)
 }
 
 /// `"12% used"` → 12, `"84% left"` → 16 (remaining inverted), bare `"62%"` → 62.
@@ -654,7 +801,86 @@ impl Drop for Pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Local, TimeZone};
+    #[cfg(unix)]
     use std::path::Path;
+
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .expect("unambiguous local time")
+    }
+
+    #[test]
+    fn reset_line_without_a_date_is_the_next_occurrence_of_that_time() {
+        // Before 8:50 → today at 8:50.
+        assert_eq!(
+            parse_reset_line("Resets 8:50am (Europe/Rome)", local(2026, 8, 10, 7, 10)),
+            Some(local(2026, 8, 10, 8, 50))
+        );
+        // At or after 8:50 → tomorrow at 8:50, never a time already gone.
+        assert_eq!(
+            parse_reset_line("Resets 8:50am (Europe/Rome)", local(2026, 8, 10, 9, 0)),
+            Some(local(2026, 8, 11, 8, 50))
+        );
+        // 12-hour clock edges.
+        assert_eq!(
+            parse_reset_line("Resets 12pm", local(2026, 8, 10, 7, 0)),
+            Some(local(2026, 8, 10, 12, 0))
+        );
+        assert_eq!(
+            parse_reset_line("Resets 12:05am", local(2026, 8, 10, 7, 0)),
+            Some(local(2026, 8, 11, 0, 5))
+        );
+    }
+
+    #[test]
+    fn reset_line_with_a_date_reads_month_day_and_time() {
+        assert_eq!(
+            parse_reset_line(
+                "   Resets Aug 16 at 10am (Europe/Rome)",
+                local(2026, 8, 10, 7, 10)
+            ),
+            Some(local(2026, 8, 16, 10, 0))
+        );
+        // A month before the current one belongs to next year (Dec → Jan).
+        assert_eq!(
+            parse_reset_line("Resets Jan 2 at 3:30pm", local(2026, 12, 30, 7, 10)),
+            Some(local(2027, 1, 2, 15, 30))
+        );
+    }
+
+    #[test]
+    fn lines_that_are_not_a_reset_are_ignored() {
+        let now = local(2026, 8, 10, 7, 10);
+        assert_eq!(parse_reset_line("Current session", now), None);
+        assert_eq!(parse_reset_line("Resets soon", now), None);
+        assert_eq!(parse_reset_line("", now), None);
+    }
+
+    #[test]
+    fn panel_windows_carry_their_own_reset_times() {
+        let now = local(2026, 8, 10, 7, 10);
+        let panel = "Current session\r\r\r████████████▌                                     25%used\rResets 8:50am (Europe/Rome)\r\rCurrent week (all models)\r██████                                            12%used\r   Resets Aug 16 at 10am (Europe/Rome)\r  +50% weekly limits promo through Aug 19 · clau.de/cc-50-promo\r\rWhat's contributing to your limits usage?\r Approximate,based onlocal sessions on this machine — does not include ↓\rCurrent week (Fable)\r                                                   0% used\r";
+        let usage = parse_claude_usage_at(panel, now).expect("panel parses");
+        let session = usage.session.expect("session window");
+        assert_eq!(session.used_percent, 25);
+        assert_eq!(
+            session.resets_at,
+            Some(local(2026, 8, 10, 8, 50).into()),
+            "the session's own Resets line, not the weekly one"
+        );
+        let weekly = usage.weekly.expect("weekly window");
+        assert_eq!(weekly.used_percent, 12);
+        assert_eq!(weekly.resets_at, Some(local(2026, 8, 16, 10, 0).into()));
+        let fable = usage.fable_weekly.expect("fable window");
+        assert_eq!(fable.used_percent, 0);
+        assert_eq!(
+            fable.resets_at, None,
+            "a window without a Resets line reports no reset rather than borrowing one"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

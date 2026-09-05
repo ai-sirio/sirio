@@ -53,6 +53,7 @@ pub use codex::{
 pub use credentials::{CredentialStore, CredentialStoreError};
 pub use model::{
     ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason, UsageWindow, reduce,
+    reset_countdown,
 };
 pub use ollama::{OllamaCloudUsageFetcher, extract_ollama_cloud_usage, parse_ollama_cloud_usage};
 pub use opencode_go::OpenCodeGoUsageFetcher;

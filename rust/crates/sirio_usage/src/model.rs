@@ -132,6 +132,27 @@ pub fn reduce(outcome: UsageFetchOutcome, previous: &ProviderUsageState) -> Prov
     }
 }
 
+/// The time left until `resets_at`, in the bar's two-unit form: `5d 23h`
+/// once a day or more remains, `1h 40m` below a day, `12m` below an hour,
+/// and `now` below a minute or once the reset has passed (a reset in the
+/// past is never rendered as a negative duration — the next fetch will
+/// replace it).
+pub fn reset_countdown(resets_at: SystemTime, now: SystemTime) -> String {
+    let remaining = resets_at.duration_since(now).unwrap_or_default().as_secs();
+    let days = remaining / 86_400;
+    let hours = (remaining % 86_400) / 3_600;
+    let minutes = (remaining % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        "now".to_string()
+    }
+}
+
 fn last_usage(state: &ProviderUsageState) -> Option<ProviderUsage> {
     match state {
         ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => Some(usage.clone()),
@@ -150,6 +171,30 @@ mod tests {
             monthly: None,
             fable_weekly: Some(UsageWindow::new("Fable", 0)),
         }
+    }
+
+    #[test]
+    fn reset_countdown_picks_the_two_largest_units() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let at = |secs: u64| now + Duration::from_secs(secs);
+        // Days and hours once a day is reached; minutes drop out.
+        assert_eq!(
+            reset_countdown(at(5 * 86_400 + 23 * 3_600 + 59 * 60), now),
+            "5d 23h"
+        );
+        assert_eq!(reset_countdown(at(6 * 86_400 + 18 * 3_600), now), "6d 18h");
+        // Hours and minutes below a day.
+        assert_eq!(reset_countdown(at(3_600 + 40 * 60), now), "1h 40m");
+        assert_eq!(reset_countdown(at(2 * 3_600), now), "2h 0m");
+        // Minutes alone below an hour; sub-minute reads as "now".
+        assert_eq!(reset_countdown(at(12 * 60 + 30), now), "12m");
+        assert_eq!(reset_countdown(at(59), now), "now");
+        // A reset already in the past is "now", never a negative duration.
+        assert_eq!(
+            reset_countdown(now - Duration::from_secs(3_600), now),
+            "now"
+        );
     }
 
     #[test]
