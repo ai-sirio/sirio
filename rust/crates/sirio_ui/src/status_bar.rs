@@ -12,10 +12,11 @@ use gpui::{AnyView, Context, Render, Rgba, Window, div, prelude::*, px, text};
 use sirio_theme::Theme;
 use sirio_usage::{
     ClaudeUsageFetcher, CodexUsageFetcher, OllamaCloudUsageFetcher, OpenCodeGoUsageFetcher,
-    ProviderUsageState, UsageFetchOutcome, UsageReason, reduce,
+    ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason, UsageWindow, reduce,
+    reset_countdown,
 };
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -24,6 +25,12 @@ pub(crate) const HEIGHT: f32 = 40.0;
 
 /// The Swift default: refresh every five minutes (60..3600 allowed).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+
+/// The pill meter's track width beside each provider's numbers.
+const METER_WIDTH: f32 = 18.0;
+
+/// The opacity stale numbers (and their meter) drop to; matches [`dim`].
+const DIM_OPACITY: f32 = 0.55;
 
 /// The settings the usage bar consumes from the settings surface
 /// (F-SET-10): which provider segments are visible and how often the
@@ -366,28 +373,25 @@ impl StatusBar {
         .detach();
     }
 
-    /// The segment text for one provider, mirroring the Swift bar:
-    /// "Claude 12% 5h · 10% wk · 0% Fable", "Codex 51% 5h",
-    /// "OpenCode Go 12% 5h · 34% wk · 71% mo"; "…" while loading; "—" when
-    /// unavailable.
+    /// The segment text for one provider: "3% used 1h 40m · 24% used 5d 23h
+    /// · 46% used Fable" once loaded (the brand mark carries the provider's
+    /// name, the text does not); "Claude …" while loading; "Claude —" or
+    /// the unavailable reason otherwise, where the name is needed.
     fn segment_text(display_name: &str, state: &ProviderUsageState) -> String {
+        Self::segment_text_at(display_name, state, SystemTime::now())
+    }
+
+    /// [`Self::segment_text`] with the clock injected, so the countdowns can
+    /// be asserted against a fixed `now`.
+    fn segment_text_at(display_name: &str, state: &ProviderUsageState, now: SystemTime) -> String {
         match state {
             ProviderUsageState::Loading => format!("{display_name} …"),
             ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => {
-                let parts: Vec<String> = [
-                    usage.session.as_ref(),
-                    usage.weekly.as_ref(),
-                    usage.monthly.as_ref(),
-                    usage.fable_weekly.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                .map(|window| format!("{}% {}", window.used_percent, window.label))
-                .collect();
+                let parts = Self::window_texts(usage, now);
                 if parts.is_empty() {
                     format!("{display_name} —")
                 } else {
-                    format!("{display_name} {}", parts.join(" · "))
+                    parts.join(" · ")
                 }
             }
             // F-SET-11: the reason is the one piece of data that tells the
@@ -419,6 +423,61 @@ impl StatusBar {
                 };
                 format!("{display_name} {reason_text}")
             }
+        }
+    }
+
+    /// One text per window read, in the bar's order: `3% used 1h 40m` — the
+    /// percent, "used", and the time to that window's reset. A window whose
+    /// reset is unknown keeps its label (`12% used 5h`) so the reader still
+    /// knows which limit it is. The Fable window keeps its name always: its
+    /// reset coincides with the weekly one, and a second `5d 23h` would leave
+    /// the two indistinguishable.
+    fn window_texts(usage: &ProviderUsage, now: SystemTime) -> Vec<String> {
+        let counted = |window: &UsageWindow| {
+            let tail = window
+                .resets_at
+                .map(|resets_at| reset_countdown(resets_at, now))
+                .unwrap_or_else(|| window.label.clone());
+            format!("{}% used {tail}", window.used_percent)
+        };
+        let named =
+            |window: &UsageWindow| format!("{}% used {}", window.used_percent, window.label);
+        [
+            usage.session.as_ref().map(counted),
+            usage.weekly.as_ref().map(counted),
+            usage.monthly.as_ref().map(counted),
+            usage.fable_weekly.as_ref().map(named),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The pill meter's fill: the session window, or the first window the
+    /// provider reports when it has no session (Ollama Cloud reads one
+    /// "usage" window). `0.0` when nothing was read.
+    fn meter_fraction(usage: &ProviderUsage) -> f32 {
+        [
+            usage.session.as_ref(),
+            usage.weekly.as_ref(),
+            usage.monthly.as_ref(),
+            usage.fable_weekly.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map_or(0.0, |window| f32::from(window.used_percent) / 100.0)
+    }
+
+    /// The pill meter's fill for a segment, or `None` when there are no
+    /// numbers to fill it with (loading, unavailable): an empty track would
+    /// read as "0% used".
+    fn segment_meter(state: &ProviderUsageState) -> Option<f32> {
+        match state {
+            ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => {
+                Some(Self::meter_fraction(usage))
+            }
+            ProviderUsageState::Loading | ProviderUsageState::Unavailable(_) => None,
         }
     }
 
@@ -485,39 +544,61 @@ impl Render for StatusBar {
             theme.text
         };
 
-        let provider_segment =
-            move |display_name: &'static str, mark: Icon, text_color: gpui::Rgba, text: String| {
-                // The `text!` macro derives its element id from its own source
-                // location: inside this closure the location is shared by all
-                // three segments, so the ids must be explicit or the duplicate
-                // element ids make GPUI drop all but one segment.
-                let text_id = format!("{display_name}-usage-text");
-                // F-USE-02: the segment's own text is the unavailable reason
-                // (or the abbreviated numbers) already — the tooltip repeats it
-                // rather than inventing a second vocabulary, so it stays
-                // correct for every state (Loading/Loaded/Stale/Unavailable)
-                // for free.
-                let segment_id = format!("{display_name}-usage-segment");
-                let tooltip_text = text.clone();
-                div()
-                    .id(segment_id)
-                    .debug_selector(move || format!("{display_name}-usage-text"))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(theme.typography.caption2)
-                    .text_color(text_color)
-                    .tooltip(move |_, cx| -> AnyView {
-                        let tooltip_text = tooltip_text.clone();
-                        cx.new(|_| StatusBarTooltip {
-                            theme,
-                            text: tooltip_text,
-                        })
-                        .into()
-                    })
-                    .child(IconElement::new(mark, IconSize::XSmall))
-                    .child(text!(id = text_id, text))
+        let provider_segment = move |display_name: &'static str,
+                                     mark: Icon,
+                                     text_color: gpui::Rgba,
+                                     dimmed: bool,
+                                     meter: Option<f32>,
+                                     text: String| {
+            // The `text!` macro derives its element id from its own source
+            // location: inside this closure the location is shared by all
+            // three segments, so the ids must be explicit or the duplicate
+            // element ids make GPUI drop all but one segment.
+            let text_id = format!("{display_name}-usage-text");
+            // F-USE-02: the tooltip repeats the segment's own text rather
+            // than inventing a second vocabulary, so it stays correct for
+            // every state for free. A meter means the text carries numbers
+            // and no name (the brand mark names the provider in the bar), so
+            // the tooltip is where the name lives: "Claude · 3% used 1h 40m";
+            // an unavailable reason already names the provider.
+            let segment_id = format!("{display_name}-usage-segment");
+            let tooltip_text = match meter {
+                Some(_) => format!("{display_name} · {text}"),
+                None => text.clone(),
             };
+            div()
+                .id(segment_id)
+                .debug_selector(move || format!("{display_name}-usage-text"))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(theme.typography.caption2)
+                .text_color(text_color)
+                .tooltip(move |_, cx| -> AnyView {
+                    let tooltip_text = tooltip_text.clone();
+                    cx.new(|_| StatusBarTooltip {
+                        theme,
+                        text: tooltip_text,
+                    })
+                    .into()
+                })
+                .child(IconElement::new(mark, IconSize::XSmall))
+                .when_some(meter, |segment, fraction| {
+                    // The pill: bezel's determinate progress bar on a fixed
+                    // narrow track, so the row never reflows as the value
+                    // moves. Dimmed with the text when the numbers are stale.
+                    segment.child(
+                        div()
+                            .id(format!("{display_name}-usage-meter"))
+                            .debug_selector(move || format!("{display_name}-usage-meter"))
+                            .flex_none()
+                            .w(px(METER_WIDTH))
+                            .opacity(if dimmed { DIM_OPACITY } else { 1.0 })
+                            .child(loading::progress(fraction, &theme)),
+                    )
+                })
+                .child(text!(id = text_id, text))
+        };
 
         // The segments follow the settings surface's "Show in usage bar"
         // toggles (F-SET-10): a provider hidden there does not render here.
@@ -560,6 +641,8 @@ impl Render for StatusBar {
                 "Claude",
                 Icon::ClaudeCode,
                 claude_color,
+                claude_dimmed,
+                Self::segment_meter(&self.claude),
                 Self::segment_text("Claude", &self.claude),
             ));
         }
@@ -568,6 +651,8 @@ impl Render for StatusBar {
                 "Codex",
                 Icon::Codex,
                 codex_color,
+                codex_dimmed,
+                Self::segment_meter(&self.codex),
                 Self::segment_text("Codex", &self.codex),
             ));
         }
@@ -576,6 +661,8 @@ impl Render for StatusBar {
                 "OpenCode Go",
                 Icon::OpenCode,
                 opencode_go_color,
+                opencode_go_dimmed,
+                Self::segment_meter(&self.opencode_go),
                 Self::segment_text("OpenCode Go", &self.opencode_go),
             ));
         }
@@ -587,6 +674,8 @@ impl Render for StatusBar {
                 "Ollama Cloud",
                 Icon::Globe,
                 ollama_cloud_color,
+                ollama_cloud_dimmed,
+                Self::segment_meter(&self.ollama_cloud),
                 Self::segment_text("Ollama Cloud", &self.ollama_cloud),
             ));
         }
@@ -676,7 +765,6 @@ fn status_bar_foreground(theme: Theme) -> Rgba {
 mod tests {
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
-    use sirio_usage::{ProviderUsage, UsageWindow};
 
     #[test]
     fn light_status_bar_foreground_uses_muted_text_and_dark_stays_faint() {
@@ -686,6 +774,138 @@ mod tests {
         assert_eq!(status_bar_foreground(light), light.text_muted);
         assert_eq!(status_bar_foreground(dark), dark.text_faint);
         assert_ne!(light.text_muted, light.text_faint);
+    }
+
+    fn window_resetting_in(label: &str, percent: u8, now: SystemTime, secs: u64) -> UsageWindow {
+        UsageWindow {
+            resets_at: Some(now + Duration::from_secs(secs)),
+            ..UsageWindow::new(label, percent)
+        }
+    }
+
+    /// The reference bar reads `3% used 1h 40m · 24% used 5d 23h · 46% used
+    /// Fable`: each window is its percent, the word "used", and the time
+    /// to its reset — except Fable, which keeps its name because its reset
+    /// coincides with the weekly one and a second `5d 23h` would leave the
+    /// two windows indistinguishable. The provider name is not in the text:
+    /// the brand mark carries it.
+    #[test]
+    fn loaded_windows_read_as_percent_used_and_the_time_to_reset() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let usage = ProviderUsage {
+            session: Some(window_resetting_in("5h", 3, now, 3_600 + 40 * 60)),
+            weekly: Some(window_resetting_in(
+                "wk",
+                24,
+                now,
+                5 * 86_400 + 23 * 3_600 + 5 * 60,
+            )),
+            monthly: None,
+            fable_weekly: Some(window_resetting_in(
+                "Fable",
+                46,
+                now,
+                5 * 86_400 + 23 * 3_600 + 5 * 60,
+            )),
+        };
+        assert_eq!(
+            StatusBar::window_texts(&usage, now),
+            vec!["3% used 1h 40m", "24% used 5d 23h", "46% used Fable"]
+        );
+        assert_eq!(
+            StatusBar::segment_text_at("Claude", &ProviderUsageState::Loaded(usage.clone()), now),
+            "3% used 1h 40m · 24% used 5d 23h · 46% used Fable"
+        );
+        assert_eq!(
+            StatusBar::segment_text_at("Claude", &ProviderUsageState::Stale(usage), now),
+            "3% used 1h 40m · 24% used 5d 23h · 46% used Fable",
+            "stale keeps the same text — dimming is what marks it stale"
+        );
+    }
+
+    #[test]
+    fn a_window_without_a_known_reset_falls_back_to_its_label() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let usage = ProviderUsage {
+            session: Some(UsageWindow::new("5h", 12)),
+            weekly: Some(UsageWindow::new("wk", 34)),
+            monthly: Some(UsageWindow::new("mo", 71)),
+            fable_weekly: None,
+        };
+        assert_eq!(
+            StatusBar::window_texts(&usage, now),
+            vec!["12% used 5h", "34% used wk", "71% used mo"]
+        );
+    }
+
+    /// The pill meter is the session window; a provider without one (Ollama
+    /// Cloud reads a single "usage" window) shows the first window it has.
+    #[test]
+    fn the_meter_tracks_the_session_window_or_the_first_window_read() {
+        let session_and_weekly = ProviderUsage {
+            session: Some(UsageWindow::new("5h", 3)),
+            weekly: Some(UsageWindow::new("wk", 24)),
+            monthly: None,
+            fable_weekly: None,
+        };
+        assert!((StatusBar::meter_fraction(&session_and_weekly) - 0.03).abs() < 1e-6);
+
+        let weekly_only = ProviderUsage {
+            session: None,
+            weekly: Some(UsageWindow::new("wk", 24)),
+            monthly: None,
+            fable_weekly: None,
+        };
+        assert!((StatusBar::meter_fraction(&weekly_only) - 0.24).abs() < 1e-6);
+
+        assert_eq!(StatusBar::meter_fraction(&ProviderUsage::default()), 0.0);
+    }
+
+    /// The pill meter is drawn only beside real numbers: a provider that is
+    /// loading or unavailable has nothing to fill it with, and an empty
+    /// track would read as "0% used".
+    #[gpui::test]
+    async fn the_meter_renders_beside_numbers_and_not_beside_a_reason(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+        bar.update(&mut cx, |bar, cx| {
+            let usage = ProviderUsage {
+                session: Some(UsageWindow::new("5h", 3)),
+                weekly: Some(UsageWindow::new("wk", 24)),
+                monthly: None,
+                fable_weekly: None,
+            };
+            bar.apply_outcomes(
+                UsageFetchOutcome::Success(usage),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("Claude-usage-meter").is_some(),
+            "a loaded provider draws its pill meter"
+        );
+        assert!(cx.debug_bounds("Claude-usage-text").is_some());
+        assert!(
+            cx.debug_bounds("Codex-usage-meter").is_none(),
+            "an unavailable provider shows its reason with no meter"
+        );
+        assert!(cx.debug_bounds("Codex-usage-text").is_some());
     }
 
     /// #199: "not implemented on this platform" is a different fact from
@@ -946,12 +1166,12 @@ mod tests {
         };
         assert_eq!(
             StatusBar::segment_text("Claude", &ProviderUsageState::Loaded(usage.clone())),
-            "Claude 12% 5h",
+            "12% used 5h",
             "a loaded state still renders real numbers, not a reason"
         );
         assert_eq!(
             StatusBar::segment_text("Claude", &ProviderUsageState::Stale(usage)),
-            "Claude 12% 5h",
+            "12% used 5h",
             "stale keeps showing the last good numbers — dimming is what marks it stale, not the text"
         );
     }
