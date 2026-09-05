@@ -7300,6 +7300,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "libc",
+ "portable-pty",
  "serde_json",
 ]
 

@@ -3,11 +3,11 @@
 //! `TillerCore/ProviderUsage.swift` (parser).
 //!
 //! Claude's usage state lives only inside its interactive TUI — there is no
-//! local usage file — so the fetcher drives a hidden `claude` PTY through
-//! the user's login shell, sends `/usage`, and parses the rendered panel,
-//! exactly like the Swift app (which itself ports Orca's `claude-pty.ts`).
+//! local usage file — so the fetcher drives a hidden `claude` PTY (through
+//! the user's login shell on Unix, directly under ConPTY on Windows), sends
+//! `/usage`, and parses the rendered panel, exactly like the Swift app
+//! (which itself ports Orca's `claude-pty.ts`).
 
-#[cfg(unix)]
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
@@ -16,10 +16,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Child, Command, Stdio};
-#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(unix)]
 use std::time::Instant;
 use std::time::SystemTime;
 
@@ -78,6 +76,19 @@ const FABLE_LABEL: &str = "Fable";
 #[cfg(unix)]
 const MAX_BUFFER_BYTES: usize = 512 * 1024;
 
+/// Appends one chunk of PTY output to the shared buffer, honouring
+/// [`MAX_BUFFER_BYTES`]: past the cap, further output is dropped rather than
+/// retained. (Windows replays its output into a bounded screen grid
+/// instead — see [`crate::screen::Screen`].)
+#[cfg(unix)]
+fn append_capped(buffer: &Mutex<String>, chunk: &[u8]) {
+    let mut buffer = buffer.lock().expect("usage buffer lock");
+    if buffer.len() < MAX_BUFFER_BYTES {
+        let take = chunk.len().min(MAX_BUFFER_BYTES - buffer.len());
+        buffer.push_str(&String::from_utf8_lossy(&chunk[..take]));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pure parser (ported from `parseClaudeUsage`)
 // ---------------------------------------------------------------------------
@@ -130,7 +141,8 @@ fn window(label: &str, percent: u8, resets_at: Option<DateTime<Local>>) -> Usage
 }
 
 /// Removes CSI and OSC escape sequences, mirroring Swift's `stripANSI`:
-/// `ESC [ ... final-byte` and `ESC ] ... BEL`.
+/// `ESC [ ... final-byte` and `ESC ] ... BEL` (or `ESC \`). Safe on a
+/// buffer cut mid-sequence, since the parser runs between PTY reads.
 fn strip_ansi(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
@@ -148,12 +160,23 @@ fn strip_ansi(input: &str) -> String {
                 continue;
             }
             if rest.first() == Some(&b']') {
-                // OSC: consume until BEL (0x07) or end.
+                // OSC: consume through BEL (0x07) or ST (ESC \). A buffer
+                // that ends before either — the parser runs on the live
+                // buffer between PTY reads — is consumed to its end.
+                let mut consumed = rest.len();
                 let mut j = 1;
-                while j < rest.len() && rest[j] != 0x07 {
+                while j < rest.len() {
+                    if rest[j] == 0x07 {
+                        consumed = j + 1;
+                        break;
+                    }
+                    if rest[j] == 0x1b && rest.get(j + 1) == Some(&b'\\') {
+                        consumed = j + 2;
+                        break;
+                    }
                     j += 1;
                 }
-                i += 1 + j + usize::from(rest[j] == 0x07);
+                i += 1 + consumed;
                 continue;
             }
         }
@@ -412,6 +435,12 @@ pub fn classify_failure(text: &str) -> Option<UsageReason> {
         || lower.contains("invalid api key")
     {
         Some(UsageReason::LoggedOut)
+    } else if lower.contains("trust this folder") {
+        // The workspace-trust dialog, not the prompt — its `❯` marks the
+        // highlighted "No, exit", so the drive loop must never send Enter
+        // into it. `PROBE_ENV` keeps it from appearing; this is the guard
+        // for the day that flag stops being honoured.
+        Some(UsageReason::Error)
     } else {
         None
     }
@@ -479,45 +508,29 @@ impl ClaudeUsageFetcher {
     /// only thing deciding what `claude` resolves to. Production `fetch()`
     /// never sets that key, so real users still get the login shell.
     ///
-    /// Unix-only: drives a real PTY (`posix_openpt`/`ptsname`/`TIOCSCTTY`) under a login
-    /// shell, exactly like the Swift app's `PtyProcess`. Windows has no POSIX PTY; the
-    /// counterpart is ConPTY (`CreatePseudoConsole`), which `portable-pty`'s
-    /// `tty/windows/` already wraps for the terminal pane — reuse that rather than
-    /// hand-rolling a second ConPTY client here. See the `#[cfg(not(unix))]` stub below.
-    #[cfg(unix)]
+    /// Unix drives a real PTY (`posix_openpt`/`ptsname`/`TIOCSCTTY`) under a
+    /// login shell, exactly like the Swift app's `PtyProcess`. Windows has no
+    /// POSIX PTY, no login shell and no dotfiles to skip: it runs `claude`
+    /// itself under ConPTY (`CreatePseudoConsole`, through `portable-pty`),
+    /// resolved on the probe's own `PATH` — so a `PATH` in `envs` decides
+    /// what `claude` resolves to there without any dotfile flag. Only
+    /// [`probe_launch`] and [`Pty`] differ per platform; the drive loop
+    /// below is shared.
     pub fn fetch_with_env(
         settle: Duration,
         poll: Duration,
         timeout: Duration,
         envs: &[(&str, &str)],
     ) -> UsageFetchOutcome {
-        let shell = login_shell();
         let skip_dotfiles = envs
             .iter()
             .any(|(key, _)| *key == "SIRIO_USAGE_NO_DOTFILES");
-        let shell_name = Path::new(&shell)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        let mut args: Vec<&str> = if skip_dotfiles {
-            if shell_name == "zsh" {
-                // `-f`: skip `.zshenv`/`.zshrc`/`.zprofile`/`.zlogin`.
-                vec!["-f", "-c"]
-            } else {
-                // bash (and `sh` symlinked to it): skip both the login
-                // profile scripts and the interactive rc file.
-                vec!["--noprofile", "--norc", "-c"]
-            }
-        } else {
-            vec!["-lc"]
-        };
-        args.push("claude");
-        let pty = match Pty::spawn_with_env(&shell, &args, envs) {
+        let (program, args) = probe_launch(skip_dotfiles);
+        let mut pty = match Pty::spawn_with_env(&program, &args, envs) {
             Ok(pty) => pty,
             Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
         };
 
-        let buffer = pty.buffer();
         let deadline = Instant::now() + timeout;
 
         // Phase 1 — wait for the TUI prompt to actually render before
@@ -532,12 +545,12 @@ impl ClaudeUsageFetcher {
         let mut welcome_dismissed = false;
         let mut prompt_seen = false;
         while Instant::now() < deadline && !prompt_seen {
-            let text = buffer.lock().expect("usage buffer lock").clone();
+            let text = pty.text();
             if let Some(reason) = classify_failure(&text) {
                 return UsageFetchOutcome::Unavailable(reason);
             }
             if let Some(usage) = parse_claude_usage(&text) {
-                return UsageFetchOutcome::Success(usage);
+                return UsageFetchOutcome::Success(settled_usage(usage, &pty, poll, deadline));
             }
             let lower = text.to_lowercase();
             if !welcome_dismissed
@@ -571,7 +584,7 @@ impl ClaudeUsageFetcher {
         let resend_every = Duration::from_secs(8);
         let mut last_sent = Instant::now();
         while Instant::now() < deadline {
-            let text = buffer.lock().expect("usage buffer lock").clone();
+            let text = pty.text();
             if let Some(reason) = classify_failure(&text) {
                 return UsageFetchOutcome::Unavailable(reason);
             }
@@ -610,7 +623,7 @@ impl ClaudeUsageFetcher {
                 palette_confirmed = true;
             }
             if let Some(usage) = parse_claude_usage(&text) {
-                return UsageFetchOutcome::Success(usage);
+                return UsageFetchOutcome::Success(settled_usage(usage, &pty, poll, deadline));
             }
             std::thread::sleep(poll);
         }
@@ -619,21 +632,74 @@ impl ClaudeUsageFetcher {
         drop(pty);
         UsageFetchOutcome::TimedOut
     }
+}
 
-    /// Windows stub: no ConPTY-backed fetch is implemented yet (see the doc comment on
-    /// the `#[cfg(unix)]` twin above for the intended counterpart). Reports honestly as
-    /// `Unavailable(Unsupported)` rather than pretending to have tried -- and as
-    /// `Unsupported` rather than `Error`, because nothing was attempted and nothing
-    /// is wrong with this machine (#199).
-    #[cfg(not(unix))]
-    pub fn fetch_with_env(
-        _settle: Duration,
-        _poll: Duration,
-        _timeout: Duration,
-        _envs: &[(&str, &str)],
-    ) -> UsageFetchOutcome {
-        UsageFetchOutcome::Unavailable(UsageReason::Unsupported)
+/// How long [`settled_usage`] keeps waiting for the panel to finish
+/// painting after it first parsed, at most.
+const SETTLE_CAP: Duration = Duration::from_secs(2);
+
+/// The panel as read once output stops arriving. The first parse can land
+/// on a half-painted panel — ConPTY paints it in pieces, and the Fable
+/// window and every `Resets` line arrive after the first percents
+/// (confirmed live: an immediate return read session and weekly percents
+/// with no reset times and no Fable window). So once `first` parsed, keep
+/// polling until one poll interval passes with the text unchanged, bounded
+/// by [`SETTLE_CAP`] and the fetch deadline, then parse the final text;
+/// `first` stands if that somehow cannot be re-read.
+fn settled_usage(
+    first: ProviderUsage,
+    pty: &Pty,
+    poll: Duration,
+    deadline: Instant,
+) -> ProviderUsage {
+    let cap = deadline.min(Instant::now() + SETTLE_CAP);
+    let mut seen = pty.text();
+    while Instant::now() < cap {
+        std::thread::sleep(poll);
+        let now = pty.text();
+        if now == seen {
+            break;
+        }
+        seen = now;
     }
+    parse_claude_usage(&seen).unwrap_or(first)
+}
+
+/// The program and arguments the probe PTY runs. Unix launches `claude`
+/// through the user's login shell (`-lc`), matching a real terminal; with
+/// `skip_dotfiles` the shell is started without sourcing its login and
+/// interactive dotfiles, so environment overrides survive (see
+/// [`ClaudeUsageFetcher::fetch_with_env`]).
+#[cfg(unix)]
+fn probe_launch(skip_dotfiles: bool) -> (String, Vec<&'static str>) {
+    let shell = login_shell();
+    let shell_name = Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let mut args: Vec<&str> = if skip_dotfiles {
+        if shell_name == "zsh" {
+            // `-f`: skip `.zshenv`/`.zshrc`/`.zprofile`/`.zlogin`.
+            vec!["-f", "-c"]
+        } else {
+            // bash (and `sh` symlinked to it): skip both the login
+            // profile scripts and the interactive rc file.
+            vec!["--noprofile", "--norc", "-c"]
+        }
+    } else {
+        vec!["-lc"]
+    };
+    args.push("claude");
+    (shell, args)
+}
+
+/// Windows has no login shell to go through and no dotfiles to skip:
+/// `claude` runs directly, resolved by `portable-pty` on the probe's own
+/// `PATH` with `PATHEXT` (so the native `claude.exe` is found the way a
+/// console would find it).
+#[cfg(windows)]
+fn probe_launch(_skip_dotfiles: bool) -> (String, Vec<&'static str>) {
+    ("claude".to_string(), Vec::new())
 }
 
 #[cfg(unix)]
@@ -748,11 +814,7 @@ impl Pty {
                 if n <= 0 {
                     break;
                 }
-                let mut buffer = reader_buffer.lock().expect("usage buffer lock");
-                if buffer.len() < MAX_BUFFER_BYTES {
-                    let take = (n as usize).min(MAX_BUFFER_BYTES - buffer.len());
-                    buffer.push_str(&String::from_utf8_lossy(&chunk[..take]));
-                }
+                append_capped(&reader_buffer, &chunk[..n as usize]);
             }
         });
 
@@ -763,17 +825,201 @@ impl Pty {
         })
     }
 
-    fn write(&self, bytes: &[u8]) {
+    fn write(&mut self, bytes: &[u8]) {
         // SAFETY: master is a valid open fd for the lifetime of `self`.
         unsafe {
             libc::write(self.master, bytes.as_ptr().cast(), bytes.len());
         }
     }
 
-    fn buffer(&self) -> Arc<Mutex<String>> {
-        self.buffer.clone()
+    /// Everything the child has written so far — the raw stream, which is
+    /// what the TUI itself wrote on a Unix pty.
+    fn text(&self) -> String {
+        self.buffer.lock().expect("usage buffer lock").clone()
     }
 }
+
+/// Windows twin of the Unix [`Pty`]: a ConPTY (`CreatePseudoConsole`)
+/// opened through `portable-pty`, the wrapper the terminal pane already
+/// builds on, rather than a second hand-rolled ConPTY client. Same shape
+/// for the drive loop — a shared output buffer, `write`, kill on drop.
+#[cfg(windows)]
+struct Pty {
+    /// Kept alive for the whole probe: dropping the master closes the
+    /// pseudo console, which is what finally unblocks the reader thread
+    /// once the child is gone.
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+    /// Shared with the reader thread, which answers conhost's cursor
+    /// queries on the drive loop's behalf (see [`cursor_position_requests`]).
+    writer: Arc<Mutex<Box<dyn io::Write + Send>>>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// conhost's output is a screen diff, not a text stream; the reader
+    /// thread replays it here and [`Self::text`] reads the screen back.
+    screen: Arc<Mutex<crate::screen::Screen>>,
+}
+
+/// ConPTY's cursor position request, `CSI 6 n` (DSR). conhost emits it as
+/// its very first output and **blocks the child's output until the host
+/// terminal answers** — confirmed live: without a reply, ten seconds of
+/// `cmd /c echo` produced exactly `"\x1b[6n"` and nothing else. A real
+/// terminal emulator answers it as a matter of course; this probe has no
+/// emulator, so its reader thread answers instead. The Unix probe never
+/// needed this: there is no conhost between it and `claude`.
+#[cfg(windows)]
+const CURSOR_POSITION_REQUEST: &[u8] = b"\x1b[6n";
+
+/// The reply to [`CURSOR_POSITION_REQUEST`]: cursor at row 1, column 1
+/// (`CSI 1 ; 1 R`). Any well-formed position unblocks conhost; the probe
+/// never renders, so the true position is meaningless.
+#[cfg(windows)]
+const CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Counts the cursor position requests in `chunk`, carrying the tail of
+/// the previous chunk in `carry` so a request split across two reads is
+/// still seen exactly once.
+#[cfg(windows)]
+fn cursor_position_requests(carry: &mut Vec<u8>, chunk: &[u8]) -> usize {
+    carry.extend_from_slice(chunk);
+    let count = carry
+        .windows(CURSOR_POSITION_REQUEST.len())
+        .filter(|window| *window == CURSOR_POSITION_REQUEST)
+        .count();
+    let keep = carry.len().min(CURSOR_POSITION_REQUEST.len() - 1);
+    carry.drain(..carry.len() - keep);
+    count
+}
+
+/// The pseudo console's size. The Unix probe never sets one (the TUI copes
+/// with an unsized pty); ConPTY needs a real geometry, and a comfortably
+/// wide one keeps the `/usage` panel's lines from wrapping into shapes the
+/// parser has never seen.
+#[cfg(windows)]
+const CONPTY_ROWS: u16 = 40;
+#[cfg(windows)]
+const CONPTY_COLS: u16 = 120;
+
+#[cfg(windows)]
+impl Pty {
+    fn spawn_with_env(program: &str, args: &[&str], envs: &[(&str, &str)]) -> io::Result<Pty> {
+        use portable_pty::{PtySize, native_pty_system};
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: CONPTY_ROWS,
+                cols: CONPTY_COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(io::Error::other)?;
+        // A missing `claude` fails right here (`CreateProcessW` finds no
+        // program), which the caller reports as `NotInstalled` — the same
+        // outcome the Unix login shell's "command not found" yields.
+        let child = pair
+            .slave
+            .spawn_command(probe_command(program, args, envs))
+            .map_err(io::Error::other)?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+        let writer = Arc::new(Mutex::new(
+            pair.master.take_writer().map_err(io::Error::other)?,
+        ));
+
+        let screen = Arc::new(Mutex::new(crate::screen::Screen::new(
+            usize::from(CONPTY_ROWS),
+            usize::from(CONPTY_COLS),
+        )));
+        let reader_screen = screen.clone();
+        let reply_writer = writer.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            let mut carry = Vec::new();
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        reader_screen
+                            .lock()
+                            .expect("usage screen lock")
+                            .feed(&chunk[..n]);
+                        for _ in 0..cursor_position_requests(&mut carry, &chunk[..n]) {
+                            write_best_effort(&reply_writer, CURSOR_POSITION_REPLY);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Pty {
+            _master: pair.master,
+            writer,
+            child,
+            screen,
+        })
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        write_best_effort(&self.writer, bytes);
+    }
+
+    /// The screen as conhost currently paints it (scrolled-off rows first),
+    /// which is the text-stream shape the parser expects.
+    fn text(&self) -> String {
+        self.screen.lock().expect("usage screen lock").text()
+    }
+}
+
+/// Best effort, like the Unix `libc::write`: a closed pty means the child
+/// is gone, which the drive loop's timeout already covers.
+#[cfg(windows)]
+fn write_best_effort(writer: &Mutex<Box<dyn io::Write + Send>>, bytes: &[u8]) {
+    let mut writer = writer.lock().expect("usage pty writer lock");
+    let _ = writer.write_all(bytes);
+    let _ = writer.flush();
+}
+
+/// The ConPTY twin of the Unix `probe_command`: same working directory,
+/// same `TERM`, same `envs` overrides — as a `portable-pty` builder, which
+/// is what resolves `program` on its own `PATH`/`PATHEXT` at spawn time.
+#[cfg(windows)]
+fn probe_command(
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> portable_pty::CommandBuilder {
+    let mut command = portable_pty::CommandBuilder::new(program);
+    command.args(args);
+    command.cwd(crate::probe_working_directory());
+    for (key, value) in PROBE_ENV.iter().chain(envs) {
+        command.env(key, value);
+    }
+    command
+}
+
+#[cfg(windows)]
+impl Drop for Pty {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // `_master` drops after this body, closing the pseudo console and
+        // releasing the reader thread.
+    }
+}
+
+/// Environment every probe launch carries, on both platforms.
+///
+/// `CLAUDE_CODE_SANDBOXED=1` is the flag `claude` reads to know it is
+/// running somewhere already contained; its workspace-trust check returns
+/// early on it. Without it, a `claude` started in the probe directory that
+/// no human has trusted opens the "Quick safety check … ❯ No, exit / Yes,
+/// I trust this folder" dialog instead of its prompt — confirmed live on
+/// Windows, where `%TEMP%` had never been trusted: the dialog's `❯` reads
+/// as the prompt, the drive loop's Enter selects the highlighted "No,
+/// exit", and the fetch times out. The flag is the right answer rather
+/// than accepting the dialog on the user's behalf: accepting would persist
+/// trust for the probe directory in the user's own `~/.claude.json`, a
+/// config change nobody approved, while the flag changes nothing on disk
+/// and the probe never asks `claude` to touch the directory anyway.
+const PROBE_ENV: &[(&str, &str)] = &[("TERM", "xterm-256color"), ("CLAUDE_CODE_SANDBOXED", "1")];
 
 #[cfg(unix)]
 fn probe_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Command {
@@ -781,7 +1027,7 @@ fn probe_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Command
     command
         .args(args)
         .current_dir(crate::probe_working_directory())
-        .env("TERM", "xterm-256color")
+        .envs(PROBE_ENV.iter().copied())
         .envs(envs.iter().copied());
     command
 }
@@ -894,6 +1140,143 @@ mod tests {
         if let Some(home) = user_home_dir() {
             assert_ne!(cwd, home.as_path());
         }
+        let sandboxed = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("CLAUDE_CODE_SANDBOXED"))
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            sandboxed,
+            Some(std::ffi::OsStr::new("1")),
+            "the probe must skip claude's workspace-trust dialog"
+        );
+    }
+
+    /// Windows twin of the test above: the ConPTY probe's `CommandBuilder`
+    /// carries the same safe, absolute working directory, and the `envs`
+    /// overrides land on the builder (they are what tests use to point
+    /// `claude` resolution somewhere hermetic).
+    #[cfg(windows)]
+    #[test]
+    fn usage_probe_command_has_a_safe_working_directory() {
+        let command = probe_command("cmd", &["/c", "exit"], &[("SIRIO_PROBE_MARK", "1")]);
+        let cwd = PathBuf::from(
+            command
+                .get_cwd()
+                .expect("usage probes must set a working directory"),
+        );
+
+        assert!(cwd.is_absolute(), "{}", cwd.display());
+        if let Some(home) = user_home_dir() {
+            assert_ne!(cwd, home);
+        }
+        assert_eq!(
+            command.get_env("SIRIO_PROBE_MARK"),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        assert_eq!(
+            command.get_env("CLAUDE_CODE_SANDBOXED"),
+            Some(std::ffi::OsStr::new("1")),
+            "the probe must skip claude's workspace-trust dialog"
+        );
+    }
+
+    /// conhost's `CSI 6 n` is counted once whether it arrives whole, split
+    /// across two reads, or twice in one read; a carry that holds a
+    /// complete request already counted is not counted again.
+    #[cfg(windows)]
+    #[test]
+    fn cursor_position_requests_are_counted_across_chunk_boundaries() {
+        let mut carry = Vec::new();
+        assert_eq!(cursor_position_requests(&mut carry, b"hello \x1b[6n"), 1);
+        assert_eq!(cursor_position_requests(&mut carry, b"plain"), 0);
+        assert_eq!(cursor_position_requests(&mut carry, b"\x1b["), 0);
+        assert_eq!(cursor_position_requests(&mut carry, b"6n"), 1);
+        assert_eq!(cursor_position_requests(&mut carry, b"\x1b[6n\x1b[6n"), 2);
+        assert_eq!(cursor_position_requests(&mut carry, b""), 0);
+        assert_eq!(cursor_position_requests(&mut carry, b"\x1b[6"), 0);
+        assert_eq!(cursor_position_requests(&mut carry, b"m"), 0);
+    }
+
+    /// The Windows `Pty` is real: a child spawned under ConPTY has its
+    /// output captured into the shared buffer the fetch loop polls — which
+    /// includes answering conhost's opening cursor query, without which
+    /// nothing past `"\x1b[6n"` ever arrives. `cmd` is the one program
+    /// every Windows box has.
+    #[cfg(windows)]
+    #[test]
+    fn conpty_probe_captures_the_child_output() {
+        let pty = Pty::spawn_with_env("cmd", &["/c", "echo sirio-conpty-marker"], &[])
+            .expect("ConPTY spawn of cmd");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if pty.text().contains("sirio-conpty-marker") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("ConPTY output never reached the screen: {:?}", pty.text());
+    }
+
+    /// Live instrument, not a gate: drives the production `fetch()` against
+    /// whatever `claude` this machine has and prints the outcome, so a
+    /// Windows change to the probe can be checked end to end without the
+    /// app (`cargo test -p sirio_usage live_fetch -- --ignored --nocapture`).
+    /// Ignored because it needs a signed-in `claude` and ~10 s of wall time.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "drives the real installed claude; run by hand"]
+    fn live_fetch_against_the_installed_claude() {
+        let started = Instant::now();
+        let outcome = ClaudeUsageFetcher::fetch();
+        println!(
+            "live claude fetch after {:?}: {outcome:?}",
+            started.elapsed()
+        );
+        let UsageFetchOutcome::Success(usage) = outcome else {
+            panic!("expected real usage numbers from the installed claude, got {outcome:?}");
+        };
+        // The panel always carries these two windows with their reset
+        // times; reading them proves the fetch waited for the whole panel,
+        // not the first half-painted frame.
+        let session = usage.session.expect("session window");
+        let weekly = usage.weekly.expect("weekly window");
+        assert!(session.resets_at.is_some(), "session reset time");
+        assert!(weekly.resets_at.is_some(), "weekly reset time");
+    }
+
+    /// With `claude` resolvable nowhere on the probe's `PATH`, the fetch
+    /// reports `NotInstalled` — the same outcome the Unix login-shell path
+    /// gives — instead of the old `Unsupported` stub (#199), and it does so
+    /// from a failed spawn, well inside the timeout.
+    #[cfg(windows)]
+    #[test]
+    fn fetch_reports_not_installed_when_claude_is_off_the_probe_path() {
+        let empty =
+            std::env::temp_dir().join(format!("sirio-usage-empty-path-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("empty PATH dir");
+        let path = empty.to_string_lossy().into_owned();
+
+        let started = Instant::now();
+        let outcome = ClaudeUsageFetcher::fetch_with_env(
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+            &[("PATH", path.as_str())],
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+
+        assert_eq!(
+            outcome,
+            UsageFetchOutcome::Unavailable(UsageReason::NotInstalled)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a failed spawn must not wait out the timeout"
+        );
     }
 
     #[test]
@@ -901,6 +1284,19 @@ mod tests {
         assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
         assert_eq!(strip_ansi("a\x1b]0;title\x07b"), "ab");
         assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    /// The parser runs on the live buffer between PTY reads, so a chunk
+    /// can end in the middle of a sequence. An OSC with no terminator yet
+    /// is dropped, not indexed past the end (the live ConPTY probe panicked
+    /// on exactly this: `index out of bounds: the len is 272 but the index
+    /// is 272`); an OSC closed by `ESC \` (ST) ends there instead of
+    /// swallowing everything up to the next BEL.
+    #[test]
+    fn strip_ansi_survives_a_truncated_osc_and_honours_st() {
+        assert_eq!(strip_ansi("a\x1b]0;title"), "a");
+        assert_eq!(strip_ansi("a\x1b]0;title\x1b\\b"), "ab");
+        assert_eq!(strip_ansi("a\x1b["), "a");
     }
 
     #[test]
@@ -942,6 +1338,12 @@ mod tests {
         assert_eq!(
             classify_failure("Please run /login to continue"),
             Some(UsageReason::LoggedOut)
+        );
+        // The workspace-trust dialog is a failure to reach the prompt, never
+        // a prompt: pressing Enter into it selects "No, exit".
+        assert_eq!(
+            classify_failure("Quick safety check … ❯ No, exit  Yes, I trust this folder"),
+            Some(UsageReason::Error)
         );
         assert_eq!(classify_failure("some other output"), None);
     }
