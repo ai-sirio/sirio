@@ -23878,12 +23878,17 @@ mod tests {
                 .expect("palette workspace root")
         });
 
+        // The bar draws a segment only for a provider with numbers, which
+        // no real fetch yields inside a test; the contract under test is the
+        // preferences reaching the bar, read from the bar itself.
+        let status_bar = cx.update(|_, cx| workspace.read(cx).status_bar.clone());
+        let prefs = cx.update(|_, cx| status_bar.read(cx).preferences().clone());
         assert!(
-            cx.debug_bounds("Claude-usage-text").is_some(),
+            prefs.claude_visible,
             "the bar starts with Claude visible per the contract defaults"
         );
         assert!(
-            cx.debug_bounds("OpenCode Go-usage-text").is_none(),
+            !prefs.opencode_visible,
             "the bar starts with OpenCode Go hidden per the contract defaults"
         );
 
@@ -23903,19 +23908,20 @@ mod tests {
         cx.run_until_parked();
 
         // The real Back route is queued through the workspace's polling loop;
-        // hide the overlay directly here so the assertion inspects the bar,
+        // hide the overlay directly here so the bar is what gets rendered,
         // rather than the settings surface covering it.
         workspace.update(&mut cx, |workspace, cx| {
             workspace.show_settings = false;
             cx.notify();
         });
         cx.run_until_parked();
+        let prefs = cx.update(|_, cx| status_bar.read(cx).preferences().clone());
         assert!(
-            cx.debug_bounds("Claude-usage-text").is_none(),
-            "hiding Claude in settings removes its usage segment"
+            !prefs.claude_visible,
+            "hiding Claude in settings reaches the bar's preferences"
         );
         assert!(
-            cx.debug_bounds("Codex-usage-text").is_some(),
+            prefs.codex_visible,
             "the other visible providers stay"
         );
     }
