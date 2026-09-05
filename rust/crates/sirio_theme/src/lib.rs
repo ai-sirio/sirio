@@ -194,6 +194,11 @@ pub struct ThemeColors {
     /// Stronger divider, for seams that separate rather than merely delimit,
     /// and the neutral rail down a task, edit or tool card.
     pub border_strong: Rgba,
+    /// Keyboard-focus ring on a text field — bezel's `ring`, the translucent
+    /// hairline every bezel input, select and control lights up with. A veil
+    /// on the surface's own tone (white on dark, black on light), never the
+    /// body text colour: that painted an opaque white frame on the dark theme.
+    pub ring: Rgba,
     /// Faintest text step — placeholder copy and disabled labels, below
     /// [`ThemeColors::text_faint`].
     pub text_dim: Rgba,
@@ -363,6 +368,7 @@ impl ThemeColors {
         // rule instead.
         let border = Rgba::from(bezel.border);
         let border_strong = Rgba::from(bezel.border_strong);
+        let ring = Rgba::from(bezel.ring);
         // Measured off the seam itself, which is two frame pixels wide — one
         // logical pixel at 2x — and flat at 200/200 in both variants, so these
         // are solid values and not a blend of the surfaces either side.
@@ -423,6 +429,7 @@ impl ThemeColors {
             overlay,
             overlay_strong,
             border_strong,
+            ring,
             text_dim,
             brand_coral,
             accent,
@@ -1820,6 +1827,7 @@ mod tests {
             ("text_dim", sirio.text_dim, bezel.text_dim),
             ("border", sirio.border, bezel.border),
             ("border_strong", sirio.border_strong, bezel.border_strong),
+            ("ring", sirio.ring, bezel.ring),
             ("selection", sirio.selection, bezel.selection),
             ("code_wash", sirio.code_wash, bezel.code_wash),
             ("solid", sirio.solid, bezel.solid),
@@ -2430,6 +2438,7 @@ mod tests {
             ("overlay", light.overlay, dark.overlay),
             ("overlay_strong", light.overlay_strong, dark.overlay_strong),
             ("border_strong", light.border_strong, dark.border_strong),
+            ("ring", light.ring, dark.ring),
             ("text_dim", light.text_dim, dark.text_dim),
             ("brand_coral", light.brand_coral, dark.brand_coral),
             ("accent", light.accent, dark.accent),
