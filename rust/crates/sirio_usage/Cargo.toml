@@ -8,3 +8,11 @@ publish = false
 libc = "0.2"
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# The Claude probe drives a hidden `claude` under a PTY. Unix opens one by
+# hand (`posix_openpt`, in `claude.rs`); Windows has no POSIX PTY, and its
+# counterpart, ConPTY (`CreatePseudoConsole`), is reached through the same
+# wrapper the terminal pane already builds on (`sirio_terminal`) rather than a
+# second hand-rolled client. Windows-only so the Unix build stays as it was.
+[target.'cfg(windows)'.dependencies]
+portable-pty = "0.9"

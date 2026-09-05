@@ -39,6 +39,7 @@ mod http;
 mod model;
 mod ollama;
 mod opencode_go;
+mod screen;
 
 pub use account::{AgentAccountIdentity, LocalAccountState, parse_codex_identity};
 pub use claude::{
