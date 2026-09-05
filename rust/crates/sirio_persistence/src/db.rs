@@ -1749,6 +1749,7 @@ mod save_tabs_tests {
             turns: vec![ChatTurn {
                 entries: vec![ChatEntry::UserMessage {
                     text: "hello".into(),
+                    at: None,
                 }],
             }],
         })
