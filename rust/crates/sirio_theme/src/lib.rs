@@ -1251,13 +1251,16 @@ impl Theme {
         let previous = cx.try_global::<Self>();
         let base = previous.map_or_else(BaseColor::default, |theme| theme.base_color);
         let translucency = previous.is_some_and(|theme| theme.translucency_enabled);
+        let opacity = previous.map_or(Self::surface_opacity(true), |theme| {
+            theme.translucent_surface_opacity
+        });
         let typography = previous.map_or_else(Typography::default, |theme| theme.typography);
         #[cfg(target_os = "linux")]
         let mut theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
         #[cfg(not(target_os = "linux"))]
         let mut theme = Self::for_mode(mode, cx.window_appearance(), base);
         theme.typography = typography;
-        let theme = theme.with_translucency(translucency);
+        let theme = theme.with_translucency_at(translucency, opacity);
         theme.install_into_bezel(cx);
         cx.set_global(theme);
     }
@@ -1323,13 +1326,16 @@ impl Theme {
             .map_or(ThemeMode::System, |theme| theme.mode);
         let previous = cx.try_global::<Self>();
         let translucency = previous.is_some_and(|theme| theme.translucency_enabled);
+        let opacity = previous.map_or(Self::surface_opacity(true), |theme| {
+            theme.translucent_surface_opacity
+        });
         let typography = previous.map_or_else(Typography::default, |theme| theme.typography);
         #[cfg(target_os = "linux")]
         let mut theme = Self::for_mode_linux(mode, cx.window_appearance(), base);
         #[cfg(not(target_os = "linux"))]
         let mut theme = Self::for_mode(mode, cx.window_appearance(), base);
         theme.typography = typography;
-        let theme = theme.with_translucency(translucency);
+        let theme = theme.with_translucency_at(translucency, opacity);
         theme.install_into_bezel(cx);
         cx.set_global(theme);
     }
@@ -1370,7 +1376,10 @@ impl Theme {
                         current.base_color,
                     );
                     next.typography = current.typography;
-                    let next = next.with_translucency(current.translucency_enabled);
+                    let next = next.with_translucency_at(
+                        current.translucency_enabled,
+                        current.translucent_surface_opacity,
+                    );
                     next.install_into_bezel(cx);
                     cx.set_global(next);
                 }
@@ -1456,13 +1465,24 @@ impl Theme {
     /// alpha is *scaled*, not overwritten — see
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
     pub fn with_translucency(self, enabled: bool) -> Self {
+        self.with_translucency_at(enabled, Self::surface_opacity(true))
+    }
+
+    /// [`Theme::with_translucency`] with the fade's opacity chosen by the
+    /// caller instead of [`Theme::surface_opacity`]'s default. The platform
+    /// shell picks it: how much of the desktop a blurred backdrop should let
+    /// through depends on how tinted the platform's own blur already is. The
+    /// chosen opacity is remembered on the theme
+    /// ([`Theme::translucent_surface_opacity`]) so every reinstall keeps it
+    /// alongside the flag.
+    pub fn with_translucency_at(self, enabled: bool, opacity: f32) -> Self {
         let mut theme = Self::for_appearance(self.mode, self.appearance, self.base_color);
         theme.typography = self.typography;
         theme.translucency_enabled = enabled;
+        theme.translucent_surface_opacity = opacity;
         if !enabled {
             return theme;
         }
-        let opacity = Self::surface_opacity(true);
         // Scale the alpha, do not overwrite it. These were all opaque once, so
         // the two were the same thing; bezel's dark `input_bg` is a 3% white
         // veil, and overwriting turned it into an 85% white fill.
@@ -2541,6 +2561,32 @@ mod tests {
             base.input_bg.a,
             translucent.input_bg.a
         );
+    }
+
+    #[test]
+    fn with_translucency_at_fades_to_the_given_opacity_and_remembers_it() {
+        for base in [Theme::dark(), Theme::light()] {
+            let subtle = base.with_translucency_at(true, 0.9);
+            assert!(subtle.translucency_enabled);
+            assert_eq!(subtle.translucent_surface_opacity, 0.9);
+            assert!((subtle.surface.a - base.surface.a * 0.9).abs() < 1e-6);
+            assert!((subtle.terminal_surface.a - base.terminal_surface.a * 0.9).abs() < 1e-6);
+            // Re-deriving from the faded theme keeps the caller's opacity, so
+            // a mode switch that rebuilds the palette cannot fall back to the
+            // default fade.
+            let again = subtle.with_translucency_at(
+                subtle.translucency_enabled,
+                subtle.translucent_surface_opacity,
+            );
+            assert_eq!(again.surface, subtle.surface);
+            let opaque = subtle.with_translucency_at(false, 0.9);
+            assert!(!opaque.translucency_enabled);
+            assert_eq!(opaque.surface, base.surface);
+            assert_eq!(
+                opaque.translucent_surface_opacity, 0.9,
+                "disabling keeps the opacity for the next enable"
+            );
+        }
     }
 
     #[test]

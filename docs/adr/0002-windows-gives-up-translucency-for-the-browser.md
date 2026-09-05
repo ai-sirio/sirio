@@ -4,7 +4,9 @@ Date: 2026-08-26
 
 ## Status
 
-Accepted
+Accepted. The DirectComposition opt-out stands; the "no translucent chrome"
+consequence is amended by ADR 0003, which vendors `gpui_windows` with a bitblt
+swap chain on the same fallback path so the blur can show after all.
 
 ## Context
 
