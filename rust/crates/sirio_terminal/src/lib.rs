@@ -57,8 +57,8 @@ pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
 const LINE_HEIGHT: Pixels = px(18.0);
-const MIN_FONT_SIZE: i32 = 9;
-const MAX_FONT_SIZE: i32 = 24;
+const MIN_FONT_SIZE: i32 = 12;
+const MAX_FONT_SIZE: i32 = 18;
 
 fn line_height_for_font_size(font_size: Pixels) -> Pixels {
     px((f32::from(font_size) * f32::from(LINE_HEIGHT) / f32::from(FONT_SIZE))

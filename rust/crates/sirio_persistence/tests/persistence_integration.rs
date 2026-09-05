@@ -1204,8 +1204,8 @@ fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
         let db = AppDatabase::open(&path).expect("open");
         db.save_settings(&AppSettings {
             appearance: AppearanceMode::Light,
-            ui_font_size: 99,      // above the 10...20 Swift range
-            terminal_font_size: 1, // below the 9...24 Swift range
+            ui_font_size: 99,      // above the 12...18 range
+            terminal_font_size: 1, // below the 12...18 range
             control_socket_enabled: true,
             ..AppSettings::default()
         })
@@ -1225,12 +1225,12 @@ fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
     let db = AppDatabase::open(&path).expect("reopen");
     let settings = db.settings().expect("load");
     assert_eq!(
-        settings.ui_font_size, 20,
-        "clamped to the Swift upper bound"
+        settings.ui_font_size, 18,
+        "clamped to the shared upper bound"
     );
     assert_eq!(
-        settings.terminal_font_size, 9,
-        "clamped to the Swift lower bound"
+        settings.terminal_font_size, 12,
+        "clamped to the shared lower bound"
     );
     assert_eq!(
         settings.base_color,
