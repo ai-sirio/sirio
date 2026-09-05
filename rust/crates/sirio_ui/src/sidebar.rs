@@ -129,12 +129,42 @@ impl RowStatusGlyph {
 /// The offset is far past anything a session will reach.
 pub const TAB_ROW_ID_OFFSET: usize = 1_000_000;
 
-/// One open tab, as the host (`main.rs`) knows it. This is the same fact the
-/// tab bar and the Activity panel already render — the sidebar's tab rows
-/// are a third view of it, not a second copy.
+/// Row-id base for parked tab rows, kept clear of both the worktree row ids
+/// (`project_index * 1000 + worktree_index + 1`) and the live tab rows above.
+/// A parked tab has no `OpenTab::id`, so its row is identified by the
+/// worktree it hangs under and its position in that worktree's strip — see
+/// [`parked_tab_row_id`].
+pub const PARKED_TAB_ROW_ID_OFFSET: usize = 100_000_000;
+
+/// The row id of the `index`-th parked tab under worktree row `worktree_id`.
+/// Unique across worktrees, unlike an `OpenTab::id`, which every worktree
+/// numbers from zero.
+pub fn parked_tab_row_id(worktree_id: usize, index: usize) -> usize {
+    PARKED_TAB_ROW_ID_OFFSET + worktree_id * 1000 + index
+}
+
+/// What a sidebar tab row stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarTabRef {
+    /// A tab in the host's live list: its `OpenTab::id`, the id
+    /// [`SidebarEvent::SelectTab`] and [`SidebarEvent::CloseTab`] carry.
+    Open(usize),
+    /// A tab of a worktree the host has switched away from: it is no longer
+    /// mounted, but the host still lists it from the worktree's persisted
+    /// strip so the sidebar keeps showing what that worktree holds. The
+    /// value is its 0-based position in that strip; a click reports it back
+    /// as [`SidebarEvent::SelectParkedTab`].
+    Parked(usize),
+}
+
+/// One tab, as the host (`main.rs`) knows it. For a live tab this is the
+/// same fact the tab bar and the Activity panel already render — the
+/// sidebar's tab rows are a third view of it, not a second copy. For a
+/// parked one it is the persisted strip the host would restore on selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarTab {
-    /// The tab's real id (`OpenTab::id`).
-    pub id: usize,
+    /// Which tab this is: live, or parked with its worktree.
+    pub tab: SidebarTabRef,
     /// The tab's title, e.g. "Chat" or "Terminal".
     pub title: String,
     /// Whether this is the workspace's active tab.
@@ -195,7 +225,9 @@ pub struct SidebarRow {
     pub title: String,
     /// Whether this row is selected.
     pub selected: bool,
-    /// Whether this project row is expanded.
+    /// Whether this project or worktree row's disclosure is open. A project
+    /// hides its whole section when closed; a worktree hides its tab rows.
+    /// Meaningless for the other kinds.
     pub expanded: bool,
     /// The application-level primary marker for a worktree row.
     pub is_primary: bool,
@@ -212,10 +244,17 @@ pub struct SidebarRow {
     /// worktree row — the path git operations run against.
     pub path: Option<PathBuf>,
     /// The real `OpenTab::id` this row was built from, for a `RowKind::Tab`
-    /// row sourced from [`Sidebar::set_worktree_tabs`]. `None` for every
-    /// other row, including the decorative fixture rows: those keep the old
-    /// local-selection click behaviour, this doesn't.
+    /// row sourced from [`Sidebar::set_worktree_tabs`] with a
+    /// [`SidebarTabRef::Open`]. `None` for every other row, including the
+    /// decorative fixture rows: those keep the old local-selection click
+    /// behaviour, this doesn't.
     pub tab_id: Option<usize>,
+    /// The strip position of a parked tab, for a `RowKind::Tab` row sourced
+    /// from a [`SidebarTabRef::Parked`]. Such a row carries its worktree's
+    /// checkout path in `path` (the only tab row that does), so its click
+    /// can report [`SidebarEvent::SelectParkedTab`] without a lookup.
+    /// Exclusive with `tab_id`.
+    pub parked_tab: Option<usize>,
     /// The semantic kind for a real tab row. `None` for non-tab rows and
     /// legacy fixture rows that do not represent a host-owned tab.
     pub tab_kind: Option<TabKind>,
@@ -380,6 +419,12 @@ pub enum SidebarEvent {
     /// [`Sidebar::set_selected_worktree`] so the highlight follows the
     /// host's decision, not the other way around.
     SelectWorktree(PathBuf),
+    /// The user clicked a parked tab row ([`SidebarTabRef::Parked`]): the
+    /// `index`-th tab of the persisted strip of the worktree at `path`,
+    /// which is not the selected worktree. The host selects that worktree
+    /// (restoring its strip) and then activates the tab at that position;
+    /// there is no live tab id to name.
+    SelectParkedTab { path: PathBuf, index: usize },
     /// A worktree was created successfully on disk. The host must refresh
     /// the owning catalog before accepting the new path as selectable.
     WorktreeCreated { project_id: String, path: PathBuf },
@@ -515,6 +560,11 @@ pub struct Sidebar {
     field_blink: caret::Blink,
     /// The open worktree-creation prompt, if any.
     prompt: Option<WorktreePrompt>,
+    /// Checkout paths of the worktrees whose disclosure the user closed.
+    /// Keyed by path rather than row id because rows are rebuilt from the
+    /// catalog on every `set_projects`; see [`Self::set_row_expanded`].
+    /// Session-scoped: not persisted.
+    collapsed_worktrees: std::collections::HashSet<PathBuf>,
     /// A transient error message (failed creation/removal) shown at the
     /// bottom of the sidebar.
     notice: Option<String>,
@@ -552,6 +602,10 @@ struct RowInputs {
     row: SidebarRow,
     index: usize,
     cursor: bool,
+    /// Whether the row has rows under it in the full tree — a worktree's
+    /// tab rows, which may be hidden by its own disclosure. Decides the
+    /// tree shape (`Sidebar::tree_row`), so it is an input like the rest.
+    has_children: bool,
     project_id: Option<String>,
     project_icon: Option<ProjectIcon>,
     drag: Option<RowDrag>,
@@ -574,7 +628,7 @@ impl Render for RowView {
         let theme = *Theme::get(cx);
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let inputs = self.inputs.clone();
-        let row_shape = Sidebar::tree_row(&inputs.row);
+        let row_shape = Sidebar::tree_row(&inputs.row, inputs.has_children);
         // Boxed here: the opaque return type of `render_row` captures the
         // borrow of `bezel_theme`, which ends with this frame's render.
         Sidebar::render_row(
@@ -652,6 +706,7 @@ impl Sidebar {
                 is_git: true,
                 path,
                 tab_id: None,
+                parked_tab: None,
                 tab_kind: None,
                 agent_icon: None,
                 agent_brand: None,
@@ -663,7 +718,7 @@ impl Sidebar {
         let worktree_path = sirio_repo.clone();
         let mut rows = vec![
             row(0, RowKind::Project, 0, "sirio", true, true, sirio_repo),
-            row(1, RowKind::Worktree, 1, "main", true, false, worktree_path),
+            row(1, RowKind::Worktree, 1, "main", true, true, worktree_path),
             row(2, RowKind::Tab, 2, "Chat", true, false, None),
             row(
                 3,
@@ -683,7 +738,7 @@ impl Sidebar {
                 false,
                 None,
             ),
-            row(5, RowKind::Worktree, 1, "main", false, false, None),
+            row(5, RowKind::Worktree, 1, "main", false, true, None),
             row(6, RowKind::Tab, 2, "Terminal", false, false, None),
             row(
                 7,
@@ -711,6 +766,7 @@ impl Sidebar {
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
+            collapsed_worktrees: std::collections::HashSet::new(),
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
@@ -751,6 +807,7 @@ impl Sidebar {
                 is_git: project_is_git,
                 path: Some(project_path),
                 tab_id: None,
+                parked_tab: None,
                 tab_kind: None,
                 agent_icon: None,
                 agent_brand: None,
@@ -765,7 +822,7 @@ impl Sidebar {
                     depth: 1,
                     title: worktree.branch,
                     selected: project_index == 0 && worktree_index == 0,
-                    expanded: false,
+                    expanded: true,
                     is_primary: worktree.is_primary,
                     agent_status: None,
                     // Worktree rows inherit the project's repo-ness; the
@@ -773,6 +830,7 @@ impl Sidebar {
                     is_git: project_is_git,
                     path: Some(worktree.path),
                     tab_id: None,
+                    parked_tab: None,
                     tab_kind: None,
                     agent_icon: None,
                     agent_brand: None,
@@ -793,6 +851,7 @@ impl Sidebar {
                     is_git: true,
                     path: None,
                     tab_id: None,
+                    parked_tab: None,
                     tab_kind: None,
                     agent_icon: None,
                     agent_brand: None,
@@ -813,6 +872,7 @@ impl Sidebar {
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
+            collapsed_worktrees: std::collections::HashSet::new(),
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
@@ -836,6 +896,7 @@ impl Sidebar {
         self.project_worktree_defaults = replacement.project_worktree_defaults;
         self.filter = filter;
         self.pending_reorder = None;
+        self.apply_collapsed_worktrees();
         // F-PRJ-12: an already-open Project Settings card snapshots
         // is_git/path once, when it's opened (open_project_settings). If
         // the rebuilt rows above changed that same project -- e.g.
@@ -1931,11 +1992,38 @@ impl Sidebar {
         counts
     }
 
-    fn tree_row(row: &SidebarRow) -> tree::Row {
+    /// The bezel tree shape of one row. A project is a container even when
+    /// empty and always carries a chevron; a worktree earns one only while
+    /// it has tab rows to hide (`has_children`), so an idle worktree with
+    /// nothing under it does not grow a disclosure that opens onto nothing.
+    fn tree_row(row: &SidebarRow, has_children: bool) -> tree::Row {
         match row.kind {
             RowKind::Project => tree::Row::branch(0, row.expanded),
+            RowKind::Worktree if has_children => tree::Row::branch(1, row.expanded),
             RowKind::Worktree | RowKind::NewWorktree => tree::Row::leaf(1),
             RowKind::Tab => tree::Row::leaf(2),
+        }
+    }
+
+    /// Whether the worktree row `worktree_id` has tab rows directly under it
+    /// in the full (unfiltered, uncollapsed) row list.
+    fn worktree_has_tab_rows(rows: &[SidebarRow], worktree_id: usize) -> bool {
+        rows.iter()
+            .position(|row| row.id == worktree_id && row.kind == RowKind::Worktree)
+            .is_some_and(|index| {
+                rows.get(index + 1)
+                    .is_some_and(|next| next.kind == RowKind::Tab)
+            })
+    }
+
+    /// `has_children` for [`Self::tree_row`], resolved against the full row
+    /// list rather than the visible one: a collapsed worktree's tab rows are
+    /// exactly the ones `visible_rows` leaves out.
+    fn row_has_children(&self, row: &SidebarRow) -> bool {
+        match row.kind {
+            RowKind::Project => true,
+            RowKind::Worktree => Self::worktree_has_tab_rows(&self.rows, row.id),
+            RowKind::Tab | RowKind::NewWorktree => false,
         }
     }
 
@@ -1950,29 +2038,18 @@ impl Sidebar {
         }
 
         let cursor = self.tree_cursor.min(rows.len() - 1);
-        let shape = rows.iter().map(Self::tree_row).collect::<Vec<_>>();
+        let shape = rows
+            .iter()
+            .map(|row| Self::tree_row(row, self.row_has_children(row)))
+            .collect::<Vec<_>>();
         match tree::step(&shape, cursor, direction) {
             Some(tree::Move::To(index)) => self.tree_cursor = index,
             Some(tree::Move::Expand(index)) => {
-                let row_id = rows[index].id;
-                if let Some(project) = self
-                    .rows
-                    .iter_mut()
-                    .find(|row| row.id == row_id && row.kind == RowKind::Project)
-                {
-                    project.expanded = true;
-                }
+                self.set_row_expanded(rows[index].id, rows[index].kind, true);
                 self.tree_cursor = index;
             }
             Some(tree::Move::Collapse(index)) => {
-                let row_id = rows[index].id;
-                if let Some(project) = self
-                    .rows
-                    .iter_mut()
-                    .find(|row| row.id == row_id && row.kind == RowKind::Project)
-                {
-                    project.expanded = false;
-                }
+                self.set_row_expanded(rows[index].id, rows[index].kind, false);
                 self.tree_cursor = index;
             }
             None => {
@@ -2162,10 +2239,14 @@ impl Sidebar {
             return;
         };
         let insert_at = worktree_index + 1;
+        // Host-sourced rows, live or parked, are the ones this call owns;
+        // the decorative fixture tab rows carry neither and are left alone.
         let existing_end = insert_at
             + self.rows[insert_at..]
                 .iter()
-                .take_while(|row| row.kind == RowKind::Tab && row.tab_id.is_some())
+                .take_while(|row| {
+                    row.kind == RowKind::Tab && (row.tab_id.is_some() || row.parked_tab.is_some())
+                })
                 .count();
 
         // The diff includes the agent mark, and must: it is the only field
@@ -2179,6 +2260,7 @@ impl Sidebar {
             .map(|row| {
                 (
                     row.tab_id,
+                    row.parked_tab,
                     row.tab_kind,
                     row.agent_icon,
                     row.agent_brand,
@@ -2187,8 +2269,13 @@ impl Sidebar {
                 )
             })
             .eq(tabs.iter().map(|tab| {
+                let (tab_id, parked_tab) = match tab.tab {
+                    SidebarTabRef::Open(id) => (Some(id), None),
+                    SidebarTabRef::Parked(index) => (None, Some(index)),
+                };
                 (
-                    Some(tab.id),
+                    tab_id,
+                    parked_tab,
                     Some(tab.kind),
                     tab.agent.map(|agent| agent.icon),
                     tab.agent.map(|agent| agent.brand),
@@ -2201,23 +2288,38 @@ impl Sidebar {
         }
 
         let depth = self.rows[worktree_index].depth + 1;
-        let new_rows = tabs.into_iter().map(|tab| SidebarRow {
-            id: TAB_ROW_ID_OFFSET + tab.id,
-            kind: RowKind::Tab,
-            depth,
-            title: tab.title,
-            selected: tab.selected,
-            expanded: false,
-            is_primary: false,
-            agent_status: None,
-            is_git: false,
-            path: None,
-            tab_id: Some(tab.id),
-            tab_kind: Some(tab.kind),
-            agent_icon: tab.agent.map(|agent| agent.icon),
-            agent_brand: tab.agent.map(|agent| agent.brand),
-            comment: None,
-            running_agents: Vec::new(),
+        let worktree_path = self.rows[worktree_index].path.clone();
+        let new_rows = tabs.into_iter().map(|tab| {
+            let (id, tab_id, parked_tab, path) = match tab.tab {
+                SidebarTabRef::Open(tab_id) => {
+                    (TAB_ROW_ID_OFFSET + tab_id, Some(tab_id), None, None)
+                }
+                SidebarTabRef::Parked(index) => (
+                    parked_tab_row_id(worktree_id, index),
+                    None,
+                    Some(index),
+                    worktree_path.clone(),
+                ),
+            };
+            SidebarRow {
+                id,
+                kind: RowKind::Tab,
+                depth,
+                title: tab.title,
+                selected: tab.selected,
+                expanded: false,
+                is_primary: false,
+                agent_status: None,
+                is_git: false,
+                path,
+                tab_id,
+                parked_tab,
+                tab_kind: Some(tab.kind),
+                agent_icon: tab.agent.map(|agent| agent.icon),
+                agent_brand: tab.agent.map(|agent| agent.brand),
+                comment: None,
+                running_agents: Vec::new(),
+            }
         });
         self.rows.splice(insert_at..existing_end, new_rows);
         cx.notify();
@@ -2232,6 +2334,64 @@ impl Sidebar {
             project.expanded = !project.expanded;
         }
         self.select_row(id, cx);
+    }
+
+    /// Opens or closes the disclosure of the worktree row `id`. Unlike
+    /// [`Self::toggle_project`] this never touches the selection: the chevron
+    /// is its own control, and which worktree is selected stays the host's
+    /// decision (`SidebarEvent::SelectWorktree`).
+    fn toggle_worktree(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(expanded) = self
+            .rows
+            .iter()
+            .find(|row| row.id == id && row.kind == RowKind::Worktree)
+            .map(|row| row.expanded)
+        else {
+            return;
+        };
+        self.set_row_expanded(id, RowKind::Worktree, !expanded);
+        cx.notify();
+    }
+
+    /// The one place a row's `expanded` flag is written. For a worktree the
+    /// same fact is mirrored into `collapsed_worktrees`, keyed by checkout
+    /// path, so it outlives the row: `set_projects` rebuilds every row from
+    /// the catalog and re-applies the set, and a selection change never
+    /// consults it at all — a worktree the user closed stays closed, one
+    /// they left open stays open, whichever worktree is current.
+    fn set_row_expanded(&mut self, id: usize, kind: RowKind, expanded: bool) {
+        if !matches!(kind, RowKind::Project | RowKind::Worktree) {
+            return;
+        }
+        let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.id == id && row.kind == kind)
+        else {
+            return;
+        };
+        row.expanded = expanded;
+        if kind == RowKind::Worktree
+            && let Some(path) = row.path.clone()
+        {
+            if expanded {
+                self.collapsed_worktrees.remove(&path);
+            } else {
+                self.collapsed_worktrees.insert(path);
+            }
+        }
+    }
+
+    /// Re-applies `collapsed_worktrees` to freshly built worktree rows.
+    fn apply_collapsed_worktrees(&mut self) {
+        for row in &mut self.rows {
+            if row.kind == RowKind::Worktree {
+                row.expanded = !row
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| self.collapsed_worktrees.contains(path));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2446,6 +2606,7 @@ impl Sidebar {
                 is_git: true,
                 path: Some(path),
                 tab_id: None,
+                parked_tab: None,
                 tab_kind: None,
                 agent_icon: None,
                 agent_brand: None,
@@ -2666,15 +2827,25 @@ impl Sidebar {
                     }
                     let mut section = vec![project_row];
                     if project.expanded {
+                        // A collapsed worktree hides the tab rows under it,
+                        // the way a collapsed project hides its section.
+                        let mut worktree_expanded = true;
                         section.extend(
                             children
                                 .iter()
-                                .filter(|row| {
+                                .filter(|row| match row.kind {
+                                    RowKind::Worktree => {
+                                        worktree_expanded = row.expanded;
+                                        true
+                                    }
+                                    RowKind::Tab => worktree_expanded,
                                     // The New Worktree row is only offered
                                     // for git projects with a repository
                                     // path.
-                                    row.kind != RowKind::NewWorktree
-                                        || (project.is_git && project.path.is_some())
+                                    RowKind::NewWorktree => {
+                                        project.is_git && project.path.is_some()
+                                    }
+                                    RowKind::Project => true,
                                 })
                                 .cloned(),
                         );
@@ -2724,8 +2895,12 @@ impl Sidebar {
                                 .iter()
                                 .any(|tab: &SidebarRow| tab.title.to_lowercase().contains(&query));
                             if worktree_matches || tab_matches {
+                                // Same rule as a collapsed project: its own
+                                // match reveals the row, not the rows it
+                                // hides — those need a match of their own.
+                                let worktree_expanded = worktree_row.expanded;
                                 filtered.push(worktree_row);
-                                if worktree_matches {
+                                if worktree_matches && worktree_expanded {
                                     filtered.append(tabs);
                                 } else {
                                     filtered.extend(
@@ -3758,6 +3933,7 @@ impl Sidebar {
         let context_entity = entity.clone();
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
+        let parked_tab = row.parked_tab;
         let mark_size = theme.typography.headline;
         let icon_size = IconSize::Small;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
@@ -3800,6 +3976,17 @@ impl Sidebar {
                         // selected, so report the click rather than
                         // flipping `selected` locally.
                         cx.emit(SidebarEvent::SelectTab(tab_id));
+                        return;
+                    }
+                    if let Some(index) = parked_tab
+                        && let Some(path) = worktree_path.as_ref()
+                    {
+                        // A parked tab has no live id: ask the host to bring
+                        // its worktree back with this strip position active.
+                        cx.emit(SidebarEvent::SelectParkedTab {
+                            path: path.clone(),
+                            index,
+                        });
                         return;
                     }
                     match kind {
@@ -3930,6 +4117,11 @@ impl Sidebar {
                         FontWeight::SEMIBOLD
                     } else {
                         FontWeight::NORMAL
+                    })
+                    // A parked tab is not live: its title reads as a record
+                    // of what the worktree holds, not as an open surface.
+                    .when(parked_tab.is_some(), |this| {
+                        this.text_color(theme.text_faint)
                     })
                     .child(title),
             )
@@ -4112,7 +4304,34 @@ impl Sidebar {
                 )
             });
 
-        row_view.child(content)
+        // A worktree's disclosure is its own control, unlike a project's,
+        // whose whole row toggles: the row body must keep meaning "select
+        // this worktree". bezel draws the chevron with no handler of its
+        // own, so a hit target the size of its column sits over it and
+        // stops the click before the row's selection handler sees it.
+        let chevron_entity = entity.clone();
+        let worktree_chevron = is_worktree && row_shape.expanded.is_some();
+        let chevron_left = tree::INDENT * row_shape.depth as f32;
+        row_view.child(content).when(worktree_chevron, |this| {
+            this.child(
+                div()
+                    .id(("sidebar-worktree-chevron", row_id))
+                    .debug_selector(move || format!("sidebar-worktree-chevron-{row_id}"))
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(chevron_left))
+                    .w(px(16.0))
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        chevron_entity.update(cx, |sidebar, cx| {
+                            sidebar.focus_tree_row(row_index, window, cx);
+                            sidebar.toggle_worktree(row_id, cx);
+                        });
+                    }),
+            )
+        })
     }
 }
 
@@ -4215,6 +4434,7 @@ impl Render for Sidebar {
             let inputs = RowInputs {
                 drag: row_drags.get(&row.id).copied(),
                 cursor: index == tree_cursor,
+                has_children: self.row_has_children(&row),
                 index,
                 project_id,
                 project_icon,
@@ -4970,6 +5190,7 @@ mod tests {
             is_git: true,
             path: None,
             tab_id: None,
+            parked_tab: None,
             tab_kind: None,
             agent_icon: None,
             agent_brand: None,
@@ -4981,11 +5202,11 @@ mod tests {
     #[test]
     fn project_and_worktree_rows_map_to_bezel_tree_levels() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), true),
             tree::Row::branch(0, true)
         );
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false)),
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false), false),
             tree::Row::leaf(1)
         );
     }
@@ -4993,27 +5214,49 @@ mod tests {
     #[test]
     fn project_tree_rows_keep_the_sidebar_expansion_state() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, false)),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, false), true),
             tree::Row::branch(0, false)
         );
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), true),
+            tree::Row::branch(0, true)
+        );
+    }
+
+    /// A project is a container even when empty, so it always carries a
+    /// chevron; a worktree only earns one once it has tab rows to hide.
+    #[test]
+    fn a_project_is_a_branch_even_without_children() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), false),
             tree::Row::branch(0, true)
         );
     }
 
     #[test]
-    fn a_worktree_is_always_a_leaf() {
+    fn a_worktree_without_tab_rows_is_a_leaf() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true)),
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true), false),
             tree::Row::leaf(1)
+        );
+    }
+
+    #[test]
+    fn a_worktree_with_tab_rows_is_a_branch_keeping_its_expansion_state() {
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true), true),
+            tree::Row::branch(1, true)
+        );
+        assert_eq!(
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false), true),
+            tree::Row::branch(1, false)
         );
     }
 
     #[test]
     fn the_new_worktree_action_is_a_depth_one_leaf() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false)),
+            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false), false),
             tree::Row::leaf(1)
         );
     }
@@ -5021,7 +5264,7 @@ mod tests {
     #[test]
     fn tab_rows_are_depth_two_leaves() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false)),
+            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false), false),
             tree::Row::leaf(2)
         );
     }
@@ -5029,14 +5272,424 @@ mod tests {
     #[test]
     fn bezel_parent_navigation_matches_the_sidebar_hierarchy() {
         let shape = [
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false)),
-            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false)),
-            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false)),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), true),
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true), true),
+            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false), false),
+            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false), false),
         ];
         assert_eq!(tree::parent_of(&shape, 1), Some(0));
         assert_eq!(tree::parent_of(&shape, 2), Some(1));
         assert_eq!(tree::parent_of(&shape, 3), Some(0));
+    }
+
+    /// The fixture's first worktree (row 1) owns a tab row (row 2) and is
+    /// followed by the New Worktree action (row 3). Collapsing the worktree
+    /// hides only what hangs under it.
+    #[gpui::test]
+    async fn collapsing_a_worktree_hides_its_tab_rows_but_not_its_siblings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let sidebar = cx.new(|cx| Sidebar::new_with_repo(cx, Some(PathBuf::from("fixture-repo"))));
+        let visible_ids = |sidebar: &Sidebar| {
+            sidebar
+                .visible_rows()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        };
+
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(
+                visible_ids(sidebar).contains(&2),
+                "a worktree starts expanded: its tab row is visible"
+            );
+        });
+
+        sidebar.update(cx, |sidebar, cx| sidebar.toggle_worktree(1, cx));
+        sidebar.read_with(cx, |sidebar, _| {
+            let ids = visible_ids(sidebar);
+            assert!(ids.contains(&1), "the collapsed worktree row itself stays");
+            assert!(!ids.contains(&2), "its tab row is hidden");
+            assert!(ids.contains(&3), "the New Worktree sibling is untouched");
+        });
+
+        sidebar.update(cx, |sidebar, cx| sidebar.toggle_worktree(1, cx));
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(
+                visible_ids(sidebar).contains(&2),
+                "toggling again restores the tab row"
+            );
+        });
+    }
+
+    /// The filter follows the project rule one level down: a collapsed
+    /// worktree's tab rows stay hidden unless the query matches one of them.
+    #[gpui::test]
+    async fn filter_reveals_a_collapsed_worktrees_matching_tab_rows_only(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let sidebar = cx.new(|cx| Sidebar::new_with_repo(cx, None));
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.toggle_worktree(1, cx);
+            sidebar.filter = "main".to_string();
+        });
+        sidebar.read_with(cx, |sidebar, _| {
+            let ids = sidebar
+                .visible_rows()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>();
+            assert!(ids.contains(&1), "the worktree itself matches");
+            assert!(
+                !ids.contains(&2),
+                "a non-matching tab row under a collapsed worktree stays hidden"
+            );
+        });
+
+        sidebar.update(cx, |sidebar, _| sidebar.filter = "chat".to_string());
+        sidebar.read_with(cx, |sidebar, _| {
+            let ids = sidebar
+                .visible_rows()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>();
+            assert!(
+                ids.contains(&2),
+                "a matching tab row is shown even under a collapsed worktree"
+            );
+        });
+    }
+
+    /// The worktree chevron is its own control: clicking it folds the tab
+    /// rows without reporting a selection, clicking the row still selects,
+    /// and bezel's ←/→ fold and unfold the same row from the keyboard.
+    #[gpui::test]
+    async fn worktree_chevron_toggles_tab_rows_without_selecting(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::tree::init);
+        let repo = PathBuf::from("fixture-repo");
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        assert!(
+            cx.debug_bounds("sidebar-row-2").is_some(),
+            "the worktree starts open: its tab row is drawn"
+        );
+
+        // The chevron rides in bezel's 16px disclosure column, after one
+        // level of indent guide.
+        let row1 = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn");
+        let chevron = point(row1.origin.x + px(tree::INDENT) + px(8.0), row1.center().y);
+        cx.simulate_click(chevron, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-2").is_none(),
+            "the chevron click folds the worktree's tab row"
+        );
+        assert!(
+            events.borrow().is_empty(),
+            "the chevron is not a selection: nothing is reported, got {:?}",
+            events.borrow()
+        );
+
+        cx.simulate_click(chevron, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-2").is_some(),
+            "a second chevron click unfolds it again"
+        );
+
+        // The keyboard path folds the same row: the chevron click left the
+        // tree cursor on it.
+        cx.simulate_keystrokes("left");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-2").is_none(),
+            "← on a worktree row folds its tab rows"
+        );
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-2").is_some(),
+            "→ on a worktree row unfolds them"
+        );
+
+        // The row body is still the selection control it always was.
+        let row1 = cx.debug_bounds("sidebar-row-1").expect("worktree row");
+        cx.simulate_click(row1.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::SelectWorktree(path) if *path == repo)),
+            "clicking the row body reports SelectWorktree, got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// A parked tab is one the host no longer holds live (its worktree was
+    /// switched away from) but still lists from the persisted strip. Its
+    /// row is drawn under the worktree, offers no ✕ (there is no live tab
+    /// to close), and a click asks the host to bring the worktree back with
+    /// that tab active rather than naming a tab id that does not exist.
+    #[gpui::test]
+    async fn parked_tab_rows_report_a_parked_selection_and_offer_no_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let repo = PathBuf::from("fixture-repo");
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(
+                1,
+                vec![
+                    SidebarTab {
+                        tab: SidebarTabRef::Parked(0),
+                        title: "Old Terminal".into(),
+                        selected: false,
+                        kind: TabKind::Terminal,
+                        agent: None,
+                    },
+                    SidebarTab {
+                        tab: SidebarTabRef::Parked(1),
+                        title: "Old Chat".into(),
+                        selected: false,
+                        kind: TabKind::AgentChat,
+                        agent: AgentMark::for_agent_id("claude"),
+                    },
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let second_id = parked_tab_row_id(1, 1);
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{second_id}").into_boxed_str());
+        let close_selector: &'static str =
+            Box::leak(format!("sidebar-tab-close-{second_id}").into_boxed_str());
+        let mark_selector: &'static str =
+            Box::leak(format!("sidebar-tab-mark-{second_id}-claude-mark").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the parked tab row is drawn under its worktree");
+        assert!(
+            cx.debug_bounds(mark_selector).is_some(),
+            "a parked agent tab keeps its brand mark"
+        );
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(close_selector).is_none(),
+            "a parked tab has no live tab to close, so no ✕ even on hover"
+        );
+
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let emitted = events.borrow();
+        assert!(
+            emitted.iter().any(|event| matches!(
+                event,
+                SidebarEvent::SelectParkedTab { path, index: 1 } if *path == repo
+            )),
+            "clicking a parked tab row reports the worktree path and the tab's index, got {emitted:?}"
+        );
+        assert!(
+            !emitted
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::SelectTab(_))),
+            "and never a live tab id it does not have"
+        );
+    }
+
+    /// The host re-pushes a worktree's list on every sync: live tabs
+    /// replace parked rows in place, and an empty list clears either.
+    #[gpui::test]
+    async fn live_tabs_replace_parked_rows_and_an_empty_list_clears_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let sidebar = cx.new(|cx| Sidebar::new_with_repo(cx, Some(PathBuf::from("fixture-repo"))));
+        let tab_rows_under_1 = |sidebar: &Sidebar| {
+            let start = sidebar
+                .rows
+                .iter()
+                .position(|row| row.id == 1)
+                .expect("worktree row 1");
+            sidebar.rows[start + 1..]
+                .iter()
+                // The fixture's decorative "Chat" row (id 2) is not
+                // host-sourced and stays put; only live and parked rows are
+                // this call's.
+                .take_while(|row| {
+                    row.kind == RowKind::Tab && (row.tab_id.is_some() || row.parked_tab.is_some())
+                })
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        };
+        let parked = |index: usize| SidebarTab {
+            tab: SidebarTabRef::Parked(index),
+            title: format!("Parked {index}"),
+            selected: false,
+            kind: TabKind::Terminal,
+            agent: None,
+        };
+        let live = |id: usize| SidebarTab {
+            tab: SidebarTabRef::Open(id),
+            title: format!("Live {id}"),
+            selected: false,
+            kind: TabKind::Terminal,
+            agent: None,
+        };
+
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(1, vec![parked(0), parked(1)], cx);
+        });
+        sidebar.read_with(cx, |sidebar, _| {
+            assert_eq!(
+                tab_rows_under_1(sidebar),
+                vec![parked_tab_row_id(1, 0), parked_tab_row_id(1, 1)]
+            );
+        });
+
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(1, vec![live(7)], cx);
+        });
+        sidebar.read_with(cx, |sidebar, _| {
+            assert_eq!(
+                tab_rows_under_1(sidebar),
+                vec![TAB_ROW_ID_OFFSET + 7],
+                "live tabs replace the parked rows rather than stacking under them"
+            );
+        });
+
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(1, Vec::new(), cx);
+        });
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(tab_rows_under_1(sidebar).is_empty());
+        });
+    }
+
+    /// The collapsed set is keyed by checkout path, so it survives the host
+    /// rebuilding the rows (`set_projects`) and moving the selection to a
+    /// different worktree — the point of the feature: a worktree the user
+    /// closed stays closed, one they left open stays open.
+    #[gpui::test]
+    async fn a_collapsed_worktree_stays_collapsed_across_rebuilds_and_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let root = std::path::PathBuf::from("/tmp/sirio-collapse-fixture");
+        let projects = || {
+            vec![SidebarProject {
+                id: "proj".into(),
+                name: "proj".into(),
+                is_git: true,
+                root_path: root.clone(),
+                worktrees: vec![
+                    SidebarWorktree {
+                        branch: "main".into(),
+                        path: root.join("main"),
+                        is_primary: true,
+                        comment: None,
+                    },
+                    SidebarWorktree {
+                        branch: "feature".into(),
+                        path: root.join("feature"),
+                        is_primary: false,
+                        comment: None,
+                    },
+                ],
+            }]
+        };
+        let tab = || SidebarTab {
+            tab: SidebarTabRef::Open(0),
+            title: "Terminal".into(),
+            selected: false,
+            kind: TabKind::Terminal,
+            agent: None,
+        };
+        let sidebar = cx.new(|cx| Sidebar::from_projects(projects(), cx));
+        // Row ids follow `from_projects`: project 0, worktrees 1 and 2.
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(1, vec![tab()], cx);
+            sidebar.set_worktree_tabs(2, vec![tab()], cx);
+            sidebar.toggle_worktree(1, cx);
+        });
+
+        // The host rebuilds the rows and re-pushes the tabs, then selects
+        // the other worktree.
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_projects(projects(), cx);
+            sidebar.set_worktree_tabs(1, vec![tab()], cx);
+            sidebar.set_worktree_tabs(2, vec![tab()], cx);
+            sidebar.set_selected_worktree(&root.join("feature"), cx);
+        });
+
+        sidebar.read_with(cx, |sidebar, _| {
+            let visible = sidebar.visible_rows();
+            let tab_rows_under = |worktree_id: usize| {
+                let start = visible
+                    .iter()
+                    .position(|row| row.id == worktree_id)
+                    .expect("worktree row visible");
+                visible[start + 1..]
+                    .iter()
+                    .take_while(|row| row.kind == RowKind::Tab)
+                    .count()
+            };
+            assert_eq!(
+                tab_rows_under(1),
+                0,
+                "the worktree the user closed stays closed after a rebuild and a selection change"
+            );
+            assert_eq!(
+                tab_rows_under(2),
+                1,
+                "the worktree the user left open stays open"
+            );
+            let main_row = sidebar
+                .rows
+                .iter()
+                .find(|row| row.id == 1)
+                .expect("main row");
+            assert!(
+                !main_row.expanded,
+                "the rebuilt row carries the collapsed state"
+            );
+        });
     }
 
     /// The row's rhythm is a minimum, not a prediction: a row keeps the
@@ -5061,6 +5714,7 @@ mod tests {
             is_git: true,
             path: Some(PathBuf::from("/tmp/sirio")),
             tab_id: None,
+            parked_tab: None,
             tab_kind: None,
             agent_icon: None,
             agent_brand: None,
@@ -5193,6 +5847,7 @@ mod tests {
             is_git: false,
             path: None,
             tab_id: Some(1),
+            parked_tab: None,
             tab_kind: Some(TabKind::Terminal),
             agent_icon: None,
             agent_brand: None,
@@ -5217,6 +5872,7 @@ mod tests {
             is_git: false,
             path: None,
             tab_id: Some(2),
+            parked_tab: None,
             tab_kind: Some(TabKind::Terminal),
             agent_icon: Some(Icon::ClaudeCode),
             agent_brand: None,
@@ -6426,7 +7082,7 @@ mod tests {
         let entity =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
         let plain_terminal = || SidebarTab {
-            id: 7,
+            tab: SidebarTabRef::Open(7),
             title: "Terminal".into(),
             selected: false,
             kind: TabKind::Terminal,
@@ -6647,7 +7303,7 @@ mod tests {
             sidebar.set_worktree_tabs(
                 3,
                 vec![SidebarTab {
-                    id: 7,
+                    tab: SidebarTabRef::Open(7),
                     title: "Claude Code".into(),
                     selected: true,
                     kind: TabKind::Terminal,
@@ -6901,14 +7557,14 @@ mod tests {
                 1,
                 vec![
                     SidebarTab {
-                        id: 42,
+                        tab: SidebarTabRef::Open(42),
                         title: "First".into(),
                         selected: true,
                         kind: TabKind::Terminal,
                         agent: None,
                     },
                     SidebarTab {
-                        id: 43,
+                        tab: SidebarTabRef::Open(43),
                         title: "Second".into(),
                         selected: false,
                         kind: TabKind::Terminal,
@@ -6995,7 +7651,7 @@ mod tests {
             sidebar.set_worktree_tabs(
                 1,
                 vec![SidebarTab {
-                    id: tab_id,
+                    tab: SidebarTabRef::Open(tab_id),
                     title: "Chat".into(),
                     selected: true,
                     kind: TabKind::AgentChat,

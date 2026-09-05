@@ -51,8 +51,10 @@ use sirio_ui::{
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
         AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
-        SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
+        SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef, SidebarWorktree,
+        TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
+        parked_tab_row_id,
     },
     status_bar::{
         StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
@@ -3583,6 +3585,20 @@ fn activity_rank(status: ActivityStatus) -> u8 {
 /// (`App/TerminalContextMenuProvider.swift:58`, `App/SidebarView.swift:601`/
 /// `:678`). `request_close_terminal_at` now holds every terminal close for
 /// confirmation unconditionally; only the Activity row still asks this.
+/// The shell's `TabKind` for a persisted surface kind (`SessionTab::kind`).
+/// One decoder for restore and for the sidebar's parked rows, so the two
+/// can never disagree about what a stored "chat" is. Unknown kinds are
+/// terminals, as restore has always treated them.
+fn tab_kind_from_persisted(kind: &str) -> TabKind {
+    match kind {
+        "chat" => TabKind::AgentChat,
+        "diff" => TabKind::Diff,
+        "browser" => TabKind::Browser,
+        "file" => TabKind::Editor,
+        _ => TabKind::Terminal,
+    }
+}
+
 fn pane_close_needs_confirmation(status: ActivityStatus) -> bool {
     let domain =
         sirio_activity::ActivityStatus::from_agent_status(agent_status_for_activity(status));
@@ -4093,6 +4109,15 @@ struct SirioWorkspace {
     /// a mounted worktree uses this snapshot when its DB row is empty or
     /// belongs to another worktree.
     parked_worktree_tabs: BTreeMap<String, ParkedWorktreeTabs>,
+    /// What each worktree the user switched away from still holds, as the
+    /// sidebar lists it under that worktree: its persisted strip, mapped to
+    /// parked rows (`SidebarTabRef::Parked`). Filled lazily by
+    /// [`Self::parked_sidebar_tabs_for`] the first time `sync_activity` asks
+    /// about a worktree with no live tabs (an empty list is cached too, so a
+    /// never-opened worktree costs one read, not one per frame), and dropped
+    /// for both ends of every switch in `select_worktree`, after the
+    /// outgoing layout has been saved, so it is rebuilt from that save.
+    parked_sidebar_tabs: BTreeMap<PathBuf, Vec<SidebarTab>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4751,6 +4776,7 @@ impl SirioWorkspace {
             empty_pane_prompts: BTreeMap::new(),
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
+            parked_sidebar_tabs: BTreeMap::new(),
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -5997,6 +6023,24 @@ impl SirioWorkspace {
             SidebarEvent::AddProject(path) => self.add_project(path.clone(), cx),
             SidebarEvent::RemoveProject(id) => self.remove_project(id, cx),
             SidebarEvent::SelectTab(id) => self.select_tab(*id, None, cx),
+            SidebarEvent::SelectParkedTab { path, index } => {
+                // Bring the worktree back first — that restores its strip —
+                // then activate the tab at the clicked position, counted the
+                // way the parked list was built (sidebar-visible tabs only).
+                if self.select_worktree(path.clone(), None, cx).is_err() {
+                    self.restore_sidebar_selection(cx);
+                    return;
+                }
+                let tab_id = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.kind.appears_in_sidebar())
+                    .nth(*index)
+                    .map(|tab| tab.id);
+                if let Some(tab_id) = tab_id {
+                    self.select_tab(tab_id, None, cx);
+                }
+            }
             SidebarEvent::SelectWorktree(path) => {
                 self.select_worktree_from_sidebar(path.clone(), cx);
             }
@@ -6926,13 +6970,53 @@ impl SirioWorkspace {
                     && tab.kind.appears_in_sidebar()
             })
             .map(|(index, tab)| SidebarTab {
-                id: tab.id,
+                tab: SidebarTabRef::Open(tab.id),
                 title: tab.title.clone(),
                 selected: index == self.active_tab,
                 kind: tab.kind,
                 agent: self.tab_agent_mark(tab),
             })
             .collect()
+    }
+
+    /// The sidebar rows of a worktree with no live tabs: its persisted strip,
+    /// as parked rows. A worktree the user switched away from keeps listing
+    /// what it holds, so the sidebar tree does not empty out under every
+    /// worktree but the selected one. Cached per path (see
+    /// `parked_sidebar_tabs`), since `sync_activity` runs every frame.
+    ///
+    /// The list is filtered by `TabKind::appears_in_sidebar` the same way
+    /// the live list is, and the `Parked` index counts *sidebar-visible*
+    /// tabs — the same filter [`Self::handle_sidebar_event`] applies to the
+    /// restored strip when answering `SelectParkedTab`, so the index names
+    /// the same tab on both sides even with a Browser tab in the strip.
+    fn parked_sidebar_tabs_for(&mut self, worktree_path: &Path) -> Vec<SidebarTab> {
+        if let Some(parked) = self.parked_sidebar_tabs.get(worktree_path) {
+            return parked.clone();
+        }
+        let parked: Vec<SidebarTab> = self
+            .session
+            .persisted_tabs_for(worktree_path)
+            .into_iter()
+            .filter(|tab| tab_kind_from_persisted(&tab.kind).appears_in_sidebar())
+            .enumerate()
+            .map(|(index, tab)| SidebarTab {
+                tab: SidebarTabRef::Parked(index),
+                kind: tab_kind_from_persisted(&tab.kind),
+                title: tab.title,
+                // Nothing parked is the active tab: the active tab is a live
+                // fact of the selected worktree.
+                selected: false,
+                agent: tab
+                    .agent_id
+                    .as_ref()
+                    .and_then(AgentRef::adapter_id)
+                    .and_then(AgentMark::for_agent_id),
+            })
+            .collect();
+        self.parked_sidebar_tabs
+            .insert(worktree_path.to_path_buf(), parked.clone());
+        parked
     }
 
     /// Publishes this window's live panes to the control registry.
@@ -7281,6 +7365,13 @@ impl SirioWorkspace {
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
+        // Both ends of the switch are rebuilt from the database on the next
+        // `sync_activity`: the outgoing worktree's parked rows from the
+        // layout the safe branch above just saved, the incoming one's on
+        // its next departure. Nothing cached before this point can be
+        // trusted for either.
+        self.parked_sidebar_tabs.remove(&old_path);
+        self.parked_sidebar_tabs.remove(&selected_path);
         // #323: the pane flag is per worktree, so it follows the switch the
         // same way the tabs above just did. The safe restore branch above
         // preserves a newly revealed active Secondary tab; an unsafe switch
@@ -7840,16 +7931,29 @@ impl SirioWorkspace {
         // any other up there and never a row down here. Selection is still
         // compared against the tab's real index in `self.tabs`, not its
         // position in the filtered owner list.
-        let sidebar_updates: Vec<(usize, Vec<SidebarTab>)> = self
+        let worktree_rows: Vec<(usize, PathBuf)> = self
             .project_catalog
             .projects()
             .iter()
             .flat_map(|project| project.worktrees.iter())
             .filter_map(|worktree| {
                 self.sidebar_worktree_id(&worktree.path)
-                    .map(|id| (id, self.sidebar_tabs_for_worktree(&worktree.path)))
+                    .map(|id| (id, worktree.path.clone()))
             })
             .collect();
+        let mut sidebar_updates: Vec<(usize, Vec<SidebarTab>)> =
+            Vec::with_capacity(worktree_rows.len());
+        for (worktree_id, path) in worktree_rows {
+            let mut tabs = self.sidebar_tabs_for_worktree(&path);
+            // A worktree with no live tabs keeps listing its persisted strip
+            // as parked rows — unless it is the selected one, whose truth is
+            // the live list even when that list is empty: the user just
+            // closed everything, and a strip from before must not reappear.
+            if tabs.is_empty() && !paths_name_the_same_document(&path, &self.working_directory) {
+                tabs = self.parked_sidebar_tabs_for(&path);
+            }
+            sidebar_updates.push((worktree_id, tabs));
+        }
         self.sidebar.update(cx, |sidebar, cx| {
             for (worktree_id, tabs) in sidebar_updates {
                 sidebar.set_worktree_tabs(worktree_id, tabs, cx);
@@ -15404,13 +15508,7 @@ fn restore_tabs_with_terminal_cache(
             id,
             persistence_id: tab.id.clone(),
             title: tab.title.clone(),
-            kind: match tab.kind.as_str() {
-                "chat" => TabKind::AgentChat,
-                "diff" => TabKind::Diff,
-                "browser" => TabKind::Browser,
-                "file" => TabKind::Editor,
-                _ => TabKind::Terminal,
-            },
+            kind: tab_kind_from_persisted(&tab.kind),
             agent_icon,
             agent_id,
             session_state: tab_state,
@@ -19101,6 +19199,326 @@ mod tests {
 
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two worktrees of one project on disk — the git repo itself and a
+    /// plain sibling directory — with a session database, for the parked
+    /// tab-row tests. Row ids follow `from_projects`: the repo is worktree
+    /// row 1, the sibling row 2.
+    fn parked_rows_test_workspace(
+        cx: &mut Context<SirioWorkspace>,
+        repo: &Path,
+        other: &Path,
+    ) -> SirioWorkspace {
+        let workspace = worktree_state_test_workspace(
+            cx,
+            repo,
+            vec![
+                session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.to_path_buf(),
+                    is_primary: true,
+                },
+                session::CatalogWorktree {
+                    branch: "other".into(),
+                    path: other.to_path_buf(),
+                    is_primary: false,
+                },
+            ],
+        );
+        // A layout is only persisted for a git worktree the catalog already
+        // knows (`write_layout` drops it otherwise), so the catalog goes to
+        // the database first, as boot does.
+        workspace
+            .session
+            .schedule_catalog(&workspace.project_catalog);
+        workspace
+    }
+
+    /// A real second worktree of `repo` on branch `other`: selecting a
+    /// worktree re-reads the project from git, so a plain directory would
+    /// drop out of the catalog on the first switch.
+    fn parked_rows_other_dir(repo: &Path) -> PathBuf {
+        let name = format!(
+            "{}-other",
+            repo.file_name().expect("repo dir name").to_string_lossy()
+        );
+        // Not canonicalized, unlike the scratch repo: git rejects a `\\?\`
+        // prefix on Windows, both when creating the worktree and when the
+        // session resolves the path's identity to save a layout for it.
+        let other = std::env::temp_dir().join(&name);
+        let _ = std::fs::remove_dir_all(&other);
+        git_test(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other",
+                &format!("../{name}"),
+            ],
+        );
+        other
+    }
+
+    /// A persisted chat tab with no agent: restoring one builds an
+    /// unavailable chat and spawns nothing, so the switch tests below stay
+    /// process-free.
+    fn persisted_chat(id: &str, title: &str, active: bool) -> SessionTab {
+        SessionTab {
+            id: id.into(),
+            title: title.into(),
+            kind: "chat".into(),
+            agent_id: None,
+            active,
+        }
+    }
+
+    fn persisted_layout(directory: &Path, branch: &str, tabs: Vec<SessionTab>) -> SessionLayout {
+        let tab_states = tabs.iter().map(|_| SessionTabState::default()).collect();
+        SessionLayout {
+            working_directory: directory.to_path_buf(),
+            branch: branch.into(),
+            tabs,
+            tab_states,
+        }
+    }
+
+    fn static_row_selector(row_id: usize) -> &'static str {
+        Box::leak(format!("sidebar-row-{row_id}").into_boxed_str())
+    }
+
+    /// A worktree that is not selected keeps listing what it holds: the
+    /// host pushes its persisted strip as parked rows. The selected worktree
+    /// never does — its truth is the live tab list, even when that is empty.
+    #[gpui::test]
+    async fn an_unselected_worktree_lists_its_persisted_tabs_as_parked_rows(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo("parked-list");
+        let other = parked_rows_other_dir(&repo);
+        let (repo_for_window, other_for_window) = (repo.clone(), other.clone());
+        let window = cx.add_window(|_window, cx| {
+            let workspace = parked_rows_test_workspace(cx, &repo_for_window, &other_for_window);
+            // Both strips look as if each worktree had been visited in an
+            // earlier session: seeded before the first frame, the way boot
+            // finds them, since a parked list is read once and then cached
+            // until its worktree is switched to or from.
+            workspace.session.save_layout_now(&persisted_layout(
+                &other_for_window,
+                "other",
+                vec![
+                    persisted_chat("other-a", "Other A", true),
+                    persisted_chat("other-b", "Other B", false),
+                ],
+            ));
+            workspace.session.save_layout_now(&persisted_layout(
+                &repo_for_window,
+                "main",
+                vec![persisted_chat("main-a", "Main A", true)],
+            ));
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            assert_eq!(workspace.working_directory, repo);
+            assert!(
+                workspace.tabs.is_empty(),
+                "the fixture starts with no live tab"
+            );
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds(static_row_selector(parked_tab_row_id(2, 0)))
+                .is_some(),
+            "the unselected worktree's first persisted tab is drawn as a parked row"
+        );
+        assert!(
+            cx.debug_bounds(static_row_selector(parked_tab_row_id(2, 1)))
+                .is_some(),
+            "and its second"
+        );
+        assert!(
+            cx.debug_bounds(static_row_selector(parked_tab_row_id(1, 0)))
+                .is_none(),
+            "the selected worktree shows only live tabs, never its persisted strip"
+        );
+    }
+
+    /// The user's own case: switch away from a worktree with open tabs, and
+    /// its rows must stay under it — now as parked rows built from the strip
+    /// the switch just saved, no longer as live ones.
+    #[gpui::test]
+    async fn switching_away_keeps_the_old_worktrees_tabs_listed_as_parked_rows(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo("parked-switch");
+        let other = parked_rows_other_dir(&repo);
+        let (repo_for_window, other_for_window) = (repo.clone(), other.clone());
+        let window = cx.add_window(|_window, cx| {
+            parked_rows_test_workspace(cx, &repo_for_window, &other_for_window)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // One live chat tab on the repo worktree, safe to switch away from.
+        workspace.update(&mut cx, |workspace, cx| {
+            let chat = cx.new(|cx| Chat::unavailable("fixture".into(), repo.clone(), cx));
+            workspace.tabs = vec![OpenTab {
+                id: 0,
+                persistence_id: "live-chat".into(),
+                title: "Live Chat".into(),
+                kind: TabKind::AgentChat,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(0),
+                panes: PaneNode::leaf(0, TabContent::Chat(chat)),
+                focused_pane: 0,
+                title_is_auto_named: false,
+            }];
+            workspace.tab_worktree_paths.insert(0, repo.clone());
+            workspace.next_tab_id = 1;
+            workspace.next_pane_id = 1;
+            workspace.active_tab = 0;
+            // The destination has a strip of its own, so the switch restores
+            // a chat rather than spawning a default terminal.
+            workspace.session.save_layout_now(&persisted_layout(
+                &other,
+                "other",
+                vec![persisted_chat("other-a", "Other A", true)],
+            ));
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        let live_row = static_row_selector(TAB_ROW_ID_OFFSET);
+        let parked_row = static_row_selector(parked_tab_row_id(1, 0));
+        assert!(
+            cx.debug_bounds(live_row).is_some(),
+            "before the switch the repo's tab is a live row"
+        );
+        assert!(cx.debug_bounds(parked_row).is_none());
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .select_worktree(other.clone(), None, cx)
+                .expect("select the other worktree");
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                paths_name_the_same_document(&workspace.working_directory, &other),
+                "the switch landed on the other worktree"
+            );
+            assert_eq!(
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.title.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Other A"],
+                "the switch was a safe reload: the repo's tab is no longer live"
+            );
+        });
+        // Tab ids restart from zero per worktree, so `live_row` now names
+        // the restored "Other A" under worktree row 2; the repo's own tab
+        // survives only as the parked row directly under worktree row 1.
+        let repo_row = cx.debug_bounds("sidebar-row-1").expect("repo worktree row");
+        let other_row = cx
+            .debug_bounds("sidebar-row-2")
+            .expect("other worktree row");
+        let parked = cx
+            .debug_bounds(parked_row)
+            .expect("the repo's tab is still listed under the repo, parked");
+        let live = cx
+            .debug_bounds(live_row)
+            .expect("the other worktree's restored tab is a live row");
+        assert!(
+            repo_row.bottom() <= parked.top() && parked.bottom() <= other_row.top(),
+            "the parked row sits under the repo row: repo={repo_row:?} parked={parked:?} other={other_row:?}"
+        );
+        assert!(
+            other_row.bottom() <= live.top(),
+            "the only live row sits under the other worktree: other={other_row:?} live={live:?}"
+        );
+    }
+
+    /// Clicking a parked row brings its worktree back with that tab active:
+    /// the index names a position in the sidebar-visible strip, not a tab
+    /// id, because the tab does not exist until the switch restores it.
+    #[gpui::test]
+    async fn selecting_a_parked_tab_switches_worktree_and_activates_that_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo("parked-select");
+        let other = parked_rows_other_dir(&repo);
+        let (repo_for_window, other_for_window) = (repo.clone(), other.clone());
+        let window = cx.add_window(|_window, cx| {
+            parked_rows_test_workspace(cx, &repo_for_window, &other_for_window)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.session.save_layout_now(&persisted_layout(
+                &other,
+                "other",
+                vec![
+                    persisted_chat("other-a", "Other A", true),
+                    persisted_chat("other-b", "Other B", false),
+                ],
+            ));
+            workspace.handle_sidebar_event(
+                &SidebarEvent::SelectParkedTab {
+                    path: other.clone(),
+                    index: 1,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                paths_name_the_same_document(&workspace.working_directory, &other),
+                "the parked tab's worktree becomes the selected one"
+            );
+            assert_eq!(
+                workspace.tabs[workspace.active_tab].title, "Other B",
+                "and the tab at the clicked strip position is active, not the persisted active one"
+            );
+        });
     }
 
     /// CENTER-01: the safety gate. A live (needs-input) tab in the outgoing
