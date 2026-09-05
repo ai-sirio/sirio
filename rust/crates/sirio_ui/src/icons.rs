@@ -26,7 +26,10 @@ use gpui::{
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
+
+use sirio_project::FileIconKey;
 
 use sirio_theme::AgentBrandColor;
 
@@ -385,6 +388,105 @@ impl Icon {
     /// [`Styled::text_color`] (theme-sourced).
     pub fn element(self, size: IconSize) -> IconElement {
         IconElement::new(self, size)
+    }
+}
+
+/// The per-type file glyph for a document. The Files tree row and the tab
+/// that shows the same file both draw this one mark, so a name looks the
+/// same in both places.
+///
+/// The classification — which name or extension gets which *logical* icon
+/// key — is [`FileIconKey`], ported 1:1 from the original's
+/// `FileIconKey.swift` (F-CORE-FILE-08): see that type for the exact
+/// exact-name/extension/directory-name tables and their fallback rule.
+///
+/// The *rendering* of each logical key is necessarily narrower than the
+/// original's: the pinned `rust/assets/icons/zed/` catalog ships a focused
+/// set of general-purpose UI glyphs, not a
+/// per-language icon font, so most [`FileIconKey`] variants collapse onto
+/// the generic [`Icon::File`] / [`Icon::FolderFill`] marks below rather than
+/// getting an invented shape that doesn't exist in the pinned catalog.
+/// Only the handful of keys with an unambiguous Zed shape (a terminal for
+/// shell scripts, a branch for git files, a gear for env/settings, an
+/// archive box, a key for lock files) get their own icon.
+pub fn file_glyph(path: &Path, is_dir: bool) -> Icon {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let key = if is_dir {
+        FileIconKey::for_directory_name(&name)
+    } else {
+        FileIconKey::for_file_name(&name)
+    };
+    if !is_dir && let Some(asset) = key.material_asset() {
+        return Icon::file_type(asset);
+    }
+    match key {
+        FileIconKey::Shell => Icon::SquareTerminal,
+        FileIconKey::Git | FileIconKey::FolderGit => Icon::GitBranch,
+        FileIconKey::Env | FileIconKey::Settings => Icon::Settings,
+        FileIconKey::Archive => Icon::Archive,
+        FileIconKey::Lock => Icon::Lock,
+        // Every other file key — the per-language kinds (Swift, Python,
+        // Rust, …), markup/data kinds (Json, Yaml, Markdown, …), media
+        // kinds (Image, Video, Audio, Font) and the remaining exact-name
+        // kinds (Docker, Makefile, Sql, Database, Log) — has no dedicated
+        // glyph in the approved Zed subset and shares the generic file mark.
+        FileIconKey::Swift
+        | FileIconKey::C
+        | FileIconKey::Cpp
+        | FileIconKey::CSharp
+        | FileIconKey::Java
+        | FileIconKey::Kotlin
+        | FileIconKey::Python
+        | FileIconKey::Ruby
+        | FileIconKey::Rust
+        | FileIconKey::Go
+        | FileIconKey::JavaScript
+        | FileIconKey::TypeScript
+        | FileIconKey::React
+        | FileIconKey::Vue
+        | FileIconKey::Html
+        | FileIconKey::Css
+        | FileIconKey::Sass
+        | FileIconKey::Json
+        | FileIconKey::Yaml
+        | FileIconKey::Toml
+        | FileIconKey::Xml
+        | FileIconKey::Markdown
+        | FileIconKey::Text
+        | FileIconKey::Pdf
+        | FileIconKey::Image
+        | FileIconKey::Video
+        | FileIconKey::Audio
+        | FileIconKey::Font
+        | FileIconKey::Sql
+        | FileIconKey::Database
+        | FileIconKey::Docker
+        | FileIconKey::Log
+        | FileIconKey::Makefile
+        | FileIconKey::File
+        | FileIconKey::Symlink => Icon::File,
+        // Every folder key beyond `.git` (Src, Tests, Docs, Github,
+        // NodeModules, Dist, Scripts, Config, Assets, Public, Packages,
+        // Vscode, Lib, Tools, and the plain default) shares the folder
+        // mark: the approved Zed subset has one folder shape, not fifteen.
+        FileIconKey::Folder
+        | FileIconKey::FolderSrc
+        | FileIconKey::FolderTests
+        | FileIconKey::FolderDocs
+        | FileIconKey::FolderGithub
+        | FileIconKey::FolderNodeModules
+        | FileIconKey::FolderDist
+        | FileIconKey::FolderScripts
+        | FileIconKey::FolderConfig
+        | FileIconKey::FolderAssets
+        | FileIconKey::FolderPublic
+        | FileIconKey::FolderPackages
+        | FileIconKey::FolderVscode
+        | FileIconKey::FolderLib
+        | FileIconKey::FolderTools => Icon::FolderFill,
     }
 }
 
