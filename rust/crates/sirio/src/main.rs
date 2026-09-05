@@ -5698,7 +5698,7 @@ impl SirioWorkspace {
     }
 
     fn apply_terminal_font_size(&mut self, font_size: i32, cx: &mut Context<Self>) {
-        let font_size = font_size.clamp(9, 24);
+        let font_size = font_size.clamp(12, 18);
         if self.terminal_font_size == font_size {
             return;
         }
@@ -16165,8 +16165,8 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
 
     SettingsSnapshot {
         theme: theme_mode(settings.appearance),
-        interface_font_size: settings.ui_font_size.clamp(10, 20) as i32,
-        terminal_font_size: settings.terminal_font_size.clamp(9, 24) as i32,
+        interface_font_size: settings.ui_font_size.clamp(12, 18) as i32,
+        terminal_font_size: settings.terminal_font_size.clamp(12, 18) as i32,
         base_color: theme_base_color(settings.base_color),
         control_socket_enabled: settings.control_socket_enabled,
         // The live socket path is supplied by the host after this conversion;
@@ -16192,8 +16192,8 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
 fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
     AppSettings {
         appearance: persisted_appearance(snapshot.theme),
-        ui_font_size: i64::from(snapshot.interface_font_size.clamp(10, 20)),
-        terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(9, 24)),
+        ui_font_size: i64::from(snapshot.interface_font_size.clamp(12, 18)),
+        terminal_font_size: i64::from(snapshot.terminal_font_size.clamp(12, 18)),
         base_color: persisted_base_color(snapshot.base_color),
         control_socket_enabled: snapshot.control_socket_enabled,
         // `SettingsSnapshot` carries only UI-owned values; the update opt-out
@@ -25122,7 +25122,7 @@ mod tests {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
-            terminal_font_size: 19,
+            terminal_font_size: 16,
             base_color: BaseColor::Neutral,
             control_socket_enabled: false,
             updates_enabled: true,
@@ -25148,7 +25148,7 @@ mod tests {
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
         assert_eq!(snapshot.theme, sirio_theme::ThemeMode::Dark);
         assert_eq!(snapshot.interface_font_size, 17);
-        assert_eq!(snapshot.terminal_font_size, 19);
+        assert_eq!(snapshot.terminal_font_size, 16);
         assert!(!snapshot.control_socket_enabled);
         assert!(!snapshot.resume_agent_sessions);
         assert!(snapshot.auto_naming);
@@ -25227,7 +25227,7 @@ mod tests {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
-            terminal_font_size: 19,
+            terminal_font_size: 16,
             base_color: BaseColor::Neutral,
             control_socket_enabled: false,
             updates_enabled: true,

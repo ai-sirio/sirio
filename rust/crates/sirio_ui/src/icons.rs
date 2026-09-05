@@ -61,6 +61,8 @@ pub enum Icon {
     Close,
     /// Collapse (`zed/chevron_down.svg`).
     ChevronDown,
+    /// Step up (`zed/chevron_up.svg`).
+    ChevronUp,
     /// Expand (`zed/chevron_right.svg`).
     ChevronRight,
     /// Back (`zed/chevron_left.svg`).
@@ -167,6 +169,7 @@ impl Icon {
             Icon::SquareTerminal => "icons/zed/terminal.svg",
             Icon::Close => "icons/zed/close.svg",
             Icon::ChevronDown => "icons/zed/chevron_down.svg",
+            Icon::ChevronUp => "icons/zed/chevron_up.svg",
             Icon::ChevronRight => "icons/zed/chevron_right.svg",
             Icon::ChevronLeft => "icons/zed/chevron_left.svg",
             Icon::Settings => "icons/zed/settings.svg",
@@ -249,6 +252,7 @@ impl Icon {
             Icon::SquareTerminal => include_bytes!("../../../assets/icons/zed/terminal.svg"),
             Icon::Close => include_bytes!("../../../assets/icons/zed/close.svg"),
             Icon::ChevronDown => include_bytes!("../../../assets/icons/zed/chevron_down.svg"),
+            Icon::ChevronUp => include_bytes!("../../../assets/icons/zed/chevron_up.svg"),
             Icon::ChevronRight => include_bytes!("../../../assets/icons/zed/chevron_right.svg"),
             Icon::ChevronLeft => include_bytes!("../../../assets/icons/zed/chevron_left.svg"),
             Icon::Settings => include_bytes!("../../../assets/icons/zed/settings.svg"),
@@ -645,13 +649,14 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 32] = [
+pub const ALL_ICONS: [Icon; 33] = [
     Icon::FolderFill,
     Icon::GitBranch,
     Icon::MessageSquare,
     Icon::SquareTerminal,
     Icon::Close,
     Icon::ChevronDown,
+    Icon::ChevronUp,
     Icon::ChevronRight,
     Icon::ChevronLeft,
     Icon::Settings,
@@ -726,6 +731,7 @@ mod tests {
             (Icon::SquareTerminal, "icons/zed/terminal.svg"),
             (Icon::Close, "icons/zed/close.svg"),
             (Icon::ChevronDown, "icons/zed/chevron_down.svg"),
+            (Icon::ChevronUp, "icons/zed/chevron_up.svg"),
             (Icon::ChevronRight, "icons/zed/chevron_right.svg"),
             (Icon::ChevronLeft, "icons/zed/chevron_left.svg"),
             (Icon::Settings, "icons/zed/settings.svg"),

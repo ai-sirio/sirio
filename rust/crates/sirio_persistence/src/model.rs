@@ -568,10 +568,13 @@ pub mod settings_keys {
 
 /// The Swift ranges settings values are clamped into.
 pub mod settings_ranges {
-    /// `AppSettings.uiFontSizeRange`
-    pub const UI_FONT_SIZE: std::ops::RangeInclusive<i64> = 10..=20;
-    /// `AppSettings.terminalFontSizeRange`
-    pub const TERMINAL_FONT_SIZE: std::ops::RangeInclusive<i64> = 9..=24;
+    /// `AppSettings.uiFontSizeRange` was 10..=20; narrowed to 12..=18 on
+    /// 2026-09-05 together with the terminal range so both steppers stop at
+    /// the same legible extremes. Stored values outside it are clamped on
+    /// load, so an older database keeps working.
+    pub const UI_FONT_SIZE: std::ops::RangeInclusive<i64> = 12..=18;
+    /// `AppSettings.terminalFontSizeRange` was 9..=24; see `UI_FONT_SIZE`.
+    pub const TERMINAL_FONT_SIZE: std::ops::RangeInclusive<i64> = 12..=18;
     pub const CHAT_RETENTION: std::ops::RangeInclusive<i64> = 5..=500;
     pub const MOUNTED_WORKTREES: std::ops::RangeInclusive<i64> = 2..=50;
     pub const REFRESH_INTERVAL_MIN: std::ops::RangeInclusive<i64> = 1..=60;
@@ -632,6 +635,14 @@ mod tests {
         assert_eq!(defaults.ui_font_size, 13);
         assert_eq!(defaults.terminal_font_size, 13);
         assert!(defaults.control_socket_enabled);
+    }
+
+    #[test]
+    fn font_size_ranges_run_from_12_to_18_points() {
+        // Both steppers share one range: narrowed from the Swift 10..20 and
+        // 9..24 so that the extremes stay legible on every platform.
+        assert_eq!(settings_ranges::UI_FONT_SIZE, 12..=18);
+        assert_eq!(settings_ranges::TERMINAL_FONT_SIZE, 12..=18);
     }
 
     #[test]

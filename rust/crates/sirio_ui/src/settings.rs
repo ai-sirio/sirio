@@ -1109,8 +1109,8 @@ impl Settings {
             on_change: None,
             theme_mode: initial.theme,
             translucency: initial.translucency,
-            interface_font_size: initial.interface_font_size.clamp(10, 20),
-            terminal_font_size: initial.terminal_font_size.clamp(9, 24),
+            interface_font_size: initial.interface_font_size.clamp(12, 18),
+            terminal_font_size: initial.terminal_font_size.clamp(12, 18),
             base_color: initial.base_color,
             // A persisted choice from another platform (the database default
             // is the Swift-parity sfSymbols) is clamped to the first set
@@ -1662,7 +1662,7 @@ impl Settings {
     }
 
     fn set_interface_font_size(&mut self, value: i32, cx: &mut Context<Self>) {
-        self.interface_font_size = value.clamp(10, 20);
+        self.interface_font_size = value.clamp(12, 18);
         Theme::set_interface_font_size(self.interface_font_size, cx);
         cx.refresh_windows();
         self.changed();
@@ -1670,7 +1670,7 @@ impl Settings {
     }
 
     fn set_terminal_font_size(&mut self, value: i32, cx: &mut Context<Self>) {
-        self.terminal_font_size = value.clamp(9, 24);
+        self.terminal_font_size = value.clamp(12, 18);
         self.changed();
         cx.notify();
     }

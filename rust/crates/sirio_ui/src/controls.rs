@@ -268,6 +268,12 @@ pub fn segmented_icons(
 ///
 /// `unit` is required rather than defaulting: while it defaulted to `"pt"`, the two count rows in
 /// General rendered as "100 pt" chats and "6 pt" worktrees.
+///
+/// The arrows are SVG chevrons, not the `⌄`/`⌃` text glyphs they used to be: those are
+/// keyboard-modifier symbols whose ink sits at the bottom and top of the em box, so centring
+/// the line box left the down arrow below the value's baseline and the up arrow above its cap
+/// height. An icon's ink is centred in its own 16×16 view box, so `items_center` aligns it
+/// with the value text.
 pub fn stepper<F>(
     id: &'static str,
     value: i32,
@@ -299,11 +305,10 @@ where
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(theme.typography.callout)
-                .text_color(theme.text_faint)
+                .text_color(theme.text_muted)
                 .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| decrement(value - 1, cx))
-                .child("⌄"),
+                .child(IconElement::new(Icon::ChevronDown, IconSize::Small)),
         )
         .child(
             div()
@@ -328,11 +333,10 @@ where
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(theme.typography.callout)
-                .text_color(theme.text_faint)
+                .text_color(theme.text_muted)
                 .hover(|style| style.bg(theme.element_hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
-                .child("⌃"),
+                .child(IconElement::new(Icon::ChevronUp, IconSize::Small)),
         )
 }
 
