@@ -1,9 +1,13 @@
-# `rust/vendor/` — local override of the published `bezel-gpui-linux` crate
+# `rust/vendor/` — local overrides of two published Bezel GPUI platform crates
 
-This directory holds a `[patch.crates-io]` override for one package, `bezel-gpui-linux` (release
-`0.3.8`, see `rust/Cargo.toml`), wired in via that same file's `[patch.crates-io]` section.
-Everything else in the Bezel GPUI family (`gpui`, `gpui_platform`, and the rest) still comes
-straight from the published crates.io release, unpatched.
+This directory holds `[patch.crates-io]` overrides for two packages, `bezel-gpui-linux` and
+`bezel-gpui-windows` (both release `0.3.8`, see `rust/Cargo.toml`), wired in via that same file's
+`[patch.crates-io]` section. Everything else in the Bezel GPUI family (`gpui`, `gpui_platform`,
+and the rest) still comes straight from the published crates.io release, unpatched.
+
+Each override changes one function of its crate and nothing else; the two are unrelated fixes
+that happen to need the same mechanism. `gpui_linux` is described first and at length because it
+established the arrangement; `gpui_windows` follows it and has its own short section at the end.
 
 ## Why this exists: F-CORE-FILE-03A
 
@@ -98,3 +102,35 @@ This is a real, standing fork of one crate, not a one-line patch. Bumping
 dropping this override entirely, if upstream has fixed the race some other way by then — worth
 checking first). Nothing else in the vendored crate should ever need hand-merging, since nothing
 else was changed from upstream.
+
+## `gpui_windows` — a bitblt swap chain so translucency can show (ADR 0003)
+
+`vendor/gpui_windows/` is the released `bezel-gpui-windows` 0.3.8 source with exactly one change:
+`create_swap_chain` in `src/directx_renderer.rs` — the swap chain GPUI builds when
+`GPUI_DISABLE_DIRECT_COMPOSITION` is set, which Sirio sets on Windows so the Browser surface's
+WebView2 child HWND has a redirection surface to compose into (ADR 0002) — is a bit-block-transfer
+swap chain (`DXGI_SWAP_EFFECT_DISCARD`, `DXGI_SCALING_STRETCH`, `DXGI_ALPHA_MODE_UNSPECIFIED`)
+instead of upstream's flip-model one. The DWM composes a flip-model HWND swap chain as opaque, so
+upstream's fallback path could never show the acrylic accent `set_background_appearance(Blurred)`
+installs; a bitblt present copies the back buffer, alpha included, into the redirection surface,
+which the DWM does composite per-pixel under an accent policy. Measured both ways on real hardware
+on 2026-09-05 — see `docs/adr/0003-windows-regains-translucency-through-a-bitblt-swap-chain.md`.
+The comment above the changed descriptor in the vendored file says the same in place. Every other
+file is byte-for-byte the released source.
+
+The manifest follows `gpui_linux`'s conventions (`[workspace]` table, `publish = false`, package
+name kept as `bezel-gpui-windows`, `[lib] name` kept as `gpui_windows`); the released manifest
+already spells every dependency out as a literal registry dependency, so nothing else had to
+change. `bezel-gpui-platform` takes `gpui_windows` as a plain crates.io dependency
+(`package = "bezel-gpui-windows"`), so the single `[patch.crates-io]` entry reaches every consumer,
+exactly as for `gpui_linux`.
+
+Unlike `gpui_linux`, this override carries **no standalone `Cargo.lock` and no CI test stage**: the
+change is one swap-chain descriptor whose effect exists only on a live DWM, and the crate's own
+tests do not cover swap-chain creation. The check that matters is visual (an isolated instance over
+a loud backdrop, with a Browser tab open), and `cargo tree -i bezel-gpui-windows` confirming the
+path source is used with no `patch ... was not used` warning.
+
+Bumping the pinned `bezel-gpui-windows` version means re-applying that one descriptor change by
+hand — or dropping the override, if upstream's no-DirectComposition path has become
+translucency-capable by then (worth checking first, as for `gpui_linux`).

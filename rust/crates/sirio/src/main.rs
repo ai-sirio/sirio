@@ -5087,15 +5087,7 @@ impl SirioWorkspace {
             return;
         }
         self.translucency_enabled = enabled;
-        // The surface fade follows the *resolved* material, not the toggle:
-        // on a platform without native blur the window stays opaque, and a
-        // faded panel over an opaque frame would only shift its tint (the
-        // spec's "visual consistency is preferable to an unblurred,
-        // partially transparent frame" rule).
-        let material = shell_chrome::current_platform_material(enabled);
-        cx.set_global(
-            Theme::get(cx).with_translucency(material == shell_chrome::ShellMaterial::Blurred),
-        );
+        shell_chrome::current_platform_material(enabled).apply_to_theme(cx);
         self.apply_window_background(startup_window_background(enabled), window);
         self.last_applied_translucency = Some(enabled);
         cx.notify();
@@ -16374,9 +16366,11 @@ fn main() {
     // `WindowsPlatform::new`, so it has to be set before `application()` —
     // per-window or per-tab toggling was never possible.
     //
-    // The cost is real and recorded in ADR 0002: translucency is dropped on
-    // Windows (the HWND path is `DXGI_ALPHA_MODE_IGNORE`), which is why
-    // `current_platform_material` no longer claims native blur there.
+    // The cost was real and is recorded in ADR 0002: upstream's HWND path is
+    // a flip-model swap chain the DWM composes opaque, so translucency was
+    // dropped on Windows. ADR 0003 buys it back by vendoring `gpui_windows`
+    // with a bitblt swap chain on that same path (rust/vendor/README.md), which
+    // is why `current_platform_material` claims native blur there again.
     #[cfg(target_os = "windows")]
     {
         // An explicit setting wins: someone debugging composition can still
@@ -16469,6 +16463,12 @@ fn main() {
             cx,
         );
         Theme::set_interface_font_size(saved_settings.ui_font_size as i32, cx);
+        // The window below is opened with the material resolved from the
+        // persisted preference; the theme's surfaces must fade to match from
+        // the first frame, not only once the toggle is next flipped, or a
+        // restored translucent window draws opaque panels over a blurred
+        // frame until then.
+        shell_chrome::current_platform_material(saved_settings.translucency).apply_to_theme(cx);
         let context = worktree_context(&project_catalog, &working_directory);
         let status_data = UsageBarData {
             branch: context.branch.clone(),
