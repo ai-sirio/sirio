@@ -222,8 +222,6 @@ impl Settings {
             // this row's install is in flight the action disappears: the
             // per-agent lock would refuse a second click anyway, and a
             // dead-looking button invites exactly that click.
-            // (The Update control keeps the predicate Task 9 gave it; the
-            // `v{latest} available` fragment and Update All land next.)
             let action = if matches!(install_state, Some(InstallState::InFlight)) {
                 None
             } else {
