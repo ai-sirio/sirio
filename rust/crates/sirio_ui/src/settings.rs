@@ -2821,7 +2821,7 @@ impl Settings {
             .rounded(theme.radii.control)
             .bg(theme.input_bg)
             .border_1()
-            .border_color(if is_focused { theme.text } else { theme.border })
+            .border_color(if is_focused { theme.ring } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 click_entity.update(cx, |this, cx| on_focus(this, window, cx));
@@ -3520,7 +3520,7 @@ impl Settings {
                             .bg(theme.input_bg)
                             .border_1()
                             .border_color(if search_is_focused {
-                                theme.text
+                                theme.ring
                             } else {
                                 theme.border
                             })
