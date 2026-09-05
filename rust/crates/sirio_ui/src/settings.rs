@@ -1,11 +1,12 @@
 //! Full-window settings surface and its small fixture model.
 
-use bezel::theme::Theme as BezelTheme;
 use crate::caret;
 use crate::controls;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
+use bezel::theme::Theme as BezelTheme;
+use bezel::ui::input::TextField;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
     KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, Window, actions, div, point, prelude::*,
@@ -27,6 +28,8 @@ use std::{collections::BTreeSet, path::PathBuf, process::Command};
 // Scoped to the menu's key context so the shell's own Escape handling is
 // untouched whenever the menu is not the focused thing.
 actions!(settings_summarizer, [CloseSummarizerPicker]);
+
+mod agents_page;
 
 /// The settings content column — the frozen 720px content column of
 /// `docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` (waku
@@ -143,7 +146,6 @@ impl SettingsCategory {
         }
     }
 }
-
 
 /// The agent used to summarize sessions into short tab titles
 /// (F-SET-05's summarizer picker). The choice is one of the five supported
@@ -603,25 +605,6 @@ pub fn provider_row(
     }
 }
 
-/// The pill for one agent row. Every arm is a rendering of a resolved fact:
-/// the previous version asked `acp_program()`, a compile-time claim, which
-/// is why OpenCode and Oh-My-Pi were labelled "No ACP server" while their
-/// binaries served one.
-pub(crate) fn launch_badge_label(source: &sirio_registry::LaunchSource) -> &'static str {
-    use sirio_registry::{LaunchSource, UnavailableReason};
-    match source {
-        LaunchSource::Builtin { .. } | LaunchSource::Installed(_) => "ACP chat available",
-        LaunchSource::Installable { .. } => "Available to install",
-        LaunchSource::Unavailable(UnavailableReason::NoArtifactForPlatform) => {
-            "Not available for this platform"
-        }
-        LaunchSource::Unavailable(UnavailableReason::UnsupportedDistribution) => {
-            "Unsupported install format"
-        }
-        LaunchSource::Unavailable(UnavailableReason::NotInRegistry) => "No ACP server",
-    }
-}
-
 /// What an installed agent could not prove about itself, or `None` when it
 /// could.
 pub(crate) fn installed_integrity_note(
@@ -668,6 +651,10 @@ impl ProviderKind {
 /// chip's own lightness and vanishes. The page ground is the neutral that
 /// actually contrasts with both fills, and it is already what the granted
 /// permission badge uses two screens over.
+///
+/// macOS-only in production (the permission rows it serves are macOS
+/// gates); the contrast test below uses it on every platform.
+#[cfg(any(test, target_os = "macos"))]
 fn on_status_fill(theme: &Theme) -> Rgba {
     theme.surface
 }
@@ -1033,14 +1020,11 @@ pub struct Settings {
     browser_origins: BTreeSet<String>,
     on_revoke_browser_origin: Option<Rc<dyn Fn(String)>>,
     on_revoke_all_browser_origins: Option<Rc<dyn Fn()>>,
-    /// Live text of the Agents screen's search field (F-SET-16). Transient
-    /// UI state, not part of the persistence contract — nothing durable
-    /// depends on what was last typed into a filter box.
-    agent_search: String,
-    /// Focus handle for the Agents screen's search field, the same
-    /// click-to-focus + raw-keystroke pattern `sidebar.rs`'s project filter
-    /// already uses and tests successfully.
-    agent_search_focus: FocusHandle,
+    /// The Agents screen's search field (F-SET-16): a bezel `TextField`
+    /// whose content is the filter query. Transient UI state, not part of
+    /// the persistence contract — nothing durable depends on what was last
+    /// typed into a filter box.
+    agent_search_field: Entity<TextField>,
     /// Shared blink state for every settings text field's insertion caret
     /// (search, both cookies, workspace override). One is enough: window
     /// focus is unique, so at most one field can show a caret. Computed
@@ -1185,8 +1169,15 @@ impl Settings {
             browser_origins: BTreeSet::new(),
             on_revoke_browser_origin: None,
             on_revoke_all_browser_origins: None,
-            agent_search: String::new(),
-            agent_search_focus: cx.focus_handle(),
+            agent_search_field: {
+                let field = cx.new(|cx| {
+                    TextField::new(cx)
+                        .with_placeholder("Search agents")
+                        .with_key_context("SettingsAgentSearch")
+                });
+                cx.observe(&field, |_, _, cx| cx.notify()).detach();
+                field
+            },
             field_blink: caret::Blink::new(),
             field_caret_visible: false,
             database_path: None,
@@ -1993,31 +1984,9 @@ impl Settings {
             .filter(|text| !text.is_empty())
     }
 
-    /// Raw-keystroke handling for the Agents screen's search field
-    /// (F-SET-16), the same backspace/character pattern `sidebar.rs`'s
-    /// project filter already uses.
     /// Blink timer tick shared by every settings text field's caret.
     fn flip_field_blink(&mut self, cx: &mut Context<Self>) {
         self.field_blink.flip();
-        cx.notify();
-    }
-
-    fn on_agent_search_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.field_blink.wake();
-        let key = event.keystroke.key.as_str();
-        if key == "backspace" || key == "delete" {
-            self.agent_search.pop();
-        } else if let Some(character) = event.keystroke.key_char.as_deref()
-            && !event.keystroke.modifiers.platform
-            && !event.keystroke.modifiers.control
-        {
-            self.agent_search.push_str(character);
-        }
         cx.notify();
     }
 
@@ -3164,48 +3133,6 @@ impl Settings {
         page
     }
 
-    /// The status pill for one provider row: the resolved executable when
-    /// the CLI is installed, the crate's own "not found" wording when it
-    /// is absent. A badge that claimed a binary not on PATH was installed
-    /// would be the exact lie this screen used to tell.
-    fn render_provider_status(availability: &AgentAvailability, theme: Theme) -> impl IntoElement {
-        /// Widest the resolved-path pill may grow: room for a typical
-        /// `~/.local/bin/<cli>` whole, while a node-hosted CLI's install
-        /// prefix is clipped instead of the row's identity.
-        const PATH_PILL_MAX_WIDTH: f32 = 240.0;
-        let status_id = format!("settings-agent-status-{}", availability.id);
-        match &availability.executable {
-            // #334: the path is capped, and clipped from its *start*, so a
-            // deep install prefix gives way before the binary's name does
-            // — and long before the row's own name and description, which
-            // are the only other shrinkable items in the row and used to
-            // collapse to nothing under a max-content pill.
-            Some(path) => div()
-                .id(status_id.clone())
-                .debug_selector(move || status_id.clone())
-                .max_w(px(PATH_PILL_MAX_WIDTH))
-                .overflow_hidden()
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .text_color(theme.text_muted)
-                .bg(theme.surface_raised)
-                .child(caret::field_value(text!(sirio_project::display_path(path)))),
-            None => div()
-                .id(status_id.clone())
-                .debug_selector(move || status_id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(on_status_fill(&theme))
-                .bg(theme.danger)
-                .child(text!(availability.status_label())),
-        }
-    }
-
     /// Resolves one adapter row's source from the last applied sweep.
     /// Rows without a known source resolve honestly to NotInRegistry.
     fn launch_source_for_row(&self, id: &str) -> sirio_registry::LaunchSource {
@@ -3218,421 +3145,6 @@ impl Settings {
                     sirio_registry::UnavailableReason::NotInRegistry,
                 )
             })
-    }
-
-    /// The ACP chat badge for one provider row — a rendering of the row's
-    /// resolved [`sirio_registry::LaunchSource`] rather than a compiled
-    /// claim. Colours are theme tokens: the neutral raised pill for
-    /// Builtin/Installed, the waku warning tone for everything else.
-    fn render_acp_badge(
-        badge_key: String,
-        source: &sirio_registry::LaunchSource,
-        theme: Theme,
-    ) -> impl IntoElement {
-        let badge_id = format!("settings-agent-acp-{badge_key}");
-        let label = launch_badge_label(source);
-        let neutral = matches!(
-            source,
-            sirio_registry::LaunchSource::Builtin { .. }
-                | sirio_registry::LaunchSource::Installed(_)
-        );
-        if neutral {
-            div()
-                .id(badge_id.clone())
-                .debug_selector(move || badge_id.clone())
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .text_color(theme.text_muted)
-                .bg(theme.surface_raised)
-                .child(text!(label))
-        } else {
-            div()
-                .id(badge_id.clone())
-                .debug_selector(move || badge_id)
-                .px(px(8.0))
-                .py(px(3.0))
-                .rounded(theme.radii.row_card)
-                .text_size(theme.typography.caption2)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(on_status_fill(&theme))
-                .bg(theme.warning)
-                .child(text!(label))
-        }
-    }
-
-    fn render_agents(
-        &self,
-        theme: Theme,
-        entity: Entity<Self>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        // F-SET-16: filtering hides non-matching rows but must not renumber
-        // the ones that stay — `settings-agent-row-{index}` ids are keyed to
-        // the original `provider_availability` position, and an existing
-        // test asserts against those exact indices.
-        let query = self.agent_search.trim().to_lowercase();
-        let first_load = self.provider_availability.is_empty()
-            && self.agent_registry_error.is_none()
-            && query.is_empty();
-        let mut agent_rows = controls::card(theme);
-        let mut first_visible_row = true;
-        for (index, availability) in self.provider_availability.iter().enumerate() {
-            let source = self.launch_source_for_row(availability.id);
-            let row = provider_row(availability, Some(&source));
-            if !query.is_empty()
-                && !row.name.to_lowercase().contains(&query)
-                && !row.description.to_lowercase().contains(&query)
-            {
-                continue;
-            }
-            if !first_visible_row {
-                agent_rows = agent_rows.child(controls::separator(theme));
-            }
-            first_visible_row = false;
-            let label = div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            IconElement::new(row.icon, IconSize::Small)
-                                .text_color(provider_glyph_color(theme, row.id)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .debug_selector(move || format!("settings-agent-name-{index}"))
-                                .text_size(theme.typography.headline)
-                                .text_color(theme.text)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(text!(id = ("settings-agent-name", index), row.name)),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(move || {
-                                    format!("settings-agent-description-{index}")
-                                })
-                                .text_size(theme.typography.footnote)
-                                .text_color(theme.text_muted)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(text!(
-                                    id = ("settings-agent-description", index),
-                                    row.description
-                                )),
-                        ),
-                );
-            // F-SET-18: a not-installed agent with a known install command
-            // gets a real Install control, not just a red status pill —
-            // clicking it hands the command to the host (a spawned
-            // terminal, mirroring the Agent Skill card) and leaves a
-            // confirmation line under the row so the click's effect is
-            // visible on this screen even though this crate cannot watch
-            // the spawned install finish.
-            // F-SET-18 (closed): Install/Update are renderings of the row's
-            // resolved source. The button emits only — `sirio` owns the
-            // installer, and this crate never runs installs itself. While
-            // this row's install is in flight the action disappears: the
-            // per-agent lock would refuse a second click anyway, and a
-            // dead-looking button invites exactly that click.
-            let install_state = self.install_states.get(availability.id);
-            let action = if matches!(install_state, Some(InstallState::InFlight)) {
-                None
-            } else {
-                match &source {
-                    sirio_registry::LaunchSource::Installable { .. } => Some((
-                        SettingsEvent::InstallAgent(availability.id.to_string()),
-                        "Install",
-                    )),
-                    sirio_registry::LaunchSource::Installed(installed) => self
-                        .registry_versions
-                        .get(availability.id)
-                        .filter(|latest| *latest != &installed.version)
-                        .map(|_| {
-                            (
-                                SettingsEvent::UpdateAgent(availability.id.to_string()),
-                                "Update",
-                            )
-                        }),
-                    _ => None,
-                }
-            };
-            let install_control = if matches!(install_state, Some(InstallState::InFlight)) {
-                Some(
-                    div()
-                        .id(("settings-agent-install-spinner", index))
-                        .debug_selector(move || format!("settings-agent-install-spinner-{index}"))
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(loading::compact("settings-install-spinner", window, cx)),
-                )
-            } else {
-                action.map(|(event, label)| {
-                    let install_entity = entity.clone();
-                    div()
-                        .id(("settings-agent-install", index))
-                        .debug_selector(move || format!("settings-agent-install-{index}"))
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(theme.radii.row_card)
-                        .text_size(theme.typography.caption2)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .bg(theme.element_active)
-                        .hover(|style| style.bg(theme.element_hover))
-                        .on_click(move |_, _, cx| {
-                            install_entity.update(cx, |_, cx| {
-                                cx.emit(event.clone());
-                            });
-                        })
-                        .child(text!(id = ("settings-agent-install-label", index), label))
-                })
-            };
-            let mut row_container = div()
-                .id(("settings-agent-row", index))
-                .debug_selector(move || format!("settings-agent-row-{index}"))
-                .flex()
-                .flex_col()
-                .child(controls::row_view(
-                    label,
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(Self::render_provider_status(availability, theme))
-                        .children(row.version.as_ref().map(|version| {
-                            div()
-                                .px(px(6.0))
-                                .text_size(theme.typography.caption2)
-                                .text_color(theme.text_faint)
-                                .child(text!(
-                                    id = ("settings-agent-version", index),
-                                    // #197: name the subject. This is the
-                                    // ACP server package's version, from
-                                    // `sirio_registry` -- the same thing
-                                    // the badge and Install button beside
-                                    // it are about. Bare, it sat next to
-                                    // the CLI's path in the same colour at
-                                    // the same size and read as that
-                                    // binary's version, which it never was:
-                                    // this row said "v0.70.0" beside a
-                                    // claude.exe reporting 2.1.247.
-                                    format!("ACP v{version}")
-                                ))
-                        }))
-                        .child(Self::render_acp_badge(
-                            availability.id.to_string(),
-                            &source,
-                            theme,
-                        ))
-                        .children(install_control),
-                    theme,
-                ));
-            if let Some(note) = installed_integrity_note(&source) {
-                row_container = row_container.child(
-                    div()
-                        .id(("settings-agent-integrity", index))
-                        .debug_selector(move || format!("settings-agent-integrity-{index}"))
-                        .px(px(BezelTheme::SPACE_MD))
-                        .text_size(theme.typography.footnote)
-                        .text_color(theme.text_muted)
-                        .child(text!(note)),
-                );
-            }
-            if let Some(state) = install_state {
-                let (kind, label): (&'static str, String) = match state {
-                    InstallState::InFlight => (
-                        "status",
-                        "Installing… this can take up to ten minutes.".to_string(),
-                    ),
-                    InstallState::Failed(message) => ("reason", message.clone()),
-                };
-                let failed = matches!(state, InstallState::Failed(_));
-                row_container = row_container.child(
-                    div()
-                        .id((kind, index))
-                        .debug_selector(move || format!("settings-agent-install-{kind}-{index}"))
-                        .px(px(BezelTheme::SPACE_MD))
-                        .text_size(theme.typography.footnote)
-                        .font_weight(if failed {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(theme.text_muted)
-                        .child(text!(label)),
-                );
-            }
-            agent_rows = agent_rows.child(row_container);
-        }
-
-        let search_focus = self.agent_search_focus.clone();
-        let search_is_focused = search_focus.is_focused(window);
-        let search_text = self.agent_search.clone();
-        let search_click_entity = entity.clone();
-        let search_key_entity = entity.clone();
-        let refresh_entity = entity;
-
-        let mut surface = div()
-            .w(px(CONTENT_WIDTH))
-            .pt(px(DETAIL_TOP_PADDING))
-            .pb(px(DETAIL_BOTTOM_PADDING))
-            .child(
-                div()
-                    .w_full()
-                    .mb(px(14.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .id("agent-search-field")
-                            .debug_selector(|| "agent-search-field".to_string())
-                            .track_focus(&search_focus)
-                            .w(px(260.0))
-                            .h(px(28.0))
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            // No `gap`: flex gap goes between *every* pair of
-                            // items, the value and its caret included, and
-                            // held the bar a phantom space off the text.
-                            .rounded(theme.radii.control)
-                            .bg(theme.input_bg)
-                            .border_1()
-                            .border_color(if search_is_focused {
-                                theme.ring
-                            } else {
-                                theme.border
-                            })
-                            .cursor(gpui::CursorStyle::IBeam)
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                search_click_entity.update(cx, |this, cx| {
-                                    this.agent_search_focus.focus(window, cx);
-                                });
-                            })
-                            .on_key_down(move |event, window, cx| {
-                                search_key_entity.update(cx, |this, cx| {
-                                    this.on_agent_search_key(event, window, cx);
-                                });
-                            })
-                            .text_size(theme.typography.callout)
-                            .text_color(if search_text.is_empty() {
-                                theme.text_faint
-                            } else {
-                                theme.text
-                            })
-                            // #212: see the field above.
-                            .overflow_hidden()
-                            .child(
-                                caret::field_value(text!(if search_text.is_empty() {
-                                    "Search agents".to_string()
-                                } else {
-                                    search_text
-                                }))
-                                .id("settings-agent-search-text")
-                                .debug_selector(|| "settings-agent-search-text".to_owned()),
-                            )
-                            .when(search_is_focused, |this| {
-                                this.child(caret::bar(
-                                    px(16.0),
-                                    theme.text,
-                                    self.field_caret_visible,
-                                ))
-                            }),
-                    )
-                    .child({
-                        // F-SET-16: a "Refreshed …" stamp next to the
-                        // button — the conjunct a byte-identical
-                        // before/after capture read as absent, since
-                        // Search and Refresh were themselves already wired
-                        // and tested.
-                        let mut refresh_area = div().flex().items_center().gap(px(8.0));
-                        if let Some(stamp) = self.agent_last_refreshed.as_ref() {
-                            refresh_area = refresh_area.child(
-                                div()
-                                    .id("agents-last-refreshed")
-                                    .debug_selector(|| "agents-last-refreshed".to_string())
-                                    .text_size(theme.typography.footnote)
-                                    .text_color(theme.text_muted)
-                                    .child(text!(format!("Refreshed {stamp}"))),
-                            );
-                        }
-                        refresh_area.child(controls::button(
-                            "refresh-agents",
-                            "↻ Refresh",
-                            theme,
-                            move |_, _, cx| {
-                                refresh_entity
-                                    .update(cx, |this, cx| this.refresh_agent_availability(cx));
-                            },
-                        ))
-                    }),
-            );
-        // F-SET-17: the registry error state, rendered over the rows from
-        // the last successful sweep, with the "↻ Refresh" button above as
-        // the retry — the Swift original's warning label in
-        // `AgentsSettingsView`.
-        if let Some(error) = self.agent_registry_error.clone() {
-            surface = surface.child(
-                div()
-                    .id("settings-agents-registry-error")
-                    .debug_selector(|| "settings-agents-registry-error".to_string())
-                    .w_full()
-                    .mb(px(14.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.warning)
-                    .child(text!("⚠"))
-                    .child(text!(error)),
-            );
-        }
-        if first_load {
-            surface.child(
-                div()
-                    .id("settings-agents-loading")
-                    .debug_selector(|| "settings-agents-loading".to_string())
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(theme.spacing.card_gap)
-                    .text_size(theme.typography.headline)
-                    .text_color(theme.text_muted)
-                    .child(loading::indeterminate(
-                        "settings-agents-loading-orb",
-                        loading::GENERIC_ORB,
-                        &theme,
-                        window,
-                        cx,
-                    ))
-                    .child("Loading agents…"),
-            )
-        } else {
-            surface.child(agent_rows)
-        }
     }
 
     /// The summarizer agent trigger (F-SET-05): a button showing the
@@ -4442,7 +3954,6 @@ impl Render for Settings {
         // unique, so at most one caret is ever visible. The computed bar
         // visibility is stashed for this frame's field builders.
         let field_focused = [
-            &self.agent_search_focus,
             &self.opencode_cookie_focus,
             &self.ollama_cookie_focus,
             &self.opencode_override_focus,
@@ -4816,404 +4327,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn agent_rows_render_what_discovery_found(cx: &mut gpui::TestAppContext) {
-        // The Agents screen renders the discovery list, not a fixed set of
-        // "Available" claims: the fixture below mirrors this machine's
-        // reality (opencode/omp absent) and must render absent rows too.
-        cx.update(Theme::init);
-        let fixture = vec![
-            AgentAvailability {
-                id: "claude",
-                display_name: "Claude Code",
-                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
-            },
-            AgentAvailability {
-                id: "opencode",
-                display_name: "OpenCode",
-                executable: None,
-            },
-            AgentAvailability {
-                id: "omp",
-                display_name: "Oh-My-Pi",
-                executable: None,
-            },
-        ];
-        let expected = fixture.clone();
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agent-row-0").is_some(),
-            "the first provider row renders"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-2").is_some(),
-            "the third provider row renders"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-3").is_none(),
-            "rows follow the discovery list, not a fixed count"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-status-claude").is_some(),
-            "an installed CLI renders its status pill"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-status-opencode").is_some(),
-            "an absent CLI still renders its status pill"
-        );
-        assert!(cx.debug_bounds("settings-agent-status-omp").is_some());
-
-        let rendered = cx.update(|window, cx| {
-            window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx)
-                .provider_availability
-                .clone()
-        });
-        assert_eq!(
-            rendered, expected,
-            "the surface renders exactly what discovery returned"
-        );
-    }
-
-    #[gpui::test]
-    async fn agent_description_stays_within_its_row(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let fixture = vec![AgentAvailability {
-            id: "codex",
-            display_name: "Codex agent with a deliberately long display name that exceeds the available row width",
-            executable: None,
-        }];
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let row = cx
-            .debug_bounds("settings-agent-row-0")
-            .expect("the Codex row renders");
-        let description = cx
-            .debug_bounds("settings-agent-description-0")
-            .expect("the Codex description renders");
-        assert!(
-            description.origin.x + description.size.width <= row.origin.x + row.size.width,
-            "agent description must stay inside its row: description={description:?} row={row:?}"
-        );
-    }
-
-    /// #334: the status pill carried the resolved binary's full path at its
-    /// max-content width, and the row's label side was the only shrinkable
-    /// flex item — a long install path (Pi under
-    /// `~/.local/share/pi-node/node-v22.23.2-linux-x64/bin/pi`) squeezed
-    /// the agent's name and description down to nothing while the path
-    /// stayed whole. The name is the row's identity; the path is the part
-    /// that gives way.
-    #[gpui::test]
-    async fn a_long_binary_path_never_squeezes_the_agent_name_out_of_its_row(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let fixture = vec![AgentAvailability {
-            id: "pi",
-            display_name: "Pi",
-            executable: Some(std::path::PathBuf::from(
-                "/home/user/.local/share/pi-node/node-v22.23.2-linux-x64/lib/node_modules/\
-                 @mariozechner/pi-coding-agent/node_modules/.bin/some-very-deeply-nested/\
-                 vendor/runtime/bin/pi",
-            )),
-        }];
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        open_agents_category(&window, &mut cx);
-
-        let row = cx
-            .debug_bounds("settings-agent-row-0")
-            .expect("the Pi row renders");
-        let name = cx
-            .debug_bounds("settings-agent-name-0")
-            .expect("the Pi name renders");
-        let status = cx
-            .debug_bounds("settings-agent-status-pi")
-            .expect("the resolved-path pill renders");
-
-        assert!(
-            name.size.width >= px(7.8 * 2.0),
-            "the agent's name keeps its full width — it is the row's identity: \
-             name={name:?} status={status:?}"
-        );
-        assert!(
-            status.origin.x + status.size.width <= row.origin.x + row.size.width,
-            "the path pill stays inside the row: status={status:?} row={row:?}"
-        );
-        assert!(
-            status.size.width < row.size.width / 2.0,
-            "the path pill gives way before the name does: status={status:?} row={row:?}"
-        );
-    }
-
-    /// F-SET-18 (closed): an Installable row draws a real Install button
-    /// whose click emits [`SettingsEvent::InstallAgent`] — the host owns
-    /// the actual install (Task 8); this crate only renders and emits. A
-    /// row with nothing to offer offers no button at all — never a
-    /// fabricated one.
-    #[gpui::test]
-    async fn agent_install_click_emits_the_install_request(cx: &mut gpui::TestAppContext) {
-        use sirio_registry::{Distribution, LaunchSource};
-        cx.update(Theme::init);
-        let fixture = vec![
-            AgentAvailability {
-                id: "opencode",
-                display_name: "OpenCode",
-                executable: None,
-            },
-            AgentAvailability {
-                id: "omp",
-                display_name: "Oh-My-Pi",
-                executable: None,
-            },
-        ];
-        let sources = vec![
-            (
-                "opencode".to_string(),
-                LaunchSource::Installable {
-                    agent: sirio_registry::RegistryAgent {
-                        id: "opencode".into(),
-                        name: "OpenCode".into(),
-                        version: "1.18.21".into(),
-                        description: None,
-                        repository: None,
-                        website: None,
-                        license: None,
-                        icon: None,
-                        distributions: vec![Distribution::Binary(Default::default())],
-                    },
-                },
-            ),
-            (
-                "omp".to_string(),
-                LaunchSource::Unavailable(sirio_registry::UnavailableReason::NotInRegistry),
-            ),
-        ];
-        let events = Rc::new(RefCell::new(Vec::<String>::new()));
-        let recorder = events.clone();
-        let window = cx.add_window(move |_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default())
-                .with_availability(fixture)
-                .with_launch_sources(sources)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        cx.update(|window, app| {
-            let settings = window.root::<Settings>().flatten().expect("settings root");
-            let subscription = app.subscribe(
-                &settings,
-                move |_entity, event: &SettingsEvent, _| match event {
-                    SettingsEvent::InstallAgent(id) => recorder.borrow_mut().push(id.clone()),
-                    SettingsEvent::UpdateAgent(_) | SettingsEvent::RefreshAgentSources => {}
-                },
-            );
-            // The subscription must outlive this update scope for the whole
-            // test; forgetting it pins it to the entities' lifetimes.
-            std::mem::forget(subscription);
-        });
-
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agent-install-0").is_some(),
-            "an Installable row offers Install"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-install-1").is_none(),
-            "a row with nothing to offer draws no button"
-        );
-
-        let install = cx
-            .debug_bounds("settings-agent-install-0")
-            .expect("Install renders for opencode");
-
-        // The click below proves nothing unless the control is inside
-        // the card that clips it: `controls::card` sets
-        // `overflow_hidden`, so a button pushed past the row's right
-        // edge is invisible AND unhittable while still reporting real
-        // `debug_bounds`. That is not hypothetical — the button already
-        // overflowed the 720px column once. Assert the containment the
-        // click depends on, so drift fails here instead of in the app.
-        let row = cx
-            .debug_bounds("settings-agent-row-0")
-            .expect("the opencode row draws");
-        assert!(
-            install.origin.x + install.size.width <= row.origin.x + row.size.width,
-            "Install must sit inside the row that clips it, not past its \
-             right edge: install={install:?} row={row:?}"
-        );
-
-        cx.simulate_click(install.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert_eq!(
-            events.borrow().as_slice(),
-            ["opencode".to_string()],
-            "the click emits InstallAgent for the row's adapter id"
-        );
-    }
-
-    /// An Installable opencode row, for the install-state tests below.
-    fn install_state_window(
-        cx: &mut gpui::TestAppContext,
-    ) -> (gpui::WindowHandle<Settings>, gpui::Entity<Settings>) {
-        use sirio_registry::{Distribution, LaunchSource};
-        cx.update(Theme::init);
-        let fixture = vec![AgentAvailability {
-            id: "opencode",
-            display_name: "OpenCode",
-            executable: None,
-        }];
-        let sources = vec![(
-            "opencode".to_string(),
-            LaunchSource::Installable {
-                agent: sirio_registry::RegistryAgent {
-                    id: "opencode".into(),
-                    name: "OpenCode".into(),
-                    version: "1.18.21".into(),
-                    description: None,
-                    repository: None,
-                    website: None,
-                    license: None,
-                    icon: None,
-                    distributions: vec![Distribution::Binary(Default::default())],
-                },
-            },
-        )];
-        let window = cx.add_window(move |_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default())
-                .with_availability(fixture)
-                .with_launch_sources(sources)
-        });
-        let entity = window.entity(cx).expect("settings entity");
-        (window, entity)
-    }
-
-    fn open_agents_category(
-        window: &gpui::WindowHandle<Settings>,
-        cx: &mut gpui::VisualTestContext,
-    ) {
-        let _ = window;
-        if let Some(bounds) = cx.debug_bounds("settings-category-Agents") {
-            cx.simulate_click(bounds.center(), Modifiers::none());
-            cx.run_until_parked();
-        }
-    }
-
-    #[gpui::test]
-    async fn an_in_flight_install_hides_the_action_and_shows_progress(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (window, settings) = install_state_window(cx);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        open_agents_category(&window, &mut cx);
-
-        settings.update(&mut cx, |settings, cx| {
-            settings.set_install_state("opencode", Some(InstallState::InFlight));
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agent-install-0").is_none(),
-            "the action is not clickable while the install is in flight"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-install-status-0").is_some(),
-            "progress replaces the action"
-        );
-    }
-
-    #[gpui::test]
-    async fn a_failed_install_shows_the_reason_and_allows_retry(cx: &mut gpui::TestAppContext) {
-        let (window, settings) = install_state_window(cx);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        open_agents_category(&window, &mut cx);
-
-        settings.update(&mut cx, |settings, cx| {
-            settings.set_install_state(
-                "opencode",
-                Some(InstallState::Failed(
-                    "opencode: checksum did not match; nothing was installed".into(),
-                )),
-            );
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agent-install-0").is_some(),
-            "a failed install offers the action again"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-install-reason-0").is_some(),
-            "the failure names its reason instead of disappearing"
-        );
-    }
-
-    #[gpui::test]
-    async fn a_settled_install_returns_to_the_normal_row(cx: &mut gpui::TestAppContext) {
-        let (window, settings) = install_state_window(cx);
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        open_agents_category(&window, &mut cx);
-
-        settings.update(&mut cx, |settings, cx| {
-            settings.set_install_state("opencode", Some(InstallState::InFlight));
-            cx.notify();
-        });
-        cx.run_until_parked();
-        settings.update(&mut cx, |settings, cx| {
-            settings.set_install_state("opencode", None);
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agent-install-0").is_some(),
-            "success returns the normal action"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-install-status-0").is_none()
-                && cx.debug_bounds("settings-agent-install-reason-0").is_none(),
-            "no progress or failure line survives a settled install"
-        );
-    }
-
-    #[gpui::test]
     async fn opening_the_agents_screen_asks_the_host_to_recheck_launch_sources(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -5317,97 +4430,7 @@ mod tests {
         );
     }
 
-    /// F-SET-16: typing in the Agents screen's search field narrows the
-    /// drawn rows to the matching agent, and clearing it restores every
-    /// row — the same contract `sidebar.rs`'s project filter already has.
-    /// Filtering must not renumber surviving rows: ids stay keyed to the
-    /// original discovery position, so a filtered-out row 1 does not
-    /// become the new row 0.
-    #[gpui::test]
-    async fn agent_search_narrows_rows_and_clearing_restores_them(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let fixture = vec![
-            AgentAvailability {
-                id: "claude",
-                display_name: "Claude Code",
-                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
-            },
-            AgentAvailability {
-                id: "opencode",
-                display_name: "OpenCode",
-                executable: None,
-            },
-            AgentAvailability {
-                id: "omp",
-                display_name: "Oh-My-Pi",
-                executable: None,
-            },
-        ];
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        // Focus the search field the way a user does: click it.
-        let search = cx
-            .debug_bounds("agent-search-field")
-            .expect("the search field is drawn");
-        cx.simulate_click(search.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        cx.simulate_input("claude");
-        cx.run_until_parked();
-
-        let search_state = cx.update(|window, cx| {
-            window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx)
-                .agent_search
-                .clone()
-        });
-        assert_eq!(
-            search_state, "claude",
-            "the keystrokes reached the search state"
-        );
-
-        assert!(
-            cx.debug_bounds("settings-agent-row-0").is_some(),
-            "the matching row stays drawn"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-1").is_none(),
-            "row 1 is filtered out while the search reads 'claude'"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-2").is_none(),
-            "row 2 is filtered out while the search reads 'claude'"
-        );
-
-        // Clearing the search restores every row.
-        cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace");
-        cx.run_until_parked();
-
-        assert!(cx.debug_bounds("settings-agent-row-0").is_some());
-        assert!(
-            cx.debug_bounds("settings-agent-row-1").is_some(),
-            "row 1 returns after the search is cleared"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-2").is_some(),
-            "row 2 returns after the search is cleared"
-        );
-    }
-
-    /// F-SET-16: the Agents screen's "↻ Refresh" button re-runs agent
+    /// F-SET-16: the Agents screen's "Refresh" button re-runs agent
     /// discovery, the same re-read-from-disk meaning "Refresh now" already
     /// has on the AI Providers screen — a pinned fixture is replaced by a
     /// fresh read.
@@ -5510,165 +4533,6 @@ mod tests {
         );
     }
 
-    /// F-SET-17: a failed discovery sweep renders the registry error banner
-    /// over the rows from the last successful sweep — never five false
-    /// "Not found on PATH" claims and never a blanked list — and the next
-    /// successful sweep clears the banner and replaces the rows. The retry
-    /// gesture itself is the Agents screen's existing "↻ Refresh" button,
-    /// whose wiring `refresh_agents_re_runs_agent_discovery` already pins.
-    #[gpui::test]
-    async fn registry_error_renders_over_stale_rows_and_clears_on_recovery(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let fixture = vec![AgentAvailability {
-            id: "claude",
-            display_name: "Claude Code",
-            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
-        }];
-        let stale = fixture.clone();
-        let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let agents = cx
-            .debug_bounds("settings-category-Agents")
-            .expect("Agents category is offered");
-        cx.simulate_click(agents.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agents-registry-error").is_none(),
-            "no banner renders while the sweep has not failed"
-        );
-
-        // A sweep that cannot answer.
-        cx.update(|window, cx| {
-            let settings = window.root::<Settings>().flatten().expect("settings root");
-            settings.update(cx, |this, cx| {
-                this.apply_agent_discovery(Err(DiscoveryError::Probe {
-                    program: "claude".to_string(),
-                    path: PathBuf::from("/locked/claude"),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "permission denied",
-                    ),
-                }));
-                cx.notify();
-            });
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agents-registry-error").is_some(),
-            "the failed sweep renders the registry error banner"
-        );
-        assert!(
-            cx.debug_bounds("settings-agent-row-0").is_some(),
-            "the rows from the last successful sweep stay on screen"
-        );
-        let (rendered, message) = cx.update(|window, cx| {
-            let settings = window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx);
-            (
-                settings.provider_availability.clone(),
-                settings.agent_registry_error.clone(),
-            )
-        });
-        assert_eq!(rendered, stale, "a failed sweep never rewrites the rows");
-        let message = message.expect("the failure is recorded renderably");
-        assert!(
-            message.starts_with("Could not load the agent registry:"),
-            "the message keeps the Swift registry's shape: {message}"
-        );
-
-        // The next successful sweep replaces the rows and clears the banner.
-        let recovered = vec![AgentAvailability {
-            id: "codex",
-            display_name: "Codex",
-            executable: None,
-        }];
-        let applied = recovered.clone();
-        cx.update(|window, cx| {
-            let settings = window.root::<Settings>().flatten().expect("settings root");
-            settings.update(cx, |this, cx| {
-                this.apply_agent_discovery(Ok(applied));
-                cx.notify();
-            });
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("settings-agents-registry-error").is_none(),
-            "a successful sweep clears the banner"
-        );
-        let rendered = cx.update(|window, cx| {
-            window
-                .root::<Settings>()
-                .flatten()
-                .expect("settings root")
-                .read(cx)
-                .provider_availability
-                .clone()
-        });
-        assert_eq!(rendered, recovered, "recovery replaces the stale rows");
-    }
-
-    #[test]
-    fn the_badge_reports_the_resolved_source_rather_than_a_compiled_claim() {
-        use sirio_registry::{LaunchSource, UnavailableReason};
-
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Builtin {
-                program: "opencode".into(),
-                args: vec!["acp".into()],
-            }),
-            "ACP chat available",
-            "OpenCode serves ACP from its own binary; the old pill said the opposite"
-        );
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Unavailable(UnavailableReason::NotInRegistry)),
-            "No ACP server",
-        );
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Unavailable(
-                UnavailableReason::NoArtifactForPlatform
-            )),
-            "Not available for this platform",
-            "an undifferentiated grey pill is the failure mode this work removes"
-        );
-        assert_eq!(
-            launch_badge_label(&LaunchSource::Unavailable(
-                UnavailableReason::UnsupportedDistribution
-            )),
-            "Unsupported install format",
-        );
-    }
-
-    #[test]
-    fn an_installable_row_offers_install_and_says_when_it_cannot_be_verified() {
-        use sirio_registry::{Distribution, LaunchSource, RegistryAgent};
-
-        let agent = RegistryAgent {
-            id: "cursor".into(),
-            name: "Cursor".into(),
-            version: "1.0.0".into(),
-            description: None,
-            repository: None,
-            website: None,
-            license: None,
-            icon: None,
-            distributions: vec![Distribution::Binary(Default::default())],
-        };
-        let source = LaunchSource::Installable { agent };
-        assert_eq!(launch_badge_label(&source), "Available to install");
-    }
-
     /// #197: the version in an agent row belongs to the **ACP server
     /// package**, never to the CLI whose path sits beside it. Rendered bare
     /// as `v0.70.0`, in the same colour and size as that path and six pixels
@@ -5734,29 +4598,6 @@ mod tests {
         };
 
         assert_eq!(provider_row(&availability, Some(&source)).version, None);
-    }
-
-    #[test]
-    fn the_state_pill_never_repeats_the_action_button_label() {
-        use sirio_registry::{LaunchSource, RegistryAgent};
-
-        let source = LaunchSource::Installable {
-            agent: RegistryAgent {
-                id: "cursor".into(),
-                name: "Cursor".into(),
-                version: "1.0.0".into(),
-                description: None,
-                repository: None,
-                website: None,
-                license: None,
-                icon: None,
-                distributions: vec![],
-            },
-        };
-        let action_label = "Install";
-
-        assert_ne!(launch_badge_label(&source), "Install");
-        assert_ne!(launch_badge_label(&source), action_label);
     }
 
     #[test]
