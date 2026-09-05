@@ -13,6 +13,9 @@ use bezel::ui::widgets::{
 };
 use gpui::Focusable;
 
+/// #334: the old path pill capped the resolved path at 240 px so version plus checksum still fit one meta line.
+const PATH_FRAGMENT_MAX_WIDTH: f32 = 240.0;
+
 impl Settings {
     /// Ids with an Update to offer, in row order: Installed rows whose
     /// registry version moved ahead, skipping rows with an install in
@@ -100,7 +103,7 @@ impl Settings {
                                 .tooltip(move |window, cx| Tooltip::text(full.clone(), window, cx))
                                 .font_family(bezel_theme.font_mono.clone())
                                 .text_size(px(11.0))
-                                .max_w(px(300.0))
+                                .max_w(px(PATH_FRAGMENT_MAX_WIDTH))
                                 .overflow_hidden()
                                 .child(caret::field_value(text!(shown))),
                         )
@@ -864,6 +867,68 @@ mod tests {
         );
     }
 
+    /// #334: the Codex row at the 240 px path cap — a 60-char path plus
+    /// `ACP vX` plus the checksum note. Pins what the harness measures
+    /// reliably: the path fragment stays capped and inside the row, and the
+    /// note stays inside the row. There is deliberately no equal-top-bounds
+    /// assert: under the harness font metrics the three fragments are 501px
+    /// in a 454px body, so the note wraps at any cap above ~193px.
+    #[gpui::test]
+    async fn codex_path_keeps_capped_path_and_note_inside_its_row(cx: &mut TestAppContext) {
+        use sirio_registry::{InstalledAgent, Integrity, LaunchSource};
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let path = "/opt/homebrew/bin/codex-acp-0123456789-abcdef-00000000000000";
+        assert_eq!(path.len(), 60, "the fixture is a Codex-length path");
+        let fixture = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex",
+            executable: Some(PathBuf::from(path)),
+        }];
+        let sources = vec![(
+            "codex".to_string(),
+            LaunchSource::Installed(InstalledAgent {
+                id: "codex-acp".into(),
+                version: "1.0.0".into(),
+                executable: "/opt/sirio/codex-acp".into(),
+                args: vec![],
+                integrity: Integrity::None,
+            }),
+        )];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .with_launch_sources(sources)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        let row = cx
+            .debug_bounds("settings-agent-row-0")
+            .expect("the Codex row renders");
+        let pathb = cx
+            .debug_bounds("settings-agent-path-0")
+            .expect("the resolved-path fragment renders");
+        let note = cx
+            .debug_bounds("settings-agent-integrity-0")
+            .expect("the checksum note renders");
+        assert!(
+            pathb.size.width <= px(PATH_FRAGMENT_MAX_WIDTH),
+            "the path fragment never grows past its 240 cap: path={pathb:?}"
+        );
+        assert!(
+            pathb.origin.x + pathb.size.width <= row.origin.x + row.size.width,
+            "the path fragment stays inside the row: path={pathb:?} row={row:?}"
+        );
+        assert!(
+            note.origin.x + note.size.width <= row.origin.x + row.size.width
+                && note.origin.y >= row.origin.y
+                && note.origin.y + note.size.height <= row.origin.y + row.size.height,
+            "the note sits inside the row's bounds: note={note:?} row={row:?}"
+        );
+    }
+
     // A test-only triple with no better name: the two rows, their
     // sources and the registry versions behind them.
     #[allow(clippy::type_complexity)]
@@ -1160,7 +1225,7 @@ mod tests {
     /// a capped width, clipped from its *start*, so a deep install prefix
     /// gives way before the binary's name does — and long before the row's
     /// own name, which is the row's identity and must keep its full width.
-    /// The fragment lives in the meta line now, capped at 300 wide.
+    /// The fragment lives in the meta line now, capped at 240 wide.
     #[gpui::test]
     async fn a_long_binary_path_never_squeezes_the_agent_name_out_of_its_row(
         cx: &mut gpui::TestAppContext,
@@ -1198,8 +1263,8 @@ mod tests {
              name={name:?} path={path:?}"
         );
         assert!(
-            path.size.width <= px(300.0),
-            "the path fragment never grows past its 300 cap: path={path:?}"
+            path.size.width <= px(PATH_FRAGMENT_MAX_WIDTH),
+            "the path fragment never grows past its 240 cap: path={path:?}"
         );
         assert!(
             path.origin.x + path.size.width <= row.origin.x + row.size.width,
