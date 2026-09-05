@@ -52,7 +52,7 @@ use sirio_ui::{
     sidebar::{
         AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
         SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
-        icons::{Icon, IconElement, IconSize},
+        icons::{Icon, IconElement, IconSize, file_glyph},
     },
     status_bar::{
         StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
@@ -3438,6 +3438,21 @@ fn tab_has_file(tab: &OpenTab) -> bool {
     has_file
 }
 
+/// The document a tab shows, when one of its panes is a file: the first
+/// `TabContent::File` in pane order, read live from its `FileView` the same
+/// way `add_file_tab`'s dedup and the session snapshot read it.
+fn tab_file_path(tab: &OpenTab, cx: &App) -> Option<PathBuf> {
+    let mut path = None;
+    tab.panes.for_each(&mut |_, content| {
+        if path.is_none()
+            && let TabContent::File { view } = content
+        {
+            path = Some(view.read(cx).path().to_path_buf());
+        }
+    });
+    path
+}
+
 /// F-CORE-WSP-02: two paths name the same open document when they are
 /// exactly equal (the common case, and the only one that still holds when
 /// `path` doesn't exist on disk -- a brand-new, not-yet-saved file has
@@ -3474,9 +3489,13 @@ fn tab_has_terminal(tab: &OpenTab) -> bool {
     has_terminal
 }
 
-fn tab_icon(kind: TabKind, has_file: bool, agent_icon: Option<Icon>) -> Icon {
-    if has_file {
-        return Icon::File;
+/// The mark a tab wears in the strip and in the Activity list. A tab
+/// showing a document takes the Files tree's per-type glyph for it
+/// (`file_glyph`), so the same name draws the same mark in both places —
+/// and it outranks the agent mark, as the old has-file flag did.
+fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Icon {
+    if let Some(path) = file {
+        return file_glyph(path, false);
     }
     if let Some(agent_icon) = agent_icon {
         return agent_icon;
@@ -6879,7 +6898,7 @@ impl SirioWorkspace {
             .map(|tab| {
                 let icon = tab_icon(
                     tab.kind,
-                    tab_has_file(tab),
+                    tab_file_path(tab, cx).as_deref(),
                     self.tab_agent_mark(tab).map(|agent| agent.icon),
                 );
                 let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
@@ -11320,6 +11339,9 @@ impl SirioWorkspace {
         // because it needs the activity model, which this associated
         // function deliberately does not take.
         agent: Option<AgentMark>,
+        // The document this tab shows, when it shows one — resolved by the
+        // caller for the same reason: reading it out of the pane needs `cx`.
+        file: Option<PathBuf>,
         active: bool,
         // #320: whether the *pane* this tab is drawn in holds focus. A tab is
         // `active` within its own half regardless — both halves always show
@@ -11337,8 +11359,8 @@ impl SirioWorkspace {
         theme: Theme,
     ) -> impl IntoElement {
         let id = tab.id;
-        let is_file = tab_has_file(tab);
-        let icon = tab_icon(tab.kind, is_file, agent.map(|agent| agent.icon));
+        let is_file = file.is_some();
+        let icon = tab_icon(tab.kind, file.as_deref(), agent.map(|agent| agent.icon));
         // An agent mark is drawn in that agent's brand, here, on the sidebar
         // tab row and in the worktree badge alike — the reference has one
         // `AgentIcon` view that every one of those three places draws, so a
@@ -12621,6 +12643,7 @@ impl SirioWorkspace {
             tabs = tabs.child(Self::render_open_tab(
                 tab,
                 self.tab_agent_mark(tab),
+                tab_file_path(tab, cx),
                 // Active *within this half*. The old test was `index ==
                 // self.active_tab`, which compared a position in the filtered
                 // strip against an index into the whole tab list — right only
@@ -16636,7 +16659,7 @@ fn main() {
                         // list reads the model rather than the tab's field.
                         let icon = tab_icon(
                             tab.kind,
-                            tab_has_file(tab),
+                            tab_file_path(tab, cx).as_deref(),
                             tab.agent_icon.or_else(|| {
                                 tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
                                     activity_model
@@ -25351,7 +25374,7 @@ mod tests {
                 "agent tab id {agent_id} must resolve to its brand icon"
             );
             assert_eq!(
-                tab_icon(TabKind::Terminal, false, Some(icon)),
+                tab_icon(TabKind::Terminal, None, Some(icon)),
                 icon,
                 "a terminal tab created for {agent_id} must retain its brand icon"
             );
@@ -26942,11 +26965,44 @@ mod tests {
 
     #[test]
     fn browser_tabs_have_shell_icon_and_width() {
-        assert_eq!(tab_icon(TabKind::Browser, false, None), Icon::Globe);
+        assert_eq!(tab_icon(TabKind::Browser, None, None), Icon::Globe);
         assert_eq!(
             SirioWorkspace::tab_width(TabKind::Browser),
             CHAT_TAB_MIN_WIDTH
         );
+    }
+
+    /// A tab showing a document wears the same per-type glyph the Files
+    /// tree draws for that name (`file_glyph`), resolved from the
+    /// document's path — not from the tab's title, so a renamed tab keeps
+    /// its file type — and ahead of any agent mark, exactly as the old
+    /// has-file flag took precedence.
+    #[test]
+    fn file_tabs_wear_the_files_tree_glyph() {
+        let cases: &[(&str, Icon)] = &[
+            ("/repo/src/lib.rs", Icon::file_type("rust")),
+            ("/repo/CLAUDE.md", Icon::file_type("markdown")),
+            ("/repo/Cargo.toml", Icon::file_type("toml")),
+            ("/repo/deploy.sh", Icon::SquareTerminal),
+            ("/repo/README", Icon::File),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                tab_icon(TabKind::Editor, Some(Path::new(path)), None),
+                *expected,
+                "tab_icon(Editor, {path:?})"
+            );
+        }
+        assert_eq!(
+            tab_icon(
+                TabKind::Terminal,
+                Some(Path::new("/repo/main.py")),
+                Some(Icon::ClaudeCode)
+            ),
+            Icon::file_type("python"),
+            "a file pane outranks the agent mark, as the has-file flag did"
+        );
+        assert_eq!(tab_icon(TabKind::Editor, None, None), Icon::File);
     }
 
     #[test]
