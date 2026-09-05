@@ -391,11 +391,13 @@ fn a_corrupt_chat_turn_is_quarantined_without_losing_other_turns() {
                 ChatTurn {
                     entries: vec![ChatEntry::UserMessage {
                         text: "first".into(),
+                        at: None,
                     }],
                 },
                 ChatTurn {
                     entries: vec![ChatEntry::UserMessage {
                         text: "second".into(),
+                        at: None,
                     }],
                 },
             ],
@@ -418,7 +420,7 @@ fn a_corrupt_chat_turn_is_quarantined_without_losing_other_turns() {
     assert_eq!(transcript.turns.len(), 1);
     assert!(matches!(
         transcript.turns[0].entries[0],
-        ChatEntry::UserMessage { ref text } if text == "second"
+        ChatEntry::UserMessage { ref text, .. } if text == "second"
     ));
     assert!(
         db.quarantined_records()
@@ -608,6 +610,7 @@ fn sample_chat_transcript() -> ChatTranscript {
                 entries: vec![
                     ChatEntry::UserMessage {
                         text: "Inspect the project".into(),
+                        at: None,
                     },
                     ChatEntry::AssistantMessage {
                         text: "I will inspect it now.".into(),
@@ -629,6 +632,7 @@ fn sample_chat_transcript() -> ChatTranscript {
                 entries: vec![
                     ChatEntry::UserMessage {
                         text: "Can I apply the change?".into(),
+                        at: None,
                     },
                     ChatEntry::Permission {
                         request_id: 7,
@@ -654,7 +658,7 @@ fn sample_chat_transcript() -> ChatTranscript {
 
 fn sample_turn(text: &str) -> ChatTurn {
     ChatTurn {
-        entries: vec![ChatEntry::UserMessage { text: text.into() }],
+        entries: vec![ChatEntry::UserMessage { text: text.into(), at: None }],
     }
 }
 

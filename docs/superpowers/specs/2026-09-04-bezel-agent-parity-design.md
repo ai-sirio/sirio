@@ -411,6 +411,7 @@ against the same selectors.
 - Revised 2026-09-04 (22:58): the toolbar above the card was rejected by the user; the chip row lives in the card's bottom row, in place of the hint text.
 - Sub-project 2 landed on branch `feat/tool-calls-step-row` (2026-09-04).
 - Sub-project 3 landed on branch feat/thought-takeover (2026-09-04).
+- Sub-project 4 landed on branch feat/transcript-work-zone (2026-09-04).
 - Implementation by a pi or opencode agent in a Herdr pane (models
   `opencode-go/gpt-5.6-luna` and `opencode-go/muse-spark-1.3-contributor`),
   one writer per sub-project, driven by a task file that carries this spec's

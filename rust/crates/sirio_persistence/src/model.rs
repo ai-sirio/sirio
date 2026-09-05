@@ -261,7 +261,12 @@ pub struct ChatTurn {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChatEntry {
     /// The user's submitted prompt.
-    UserMessage { text: String },
+    UserMessage {
+        text: String,
+        /// Unix seconds of the moment the message was sent, when known.
+        #[serde(default)]
+        at: Option<i64>,
+    },
     /// Rendered assistant prose (stored as source text, not a parsed view tree).
     AssistantMessage { text: String },
     /// Rendered assistant reasoning text.
