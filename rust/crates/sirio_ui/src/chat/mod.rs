@@ -6436,11 +6436,7 @@ impl Chat {
             // so the card's box never moves while streaming.
             .rounded(px(bezel::theme::Theme::surface_radius()))
             .border_1()
-            .border_color(if focused {
-                bezel_theme.text
-            } else {
-                bezel_theme.border
-            })
+            .border_color(composer_border(focused, &bezel_theme))
             .bg(bezel_theme.card_glass_bg())
             .px(px(4.0))
             .pt(px(4.0))
@@ -7716,6 +7712,17 @@ fn split_diff_lines(text: &str) -> Vec<String> {
     lines
 }
 
+/// The composer card's border colour for the given focus state.
+///
+/// Focus is marked with bezel's `ring` — the translucent hairline every bezel
+/// input, select and control lights up with — so it follows the appearance the
+/// user chose: a faint white wash over the dark surface, a faint black one over
+/// the light. It used to be the body `text` colour, which on the dark theme
+/// painted a solid white frame around the card.
+fn composer_border(focused: bool, theme: &bezel::theme::Theme) -> gpui::Hsla {
+    if focused { theme.ring } else { theme.border }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7724,6 +7731,21 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    #[test]
+    fn composer_focus_border_is_the_theme_ring_not_body_text() {
+        for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
+            assert_eq!(composer_border(false, &theme), theme.border);
+            let focused = composer_border(true, &theme);
+            assert_eq!(focused, theme.ring);
+            assert_ne!(focused, theme.text);
+            // A hairline wash over the surface, never an opaque frame.
+            assert!(
+                focused.a < 1.0,
+                "the focus ring must be translucent, got {focused:?}"
+            );
+        }
+    }
 
     /// A typical streamed answer is reparsed as deltas arrive. This deliberately
     /// uses a coarse wall-clock ceiling: it catches an accidental super-linear

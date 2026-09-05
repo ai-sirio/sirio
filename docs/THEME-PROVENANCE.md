@@ -121,6 +121,12 @@ Recorded because no test covers any of it:
 - **Panel borders went translucent.** `border_opaque` collapsed onto `border`:
   bezel draws every seam as a hairline veil, so the opaque separator has no
   source any more.
+- **A focused text field lights bezel's `ring`, not `text`.** The composer, the
+  settings fields, the sidebar's rename and filter fields all framed themselves
+  in the body text colour on focus, which on dark is an opaque near-white box.
+  `ring` is the hairline every bezel input, select and control uses: a 35% veil
+  on the surface's own tone, so the field lifts in the appearance the user
+  chose instead of being outlined. Held by `theme_colours_come_from_bezel`.
 - **Frost and glass now share a surface model.** bezel 0.1.4 resolves both
   through `SurfaceStyle` / `SurfaceSpec`; the facade's surface behavior is one
   material contract instead of separate frost and glass paint paths.
