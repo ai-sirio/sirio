@@ -9,11 +9,15 @@
 //! # Agent marks are different
 //!
 //! The agent brand marks (Claude Code, Codex, OpenCode, Pi, omp) are
-//! embedded SVGs on every platform.
+//! embedded SVGs on every platform, taken from icon libraries rather than
+//! the Zed catalog: Claude and OpenAI from Microsoft's Codicons
+//! (`rust/assets/icons/codicons/`), OpenCode and Pi from Simple Icons
+//! (`rust/assets/icons/simple-icons/`). No library carries an Oh My Pi
+//! mark, so omp keeps Sirio's own asset.
 //! Oh My Pi's three-stop gradient is rendered **full-colour, never tinted**:
 //! its brand logo keeps its identity and must not be recoloured by a theme.
-//! Zed's monochrome marks and Sirio's Pi monogram go through the normal
-//! tinted path like the reference does.
+//! The four library marks are single `currentColor` paths and go through
+//! the normal tinted path like the reference does.
 //!
 //! The SVG bytes are embedded with `include_bytes!`, so icons ship inside
 //! the binary. Colour comes from the caller's `text_color` — which must come
@@ -38,10 +42,11 @@ use sirio_theme::AgentBrandColor;
 ///
 /// # Pinned Zed catalog
 ///
-/// Generic icons and available agent marks resolve to byte-identical SVGs
-/// vendored from Zed's pinned upstream catalog; see
-/// `rust/assets/icons/zed/ATTRIBUTION.md`. Pi and Oh My Pi deliberately keep
-/// their Sirio assets because the catalog does not provide their marks.
+/// Generic icons resolve to byte-identical SVGs vendored from Zed's pinned
+/// upstream catalog; see `rust/assets/icons/zed/ATTRIBUTION.md`. Agent marks
+/// come from Codicons and Simple Icons (each directory carries its own
+/// `ATTRIBUTION.md`); Oh My Pi keeps its Sirio asset because no library
+/// provides its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     /// A project directory (`zed/folder.svg`).
@@ -76,14 +81,15 @@ pub enum Icon {
     SunMoon,
     /// A browser surface (`zed/public.svg`).
     Globe,
-    /// Anthropic's monochrome Zed mark.
+    /// Anthropic's Claude mark, monochrome (`codicons/claude.svg`).
     ClaudeCode,
-    /// OpenAI's monochrome Zed mark, like the Swift app's `.primary`
-    /// rendering.
+    /// OpenAI's knot, monochrome (`codicons/openai.svg`), like the Swift
+    /// app's `.primary` rendering.
     Codex,
-    /// OpenCode's monochrome Zed mark.
+    /// OpenCode's nested-frame mark, monochrome
+    /// (`simple-icons/opencode.svg`).
     OpenCode,
-    /// Pi's Sirio monogram fallback, monochrome.
+    /// pi.dev's monogram, monochrome (`simple-icons/pi.svg`).
     Pi,
     /// Oh-My-Pi's mark with the pink→purple→cyan gradient, ported from
     /// `App/AgentIcon.swift` — full colour. It remains a Sirio fallback
@@ -171,10 +177,10 @@ impl Icon {
             Icon::Shield => "icons/zed/lock.svg",
             Icon::SunMoon => "icons/zed/screen.svg",
             Icon::Globe => "icons/zed/public.svg",
-            Icon::ClaudeCode => "icons/zed/ai_claude.svg",
-            Icon::Codex => "icons/zed/ai_open_ai.svg",
-            Icon::OpenCode => "icons/zed/ai_open_code.svg",
-            Icon::Pi => "icons/agent-pi.svg",
+            Icon::ClaudeCode => "icons/codicons/claude.svg",
+            Icon::Codex => "icons/codicons/openai.svg",
+            Icon::OpenCode => "icons/simple-icons/opencode.svg",
+            Icon::Pi => "icons/simple-icons/pi.svg",
             Icon::OhMyPi => "icons/agent-omp.svg",
             Icon::SidebarLeft => "icons/zed/threads_sidebar_left_open.svg",
             Icon::PanelRight => "icons/zed/threads_sidebar_right_open.svg",
@@ -253,10 +259,10 @@ impl Icon {
             Icon::Shield => include_bytes!("../../../assets/icons/zed/lock.svg"),
             Icon::SunMoon => include_bytes!("../../../assets/icons/zed/screen.svg"),
             Icon::Globe => include_bytes!("../../../assets/icons/zed/public.svg"),
-            Icon::ClaudeCode => include_bytes!("../../../assets/icons/zed/ai_claude.svg"),
-            Icon::Codex => include_bytes!("../../../assets/icons/zed/ai_open_ai.svg"),
-            Icon::OpenCode => include_bytes!("../../../assets/icons/zed/ai_open_code.svg"),
-            Icon::Pi => include_bytes!("../../../assets/icons/agent-pi.svg"),
+            Icon::ClaudeCode => include_bytes!("../../../assets/icons/codicons/claude.svg"),
+            Icon::Codex => include_bytes!("../../../assets/icons/codicons/openai.svg"),
+            Icon::OpenCode => include_bytes!("../../../assets/icons/simple-icons/opencode.svg"),
+            Icon::Pi => include_bytes!("../../../assets/icons/simple-icons/pi.svg"),
             Icon::OhMyPi => include_bytes!("../../../assets/icons/agent-omp.svg"),
             Icon::SidebarLeft => {
                 include_bytes!("../../../assets/icons/zed/threads_sidebar_left_open.svg")
@@ -335,8 +341,8 @@ impl Icon {
     /// marks are monochrome by design and follow the tinted path, exactly
     /// as the Swift app renders them with `.primary`.
     ///
-    /// Only `OhMyPi` and the `FileType` set stay chromatic. Every Zed-provided
-    /// mark and Sirio's Pi fallback are monochrome and follow the theme tint.
+    /// Only `OhMyPi` and the `FileType` set stay chromatic. The Codicons and
+    /// Simple Icons marks are monochrome and follow the theme tint.
     pub fn has_own_colours(self) -> bool {
         matches!(self, Icon::OhMyPi | Icon::FileType(_))
     }
@@ -730,10 +736,10 @@ mod tests {
             (Icon::Shield, "icons/zed/lock.svg"),
             (Icon::SunMoon, "icons/zed/screen.svg"),
             (Icon::Globe, "icons/zed/public.svg"),
-            (Icon::ClaudeCode, "icons/zed/ai_claude.svg"),
-            (Icon::Codex, "icons/zed/ai_open_ai.svg"),
-            (Icon::OpenCode, "icons/zed/ai_open_code.svg"),
-            (Icon::Pi, "icons/agent-pi.svg"),
+            (Icon::ClaudeCode, "icons/codicons/claude.svg"),
+            (Icon::Codex, "icons/codicons/openai.svg"),
+            (Icon::OpenCode, "icons/simple-icons/opencode.svg"),
+            (Icon::Pi, "icons/simple-icons/pi.svg"),
             (Icon::OhMyPi, "icons/agent-omp.svg"),
             (Icon::SidebarLeft, "icons/zed/threads_sidebar_left_open.svg"),
             (Icon::PanelRight, "icons/zed/threads_sidebar_right_open.svg"),
@@ -772,11 +778,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_catalog_uses_zed_where_available_and_sirio_for_pi_family() {
-        assert_eq!(Icon::ClaudeCode.path(), "icons/zed/ai_claude.svg");
-        assert_eq!(Icon::Codex.path(), "icons/zed/ai_open_ai.svg");
-        assert_eq!(Icon::OpenCode.path(), "icons/zed/ai_open_code.svg");
-        assert_eq!(Icon::Pi.path(), "icons/agent-pi.svg");
+    fn agent_marks_come_from_codicons_simple_icons_and_sirio_for_omp() {
+        // Codicons ships Claude and OpenAI; Simple Icons ships OpenCode and
+        // Pi; no library carries Oh My Pi, so its Sirio gradient stays.
+        assert_eq!(Icon::ClaudeCode.path(), "icons/codicons/claude.svg");
+        assert_eq!(Icon::Codex.path(), "icons/codicons/openai.svg");
+        assert_eq!(Icon::OpenCode.path(), "icons/simple-icons/opencode.svg");
+        assert_eq!(Icon::Pi.path(), "icons/simple-icons/pi.svg");
         assert_eq!(Icon::OhMyPi.path(), "icons/agent-omp.svg");
     }
 
@@ -877,17 +885,55 @@ mod tests {
 
     #[test]
     fn monochrome_agent_marks_use_the_approved_sources() {
-        for icon in [Icon::ClaudeCode, Icon::Codex, Icon::OpenCode] {
+        // Every library mark is a single `currentColor` path, so it rides
+        // GPUI's tinted svg path and never the full-colour raster.
+        for (icon, library) in [
+            (Icon::ClaudeCode, "icons/codicons/"),
+            (Icon::Codex, "icons/codicons/"),
+            (Icon::OpenCode, "icons/simple-icons/"),
+            (Icon::Pi, "icons/simple-icons/"),
+        ] {
             let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
-            assert!(icon.path().starts_with("icons/zed/"));
-            assert!(svg.contains("width=\"16\"") && svg.contains("height=\"16\""));
+            assert!(
+                icon.path().starts_with(library),
+                "{icon:?} must come from {library}, got {}",
+                icon.path()
+            );
+            assert!(
+                svg.contains("fill=\"currentColor\""),
+                "{icon:?} must resolve its fill through currentColor"
+            );
+            assert!(
+                !svg.contains("fill=\"#"),
+                "{icon:?} must not bake a colour into the asset"
+            );
             assert!(
                 !icon.has_own_colours(),
                 "{icon:?} must follow the theme tint"
             );
         }
-        assert_eq!(Icon::Pi.path(), "icons/agent-pi.svg");
-        assert!(!Icon::Pi.has_own_colours());
+    }
+
+    #[test]
+    fn library_marks_share_one_optical_margin() {
+        // Codicons draw inside a padded 16px canvas; Simple Icons fill the
+        // whole 24px box. The Simple Icons marks get a 2-unit margin on the
+        // viewBox (geometry untouched) so OpenCode and Pi do not read larger
+        // than Claude and Codex at the same IconSize.
+        for icon in [Icon::ClaudeCode, Icon::Codex] {
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            assert!(
+                svg.contains("viewBox=\"0 0 16 16\""),
+                "{icon:?} keeps Codicons' 16px canvas"
+            );
+        }
+        for icon in [Icon::OpenCode, Icon::Pi] {
+            let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");
+            assert!(
+                svg.contains("viewBox=\"-2 -2 28 28\""),
+                "{icon:?} wears the padded Simple Icons canvas"
+            );
+        }
     }
 
     #[test]
@@ -931,7 +977,10 @@ mod tests {
             (view_box_size(Icon::FolderFill) - 16.0).abs() < 1.0,
             "zed's 16x16 home format"
         );
-        assert!((view_box_size(Icon::Pi) - 800.0).abs() < 1.0, "pi viewBox");
+        assert!(
+            (view_box_size(Icon::Pi) - 28.0).abs() < 1.0,
+            "pi's padded Simple Icons viewBox"
+        );
     }
 
     #[test]

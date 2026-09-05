@@ -60,13 +60,32 @@ by Material Extensions, obtained via [Iconify](https://iconify.design)
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
+## Codicons (agent marks)
+
+The Claude and OpenAI marks in `rust/assets/icons/codicons/` are from
+[Codicons](https://github.com/microsoft/vscode-codicons) by Microsoft
+Corporation, obtained via [Iconify](https://iconify.design) (`codicon` set),
+and are used under the Creative Commons Attribution 4.0 International
+license. Provenance is recorded in `rust/assets/icons/codicons/ATTRIBUTION.md`;
+the full license text is copied in `rust/assets/icons/codicons/LICENSE`.
+
+## Simple Icons (agent marks)
+
+The OpenCode and Pi marks in `rust/assets/icons/simple-icons/` are from
+[Simple Icons](https://github.com/simple-icons/simple-icons) 16.29.0,
+obtained via [Iconify](https://iconify.design) (`simple-icons` set), and are
+released under CC0 1.0 Universal (`rust/assets/icons/simple-icons/LICENSE.md`).
+Provenance, and the one deliberate `viewBox` change, are recorded in
+`rust/assets/icons/simple-icons/ATTRIBUTION.md`.
+
 ## Agent marks
 
-The Claude, OpenAI, and OpenCode marks are the pinned SVG assets documented
-in `rust/assets/icons/zed/ATTRIBUTION.md`. The Pi and Oh-My-Pi marks in
-`rust/assets/icons/agent-pi.svg` and `rust/assets/icons/agent-omp.svg` are
-project-owned SVG translations of the vector coordinates formerly stored in
-`App/AgentIcon.swift`, readable at commit `5430d7bf`.
+The Oh-My-Pi mark in `rust/assets/icons/agent-omp.svg` is a project-owned
+SVG translation of the vector coordinates formerly stored in
+`App/AgentIcon.swift`, readable at commit `5430d7bf`. The Claude, OpenAI,
+OpenCode and Pi marks come from the Codicons and Simple Icons sets above;
+until 2026-09-05 Claude, OpenAI and OpenCode were the Zed catalog's
+`ai_*.svg` assets and Pi a project-owned monogram, both since removed.
 
 ## Trademark notice
 
