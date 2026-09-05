@@ -3,17 +3,17 @@
 //! The usage segment is real data: the bar owns a Claude
 //! usage fetch that runs on the background executor (never the render
 //! thread), refreshes on a fixed interval, and can be triggered manually
-//! from the refresh button. A provider that is missing, unreadable or
-//! malformed renders its specific unavailable reason; a timed-out refresh
-//! keeps the last good numbers visibly dimmed rather than showing them as
+//! from the refresh button. The bar shows numbers and nothing else: a
+//! provider that is missing, unreadable, unsupported here or still loading
+//! has no segment at all rather than a reason; a timed-out refresh keeps
+//! the last good numbers visibly dimmed rather than showing them as
 //! current.
 
 use gpui::{AnyView, Context, Render, Rgba, Window, div, prelude::*, px, text};
 use sirio_theme::Theme;
 use sirio_usage::{
     ClaudeUsageFetcher, CodexUsageFetcher, OllamaCloudUsageFetcher, OpenCodeGoUsageFetcher,
-    ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason, UsageWindow, reduce,
-    reset_countdown,
+    ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageWindow, reduce, reset_countdown,
 };
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
@@ -204,6 +204,13 @@ impl StatusBar {
         cx.notify();
     }
 
+    /// The preferences the bar currently consumes (F-SET-10), as last
+    /// routed by the host through [`Self::apply_preferences`] or set at
+    /// construction.
+    pub fn preferences(&self) -> &UsageBarPrefs {
+        &self.prefs
+    }
+
     /// Whether the quiet status-bar indicator should be drawn.
     fn update_indicator_visible(state: &UpdateState) -> bool {
         state.enabled
@@ -289,8 +296,9 @@ impl StatusBar {
     /// one is listening via [`Self::on_refresh`], and — independent of
     /// whether a host is wired up at all — forces every provider segment
     /// to refetch immediately instead of waiting for the next interval
-    /// tick. Segments flip to their "…" loading text right away so the
-    /// click has a visible effect even before the fetches return.
+    /// tick. Segments flip to `Loading` right away — the refresh control
+    /// spins and the numbers leave the bar until the fetches return — so
+    /// the click has a visible effect before any result is in.
     fn on_refresh_clicked(&mut self, cx: &mut Context<Self>) {
         if let Some(callback) = &self.on_refresh {
             callback();
@@ -373,56 +381,28 @@ impl StatusBar {
         .detach();
     }
 
-    /// The segment text for one provider: "3% used 1h 40m · 24% used 5d 23h
-    /// · 46% used Fable" once loaded (the brand mark carries the provider's
-    /// name, the text does not); "Claude …" while loading; "Claude —" or
-    /// the unavailable reason otherwise, where the name is needed.
-    fn segment_text(display_name: &str, state: &ProviderUsageState) -> String {
-        Self::segment_text_at(display_name, state, SystemTime::now())
+    /// The segment text for one provider — "3% used 1h 40m · 24% used 5d
+    /// 23h · 46% used Fable" — or `None` when there are no numbers to show.
+    /// The bar renders numbers and nothing else: a provider that is still
+    /// loading, could not be read (logged out, API key, not installed,
+    /// unsupported here, timed out with nothing to keep), or succeeded
+    /// without a single window gets no segment rather than a reason. The
+    /// reason remains a distinct fact in [`sirio_usage::UsageReason`] for a
+    /// surface that explains; this one only counts. Stale numbers are still
+    /// numbers, dimmed by [`Self::segment_dimmed`].
+    fn segment_text(state: &ProviderUsageState) -> Option<String> {
+        Self::segment_text_at(state, SystemTime::now())
     }
 
     /// [`Self::segment_text`] with the clock injected, so the countdowns can
     /// be asserted against a fixed `now`.
-    fn segment_text_at(display_name: &str, state: &ProviderUsageState, now: SystemTime) -> String {
+    fn segment_text_at(state: &ProviderUsageState, now: SystemTime) -> Option<String> {
         match state {
-            ProviderUsageState::Loading => format!("{display_name} …"),
             ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => {
                 let parts = Self::window_texts(usage, now);
-                if parts.is_empty() {
-                    format!("{display_name} —")
-                } else {
-                    parts.join(" · ")
-                }
+                (!parts.is_empty()).then(|| parts.join(" · "))
             }
-            // F-SET-11: the reason is the one piece of data that tells the
-            // four unavailable states apart; a `_` wildcard here discarded
-            // it and rendered every one of them as the same bare "—". A
-            // A timed-out fetch with a previous value is represented by
-            // `Stale`; without a previous value it remains
-            // `Unavailable(TimedOut)` so the user can distinguish it from a
-            // provider error.
-            ProviderUsageState::Unavailable(reason) => {
-                let reason_text = match reason {
-                    UsageReason::NotInstalled => "not found",
-                    UsageReason::LoggedOut => "logged out",
-                    UsageReason::ApiKey => "API key",
-                    // F-CORE-USG-06: a Codex refresh-token failure classified
-                    // as reused/revoked/expired gets its own copy instead of
-                    // collapsing into the generic "logged out".
-                    UsageReason::TokenReused => "token reused",
-                    UsageReason::TokenRevoked => "token revoked",
-                    UsageReason::TokenExpired => "token expired",
-                    UsageReason::TimedOut => "timed out",
-                    // #199: not a fault -- there is no implementation on
-                    // this platform to have failed. "error" sent the user
-                    // looking for a problem with their own machine, next
-                    // to a settings surface reporting the same provider
-                    // as signed in.
-                    UsageReason::Unsupported => "not supported here",
-                    UsageReason::Error => "error",
-                };
-                format!("{display_name} {reason_text}")
-            }
+            ProviderUsageState::Loading | ProviderUsageState::Unavailable(_) => None,
         }
     }
 
@@ -469,15 +449,15 @@ impl StatusBar {
         .map_or(0.0, |window| f32::from(window.used_percent) / 100.0)
     }
 
-    /// The pill meter's fill for a segment, or `None` when there are no
-    /// numbers to fill it with (loading, unavailable): an empty track would
-    /// read as "0% used".
-    fn segment_meter(state: &ProviderUsageState) -> Option<f32> {
+    /// The pill meter's fill for a segment. Only a segment with numbers is
+    /// drawn (see [`Self::segment_text`]), so a state without them fills
+    /// nothing: the value is never rendered.
+    fn segment_meter(state: &ProviderUsageState) -> f32 {
         match state {
             ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => {
-                Some(Self::meter_fraction(usage))
+                Self::meter_fraction(usage)
             }
-            ProviderUsageState::Loading | ProviderUsageState::Unavailable(_) => None,
+            ProviderUsageState::Loading | ProviderUsageState::Unavailable(_) => 0.0,
         }
     }
 
@@ -548,7 +528,7 @@ impl Render for StatusBar {
                                      mark: Icon,
                                      text_color: gpui::Rgba,
                                      dimmed: bool,
-                                     meter: Option<f32>,
+                                     meter: f32,
                                      text: String| {
             // The `text!` macro derives its element id from its own source
             // location: inside this closure the location is shared by all
@@ -556,16 +536,11 @@ impl Render for StatusBar {
             // element ids make GPUI drop all but one segment.
             let text_id = format!("{display_name}-usage-text");
             // F-USE-02: the tooltip repeats the segment's own text rather
-            // than inventing a second vocabulary, so it stays correct for
-            // every state for free. A meter means the text carries numbers
+            // than inventing a second vocabulary. The text carries numbers
             // and no name (the brand mark names the provider in the bar), so
-            // the tooltip is where the name lives: "Claude · 3% used 1h 40m";
-            // an unavailable reason already names the provider.
+            // the tooltip is where the name lives: "Claude · 3% used 1h 40m".
             let segment_id = format!("{display_name}-usage-segment");
-            let tooltip_text = match meter {
-                Some(_) => format!("{display_name} · {text}"),
-                None => text.clone(),
-            };
+            let tooltip_text = format!("{display_name} · {text}");
             div()
                 .id(segment_id)
                 .debug_selector(move || format!("{display_name}-usage-text"))
@@ -583,20 +558,18 @@ impl Render for StatusBar {
                     .into()
                 })
                 .child(IconElement::new(mark, IconSize::XSmall))
-                .when_some(meter, |segment, fraction| {
-                    // The pill: bezel's determinate progress bar on a fixed
-                    // narrow track, so the row never reflows as the value
-                    // moves. Dimmed with the text when the numbers are stale.
-                    segment.child(
-                        div()
-                            .id(format!("{display_name}-usage-meter"))
-                            .debug_selector(move || format!("{display_name}-usage-meter"))
-                            .flex_none()
-                            .w(px(METER_WIDTH))
-                            .opacity(if dimmed { DIM_OPACITY } else { 1.0 })
-                            .child(loading::progress(fraction, &theme)),
-                    )
-                })
+                // The pill: bezel's determinate progress bar on a fixed
+                // narrow track, so the row never reflows as the value
+                // moves. Dimmed with the text when the numbers are stale.
+                .child(
+                    div()
+                        .id(format!("{display_name}-usage-meter"))
+                        .debug_selector(move || format!("{display_name}-usage-meter"))
+                        .flex_none()
+                        .w(px(METER_WIDTH))
+                        .opacity(if dimmed { DIM_OPACITY } else { 1.0 })
+                        .child(loading::progress(meter, &theme)),
+                )
                 .child(text!(id = text_id, text))
         };
 
@@ -636,37 +609,48 @@ impl Render for StatusBar {
                 }),
             )
             .child(refresh_button);
-        if self.prefs.claude_visible {
+        // A segment exists only for a provider with numbers to show:
+        // loading, unavailable for any reason, or read without a window all
+        // leave the bar untouched rather than narrating the error here.
+        if self.prefs.claude_visible
+            && let Some(text) = Self::segment_text(&self.claude)
+        {
             left = left.child(provider_segment(
                 "Claude",
                 Icon::ClaudeCode,
                 claude_color,
                 claude_dimmed,
                 Self::segment_meter(&self.claude),
-                Self::segment_text("Claude", &self.claude),
+                text,
             ));
         }
-        if self.prefs.codex_visible {
+        if self.prefs.codex_visible
+            && let Some(text) = Self::segment_text(&self.codex)
+        {
             left = left.child(provider_segment(
                 "Codex",
                 Icon::Codex,
                 codex_color,
                 codex_dimmed,
                 Self::segment_meter(&self.codex),
-                Self::segment_text("Codex", &self.codex),
+                text,
             ));
         }
-        if self.prefs.opencode_visible {
+        if self.prefs.opencode_visible
+            && let Some(text) = Self::segment_text(&self.opencode_go)
+        {
             left = left.child(provider_segment(
                 "OpenCode Go",
                 Icon::OpenCode,
                 opencode_go_color,
                 opencode_go_dimmed,
                 Self::segment_meter(&self.opencode_go),
-                Self::segment_text("OpenCode Go", &self.opencode_go),
+                text,
             ));
         }
-        if self.prefs.ollama_visible {
+        if self.prefs.ollama_visible
+            && let Some(text) = Self::segment_text(&self.ollama_cloud)
+        {
             // F-SET-13: no Ollama brand mark exists in the pinned Zed catalog —
             // the globe is a declared stand-in for a cloud service, not a
             // silent leftover.
@@ -676,7 +660,7 @@ impl Render for StatusBar {
                 ollama_cloud_color,
                 ollama_cloud_dimmed,
                 Self::segment_meter(&self.ollama_cloud),
-                Self::segment_text("Ollama Cloud", &self.ollama_cloud),
+                text,
             ));
         }
         if Self::update_indicator_visible(&self.update_state) {
@@ -765,6 +749,7 @@ fn status_bar_foreground(theme: Theme) -> Rgba {
 mod tests {
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
+    use sirio_usage::UsageReason;
 
     #[test]
     fn light_status_bar_foreground_uses_muted_text_and_dark_stays_faint() {
@@ -813,12 +798,12 @@ mod tests {
             vec!["3% used 1h 40m", "24% used 5d 23h", "46% used Fable"]
         );
         assert_eq!(
-            StatusBar::segment_text_at("Claude", &ProviderUsageState::Loaded(usage.clone()), now),
-            "3% used 1h 40m · 24% used 5d 23h · 46% used Fable"
+            StatusBar::segment_text_at(&ProviderUsageState::Loaded(usage.clone()), now),
+            Some("3% used 1h 40m · 24% used 5d 23h · 46% used Fable".to_string())
         );
         assert_eq!(
-            StatusBar::segment_text_at("Claude", &ProviderUsageState::Stale(usage), now),
-            "3% used 1h 40m · 24% used 5d 23h · 46% used Fable",
+            StatusBar::segment_text_at(&ProviderUsageState::Stale(usage), now),
+            Some("3% used 1h 40m · 24% used 5d 23h · 46% used Fable".to_string()),
             "stale keeps the same text — dimming is what marks it stale"
         );
     }
@@ -903,51 +888,73 @@ mod tests {
         assert!(cx.debug_bounds("Claude-usage-text").is_some());
         assert!(
             cx.debug_bounds("Codex-usage-meter").is_none(),
-            "an unavailable provider shows its reason with no meter"
-        );
-        assert!(cx.debug_bounds("Codex-usage-text").is_some());
-    }
-
-    /// #199: "not implemented on this platform" is a different fact from
-    /// "the provider could not be read", and the bar must not say the
-    /// second when it means the first.
-    ///
-    /// On Windows the Claude fetch is a deliberate stub -- there is no
-    /// ConPTY-backed implementation to run -- and it reported
-    /// `UsageReason::Error` for want of anywhere better to go. The bar
-    /// therefore said "Claude error", permanently, next to a settings
-    /// surface reporting the very same provider as signed in with an
-    /// account address. "error" sends a user looking for a fault on their
-    /// own machine; there is none to find.
-    ///
-    /// This is the same collapse F-CORE-USG-06 and F-SET-11 already undid
-    /// once for the token-failure reasons: every distinct fact keeps its
-    /// own name, or the one piece of data that separates them is lost.
-    #[test]
-    fn an_unsupported_platform_does_not_report_itself_as_an_error() {
-        use sirio_usage::UsageReason;
-
-        let unsupported = StatusBar::segment_text(
-            "Claude",
-            &ProviderUsageState::Unavailable(UsageReason::Unsupported),
-        );
-        let errored = StatusBar::segment_text(
-            "Claude",
-            &ProviderUsageState::Unavailable(UsageReason::Error),
-        );
-
-        assert_ne!(
-            unsupported, errored,
-            "a platform with no implementation must not be indistinguishable              from a provider that genuinely failed to read"
+            "an unavailable provider draws no meter"
         );
         assert!(
-            !unsupported.contains("error"),
-            "the word that sends a user hunting for a fault is the one thing              this state must not say; got {unsupported:?}"
+            cx.debug_bounds("Codex-usage-text").is_none(),
+            "an unavailable provider leaves no text in the bar either"
         );
-        assert_eq!(unsupported, "Claude not supported here");
-        assert_eq!(
-            errored, "Claude error",
-            "the genuine read failure keeps its own wording, unchanged"
+    }
+
+    /// The bar only ever shows numbers: a provider that had them and then
+    /// stopped reporting (logged out, API refused, not installed) is
+    /// removed from the bar, not replaced by a reason. Nothing about an
+    /// error is rendered here.
+    #[gpui::test]
+    async fn a_provider_that_stops_reporting_is_removed_from_the_bar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+        let usage = ProviderUsage {
+            session: Some(UsageWindow::new("5h", 12)),
+            weekly: None,
+            monthly: None,
+            fable_weekly: None,
+        };
+        bar.update(&mut cx, |bar, cx| {
+            bar.apply_outcomes(
+                UsageFetchOutcome::Success(usage.clone()),
+                UsageFetchOutcome::Success(usage),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Claude-usage-text").is_some());
+        assert!(cx.debug_bounds("Codex-usage-text").is_some());
+
+        bar.update(&mut cx, |bar, cx| {
+            bar.apply_outcomes(
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::ApiKey),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_none(),
+            "a provider that stopped reporting is gone from the bar, not narrated"
+        );
+        assert!(
+            cx.debug_bounds("Codex-usage-text").is_none(),
+            "an API-key account has no usage to show and says nothing"
+        );
+        assert!(
+            cx.debug_bounds("sirio-status-bar").is_some(),
+            "the bar's own controls stay: only the usage segments are absent"
         );
     }
 
@@ -960,6 +967,31 @@ mod tests {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // Only numbers render a segment, so every provider is given some
+        // before the visibility toggles are exercised.
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+        bar.update(&mut cx, |bar, cx| {
+            let usage = ProviderUsage {
+                session: Some(UsageWindow::new("5h", 12)),
+                weekly: None,
+                monthly: None,
+                fable_weekly: None,
+            };
+            bar.apply_outcomes(
+                UsageFetchOutcome::Success(usage.clone()),
+                UsageFetchOutcome::Success(usage.clone()),
+                UsageFetchOutcome::Success(usage.clone()),
+                UsageFetchOutcome::Success(usage),
+                cx,
+            );
+        });
         cx.run_until_parked();
 
         // Defaults: Claude and Codex visible, OpenCode Go and Ollama
@@ -1117,46 +1149,37 @@ mod tests {
         );
     }
 
-    /// F-SET-11: the seven states this file can distinguish (Loading and
-    /// Loaded are exercised by the drawn test above via the real fetch
-    /// loop) each render their own text. `Stale` is functionally identical
-    /// to `Loaded` here except for dimming (covered separately below), so
-    /// this proves the three reasons stay apart instead of collapsing to
-    /// one wildcard "—". The four unavailable reasons must each retain their
-    /// own text: not found, logged out, timed out, and error.
+    /// A provider without numbers leaves no text in the bar: not while
+    /// loading, and not for any unavailable reason. "logged out", "API
+    /// key", "not supported here" and the rest were the bar's only error
+    /// vocabulary, and the bar is not the place for it — the reason stays a
+    /// distinct fact in `UsageReason` for a surface that explains; here the
+    /// segment is simply absent. Only real numbers earn a segment, and
+    /// stale numbers are still numbers (dimming marks them, not absence).
     #[test]
-    fn unavailable_reasons_render_distinct_text() {
+    fn a_state_without_numbers_renders_no_segment_text() {
+        assert_eq!(StatusBar::segment_text(&ProviderUsageState::Loading), None);
+        for reason in [
+            UsageReason::NotInstalled,
+            UsageReason::LoggedOut,
+            UsageReason::ApiKey,
+            UsageReason::TokenReused,
+            UsageReason::TokenRevoked,
+            UsageReason::TokenExpired,
+            UsageReason::TimedOut,
+            UsageReason::Unsupported,
+            UsageReason::Error,
+        ] {
+            assert_eq!(
+                StatusBar::segment_text(&ProviderUsageState::Unavailable(reason)),
+                None,
+                "{reason:?} must leave the bar empty"
+            );
+        }
         assert_eq!(
-            StatusBar::segment_text("Claude", &ProviderUsageState::Loading),
-            "Claude …"
-        );
-        assert_eq!(
-            StatusBar::segment_text(
-                "Claude",
-                &ProviderUsageState::Unavailable(UsageReason::NotInstalled)
-            ),
-            "Claude not found"
-        );
-        assert_eq!(
-            StatusBar::segment_text(
-                "Claude",
-                &ProviderUsageState::Unavailable(UsageReason::LoggedOut)
-            ),
-            "Claude logged out"
-        );
-        assert_eq!(
-            StatusBar::segment_text(
-                "Claude",
-                &ProviderUsageState::Unavailable(UsageReason::TimedOut)
-            ),
-            "Claude timed out"
-        );
-        assert_eq!(
-            StatusBar::segment_text(
-                "Claude",
-                &ProviderUsageState::Unavailable(UsageReason::Error)
-            ),
-            "Claude error"
+            StatusBar::segment_text(&ProviderUsageState::Loaded(ProviderUsage::default())),
+            None,
+            "a success that read no window has nothing to show either"
         );
         let usage = ProviderUsage {
             session: Some(UsageWindow::new("5h", 12)),
@@ -1165,53 +1188,13 @@ mod tests {
             fable_weekly: None,
         };
         assert_eq!(
-            StatusBar::segment_text("Claude", &ProviderUsageState::Loaded(usage.clone())),
-            "12% used 5h",
-            "a loaded state still renders real numbers, not a reason"
+            StatusBar::segment_text(&ProviderUsageState::Loaded(usage.clone())),
+            Some("12% used 5h".to_string())
         );
         assert_eq!(
-            StatusBar::segment_text("Claude", &ProviderUsageState::Stale(usage)),
-            "12% used 5h",
-            "stale keeps showing the last good numbers — dimming is what marks it stale, not the text"
-        );
-    }
-
-    /// F-CORE-USG-06: a Codex refresh-token failure classified as
-    /// reused/revoked/expired must render its own copy, not collapse to
-    /// the generic "logged out" text every other login failure uses.
-    #[test]
-    fn token_refresh_reasons_render_distinct_text() {
-        assert_eq!(
-            StatusBar::segment_text(
-                "Codex",
-                &ProviderUsageState::Unavailable(UsageReason::TokenReused)
-            ),
-            "Codex token reused"
-        );
-        assert_eq!(
-            StatusBar::segment_text(
-                "Codex",
-                &ProviderUsageState::Unavailable(UsageReason::TokenRevoked)
-            ),
-            "Codex token revoked"
-        );
-        assert_eq!(
-            StatusBar::segment_text(
-                "Codex",
-                &ProviderUsageState::Unavailable(UsageReason::TokenExpired)
-            ),
-            "Codex token expired"
-        );
-    }
-
-    #[test]
-    fn api_key_reason_renders_distinct_text() {
-        assert_eq!(
-            StatusBar::segment_text(
-                "Codex",
-                &ProviderUsageState::Unavailable(UsageReason::ApiKey)
-            ),
-            "Codex API key"
+            StatusBar::segment_text(&ProviderUsageState::Stale(usage)),
+            Some("12% used 5h".to_string()),
+            "stale keeps showing the last good numbers — dimming is what marks it stale, not absence"
         );
     }
 
