@@ -1346,9 +1346,6 @@ pub struct Chat {
     /// View state for the same-verb folds of a tool run, keyed by the fold's
     /// first entry index. Not persisted; a fold starts closed.
     open_verb_folds: HashSet<usize>,
-    /// Each turn's say over its Work zone (`widgets::Takeover`), keyed by the
-    /// turn's first entry index. Not persisted; cleared with the entries.
-    work_open: HashMap<usize, bezel::ui::widgets::Takeover>,
     /// The placeholder last pushed into the field, so render pushes a new
     /// one only when the state it names changed.
     composer_placeholder_shown: String,
@@ -1653,7 +1650,6 @@ impl Chat {
             accepted_mentions: Vec::new(),
             attachments: Vec::new(),
             open_verb_folds: HashSet::new(),
-            work_open: HashMap::new(),
             composer_placeholder_shown: String::new(),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
@@ -2322,9 +2318,6 @@ impl Chat {
                 self.expire_unanswered();
                 self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
-                if let Some(turn) = segment_turns(&self.entries).last().map(|t| t.start) {
-                    self.remeasure_turn(turn);
-                }
                 self.streaming = false;
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
@@ -2658,7 +2651,6 @@ impl Chat {
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
         self.unfolded_turns.clear();
-        self.work_open.clear();
         self.thought_scroll.clear();
         for turn in transcript.turns {
             for entry in turn.entries {
@@ -2884,7 +2876,6 @@ impl Chat {
         });
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
-            self.work_open.clear();
             self.thought_scroll.clear();
             self.list_state.splice(0..old_count, self.entries.len());
         }
@@ -3316,7 +3307,6 @@ impl Chat {
         let old_count = self.entries.len();
         self.entries.clear();
         self.unfolded_turns.clear();
-        self.work_open.clear();
         self.thought_scroll.clear();
         self.list_state.splice(0..old_count, 0);
         self.accepted_mentions.clear();
@@ -4512,7 +4502,6 @@ impl Chat {
         edit_summary: Option<EditSummaryState>,
         thought_streaming: bool,
         thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
-        role: &transcript::WorkRole,
         day_heading: Option<&str>,
         window: &mut Window,
         cx: &mut App,
@@ -4555,24 +4544,6 @@ impl Chat {
                             )),
                     )
                     .into_any_element();
-                let question = match role {
-                    transcript::WorkRole::Header { turn, steps, open } if *steps > 0 => div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(bubble)
-                        .child(Chat::render_work_header(
-                            *turn,
-                            *steps,
-                            *open,
-                            theme,
-                            &bezel_theme,
-                            entity.clone(),
-                        ))
-                        .into_any_element(),
-                    _ => bubble,
-                };
                 // The heading row belongs to the `User` entry's row, so no
                 // extra list index is needed: it sits above the question.
                 match day_heading {
@@ -4586,21 +4557,12 @@ impl Chat {
                             theme,
                             &bezel_theme,
                         ))
-                        .child(question)
+                        .child(bubble)
                         .into_any_element(),
-                    None => question,
+                    None => bubble,
                 }
             }
             Entry::Assistant { text, document } => {
-                if matches!(role, transcript::WorkRole::Member { open: true, .. }) {
-                    return Chat::render_interim_prose(
-                        entry_index,
-                        &text,
-                        source_start,
-                        &interaction,
-                        theme,
-                    );
-                }
                 let target = CopyTarget::Assistant(entry_index);
                 let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");
@@ -4642,22 +4604,22 @@ impl Chat {
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .child("Copy");
                 }
-                let mut answer = div()
+                // Every prose entry is an answer, whether it closes the turn
+                // or sits between tool calls: same markdown, same colour.
+                div()
                     .id(("assistant-response", entry_index))
                     .debug_selector(move || format!("assistant-response-{entry_index}"))
                     .relative()
                     .group(hover_group)
                     .w_full()
                     .child(MarkdownBody::new(document))
-                    .child(copy);
-                if matches!(role, transcript::WorkRole::Outside) {
-                    answer = answer.child(
+                    .child(copy)
+                    .child(
                         div()
                             .size_0()
                             .debug_selector(move || format!("answer-{entry_index}")),
-                    );
-                }
-                answer.into_any_element()
+                    )
+                    .into_any_element()
             }
             Entry::Thought {
                 text,
@@ -6800,8 +6762,6 @@ impl Render for Chat {
         // row — segmenting the transcript is O(entries), and the virtualizer
         // calls its row processor separately for every visible index.
         let turn_roles = turn_row_roles(&self.entries, &self.unfolded_turns);
-        let work =
-            transcript::work_roles(&self.entries, &self.work_open, self.streaming_turn_start());
         let transcript_focus = self.transcript_focus.clone();
         // The answer field's caret, resolved before the tree is built so the
         // card and the composer agree within one frame.
@@ -6953,7 +6913,6 @@ impl Render for Chat {
                                                                         entry_index,
                                                                     ),
                                                                     &this.thought_scroll,
-                                                                    &transcript::WorkRole::Outside,
                                                                     None,
                                                                     &mut *window,
                                                                     &mut *cx,
@@ -6966,40 +6925,6 @@ impl Render for Chat {
                                     }
                                     TurnRowRole::Normal => {}
                                 }
-                                // The Work zone: interim entries fold behind
-                                // the turn's header. Resolved after the
-                                // F-CHAT-22 fold above — a folded turn hides
-                                // its Work header too — and before the
-                                // tool-run grouping below, because a folded
-                                // zone hides its tool runs as well.
-                                let role = work
-                                    .get(entry_index)
-                                    .cloned()
-                                    .unwrap_or(transcript::WorkRole::Outside);
-                                // Permission, Plan, Error and TurnFooter
-                                // entries render where they are, outside every
-                                // zone — even when they sit before the answer.
-                                let in_zone = match &role {
-                                    transcript::WorkRole::Member { open, .. } => {
-                                        let outside = matches!(
-                                            this.entries.get(entry_index),
-                                            Some(
-                                                Entry::Permission { .. }
-                                                    | Entry::Plan { .. }
-                                                    | Entry::Error { .. }
-                                                    | Entry::TurnFooter(_)
-                                            )
-                                        );
-                                        (!outside).then_some(*open)
-                                    }
-                                    _ => None,
-                                };
-                                if in_zone == Some(false) {
-                                    return div()
-                                        .id(("chat-entry", entry_index))
-                                        .into_any_element();
-                                }
-                                let frame_open = in_zone == Some(true);
                                 // F-CHAT-22: a run of consecutive tool
                                 // calls renders as one bordered box, keyed
                                 // to the run's last index. Every other
@@ -7028,15 +6953,10 @@ impl Render for Chat {
                                             })
                                         })
                                         .collect();
-                                    // Bezel Transcript pattern §2: a work
-                                    // zone sits 8px from the answer that
+                                    // Bezel Transcript pattern §2: a tool
+                                    // run sits 8px from the prose that
                                     // follows it, tighter than the 10px
                                     // between turns elsewhere in the list.
-                                    // A run is by construction interim —
-                                    // every tool sits before `answer_from` —
-                                    // so a run never crosses the zone
-                                    // boundary; an open zone frames the whole
-                                    // box here.
                                     let run = this.render_tool_run(
                                         members,
                                         transcript_focus.clone(),
@@ -7044,17 +6964,12 @@ impl Render for Chat {
                                         &row_bezel_theme,
                                         entity.clone(),
                                     );
-                                    let body = if frame_open {
-                                        Chat::render_work_member(entry_index, run, &row_bezel_theme)
-                                    } else {
-                                        run
-                                    };
                                     return div()
                                         .id(("chat-entry", entry_index))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
-                                        .child(body)
+                                        .child(run)
                                         .into_any_element();
                                 }
                                 let source_start = transcript_ranges
@@ -7065,13 +6980,7 @@ impl Render for Chat {
                                     .get(entry_index)
                                     .cloned()
                                     .map(|entry| {
-                                        // An open member trades the row's own
-                                        // bottom padding for the zone frame's
-                                        // `gap 8`, so members stack at the
-                                        // gallery's spacing.
-                                        let bottom_padding = if frame_open {
-                                            0.0
-                                        } else if matches!(entry, Entry::TurnFooter(_)) {
+                                        let bottom_padding = if matches!(entry, Entry::TurnFooter(_)) {
                                             TURN_BOTTOM_PADDING
                                         } else {
                                             10.0
@@ -7099,21 +7008,11 @@ impl Render for Chat {
                                             this.edit_summaries.get(&entry_index).cloned(),
                                             this.thought_is_streaming(entry_index),
                                             &this.thought_scroll,
-                                            &role,
                                             day_heading.as_deref(),
                                             &mut *window,
                                             &mut *cx,
                                         )
                                         .into_any_element();
-                                        let body = if frame_open {
-                                            Chat::render_work_member(
-                                                entry_index,
-                                                body,
-                                                &row_bezel_theme,
-                                            )
-                                        } else {
-                                            body
-                                        };
                                         div()
                                             .id(("chat-entry", entry_index))
                                             .w_full()
@@ -10021,11 +9920,6 @@ let answer = 42;
         });
         refresh_frame(cx);
 
-        // The settled turn folds its interim work; open the zone first.
-        let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
-        cx.simulate_click(work.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
         assert!(
             cx.debug_bounds("subagent-task-toggle-1").is_some(),
             "the subagent task card is drawn"
@@ -11683,73 +11577,14 @@ let answer = 42;
         assert!(matches!(entry, ChatEntry::UserMessage { at: None, .. }));
     }
 
-    /// The streaming turn is the trailing one without a footer, only while
-    /// the chat streams; pressing a zone flips what is on screen and holds.
+    /// Every entry of a turn stays in view once it ends — thought, prose,
+    /// tool run — and the prose the model writes between its tool calls
+    /// reads with the same weight as its answer: no `Worked · N steps`
+    /// header, no muted interim rendering.
     #[gpui::test]
-    async fn the_work_zone_follows_the_stream_until_pressed(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.push_entry(Entry::User {
-                text: "q".into(),
-                at: None,
-            });
-            chat.push_entry(test_tool_call("a"));
-            chat.streaming = true;
-            chat
-        });
-        chat.read_with(cx, |chat, _| {
-            assert_eq!(chat.streaming_turn_start(), Some(0));
-            let roles =
-                transcript::work_roles(&chat.entries, &chat.work_open, chat.streaming_turn_start());
-            assert_eq!(
-                roles[1],
-                transcript::WorkRole::Member {
-                    turn: 0,
-                    open: true
-                }
-            );
-        });
-        chat.update(cx, |chat, cx| chat.toggle_work(0, cx));
-        chat.read_with(cx, |chat, _| {
-            let roles =
-                transcript::work_roles(&chat.entries, &chat.work_open, chat.streaming_turn_start());
-            assert_eq!(
-                roles[1],
-                transcript::WorkRole::Member {
-                    turn: 0,
-                    open: false
-                },
-                "pressed while auto-open: closes and holds"
-            );
-        });
-        chat.update(cx, |chat, cx| {
-            chat.handle_event(
-                AcpEvent::TurnEnded {
-                    stop_reason: "end_turn".into(),
-                },
-                cx,
-            );
-        });
-        chat.read_with(cx, |chat, _| {
-            assert_eq!(chat.streaming_turn_start(), None);
-            let roles = transcript::work_roles(&chat.entries, &chat.work_open, None);
-            assert_eq!(
-                roles[1],
-                transcript::WorkRole::Member {
-                    turn: 0,
-                    open: false
-                }
-            );
-        });
-    }
-
-    /// A finished turn folds its interim work — thought, interim prose, tool
-    /// run — behind `Worked · N steps`; the answer stays; a press opens the
-    /// zone and its members draw inside the frame.
-    #[gpui::test]
-    async fn a_finished_turn_folds_its_work_behind_a_header(cx: &mut TestAppContext) {
+    async fn a_finished_turn_keeps_its_work_in_view_and_its_prose_reads_as_an_answer(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
@@ -11779,56 +11614,38 @@ let answer = 42;
         });
         cx.update(|_window, cx| init(cx));
         refresh_frame(cx);
-        let header = cx
-            .debug_bounds("work-toggle-0")
-            .expect("Worked · 2 steps header");
+        assert!(
+            cx.debug_bounds("work-toggle-0").is_none(),
+            "no Work header under the question"
+        );
         let bubble = cx.debug_bounds("user-bubble-0").expect("bubble");
-        assert!(
-            header.top() >= bubble.bottom(),
-            "the header sits under the question"
-        );
-        assert!(
-            cx.debug_bounds("thought-toggle-1").is_none(),
-            "folded: no thought row"
-        );
-        assert!(
-            cx.debug_bounds("interim-2").is_none(),
-            "folded: no interim prose"
-        );
-        assert!(
-            cx.debug_bounds("tool-run-3").is_none(),
-            "folded: no tool run"
-        );
-        assert!(
-            cx.debug_bounds("answer-5").is_some(),
-            "the answer is outside the zone"
-        );
-
-        cx.simulate_click(header.center(), Modifiers::none());
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("work-open-0").is_some());
         let thought = cx
             .debug_bounds("thought-toggle-1")
-            .expect("open: thought header");
-        let interim = cx.debug_bounds("interim-2").expect("open: interim prose");
-        let run = cx.debug_bounds("tool-run-3").expect("open: the run box");
-        let frame = cx
-            .debug_bounds("work-member-1")
-            .expect("the frame around a member");
+            .expect("the thought row is drawn");
         assert!(
-            thought.left() > bubble.left() || thought.left() > frame.left(),
-            "members are inset by the frame"
+            cx.debug_bounds("interim-2").is_none(),
+            "prose before the last tool call is not drawn muted"
+        );
+        let prose = cx
+            .debug_bounds("assistant-response-2")
+            .expect("prose before the last tool call is drawn as an answer");
+        let run = cx.debug_bounds("tool-run-3").expect("the run box is drawn");
+        assert!(
+            cx.debug_bounds("answer-5").is_some(),
+            "the closing prose is an answer too"
         );
         assert!(
-            interim.top() >= thought.bottom() && run.top() >= interim.bottom(),
-            "members keep transcript order"
+            thought.top() >= bubble.bottom()
+                && prose.top() >= thought.bottom()
+                && run.top() >= prose.bottom(),
+            "rows keep transcript order"
         );
     }
 
-    /// The streaming turn's zone is open by itself and folds when the turn
-    /// ends; a turn without tools has no header at all.
+    /// A turn's tool run is drawn while it streams and stays drawn once the
+    /// turn ends: nothing folds away.
     #[gpui::test]
-    async fn the_streaming_turns_zone_is_open_and_folds_on_turn_end(cx: &mut TestAppContext) {
+    async fn a_tool_run_stays_in_view_after_the_turn_ends(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
@@ -11843,14 +11660,11 @@ let answer = 42;
         });
         cx.update(|_window, cx| init(cx));
         refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("work-open-0").is_some(),
-            "open while streaming"
-        );
+        assert!(cx.debug_bounds("work-open-0").is_none(), "no zone to open");
         assert!(cx.debug_bounds("tool-run-1").is_some());
         assert!(
             cx.debug_bounds("chat-generating-spinner").is_some(),
-            "the generating spinner is a sibling of the list, not a zone member"
+            "the generating spinner is a sibling of the list"
         );
         chat.update(cx, |chat, cx| {
             chat.handle_event(AcpEvent::AgentMessageChunk("done".into()), cx);
@@ -11863,28 +11677,14 @@ let answer = 42;
         });
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("work-open-0").is_none(),
-            "folded on turn end"
+            cx.debug_bounds("tool-run-1").is_some(),
+            "the run stays in view after the turn ends"
         );
-        assert!(cx.debug_bounds("tool-run-1").is_none());
         assert!(cx.debug_bounds("answer-2").is_some());
-
-        chat.update(cx, |chat, _| {
-            chat.push_entry(Entry::User {
-                text: "q2".into(),
-                at: None,
-            });
-            chat.push_entry(Entry::Assistant {
-                text: "plain".into(),
-                document: parse_chat_markdown("plain"),
-            });
-        });
-        refresh_frame(cx);
         assert!(
-            cx.debug_bounds("work-toggle-4").is_none(),
-            "no tools, no header"
+            cx.debug_bounds("work-toggle-0").is_none(),
+            "and no header appears for it"
         );
-        assert!(cx.debug_bounds("answer-5").is_some());
     }
 
     #[gpui::test]
@@ -13106,9 +12906,6 @@ let answer = 42;
                 *duration_ms = None;
             }
             chat.push_entry(full);
-            // The zone folds interim rows behind its header; these rows are
-            // the subject, so the turn streams and the zone opens by itself.
-            chat.streaming = true;
             chat
         });
         cx.update(|_window, cx| init(cx));
@@ -14186,15 +13983,6 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
         focus_and_type(cx, "draft");
         assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft");
-        // Seed zone state so the reset has something to forget.
-        chat.update(cx, |chat, cx| {
-            chat.toggle_work(0, cx);
-        });
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| !chat.work_open.is_empty()),
-            "the completed turn takes a work zone press"
-        );
-
         let overflow = cx
             .debug_bounds("composer-overflow")
             .expect("the overflow control is drawn again");
@@ -14210,9 +13998,8 @@ let answer = 42;
             "New Conversation clears the transcript"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.work_open.is_empty()
-                && chat.unfolded_turns.is_empty()),
-            "New Conversation clears the turn fold and the work zone state"
+            chat.read_with(&cx.cx, |chat, _| chat.unfolded_turns.is_empty()),
+            "New Conversation clears the turn fold state"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
@@ -14737,10 +14524,6 @@ let answer = 42;
         });
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("work-toggle-0").is_none(),
-            "a folded turn hides its Work header too"
-        );
         let fold = cx
             .debug_bounds("turn-fold-2")
             .expect("the oldest turn draws its collapsed stand-in row");
@@ -14757,15 +14540,6 @@ let answer = 42;
             .expect("second fold row is drawn");
 
         cx.simulate_click(fold.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
-        // The unfolded turn's tool row lives inside its Work zone.
-        assert!(
-            cx.debug_bounds("work-toggle-0").is_some(),
-            "unfolding the turn brings its Work header back"
-        );
-        let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
-        cx.simulate_click(work.center(), Modifiers::none());
         cx.run_until_parked();
         refresh_frame(cx);
         assert!(
