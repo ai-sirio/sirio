@@ -73,6 +73,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod account_login;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
 /// environment. Linux-only by construction: the variables it reads and writes
@@ -5496,6 +5497,12 @@ impl SirioWorkspace {
                 }
                 sirio_ui::settings::SettingsEvent::RefreshAgentSources => {
                     workspace.refresh_launch_sources_from_registry(cx);
+                }
+                sirio_ui::settings::SettingsEvent::StartAccountLogin(request) => {
+                    account_login::start(&workspace.settings, request, cx);
+                }
+                sirio_ui::settings::SettingsEvent::RefreshUsage => {
+                    workspace.status_bar.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
                 }
             },
         )
