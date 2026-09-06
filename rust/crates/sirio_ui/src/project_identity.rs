@@ -930,23 +930,37 @@ impl ProjectIconPicker {
                             // The value scrolls so its tail stays under the
                             // caret; the placeholder keeps its start.
                             .overflow_hidden()
-                            .child(
-                                if self.emoji_grid_query.is_empty() {
-                                    caret::field_placeholder("Search emoji…".to_owned())
-                                } else {
-                                    caret::field_value(self.emoji_grid_query.clone())
-                                }
-                                .debug_selector(|| "project-icon-emoji-grid-query-text".into()),
-                            )
-                            .child(
-                                div()
+                            .children({
+                                let bar = div()
                                     .debug_selector(|| "project-icon-emoji-grid-caret".into())
                                     .child(caret::bar(
                                         px(14.0),
                                         theme.text,
                                         self.emoji_grid_caret_visible,
-                                    )),
-                            ),
+                                    ))
+                                    .into_any_element();
+                                // An empty query carries the bar at the hint's
+                                // start (bezel's `TextField` convention); a
+                                // value has it after its last character.
+                                let (text, trailing_bar) = if self.emoji_grid_query.is_empty() {
+                                    (
+                                        caret::field_placeholder(
+                                            "Search emoji…".to_owned(),
+                                            Some(bar),
+                                        ),
+                                        None,
+                                    )
+                                } else {
+                                    (caret::field_value(self.emoji_grid_query.clone()), Some(bar))
+                                };
+                                std::iter::once(
+                                    text.debug_selector(|| {
+                                        "project-icon-emoji-grid-query-text".into()
+                                    })
+                                    .into_any_element(),
+                                )
+                                .chain(trailing_bar)
+                            }),
                     )
                     .child(
                         div()
@@ -1088,15 +1102,38 @@ impl ProjectIconPicker {
         let focus_handle = focus.clone();
         let key_entity = entity.clone();
         let commit_entity = entity.clone();
-        let shown = if draft.is_empty() {
-            placeholder.to_string()
-        } else {
-            draft.to_string()
-        };
         let text_color = if draft.is_empty() {
             theme.text_muted
         } else {
             theme.text
+        };
+        let caret_id = format!("project-icon-{id_prefix}-caret");
+        let bar = div()
+            .debug_selector(move || caret_id.clone())
+            .child(caret::bar(px(16.0), theme.text, caret_visible))
+            .into_any_element();
+        // An empty field shows its placeholder with the bar at its start
+        // (bezel's `TextField` convention); a draft has it after its last
+        // character.
+        let (text, trailing_bar) = if draft.is_empty() {
+            (
+                caret::field_placeholder(
+                    text!(
+                        id = format!("project-icon-{id_prefix}-draft"),
+                        placeholder.to_string()
+                    ),
+                    Some(bar),
+                ),
+                None,
+            )
+        } else {
+            (
+                caret::field_value(text!(
+                    id = format!("project-icon-{id_prefix}-draft"),
+                    draft.to_string()
+                )),
+                Some(bar),
+            )
         };
 
         let field = div()
@@ -1123,16 +1160,8 @@ impl ProjectIconPicker {
             // A URL or path easily outgrows 220px: clip from the start so
             // the tail being typed stays in view (`caret::field_value`).
             .overflow_hidden()
-            .child(caret::field_value(text!(
-                id = format!("project-icon-{id_prefix}-draft"),
-                shown
-            )))
-            .child({
-                let caret_id = format!("project-icon-{id_prefix}-caret");
-                div()
-                    .debug_selector(move || caret_id.clone())
-                    .child(caret::bar(px(16.0), theme.text, caret_visible))
-            });
+            .child(text)
+            .children(trailing_bar);
 
         let mut row = div()
             .flex()
