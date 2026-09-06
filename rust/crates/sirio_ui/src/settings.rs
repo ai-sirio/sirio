@@ -2858,7 +2858,12 @@ impl Settings {
             .overflow_hidden()
             .child(
                 if is_empty {
-                    caret::field_placeholder(text!(placeholder.to_string()))
+                    // Empty and focused: the bar at the hint's start, the
+                    // way bezel's `TextField` paints an empty field.
+                    caret::field_placeholder(
+                        text!(placeholder.to_string()),
+                        is_focused.then(|| caret::bar(px(16.0), theme.text, caret_visible)),
+                    )
                 } else {
                     caret::field_value(text!(display_text))
                 }
@@ -2866,9 +2871,10 @@ impl Settings {
                 .debug_selector(|| "settings-text-field-text".to_owned()),
             )
             // The field's insertion caret: end-of-text, since these compact
-            // single-line fields always append. Invisible (but still laid
-            // out) while unfocused so the bar never shifts the text.
-            .when(is_focused, |this| {
+            // single-line fields always append. Drawn only while focused,
+            // and after a value; an empty field carries it at the hint's
+            // start above.
+            .when(is_focused && !is_empty, |this| {
                 this.child(caret::bar(px(16.0), theme.text, caret_visible))
             })
     }
