@@ -1,7 +1,9 @@
 //! The adapter interface and the fixed catalog of supported agent CLIs.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod claude;
 mod codex;
@@ -189,6 +191,96 @@ pub trait AgentAdapter {
     fn skill_markdown(&self) -> Option<&'static str> {
         None
     }
+
+    /// Installs this agent's Sirio hooks in the user's own configuration —
+    /// the one place `prepare` must never touch — so that agents the user
+    /// starts by hand, in any directory, still report to Sirio. Only the
+    /// explicit Settings → Install Hooks action calls this; it is never
+    /// part of launching a pane.
+    ///
+    /// One file serves every pane, so the hooks carry no pane id: sirioctl
+    /// resolves the pane from the `SIRIO_PANE_ID` each Sirio pane exports,
+    /// and stays silent outside one. `environment` supplies the agent's
+    /// own config-location overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, …)
+    /// so the hooks land where the agent actually reads.
+    ///
+    /// The default answers honestly for an agent with no user-global hook
+    /// mechanism rather than writing a file nothing reads.
+    fn install_global_hooks(
+        &self,
+        _home: &Path,
+        _environment: &BTreeMap<String, String>,
+        _sirioctl_path: &str,
+    ) -> Result<GlobalHookInstall, PrepareError> {
+        Ok(GlobalHookInstall::NotSupported)
+    }
+}
+
+/// What [`AgentAdapter::install_global_hooks`] did for one agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GlobalHookInstall {
+    /// The user-global file the hooks now live in.
+    Written(PathBuf),
+    /// The agent has no user-global place for a hook (Pi has no hook
+    /// mechanism; omp takes hooks only through `--hook <file>` on its
+    /// command line).
+    NotSupported,
+}
+
+/// One agent's outcome from [`install_global_hooks`], with the line the
+/// Settings card shows for it.
+#[derive(Debug)]
+pub struct GlobalHookReport {
+    pub display_name: &'static str,
+    pub outcome: Result<GlobalHookInstall, PrepareError>,
+}
+
+impl GlobalHookReport {
+    /// `<agent>: <file>`, `<agent>: no user-global hook mechanism`, or
+    /// `<agent>: failed — <error>`.
+    pub fn summary_line(&self) -> String {
+        match &self.outcome {
+            Ok(GlobalHookInstall::Written(path)) => {
+                format!("{}: {}", self.display_name, path.display())
+            }
+            Ok(GlobalHookInstall::NotSupported) => {
+                format!("{}: no user-global hook mechanism", self.display_name)
+            }
+            Err(error) => format!("{}: failed — {error}", self.display_name),
+        }
+    }
+}
+
+/// Settings → Install Hooks: runs [`AgentAdapter::install_global_hooks`]
+/// for every adapter in display order and reports each one. A failure in
+/// one agent does not stop the others — the user reads all five outcomes.
+pub fn install_global_hooks(
+    home: &Path,
+    environment: &BTreeMap<String, String>,
+    sirioctl_path: &str,
+) -> Vec<GlobalHookReport> {
+    ALL.iter()
+        .map(|adapter| GlobalHookReport {
+            display_name: adapter.display_name(),
+            outcome: adapter.install_global_hooks(home, environment, sirioctl_path),
+        })
+        .collect()
+}
+
+/// Writes `contents` to `path` atomically: a unique temp file in the same
+/// directory is renamed over the target, so a crash or a concurrent writer
+/// can never leave a torn config file.
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), PrepareError> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp-{}-{unique}", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Installs `markdown` as `agent_id`'s Sirio skill file inside
