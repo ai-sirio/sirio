@@ -193,7 +193,7 @@ Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the
 
 ## Acknowledgements
 
-Sirio began as a fork of [Orca](https://github.com/stablyai/orca), in its original Swift/macOS form and with a deliberately reduced scope, and was then rewritten in Rust on [gpui](https://github.com/zed-industries/zed). The UI is built from [bezel](https://github.com/crabtalk/bezel); the terminal runs on [libghostty-vt](https://github.com/ghostty-org/ghostty) with [portable-pty](https://github.com/wez/wezterm). Designed and built with [Claude Code](https://claude.ai/code) and [OpenCode](https://opencode.ai/) as pair programmers.
+ Sirio UI is built from [bezel](https://github.com/crabtalk/bezel); the terminal runs on [libghostty-vt](https://github.com/ghostty-org/ghostty) with [portable-pty](https://github.com/wez/wezterm). Designed and built with [Claude Code](https://claude.ai/code) and [OpenCode](https://opencode.ai/) as pair programmers.
 
 ## License
 
