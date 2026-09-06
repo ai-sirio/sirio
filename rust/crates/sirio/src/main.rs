@@ -15002,7 +15002,7 @@ impl Render for SirioWorkspace {
                 div()
                     .h(theme.browser_chrome.bar_height)
                     .w_full()
-                    .child(self.titlebar.clone()),
+                    .child(self.child_view(self.titlebar.clone())),
             )
             .child(
                 div()
@@ -15015,7 +15015,7 @@ impl Render for SirioWorkspace {
                 div()
                     .h(px(STATUS_BAR_HEIGHT))
                     .w_full()
-                    .child(self.status_bar.clone()),
+                    .child(self.child_view(self.status_bar.clone())),
             )
             .when(self.palette_open, |this| {
                 this.child(self.render_command_palette(theme, cx.entity()))
@@ -21153,6 +21153,68 @@ mod tests {
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
         let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// The title and status bars are still while a sidebar spinner drives
+    /// the window, so its frames must replay them like the terminal pane,
+    /// not rebuild them. The settings layout already mounts both through
+    /// `child_view`; the main layout is what a running agent draws under.
+    /// No PTY: the spinner is mounted from the activity model alone.
+    #[gpui::test]
+    async fn a_spinner_frame_replays_the_title_and_status_bars(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let terminal = cx.new(TerminalView::empty_prompt);
+        let directory = std::env::temp_dir();
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            let mut workspace = activity_test_workspace(terminal.clone(), directory, cx);
+            workspace.cache_child_views = true;
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.mark_activity_dirty();
+            workspace
+        });
+        // The spinner's lease refuses to claim frames while no window is
+        // active (`pause_when_inactive`), and a test window is never active
+        // unless activated.
+        cx.update(|window, _| window.activate_window());
+        let tick = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(40));
+            cx.run_until_parked();
+        };
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let bars = |cx: &VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, app| {
+                (
+                    workspace.titlebar.read(app).render_count(),
+                    workspace.status_bar.read(app).render_count(),
+                )
+            })
+        };
+        let frames_before = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+        let (titlebar_before, status_bar_before) = bars(cx);
+
+        for _ in 0..10 {
+            tick(cx);
+        }
+        let frames = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+        assert!(
+            frames >= frames_before + 5,
+            "the spinner lease must keep the shell drawing ({frames_before} -> {frames})"
+        );
+        let (titlebar, status_bar) = bars(cx);
+        assert_eq!(
+            titlebar, titlebar_before,
+            "a still title bar must be replayed, not re-rendered, by spinner frames"
+        );
+        assert_eq!(
+            status_bar, status_bar_before,
+            "a still status bar must be replayed, not re-rendered, by spinner frames"
+        );
     }
 
     /// Closing a tab must forget its panes in the activity model: the model

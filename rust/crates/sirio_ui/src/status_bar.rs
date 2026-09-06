@@ -163,6 +163,10 @@ pub struct StatusBar {
     /// `on_settings` when a host does not need a distinct destination.
     on_update: Option<Rc<dyn Fn()>>,
     on_refresh: Option<Rc<dyn Fn()>>,
+    /// How many times gpui asked this view to render. Test-observable only:
+    /// the host caches the bar, and a still status bar must not render at
+    /// all while a spinner elsewhere keeps the window drawing.
+    render_count: u64,
 }
 
 impl StatusBar {
@@ -180,7 +184,15 @@ impl StatusBar {
             on_settings: None,
             on_update: None,
             on_refresh: None,
+            render_count: 0,
         }
+    }
+
+    /// How many times this view has rendered. Only a test should read it:
+    /// it exists so the host can prove a cached, still bar is reused across
+    /// frames rather than re-rendered.
+    pub fn render_count(&self) -> u64 {
+        self.render_count
     }
 
     pub fn new_with_default_context() -> Self {
@@ -471,6 +483,7 @@ impl StatusBar {
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("StatusBar.render", cx.entity_id().as_u64());
+        self.render_count = self.render_count.wrapping_add(1);
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();

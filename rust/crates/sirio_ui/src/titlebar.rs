@@ -220,6 +220,10 @@ pub struct Titlebar {
     /// re-resolves every render, the same per-render idiom as Zed's
     /// `platform_title_bar.rs`, not a value cached at window-open time.
     window_controls_override: Option<WindowControls>,
+    /// How many times gpui asked this view to render. Test-observable only:
+    /// the host caches the bar, and a still title bar must not render at
+    /// all while a spinner elsewhere keeps the window drawing.
+    render_count: u64,
 }
 
 impl Titlebar {
@@ -253,7 +257,15 @@ impl Titlebar {
             double_click_action: DoubleClickAction::from_system(),
             on_show_menu: Rc::new(|window, position| window.show_window_menu(position)),
             window_controls_override: None,
+            render_count: 0,
         }
+    }
+
+    /// How many times this view has rendered. Only a test should read it:
+    /// it exists so the host can prove a cached, still bar is reused across
+    /// frames rather than re-rendered.
+    pub fn render_count(&self) -> u64 {
+        self.render_count
     }
 
     /// Test override for the double-click preference -- avoids shelling out
@@ -691,6 +703,7 @@ fn caption_button(
 impl Render for Titlebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("Titlebar.render", cx.entity_id().as_u64());
+        self.render_count = self.render_count.wrapping_add(1);
         // P102: never draw our own window controls when the platform is
         // already drawing them. `decorations_override` is the test seam
         // (see its field doc); production always takes the `None` arm and
