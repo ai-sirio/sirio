@@ -45,7 +45,8 @@ use bezel::{
 };
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
-    InteractiveElement, KeyDownEvent, PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
+    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, PromptLevel,
+    Render, Rgba, Task, Window, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -53,8 +54,11 @@ use sirio_git::{
     commit_files, diff_entry, discard, discard_all, stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::controls;
@@ -121,6 +125,14 @@ const CONTEXT_BAND_MIN: usize = 4;
 /// rather than two halves of each row; that is a different shape of code,
 /// not a constant.
 const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
+/// How far past the viewport the virtualized list lays rows out, so a wheel
+/// tick never scrolls into rows that have not been drawn yet. The same
+/// figure the chat transcript's list uses.
+const LIST_OVERDRAW: f32 = 2048.0;
+
+fn new_list_state() -> ListState {
+    ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW))
+}
 
 /// How an expanded file's diff is drawn.
 ///
@@ -369,6 +381,97 @@ enum ChangeRow {
     },
 }
 
+/// One item of the virtualized list: a section header or a change row.
+/// Flattened from [`SectionRows`] once per frame, because `gpui::list`
+/// asks for items by index.
+enum ListRow {
+    Header {
+        section: ChangeSection,
+        count: usize,
+        collapsed: bool,
+    },
+    Change(ChangeRow),
+}
+
+impl ListRow {
+    /// Hashes what decides this row's identity and height, never its text.
+    /// The list is re-spliced when the fingerprint of the whole stream
+    /// changes; `ListState::splice` keeps the logical scroll top (an item
+    /// index plus an offset inside it), so the reader stays put across an
+    /// expand below the viewport or a refresh that re-reads the same diff.
+    fn hash_identity<H: Hasher>(&self, state: &mut H) {
+        match self {
+            ListRow::Header {
+                section, collapsed, ..
+            } => {
+                0u8.hash(state);
+                section.hash(state);
+                collapsed.hash(state);
+            }
+            ListRow::Change(row) => match row {
+                ChangeRow::File {
+                    section,
+                    entry,
+                    expanded,
+                    ..
+                } => {
+                    1u8.hash(state);
+                    section.hash(state);
+                    entry.path.hash(state);
+                    expanded.hash(state);
+                }
+                ChangeRow::Hunk {
+                    section,
+                    path,
+                    header,
+                } => {
+                    2u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    header.hash(state);
+                }
+                ChangeRow::ContextBand {
+                    section,
+                    path,
+                    key,
+                    expanded,
+                    ..
+                } => {
+                    3u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    key.hash(state);
+                    expanded.hash(state);
+                }
+                ChangeRow::Line {
+                    section,
+                    path,
+                    line,
+                } => {
+                    4u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    line.old_line_number.hash(state);
+                    line.new_line_number.hash(state);
+                }
+                ChangeRow::SplitLine {
+                    section, path, key, ..
+                } => {
+                    5u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    key.hash(state);
+                }
+                ChangeRow::Unavailable { section, path, .. } => {
+                    6u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                }
+            },
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct GitSnapshot {
     entries: Vec<StatusEntry>,
@@ -476,6 +579,22 @@ pub struct ChangesTab {
     /// Focus for the list, so `on_key_down` reaches it. Built lazily at
     /// first render, the way the Files tree's is.
     list_focus: Option<FocusHandle>,
+    /// The virtualized list's state. `gpui::list` lays out only the rows
+    /// in and just around the viewport, so a frame over a 15 000-line diff
+    /// costs what the viewport costs, not what the file costs -- the old
+    /// `overflow_y_scroll` container built every row of every expanded
+    /// diff on every frame, and one wheel tick over a large diff cost
+    /// seconds. Kept in step with the row stream by `sync_list_rows`.
+    list_state: ListState,
+    /// Fingerprint of the row stream `list_state` was last spliced to
+    /// (kinds, sections, paths, keys -- never text). A refresh that
+    /// re-reads an unchanged diff leaves it alone; an expand, a collapse
+    /// or a file appearing re-splices.
+    list_fingerprint: u64,
+    /// Set by keyboard selection so the next frame scrolls the selected
+    /// file row into view: a virtualized list draws nothing off-screen, so
+    /// a selection that moved there would otherwise be invisible.
+    reveal_selected: bool,
 }
 
 impl ChangesTab {
@@ -526,6 +645,9 @@ impl ChangesTab {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -872,6 +994,7 @@ impl ChangesTab {
     fn select_change(&mut self, row: (ChangeSection, PathBuf), cx: &mut Context<Self>) {
         if self.selected_change.as_ref() != Some(&row) {
             self.selected_change = Some(row);
+            self.reveal_selected = true;
             cx.notify();
         }
     }
@@ -1183,6 +1306,50 @@ impl ChangesTab {
             }
             line_index += hunk.lines.len();
         }
+    }
+
+    /// Flattens the sections into the list's item stream and tells the
+    /// list state about it. Only a changed fingerprint splices (see
+    /// [`ListRow::hash_identity`]); a pending keyboard reveal is resolved
+    /// here too, because the selected row's index exists only in this
+    /// stream.
+    fn sync_list_rows(&mut self, sections: Vec<SectionRows>) -> Rc<Vec<ListRow>> {
+        let mut rows = Vec::new();
+        for section in sections {
+            rows.push(ListRow::Header {
+                section: section.section,
+                count: section.count,
+                collapsed: section.collapsed,
+            });
+            rows.extend(section.rows.into_iter().map(ListRow::Change));
+        }
+        let mut hasher = DefaultHasher::new();
+        rows.len().hash(&mut hasher);
+        for row in &rows {
+            row.hash_identity(&mut hasher);
+        }
+        let fingerprint = hasher.finish();
+        if fingerprint != self.list_fingerprint {
+            let old_count = self.list_state.item_count();
+            self.list_state.splice(0..old_count, rows.len());
+            self.list_fingerprint = fingerprint;
+        }
+        if self.reveal_selected {
+            self.reveal_selected = false;
+            if let Some((selected_section, selected_path)) = &self.selected_change {
+                let index = rows.iter().position(|row| {
+                    matches!(
+                        row,
+                        ListRow::Change(ChangeRow::File { section, entry, .. })
+                            if section == selected_section && &entry.path == selected_path
+                    )
+                });
+                if let Some(index) = index {
+                    self.list_state.scroll_to_reveal_item(index);
+                }
+            }
+        }
+        Rc::new(rows)
     }
 
     fn render_change_row(
@@ -2127,7 +2294,7 @@ impl ChangesTab {
     /// 2. the first load in flight with nothing to show yet — "Loading…";
     /// 3. the sections list.
     fn render_body(
-        &self,
+        &mut self,
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
@@ -2187,6 +2354,7 @@ impl ChangesTab {
                 .child("No changes")
                 .into_any_element();
         }
+        let rows = self.sync_list_rows(sections);
         let row_entity = entity;
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
@@ -2198,10 +2366,13 @@ impl ChangesTab {
             .clone();
         // Both modes render into exactly the width the surface was given —
         // see `SPLIT_DIVIDER_WIDTH` for the two attempts at doing otherwise
-        // and what each one cost. `min_w(px(0.0))` stays because a scroll
-        // container that cannot shrink below its content is a container that
-        // grows its ancestors instead of scrolling, and this one holds
-        // arbitrarily long file paths in its section rows.
+        // and what each one cost. `min_w(px(0.0))` stays because a list
+        // that cannot shrink below its content is a list that grows its
+        // ancestors instead of scrolling, and this one holds arbitrarily
+        // long file paths in its section rows. The scrolling itself is the
+        // list's: `gpui::list` owns the wheel and draws only the rows in
+        // and around the viewport, which is what keeps a frame over a very
+        // large diff at viewport cost (see `ChangesTab::list_state`).
         div()
             .id("changes-list")
             .debug_selector(|| "changes-list".into())
@@ -2213,31 +2384,39 @@ impl ChangesTab {
             .w_full()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .children(sections.into_iter().flat_map(move |section| {
-                let mut elements: Vec<AnyElement> = vec![
-                    Self::render_section_header(
-                        section.section,
-                        section.count,
-                        section.collapsed,
-                        allows_staging,
-                        row_entity.clone(),
-                        theme,
-                    )
-                    .into_any_element(),
-                ];
-                for row in section.rows {
-                    elements.push(Self::render_change_row(
-                        row,
-                        allows_staging,
-                        draws_open_diff,
-                        selected.as_ref(),
-                        row_entity.clone(),
-                        theme,
-                    ));
-                }
-                elements
-            }))
+            .child(
+                list(
+                    self.list_state.clone(),
+                    move |index, _window, _cx| match rows.get(index) {
+                        Some(ListRow::Header {
+                            section,
+                            count,
+                            collapsed,
+                        }) => Self::render_section_header(
+                            *section,
+                            *count,
+                            *collapsed,
+                            allows_staging,
+                            row_entity.clone(),
+                            theme,
+                        )
+                        .into_any_element(),
+                        Some(ListRow::Change(row)) => Self::render_change_row(
+                            row.clone(),
+                            allows_staging,
+                            draws_open_diff,
+                            selected.as_ref(),
+                            row_entity.clone(),
+                            theme,
+                        ),
+                        None => div().into_any_element(),
+                    },
+                )
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full(),
+            )
             .into_any_element()
     }
 
@@ -2294,6 +2473,10 @@ impl Render for ChangesTab {
         }
         let entity = cx.entity();
         let mode = DiffViewMode::get(cx);
+        let toolbar = self
+            .render_toolbar(entity.clone(), theme, mode)
+            .into_any_element();
+        let body = self.render_body(entity, theme, mode, _window, cx);
         div()
             // The surface's own extent, so a drawn test can assert that
             // nothing inside it — notably Split mode's width reservation —
@@ -2303,8 +2486,8 @@ impl Render for ChangesTab {
             .flex()
             .flex_col()
             .bg(theme.surface)
-            .child(self.render_toolbar(entity.clone(), theme, mode))
-            .child(self.render_body(entity, theme, mode, _window, cx))
+            .child(toolbar)
+            .child(body)
     }
 }
 
@@ -2855,6 +3038,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         }
     }
 
@@ -4392,6 +4578,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -4457,6 +4646,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -4744,6 +4936,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -5002,6 +5197,9 @@ mod tests {
                 pending_focus: None,
                 selected_change: None,
                 list_focus: None,
+                list_state: new_list_state(),
+                list_fingerprint: 0,
+                reveal_selected: false,
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -5278,5 +5476,229 @@ mod tests {
             );
             assert!(!tab.allows_staging(), "a commit is immutable");
         });
+    }
+
+    // ------------------------------------------------------------------
+    // [PERF-diff]: the regression test for "opening a very large diff makes
+    // the diff's scroll and the whole app lag". One expanded file whose
+    // diff carries `lines` rows, drawn into a fixed 1200x800 window with no
+    // git process anywhere (a commit-mode surface never arms the refresh
+    // loop). Every number is wall-clock; run with `--nocapture` to read
+    // them.
+    // ------------------------------------------------------------------
+
+    fn synthetic_big_diff_tab(lines: usize) -> ChangesTab {
+        let path = PathBuf::from("src/big_file.rs");
+        let mut diff_lines = Vec::with_capacity(lines);
+        let mut old_no = 1usize;
+        let mut new_no = 1usize;
+        let mut additions = 0usize;
+        let mut deletions = 0usize;
+        // 3 context / 10 deletions / 10 additions, repeated: the context
+        // runs stay under CONTEXT_BAND_MIN so nothing collapses into a band
+        // and the row count really is the line count.
+        let mut i = 0usize;
+        while diff_lines.len() < lines {
+            let phase = i % 23;
+            let (origin, old, new) = if phase < 3 {
+                let l = (DiffOrigin::Context, Some(old_no), Some(new_no));
+                old_no += 1;
+                new_no += 1;
+                l
+            } else if phase < 13 {
+                let l = (DiffOrigin::Deletion, Some(old_no), None);
+                old_no += 1;
+                deletions += 1;
+                l
+            } else {
+                let l = (DiffOrigin::Addition, None, Some(new_no));
+                new_no += 1;
+                additions += 1;
+                l
+            };
+            diff_lines.push(DiffLine {
+                origin,
+                old_line_number: old,
+                new_line_number: new,
+                content: format!(
+                    "    let value_{i} = compute_something(argument_{i}, other_{i}); // padding"
+                ),
+            });
+            i += 1;
+        }
+        let diff = FileDiff {
+            path: path.clone(),
+            hunks: vec![sirio_git::Hunk {
+                header: format!("@@ -1,{old_no} +1,{new_no} @@"),
+                old_start: 1,
+                old_lines: old_no,
+                new_start: 1,
+                new_lines: new_no,
+                lines: diff_lines,
+            }],
+            additions,
+            deletions,
+            is_binary: false,
+            is_submodule: false,
+        };
+        let entry = StatusEntry {
+            path: path.clone(),
+            original_path: None,
+            index_status: Some(StatusKind::Modified),
+            worktree_status: None,
+        };
+        let mut expanded_changes = HashSet::new();
+        expanded_changes.insert((ChangeSection::Staged, path.clone()));
+        let mut diffs = HashMap::new();
+        diffs.insert(path.clone(), diff);
+        let mut stats = HashMap::new();
+        stats.insert(
+            path,
+            DiffStat {
+                additions,
+                deletions,
+                is_binary: false,
+            },
+        );
+        ChangesTab {
+            repo_root: PathBuf::from("."),
+            source: ChangesSource::Commit("synthetic".to_owned()),
+            entries: vec![entry],
+            diffs,
+            stats,
+            expanded_changes,
+            collapsed_sections: HashSet::new(),
+            expanded_bands: HashSet::new(),
+            git_task: None,
+            pending_operations: VecDeque::new(),
+            has_loaded: true,
+            git_error: None,
+            git_error_from_mutation: false,
+            diff_errors: HashMap::new(),
+            refresh_started: false,
+            embedded_in_panel: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
+            pending_focus: None,
+            selected_change: None,
+            list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
+        }
+    }
+
+    struct DiffFrameCost {
+        rows: usize,
+        section_rows_ms: f64,
+        frame_ms: f64,
+        scroll_dispatch_ms: f64,
+        scroll_frame_ms: f64,
+    }
+
+    fn measure_big_diff(cx: &mut TestAppContext, lines: usize) -> DiffFrameCost {
+        use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use std::time::Instant;
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| synthetic_big_diff_tab(lines));
+        let handle: gpui::AnyWindowHandle = window.into();
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        let tab = cx.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+        let frame = |cx: &mut VisualTestContext, tab: &gpui::Entity<ChangesTab>| -> f64 {
+            cx.update(|window, cx| {
+                tab.update(cx, |_, cx| cx.notify());
+                let start = Instant::now();
+                window.draw(cx).clear(cx);
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+        };
+        // Warm-up: the first frame pays for text-system caches, not the bug.
+        frame(&mut cx, &tab);
+        let (section_rows_ms, rows) = tab.read_with(&cx.cx, |tab, _| {
+            let start = Instant::now();
+            let sections = tab.section_rows(DiffViewMode::Unified);
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            (
+                elapsed,
+                sections.iter().map(|s| s.rows.len()).sum::<usize>(),
+            )
+        });
+        // The minimum, not the median: this test runs alongside every other
+        // crate's test binary under `cargo test --workspace`, and a stall
+        // from a linker next door must not read as a slow frame. The bug is
+        // a lower bound -- a frame that *cannot* be faster than the file --
+        // and the minimum is the statistic that measures a lower bound.
+        let frame_ms = (0..5)
+            .map(|_| frame(&mut cx, &tab))
+            .fold(f64::INFINITY, f64::min);
+
+        let list = cx
+            .debug_bounds("changes-list")
+            .expect("the scrolling list is drawn");
+        let mut scroll_dispatch: Vec<f64> = Vec::new();
+        let mut scroll_frames: Vec<f64> = Vec::new();
+        for _ in 0..5 {
+            let start = Instant::now();
+            cx.simulate_event(ScrollWheelEvent {
+                position: list.center(),
+                delta: ScrollDelta::Lines(point(0.0, -3.0)),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            scroll_dispatch.push(start.elapsed().as_secs_f64() * 1000.0);
+            scroll_frames.push(cx.update(|window, cx| {
+                let start = Instant::now();
+                window.draw(cx).clear(cx);
+                start.elapsed().as_secs_f64() * 1000.0
+            }));
+        }
+        DiffFrameCost {
+            rows,
+            section_rows_ms,
+            frame_ms,
+            scroll_dispatch_ms: scroll_dispatch.into_iter().fold(f64::INFINITY, f64::min),
+            scroll_frame_ms: scroll_frames.into_iter().fold(f64::INFINITY, f64::min),
+        }
+    }
+
+    /// The report: opening a very large diff makes the diff's own scroll and
+    /// the whole app lag. The loop's claim is that a frame over an expanded
+    /// diff should cost what the *viewport* costs, not what the *file*
+    /// costs: a 50x larger diff must not make every frame ~50x slower.
+    #[gpui::test]
+    async fn perf_a_large_expanded_diff_costs_a_frame_proportional_to_the_viewport(
+        cx: &mut TestAppContext,
+    ) {
+        let small = measure_big_diff(cx, 300);
+        let large = measure_big_diff(cx, 5_000);
+        for (label, cost) in [("small", &small), ("large", &large)] {
+            eprintln!(
+                "[PERF-diff] {label}: rows={} section_rows={:.2}ms frame={:.2}ms scroll_dispatch={:.2}ms scroll_frame={:.2}ms",
+                cost.rows,
+                cost.section_rows_ms,
+                cost.frame_ms,
+                cost.scroll_dispatch_ms,
+                cost.scroll_frame_ms
+            );
+        }
+        let ratio = large.frame_ms / small.frame_ms.max(0.01);
+        eprintln!("[PERF-diff] frame ratio large/small = {ratio:.1}x");
+        assert!(
+            ratio < 4.0,
+            "a frame over a {}-row diff costs {:.1}ms, {ratio:.1}x the {:.1}ms of a {}-row one: \
+             the whole file is being laid out every frame, not the viewport",
+            large.rows,
+            large.frame_ms,
+            small.frame_ms,
+            small.rows
+        );
     }
 }
