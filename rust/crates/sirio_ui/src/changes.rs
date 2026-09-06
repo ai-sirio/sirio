@@ -1803,8 +1803,6 @@ impl ChangesTab {
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let stage_entity = entity.clone();
         let discard_entity = entity.clone();
@@ -1812,7 +1810,6 @@ impl ChangesTab {
         let collapse_entity = entity.clone();
         let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
-        let refreshing = self.git_task.is_some();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -1863,31 +1860,25 @@ impl ChangesTab {
                     });
                 },
             ))
-            .when(refreshing, |this| {
-                this.child(
-                    div()
-                        .id("changes-refresh")
-                        .debug_selector(|| "changes-refresh".to_owned())
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(loading::compact("changes-refresh-spinner", window, cx)),
-                )
-            })
-            .when(!refreshing, |this| {
-                this.child(action_icon_button(
-                    Icon::RefreshCw,
-                    "Refresh",
-                    "changes-refresh",
-                    "refresh-changes".to_owned(),
-                    theme,
-                    move |cx| {
-                        refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
-                    },
-                ))
-            })
+            // Refresh is a button and nothing else: it never turns into a
+            // spinner while a snapshot loads. The toolbar used to swap it
+            // for `loading::compact` for as long as `git_task` was in
+            // flight, and `ensure_refresh` puts a task in flight every
+            // second, so the icon blinked once a second for the duration
+            // of every `git status`. A refresh over a settled surface is
+            // silent — the same rule `render_body` applies to the list —
+            // and a click during one is a no-op by `refresh`'s own
+            // single-flight guard.
+            .child(action_icon_button(
+                Icon::RefreshCw,
+                "Refresh",
+                "changes-refresh",
+                "refresh-changes".to_owned(),
+                theme,
+                move |cx| {
+                    refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
+                },
+            ))
             .child(action_icon_button(
                 Icon::ExpandVertical,
                 "Expand All",
@@ -2312,7 +2303,7 @@ impl Render for ChangesTab {
             .flex()
             .flex_col()
             .bg(theme.surface)
-            .child(self.render_toolbar(entity.clone(), theme, mode, _window, cx))
+            .child(self.render_toolbar(entity.clone(), theme, mode))
             .child(self.render_body(entity, theme, mode, _window, cx))
     }
 }
@@ -3935,6 +3926,58 @@ mod tests {
                 .entries
                 .is_empty(),
             "the confirmed Discard click restores the real checkout"
+        );
+    }
+
+    /// The Refresh control never turns into a spinner. The toolbar used to
+    /// swap the button for `loading::compact` for as long as `git_task` was
+    /// in flight — and `ensure_refresh` puts a task in flight every second,
+    /// so the icon blinked once a second for the duration of every
+    /// `git status`. A refresh over a settled surface is silent: the list
+    /// stays, the button stays, and the new snapshot lands in place.
+    ///
+    /// The in-flight state is faked with a task that never completes: a
+    /// real snapshot load finishes inside `run_until_parked`, so the frame
+    /// drawn afterwards would be the settled one and prove nothing.
+    #[gpui::test]
+    async fn a_refresh_in_flight_keeps_the_refresh_button_and_draws_no_spinner(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-refresh-spinner").is_none(),
+            "a settled toolbar carries no spinner"
+        );
+
+        cx.update(|_, app| {
+            tab.update(app, |tab, cx| {
+                tab.git_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| tab.git_task.is_some()),
+            "the refresh is still in flight in the drawn frame"
+        );
+        assert!(
+            cx.debug_bounds("changes-refresh-spinner").is_none(),
+            "a refresh in flight must not draw a spinner in the toolbar"
+        );
+        assert!(
+            cx.debug_bounds("changes-refresh").is_some(),
+            "the Refresh control stays put while a refresh is in flight"
+        );
+        assert!(
+            cx.debug_bounds("changes-file-row").is_some(),
+            "the settled list stays on screen while a refresh is in flight"
         );
     }
 

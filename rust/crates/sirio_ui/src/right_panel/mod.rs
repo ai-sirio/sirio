@@ -20,7 +20,6 @@ use sirio_theme::Theme;
 use std::path::PathBuf;
 
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
-use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use history::{GitHistory, GitHistoryEvent};
 
@@ -439,7 +438,6 @@ impl RightPanel {
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = PanelView::get(cx);
@@ -482,10 +480,13 @@ impl RightPanel {
                             theme.text_muted
                         },
                     ))
-                    .when(
-                        view == PanelView::Files && self.walk_task.is_some(),
-                        |this| this.child(loading::compact("files-refresh-spinner", window, cx)),
-                    )
+                    // The Files icon never carries a spinner. It used to
+                    // overlay `loading::compact` for as long as `walk_task`
+                    // was in flight, and `ensure_tree_refresh` puts a walk
+                    // in flight every second, so the icon blinked once a
+                    // second for the duration of every `git status`. A walk
+                    // over a settled tree is silent — the same rule the
+                    // `settled` field applies to the tree itself.
                     .when_some(badge_color, |this, color| {
                         this.child(
                             div()
@@ -642,7 +643,7 @@ impl Render for RightPanel {
             .h_full()
             .overflow_hidden()
             .bg(theme.surface)
-            .child(self.render_header(entity.clone(), theme, window, cx))
+            .child(self.render_header(entity.clone(), theme, cx))
             .child(if !self.worktree_selected {
                 self.render_no_worktree(theme).into_any_element()
             } else {
@@ -863,6 +864,55 @@ mod tests {
         assert!(
             f32::from(row.size.height) > 0.0,
             "a commit row must be visible in the drawn frame"
+        );
+    }
+
+    /// The Files rail icon never carries a spinner. It used to overlay
+    /// `loading::compact` for as long as `walk_task` was in flight, and
+    /// `ensure_tree_refresh` puts a walk in flight every second, so the icon
+    /// blinked once a second for the duration of every `git status`. A walk
+    /// over a settled tree is silent: the tree stays and the new listing
+    /// lands in place.
+    ///
+    /// The in-flight state is faked with a task that never completes: a
+    /// real walk finishes inside `run_until_parked`, so the frame drawn
+    /// afterwards would be the settled one and prove nothing.
+    #[gpui::test]
+    fn a_walk_in_flight_draws_no_spinner_on_the_files_rail_icon(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("a.txt"), "a").expect("write file");
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let panel =
+            cx.update(|window, _cx| window.root::<RightPanel>().flatten().expect("panel root"));
+        panel.update(&mut cx, |panel, cx| {
+            panel.bind_worktree(dir.0.clone(), cx);
+        });
+        cx.update(|_window, cx| PanelView::set(PanelView::Files, cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("files-refresh-spinner").is_none(),
+            "a settled rail carries no spinner"
+        );
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.walk_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            panel.read_with(&cx, |panel, _| panel.walk_task.is_some()),
+            "the walk is still in flight in the drawn frame"
+        );
+        assert!(
+            cx.debug_bounds("files-refresh-spinner").is_none(),
+            "a walk in flight must not draw a spinner on the rail icon"
+        );
+        assert!(
+            cx.debug_bounds(PanelView::Files.element_id()).is_some(),
+            "the rail icon itself stays drawn"
         );
     }
 
