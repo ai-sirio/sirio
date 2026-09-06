@@ -45,6 +45,7 @@ mod directory_status;
 mod error;
 mod git;
 mod graph;
+mod ignored;
 mod log;
 mod remote;
 mod side_by_side;
@@ -63,6 +64,7 @@ pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, direct
 pub use error::{GitActionError, GitError};
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
 pub use graph::{GraphRow, layout};
+pub use ignored::{IgnoredPaths, ignored_paths, parse_ignored};
 pub use log::{CommitRecord, GitLog, LogFilter, looks_like_hash, parse_log};
 pub use remote::{GitRemote, github_owner, project_name};
 pub use side_by_side::{
