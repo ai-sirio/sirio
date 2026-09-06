@@ -250,6 +250,7 @@ pub(crate) const USER_PILL_TEXT_SIZE: f32 = 13.5;
 pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
 
 fn parse_chat_markdown(source: &str) -> markdown::Doc {
+    let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
     markdown::parse(source)
 }
 
@@ -1083,6 +1084,10 @@ impl TranscriptSelectableText {
     }
 
     fn paint_selection(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let _perf = sirio_perf::span(
+            "TranscriptText.paint_selection",
+            window.current_view().as_u64(),
+        );
         let Some(selection) = self
             .interaction
             .chat
@@ -1185,6 +1190,10 @@ impl Element for TranscriptSelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let _perf = sirio_perf::span(
+            "TranscriptText.request_layout",
+            window.current_view().as_u64(),
+        );
         self.text.request_layout(id, inspector_id, window, cx)
     }
 
@@ -1197,6 +1206,7 @@ impl Element for TranscriptSelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let _perf = sirio_perf::span("TranscriptText.prepaint", window.current_view().as_u64());
         self.text
             .prepaint(id, inspector_id, bounds, state, window, cx);
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
@@ -1212,6 +1222,11 @@ impl Element for TranscriptSelectableText {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let _perf = sirio_perf::span("TranscriptText.paint", window.current_view().as_u64());
+        let input_perf = sirio_perf::span(
+            "TranscriptText.prepare_input",
+            window.current_view().as_u64(),
+        );
         let layout = self.text.layout().clone();
         self.paint_selection(bounds, window, cx);
         window.set_cursor_style(CursorStyle::IBeam, hitbox);
@@ -1307,6 +1322,11 @@ impl Element for TranscriptSelectableText {
             }
         });
 
+        drop(input_perf);
+        let _styled_perf = sirio_perf::span(
+            "TranscriptText.paint_styled",
+            window.current_view().as_u64(),
+        );
         self.text
             .paint(id, inspector_id, bounds, state, &mut (), window, cx);
     }
@@ -1773,6 +1793,7 @@ impl Chat {
     }
 
     fn remeasure_entry(&self, index: usize) {
+        let _perf = sirio_perf::span("Chat.remeasure_entry", index as u64);
         self.list_state.remeasure_items(index..index + 1);
     }
 
@@ -1899,6 +1920,12 @@ impl Chat {
     }
 
     fn handle_event(&mut self, event: AcpEvent, cx: &mut Context<Self>) {
+        let _perf = sirio_perf::span("Chat.handle_event", cx.entity_id().as_u64());
+        let perf_notification = match &event {
+            AcpEvent::AgentMessageChunk(_) => "notify.Chat.acp_message",
+            AcpEvent::ThoughtChunk(_) => "notify.Chat.acp_thought",
+            _ => "notify.Chat.acp_other",
+        };
         match event {
             AcpEvent::AgentMessageChunk(text) => {
                 if let Some(Entry::Assistant {
@@ -2381,6 +2408,7 @@ impl Chat {
         if let Some(client) = &self.client {
             self.mode_catalog = client.mode_catalog();
         }
+        sirio_perf::event(perf_notification, cx.entity_id().as_u64());
         cx.notify();
     }
 
@@ -4517,6 +4545,7 @@ impl Chat {
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
+        let _perf = sirio_perf::span("Chat.render_entry", entry_index as u64);
         let typography = theme.typography;
         let bezel_theme = theme.to_bezel_theme();
         let interaction = TranscriptInteraction {
@@ -5220,6 +5249,7 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let _perf = sirio_perf::span("Chat.render_composer", cx.entity_id().as_u64());
         let typography = theme.typography;
         let focused = self
             .composer_field
@@ -6784,6 +6814,12 @@ fn slash_option_tooltip(description: &str) -> Option<SharedString> {
 
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
+        // Read before any loader renews this view's Bezel lease.
+        if sirio_perf::enabled() && bezel::motion::Painter::of(cx).woken(cx) {
+            sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
+        }
+        sirio_perf::event("Chat.entries", self.entries.len() as u64);
         // Fetched fresh every frame from the global, so a change of
         // appearance is picked up without the chat surface holding a stale
         // copy — never `Theme::dark()`, never a field.
@@ -7803,6 +7839,116 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    #[gpui::test]
+    async fn acp_redraw_trace_names_notifications_without_recording_content(
+        cx: &mut TestAppContext,
+    ) {
+        use std::time::Duration;
+        const CHILD: &str = "SIRIO_PERF_ACP_TRACE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = std::env::temp_dir().join(format!(
+                "sirio-acp-trace-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join("events.tsv");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "chat::tests::acp_redraw_trace_names_notifications_without_recording_content",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("SIRIO_PERF_TRACE", &path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let trace = std::fs::read_to_string(path).unwrap();
+            assert_eq!(
+                trace.matches("\tevent\tnotify.Chat.acp_message\t").count(),
+                2
+            );
+            assert_eq!(
+                trace.matches("\tevent\tnotify.Chat.acp_thought\t").count(),
+                2
+            );
+            assert!(trace.contains("\tevent\tmotion.Chat.woken\t"));
+            assert_eq!(
+                trace
+                    .matches("\tevent\trequest_frame.Chat.thought_follow\t")
+                    .count(),
+                1,
+                "the initial overflow needs one correction; stable frames need none"
+            );
+            assert!(!trace.contains("private-fixture-content"));
+            for name in [
+                "TranscriptText.request_layout",
+                "TranscriptText.prepaint",
+                "TranscriptText.paint",
+                "TranscriptText.paint_selection",
+                "TranscriptText.prepare_input",
+                "TranscriptText.paint_styled",
+                "Chat.render_entry",
+            ] {
+                assert!(
+                    trace.contains(&format!("\tspan\t{name}\t")),
+                    "missing {name}"
+                );
+            }
+            return;
+        }
+        sirio_perf::init();
+        let (chat, cx) = spinner_test_chat(cx);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::AgentMessageChunk("private-fixture-content".into()),
+                cx,
+            );
+            chat.handle_event(AcpEvent::ThoughtChunk("private-fixture-content".into()), cx);
+            chat.handle_event(
+                AcpEvent::AgentMessageChunk("private-fixture-content".into()),
+                cx,
+            );
+            chat.streaming = true;
+            chat.handle_event(
+                AcpEvent::ThoughtChunk("private-fixture-content\n".repeat(100)),
+                cx,
+            );
+        });
+        cx.update(|_, cx| {
+            use bezel::motion::AppExt as _;
+            cx.set_pause_when_inactive(false);
+        });
+        refresh_frame(cx);
+        cx.executor().advance_clock(Duration::from_millis(40));
+        cx.run_until_parked();
+        refresh_frame(cx);
+        sirio_perf::event("test.acp_trace.complete", 0);
+        let path = std::env::var_os("SIRIO_PERF_TRACE").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains("test.acp_trace.complete")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "trace writer did not flush"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn composer_field_edge_hides_the_bright_focus_ring() {

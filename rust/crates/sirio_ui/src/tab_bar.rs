@@ -613,6 +613,7 @@ impl TabBar {
 
 impl Render for TabBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("TabBar.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         let bezel_theme = theme.to_bezel_theme();
         let painter = Painter::of(cx);

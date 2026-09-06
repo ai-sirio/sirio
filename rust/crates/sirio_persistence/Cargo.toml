@@ -14,6 +14,7 @@ publish = false
 # not".
 
 [dependencies]
+sirio_perf = { path = "../sirio_perf" }
 # Bundled SQLite so no system library is required. 0.31 is pinned to the
 # version present in the local cargo registry.
 rusqlite = { version = "0.31", features = ["bundled"] }

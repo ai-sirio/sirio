@@ -615,6 +615,7 @@ impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("RightPanel.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         // #189: incremented here and nowhere else -- being *in* a drawn
         // frame is the whole signal.

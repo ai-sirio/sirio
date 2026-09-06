@@ -1,0 +1,842 @@
+{
+ "status": "baseline instrumentation; no optimization",
+ "runs": [{
+  "run_directory": "rust/target/perf/text-phases-v1",
+  "process_stopped_and_verified": true,
+  "hashes": {
+  "native_trace_sha256": "0f163f7de12ff62b5e8edba799d86f79013270538930cdc3e11be0bfbaf55ccc",
+  "standard_trace_sha256": "16b04048938c893afb87f52a723c86e4abd9ca4c216271ca162cb505716adfb2"
+},
+  "environment": {
+  "head": "22f0846b9740e9dc2c8377db96bde50bc5df782c",
+  "utc": "2026-09-06T07:01:02.790578+00:00",
+  "logical_processors": 12,
+  "source_database": "D:\\Progetti\\sirio\\sirio\\rust\\target\\perf\\startup-v1\\snapshot.sqlite",
+  "snapshot_sha256": "43cb6509f6deae01f0737e7c5e4a3dc04e02da0488902090d83bae7e538a8add"
+},
+  "process": {
+  "pid": 7820,
+  "launch_perf_counter_ns": 167462960853700,
+  "executable": "D:\\Progetti\\sirio\\sirio\\rust\\target\\debug\\sirio.exe",
+  "exe_sha256": "fd6e3618fd5b6593c94303698ed998075168051707933c0564e40764022889c1"
+},
+  "standard": [
+  {
+    "scenario": "text-open-gated-502",
+    "pid": 7820,
+    "utc": "2026-09-06T07:02:33.192329+00:00",
+    "elapsed_s": 10.000461500021629,
+    "cpu_s": 5.8125,
+    "logical_processors": 12,
+    "cpu_pct_machine": 4.843526471242876,
+    "cpu_pct_one_core": 58.12231765491451,
+    "start_epoch_ns": 1788678143191861600,
+    "end_epoch_ns": 1788678153192325300,
+    "foreground_samples": 100,
+    "focus_samples": 100,
+    "root_notification_windows": {
+      "renders": 305,
+      "without_observed_notification": 295,
+      "candidate_sets": {
+        "notify.RightPanel.refresh_complete:4294967326": 10
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "root_render_witnesses": {
+      "renders": 305,
+      "without_witness": 1,
+      "outside_platform_draw": 0,
+      "witness_sets": {
+        "motion.Chat.woken:4294967309": 294,
+        "motion.Chat.woken:4294967309 + notify.RightPanel.refresh_complete:4294967326": 6,
+        "notify.RightPanel.refresh_complete:4294967326": 4
+      },
+      "interpretation": "notification and frame-request candidates before root plus Bezel clock witnesses in its platform draw; not exclusive causal attribution"
+    },
+    "present_fps": 30.498585780577358,
+    "rates": {
+      "Chat.entries": 29.998608964502317,
+      "Chat.render": 29.998608964502317,
+      "Chat.render_composer": 29.998608964502317,
+      "Chat.render_entry": 149.9930448225116,
+      "Chat.render_thought_body": 29.998608964502317,
+      "DirectXRenderer.draw": 30.498585780577358,
+      "DirectXRenderer.present": 30.498585780577358,
+      "DirectXRenderer.render": 30.498585780577358,
+      "RightPanel.render": 0.9999536321500773,
+      "RowView.render": 29.998608964502317,
+      "Sidebar.render": 30.498585780577358,
+      "SirioWorkspace.render": 30.498585780577358,
+      "StatusBar.render": 30.498585780577358,
+      "Titlebar.render": 30.498585780577358,
+      "TranscriptText.paint": 149.9930448225116,
+      "TranscriptText.prepaint": 149.9930448225116,
+      "TranscriptText.request_layout": 149.9930448225116,
+      "Windows.draw_window": 59.997217929004634,
+      "Windows.vsync": 59.997217929004634,
+      "git.status": 0.9999536321500773,
+      "motion.Chat.woken": 29.998608964502317,
+      "notify.RightPanel.refresh_complete": 0.9999536321500773,
+      "trace.dropped": 0.9999536321500773
+    },
+    "view_rates": {
+      "Chat.render:4294967309": 29.998608964502317,
+      "RightPanel.render:4294967308": 0.0,
+      "RightPanel.render:4294967326": 0.9999536321500773,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 29.998608964502317,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967306": 30.498585780577358,
+      "SirioWorkspace.render:4294967305": 30.498585780577358,
+      "StatusBar.render:4294967302": 0.0,
+      "StatusBar.render:4294967325": 30.498585780577358,
+      "TabBar.render:4294967301": 0.0,
+      "Titlebar.render:4294967307": 30.498585780577358
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "Windows.draw_window",
+        56.45137334981777
+      ],
+      [
+        "git.status",
+        5.189525361708978
+      ],
+      [
+        "Chat.render",
+        1.482295265968517
+      ],
+      [
+        "DirectXRenderer.draw",
+        1.299769729677635
+      ],
+      [
+        "TranscriptText.paint",
+        1.1145303192290974
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  },
+  {
+    "scenario": "text-open-stream-502",
+    "pid": 7820,
+    "utc": "2026-09-06T07:03:03.327600+00:00",
+    "elapsed_s": 30.000238399981754,
+    "cpu_s": 31.25,
+    "logical_processors": 12,
+    "cpu_pct_machine": 8.68048657462752,
+    "cpu_pct_one_core": 104.16583889553026,
+    "start_epoch_ns": 1788678153327355200,
+    "end_epoch_ns": 1788678183327596000,
+    "foreground_samples": 299,
+    "focus_samples": 299,
+    "root_notification_windows": {
+      "renders": 929,
+      "without_observed_notification": 12,
+      "candidate_sets": {
+        "notify.Chat.acp_thought:4294967309": 888,
+        "notify.Chat.acp_thought:4294967309 + notify.RightPanel.refresh_complete:4294967326": 29
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "root_render_witnesses": {
+      "renders": 929,
+      "without_witness": 0,
+      "outside_platform_draw": 0,
+      "witness_sets": {
+        "motion.Chat.woken:4294967309 + notify.Chat.acp_thought:4294967309": 5,
+        "motion.Chat.woken:4294967309 + notify.Chat.acp_thought:4294967309 + notify.RightPanel.refresh_complete:4294967326 + request_frame.Chat.thought_follow:4294967309": 25,
+        "motion.Chat.woken:4294967309 + notify.Chat.acp_thought:4294967309 + request_frame.Chat.thought_follow:4294967309": 663,
+        "motion.Chat.woken:4294967309 + request_frame.Chat.thought_follow:4294967309": 8,
+        "notify.Chat.acp_thought:4294967309": 8,
+        "notify.Chat.acp_thought:4294967309 + notify.RightPanel.refresh_complete:4294967326 + request_frame.Chat.thought_follow:4294967309": 4,
+        "notify.Chat.acp_thought:4294967309 + request_frame.Chat.thought_follow:4294967309": 212,
+        "request_frame.Chat.thought_follow:4294967309": 4
+      },
+      "interpretation": "notification and frame-request candidates before root plus Bezel clock witnesses in its platform draw; not exclusive causal attribution"
+    },
+    "present_fps": 30.96641810955064,
+    "rates": {
+      "Chat.entries": 30.96641810955064,
+      "Chat.handle_event": 48.56627684135122,
+      "Chat.remeasure_entry": 48.56627684135122,
+      "Chat.render": 30.96641810955064,
+      "Chat.render_composer": 30.96641810955064,
+      "Chat.render_entry": 123.93233856976241,
+      "Chat.render_thought_body": 30.96641810955064,
+      "DirectWrite.layout_line": 48.56627684135122,
+      "DirectWrite.rasterize_glyph": 1.0333250391776856,
+      "DirectXRenderer.draw": 30.96641810955064,
+      "DirectXRenderer.present": 30.96641810955064,
+      "DirectXRenderer.render": 30.96641810955064,
+      "RightPanel.render": 0.9666589076178348,
+      "RowView.render": 23.366479111727664,
+      "Sidebar.render": 30.96641810955064,
+      "SirioWorkspace.render": 30.96641810955064,
+      "StatusBar.render": 30.96641810955064,
+      "Titlebar.render": 30.96641810955064,
+      "TranscriptText.paint": 123.99900470132226,
+      "TranscriptText.prepaint": 123.99900470132226,
+      "TranscriptText.request_layout": 123.93233856976241,
+      "Windows.draw_window": 30.96641810955064,
+      "Windows.vsync": 59.96618533808569,
+      "git.status": 0.9666589076178348,
+      "motion.Chat.woken": 23.366479111727664,
+      "notify.Chat.acp_thought": 48.56627684135122,
+      "notify.RightPanel.refresh_complete": 0.9666589076178348,
+      "request_frame.Chat.thought_follow": 30.566421320191537,
+      "trace.dropped": 0.9999919733977601
+    },
+    "view_rates": {
+      "Chat.render:4294967309": 30.96641810955064,
+      "RightPanel.render:4294967308": 0.0,
+      "RightPanel.render:4294967326": 0.9666589076178348,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 23.366479111727664,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967306": 30.96641810955064,
+      "SirioWorkspace.render:4294967305": 30.96641810955064,
+      "StatusBar.render:4294967302": 0.0,
+      "StatusBar.render:4294967325": 30.96641810955064,
+      "TabBar.render:4294967301": 0.0,
+      "Titlebar.render:4294967307": 30.96641810955064
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "Windows.draw_window",
+        98.96880427706434
+      ],
+      [
+        "TranscriptText.paint",
+        26.109999423737957
+      ],
+      [
+        "git.status",
+        5.238563618462689
+      ],
+      [
+        "Chat.render",
+        1.5612968013243413
+      ],
+      [
+        "DirectXRenderer.draw",
+        1.326567018755396
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  }
+],
+  "native": {
+  "header": {
+    "kind": "header",
+    "schema": "sirio-native-v1",
+    "pid": 7820,
+    "epoch_ns": 1788678120565352900
+  },
+  "samples": [
+    {
+      "scenario": "text-open-gated-502",
+      "pid": 7820,
+      "utc": "2026-09-06T07:02:33.192329+00:00",
+      "elapsed_s": 10.000461500021629,
+      "cpu_s": 5.8125,
+      "logical_processors": 12,
+      "cpu_pct_machine": 4.843526471242876,
+      "cpu_pct_one_core": 58.12231765491451,
+      "start_epoch_ns": 1788678143191861600,
+      "end_epoch_ns": 1788678153192325300,
+      "foreground_samples": 100,
+      "focus_samples": 100,
+      "native": {
+        "key_down_dispatches": 0,
+        "invalidating_key_down_dispatches": 0,
+        "input_pairs": [],
+        "mid_draw_inputs": 0,
+        "right_censored_inputs": 0,
+        "latency_scope": "invalidating KeyDown dispatch start to explicit newly drawn frame submission end; single window; not photon or composer-content proof",
+        "top_five_inclusive_wall": [
+          {
+            "scope": "draw",
+            "wall_pct": 54.44830123227186
+          },
+          {
+            "scope": "small_polls",
+            "wall_pct": 0.20361955816108807
+          },
+          {
+            "scope": "crates\\sirio\\src\\main.rs:4271:12",
+            "wall_pct": 0.17190702867108051
+          },
+          {
+            "scope": "crates\\sirio_ui\\src\\right_panel\\files.rs:115:34",
+            "wall_pct": 0.011580463013930044
+          },
+          {
+            "scope": "C:\\Users\\enzop\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\bezel-motion-0.1.4\\src\\lib.rs:216:8",
+            "wall_pct": 0.004938770989189232
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "text-open-stream-502",
+      "pid": 7820,
+      "utc": "2026-09-06T07:03:03.327600+00:00",
+      "elapsed_s": 30.000238399981754,
+      "cpu_s": 31.25,
+      "logical_processors": 12,
+      "cpu_pct_machine": 8.68048657462752,
+      "cpu_pct_one_core": 104.16583889553026,
+      "start_epoch_ns": 1788678153327355200,
+      "end_epoch_ns": 1788678183327596000,
+      "foreground_samples": 299,
+      "focus_samples": 299,
+      "native": {
+        "key_down_dispatches": 0,
+        "invalidating_key_down_dispatches": 0,
+        "input_pairs": [],
+        "mid_draw_inputs": 0,
+        "right_censored_inputs": 0,
+        "latency_scope": "invalidating KeyDown dispatch start to explicit newly drawn frame submission end; single window; not photon or composer-content proof",
+        "top_five_inclusive_wall": [
+          {
+            "scope": "draw",
+            "wall_pct": 96.95803541683571
+          },
+          {
+            "scope": "crates\\sirio_ui\\src\\chat\\mod.rs:3793:36",
+            "wall_pct": 0.36255608988311855
+          },
+          {
+            "scope": "small_polls",
+            "wall_pct": 0.24758801269355143
+          },
+          {
+            "scope": "crates\\sirio\\src\\main.rs:4271:12",
+            "wall_pct": 0.09606322893248243
+          },
+          {
+            "scope": "crates\\sirio_ui\\src\\right_panel\\files.rs:115:34",
+            "wall_pct": 0.008253267087109514
+          }
+        ]
+      }
+    }
+  ]
+}
+},
+{
+  "run_directory": "rust/target/perf/text-phases-closed-v1",
+  "process_stopped_and_verified": true,
+  "hashes": {
+  "native_trace_sha256": "89fe4f4e064fed379ade806d41ddd78e508bbd7f92fd2779a7e9a6d8e570edba",
+  "standard_trace_sha256": "8c182aaa781255dc9d1c17d34cb2dd1a3b9e306bc2966f90115d1ab488155e67"
+},
+  "environment": {
+  "head": "22f0846b9740e9dc2c8377db96bde50bc5df782c",
+  "utc": "2026-09-06T07:03:14.757595+00:00",
+  "logical_processors": 12,
+  "source_database": "D:\\Progetti\\sirio\\sirio\\rust\\target\\perf\\startup-v1\\snapshot.sqlite",
+  "snapshot_sha256": "43cb6509f6deae01f0737e7c5e4a3dc04e02da0488902090d83bae7e538a8add"
+},
+  "process": {
+  "pid": 45812,
+  "launch_perf_counter_ns": 167541266443700,
+  "executable": "D:\\Progetti\\sirio\\sirio\\rust\\target\\debug\\sirio.exe",
+  "exe_sha256": "fd6e3618fd5b6593c94303698ed998075168051707933c0564e40764022889c1"
+},
+  "standard": [
+  {
+    "scenario": "text-closed-gated-502",
+    "pid": 45812,
+    "utc": "2026-09-06T07:03:59.467867+00:00",
+    "elapsed_s": 10.00059089998831,
+    "cpu_s": 5.5,
+    "logical_processors": 12,
+    "cpu_pct_machine": 4.583062520174374,
+    "cpu_pct_one_core": 54.99675024209248,
+    "start_epoch_ns": 1788678229467269200,
+    "end_epoch_ns": 1788678239467862500,
+    "foreground_samples": 100,
+    "focus_samples": 100,
+    "root_notification_windows": {
+      "renders": 308,
+      "without_observed_notification": 298,
+      "candidate_sets": {
+        "notify.RightPanel.refresh_complete:4294967322": 10
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "root_render_witnesses": {
+      "renders": 308,
+      "without_witness": 0,
+      "outside_platform_draw": 0,
+      "witness_sets": {
+        "motion.Chat.woken:12884901894": 298,
+        "motion.Chat.woken:12884901894 + notify.RightPanel.refresh_complete:4294967322": 2,
+        "notify.RightPanel.refresh_complete:4294967322": 8
+      },
+      "interpretation": "notification and frame-request candidates before root plus Bezel clock witnesses in its platform draw; not exclusive causal attribution"
+    },
+    "present_fps": 30.69817867705909,
+    "rates": {
+      "Chat.entries": 29.998220205595203,
+      "Chat.render": 29.998220205595203,
+      "Chat.render_composer": 29.998220205595203,
+      "Chat.render_entry": 149.49113069121609,
+      "DirectXRenderer.draw": 30.69817867705909,
+      "DirectXRenderer.present": 30.69817867705909,
+      "DirectXRenderer.render": 30.69817867705909,
+      "RightPanel.render": 0.9999406735198401,
+      "Sidebar.render": 30.798172744411072,
+      "SirioWorkspace.render": 30.798172744411072,
+      "StatusBar.render": 30.798172744411072,
+      "Titlebar.render": 30.798172744411072,
+      "TranscriptText.paint": 119.59290455297287,
+      "TranscriptText.prepaint": 119.59290455297287,
+      "TranscriptText.request_layout": 119.59290455297287,
+      "Windows.draw_window": 59.996440411190406,
+      "Windows.vsync": 59.996440411190406,
+      "activity.inspect_foreground_agent_in": 1.899887279687696,
+      "activity.take_snapshot": 1.899887279687696,
+      "git.status": 0.9999406735198401,
+      "motion.Chat.woken": 29.998220205595203,
+      "notify.RightPanel.refresh_complete": 0.9999406735198401,
+      "trace.dropped": 0.9999406735198401
+    },
+    "view_rates": {
+      "Chat.render:12884901894": 29.998220205595203,
+      "RightPanel.render:4294967308": 0.0,
+      "RightPanel.render:4294967322": 0.9999406735198401,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 0.0,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967306": 30.798172744411072,
+      "SirioWorkspace.render:4294967305": 30.798172744411072,
+      "StatusBar.render:4294967302": 0.0,
+      "StatusBar.render:4294967321": 30.798172744411072,
+      "TabBar.render:4294967301": 0.0,
+      "TerminalView.render:4294967300": 0.0,
+      "Titlebar.render:4294967307": 30.798172744411072
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "Windows.draw_window",
+        50.60434864399495
+      ],
+      [
+        "git.status",
+        5.074185948547673
+      ],
+      [
+        "Chat.render",
+        1.5186608978489307
+      ],
+      [
+        "activity.take_snapshot",
+        1.4833399934381895
+      ],
+      [
+        "DirectXRenderer.draw",
+        1.2634220411702974
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  },
+  {
+    "scenario": "text-closed-stream-502",
+    "pid": 45812,
+    "utc": "2026-09-06T07:04:29.601220+00:00",
+    "elapsed_s": 30.000485800002934,
+    "cpu_s": 28.75,
+    "logical_processors": 12,
+    "cpu_pct_machine": 7.985981791445187,
+    "cpu_pct_one_core": 95.83178149734225,
+    "start_epoch_ns": 1788678239600727200,
+    "end_epoch_ns": 1788678269601215300,
+    "foreground_samples": 299,
+    "focus_samples": 299,
+    "root_notification_windows": {
+      "renders": 1613,
+      "without_observed_notification": 161,
+      "candidate_sets": {
+        "notify.Chat.acp_thought:12884901894": 1422,
+        "notify.Chat.acp_thought:12884901894 + notify.RightPanel.refresh_complete:4294967322": 27,
+        "notify.RightPanel.refresh_complete:4294967322": 3
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "root_render_witnesses": {
+      "renders": 1613,
+      "without_witness": 0,
+      "outside_platform_draw": 0,
+      "witness_sets": {
+        "motion.Chat.woken:12884901894": 161,
+        "motion.Chat.woken:12884901894 + notify.Chat.acp_thought:12884901894": 715,
+        "motion.Chat.woken:12884901894 + notify.Chat.acp_thought:12884901894 + notify.RightPanel.refresh_complete:4294967322": 13,
+        "motion.Chat.woken:12884901894 + notify.RightPanel.refresh_complete:4294967322": 2,
+        "notify.Chat.acp_thought:12884901894": 707,
+        "notify.Chat.acp_thought:12884901894 + notify.RightPanel.refresh_complete:4294967322": 14,
+        "notify.RightPanel.refresh_complete:4294967322": 1
+      },
+      "interpretation": "notification and frame-request candidates before root plus Bezel clock witnesses in its platform draw; not exclusive causal attribution"
+    },
+    "present_fps": 53.79912468824133,
+    "rates": {
+      "Chat.entries": 53.7657918972325,
+      "Chat.handle_event": 48.632542081873666,
+      "Chat.remeasure_entry": 48.632542081873666,
+      "Chat.render": 53.7657918972325,
+      "Chat.render_composer": 53.7657918972325,
+      "Chat.render_entry": 268.8289594861625,
+      "DirectXRenderer.draw": 53.79912468824133,
+      "DirectXRenderer.present": 53.79912468824133,
+      "DirectXRenderer.render": 53.79912468824133,
+      "RightPanel.render": 0.9999837302647087,
+      "Sidebar.render": 53.7657918972325,
+      "SirioWorkspace.render": 53.7657918972325,
+      "StatusBar.render": 53.7657918972325,
+      "Titlebar.render": 53.7657918972325,
+      "TranscriptText.paint": 215.06316758893,
+      "TranscriptText.prepaint": 215.06316758893,
+      "TranscriptText.request_layout": 215.06316758893,
+      "Windows.draw_window": 58.932374503600165,
+      "Windows.vsync": 59.96569102487369,
+      "activity.inspect_foreground_agent_in": 1.8999690875029465,
+      "activity.take_snapshot": 1.8999690875029465,
+      "git.status": 0.9999837302647087,
+      "motion.Chat.woken": 29.699516788861846,
+      "notify.Chat.acp_thought": 48.632542081873666,
+      "notify.RightPanel.refresh_complete": 0.9999837302647087,
+      "trace.dropped": 0.9999837302647087
+    },
+    "view_rates": {
+      "Chat.render:12884901894": 53.7657918972325,
+      "RightPanel.render:4294967308": 0.0,
+      "RightPanel.render:4294967322": 0.9999837302647087,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 0.0,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967306": 53.7657918972325,
+      "SirioWorkspace.render:4294967305": 53.7657918972325,
+      "StatusBar.render:4294967302": 0.0,
+      "StatusBar.render:4294967321": 53.7657918972325,
+      "TabBar.render:4294967301": 0.0,
+      "TerminalView.render:4294967300": 0.0,
+      "Titlebar.render:4294967307": 53.7657918972325
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "Windows.draw_window",
+        89.16910521865809
+      ],
+      [
+        "git.status",
+        5.341348762922294
+      ],
+      [
+        "Chat.render",
+        2.685671970783702
+      ],
+      [
+        "DirectXRenderer.draw",
+        2.225294461125784
+      ],
+      [
+        "TranscriptText.paint",
+        1.9892836343552691
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  }
+],
+  "native": {
+  "header": {
+    "kind": "header",
+    "schema": "sirio-native-v1",
+    "pid": 45812,
+    "epoch_ns": 1788678195389306800
+  },
+  "samples": [
+    {
+      "scenario": "text-closed-gated-502",
+      "pid": 45812,
+      "utc": "2026-09-06T07:03:59.467867+00:00",
+      "elapsed_s": 10.00059089998831,
+      "cpu_s": 5.5,
+      "logical_processors": 12,
+      "cpu_pct_machine": 4.583062520174374,
+      "cpu_pct_one_core": 54.99675024209248,
+      "start_epoch_ns": 1788678229467269200,
+      "end_epoch_ns": 1788678239467862500,
+      "foreground_samples": 100,
+      "focus_samples": 100,
+      "native": {
+        "key_down_dispatches": 0,
+        "invalidating_key_down_dispatches": 0,
+        "input_pairs": [],
+        "mid_draw_inputs": 0,
+        "right_censored_inputs": 0,
+        "latency_scope": "invalidating KeyDown dispatch start to explicit newly drawn frame submission end; single window; not photon or composer-content proof",
+        "top_five_inclusive_wall": [
+          {
+            "scope": "draw",
+            "wall_pct": 48.658883068467546
+          },
+          {
+            "scope": "small_polls",
+            "wall_pct": 0.2600635704283665
+          },
+          {
+            "scope": "crates\\sirio\\src\\main.rs:4271:12",
+            "wall_pct": 0.05969445832778741
+          },
+          {
+            "scope": "crates\\sirio_ui\\src\\right_panel\\files.rs:115:34",
+            "wall_pct": 0.011462319940557927
+          },
+          {
+            "scope": "C:\\Users\\enzop\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\bezel-motion-0.1.4\\src\\lib.rs:216:8",
+            "wall_pct": 0.002088876066982946
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "text-closed-stream-502",
+      "pid": 45812,
+      "utc": "2026-09-06T07:04:29.601220+00:00",
+      "elapsed_s": 30.000485800002934,
+      "cpu_s": 28.75,
+      "logical_processors": 12,
+      "cpu_pct_machine": 7.985981791445187,
+      "cpu_pct_one_core": 95.83178149734225,
+      "start_epoch_ns": 1788678239600727200,
+      "end_epoch_ns": 1788678269601215300,
+      "foreground_samples": 299,
+      "focus_samples": 299,
+      "native": {
+        "key_down_dispatches": 0,
+        "invalidating_key_down_dispatches": 0,
+        "input_pairs": [],
+        "mid_draw_inputs": 0,
+        "right_censored_inputs": 0,
+        "latency_scope": "invalidating KeyDown dispatch start to explicit newly drawn frame submission end; single window; not photon or composer-content proof",
+        "top_five_inclusive_wall": [
+          {
+            "scope": "draw",
+            "wall_pct": 85.90223937056544
+          },
+          {
+            "scope": "small_polls",
+            "wall_pct": 0.6752740132918038
+          },
+          {
+            "scope": "crates\\sirio_ui\\src\\chat\\mod.rs:3793:36",
+            "wall_pct": 0.13660011084952983
+          },
+          {
+            "scope": "crates\\sirio\\src\\main.rs:4271:12",
+            "wall_pct": 0.03617174481904513
+          },
+          {
+            "scope": "crates\\sirio_ui\\src\\right_panel\\files.rs:115:34",
+            "wall_pct": 0.009211183467378318
+          }
+        ]
+      }
+    }
+  ]
+}
+}],
+ "text_phases": [
+  {
+    "run": "text-phases-v1",
+    "scenario": "text-open-gated-502",
+    "phases": {
+      "DirectWrite.layout_line": {
+        "calls": 0,
+        "calls_per_s": 0.0,
+        "inclusive_wall_pct": 0.0
+      },
+      "DirectWrite.rasterize_glyph": {
+        "calls": 0,
+        "calls_per_s": 0.0,
+        "inclusive_wall_pct": 0.0
+      },
+      "TranscriptText.request_layout": {
+        "calls": 1500,
+        "calls_per_s": 149.9930448225116,
+        "inclusive_wall_pct": 0.12425223842370431
+      },
+      "TranscriptText.prepaint": {
+        "calls": 1500,
+        "calls_per_s": 149.9930448225116,
+        "inclusive_wall_pct": 0.00750565196291848
+      },
+      "TranscriptText.paint": {
+        "calls": 1500,
+        "calls_per_s": 149.9930448225116,
+        "inclusive_wall_pct": 1.1145303192290974
+      },
+      "Chat.render_entry": {
+        "calls": 1500,
+        "calls_per_s": 149.9930448225116,
+        "inclusive_wall_pct": 0.44622430857881124
+      }
+    }
+  },
+  {
+    "run": "text-phases-v1",
+    "scenario": "text-open-stream-502",
+    "phases": {
+      "DirectWrite.layout_line": {
+        "calls": 1457,
+        "calls_per_s": 48.56627684135122,
+        "inclusive_wall_pct": 0.48769841874069225
+      },
+      "DirectWrite.rasterize_glyph": {
+        "calls": 31,
+        "calls_per_s": 1.0333250391776856,
+        "inclusive_wall_pct": 0.0005296624152430137
+      },
+      "TranscriptText.request_layout": {
+        "calls": 3718,
+        "calls_per_s": 123.93233856976241,
+        "inclusive_wall_pct": 0.24794167652147647
+      },
+      "TranscriptText.prepaint": {
+        "calls": 3720,
+        "calls_per_s": 123.99900470132226,
+        "inclusive_wall_pct": 0.00704061015403583
+      },
+      "TranscriptText.paint": {
+        "calls": 3720,
+        "calls_per_s": 123.99900470132226,
+        "inclusive_wall_pct": 26.109999423737957
+      },
+      "Chat.render_entry": {
+        "calls": 3718,
+        "calls_per_s": 123.93233856976241,
+        "inclusive_wall_pct": 0.4966126805222177
+      }
+    }
+  },
+  {
+    "run": "text-phases-closed-v1",
+    "scenario": "text-closed-gated-502",
+    "phases": {
+      "DirectWrite.layout_line": {
+        "calls": 0,
+        "calls_per_s": 0.0,
+        "inclusive_wall_pct": 0.0
+      },
+      "DirectWrite.rasterize_glyph": {
+        "calls": 0,
+        "calls_per_s": 0.0,
+        "inclusive_wall_pct": 0.0
+      },
+      "TranscriptText.request_layout": {
+        "calls": 1196,
+        "calls_per_s": 119.59290455297287,
+        "inclusive_wall_pct": 0.11002547218873504
+      },
+      "TranscriptText.prepaint": {
+        "calls": 1196,
+        "calls_per_s": 119.59290455297287,
+        "inclusive_wall_pct": 0.0061896327690878095
+      },
+      "TranscriptText.paint": {
+        "calls": 1196,
+        "calls_per_s": 119.59290455297287,
+        "inclusive_wall_pct": 1.0770490986769754
+      },
+      "Chat.render_entry": {
+        "calls": 1495,
+        "calls_per_s": 149.49113069121609,
+        "inclusive_wall_pct": 0.3645683701585985
+      }
+    }
+  },
+  {
+    "run": "text-phases-closed-v1",
+    "scenario": "text-closed-stream-502",
+    "phases": {
+      "DirectWrite.layout_line": {
+        "calls": 0,
+        "calls_per_s": 0.0,
+        "inclusive_wall_pct": 0.0
+      },
+      "DirectWrite.rasterize_glyph": {
+        "calls": 0,
+        "calls_per_s": 0.0,
+        "inclusive_wall_pct": 0.0
+      },
+      "TranscriptText.request_layout": {
+        "calls": 6452,
+        "calls_per_s": 215.06316758893,
+        "inclusive_wall_pct": 0.1944035037216611
+      },
+      "TranscriptText.prepaint": {
+        "calls": 6452,
+        "calls_per_s": 215.06316758893,
+        "inclusive_wall_pct": 0.011519479244739355
+      },
+      "TranscriptText.paint": {
+        "calls": 6452,
+        "calls_per_s": 215.06316758893,
+        "inclusive_wall_pct": 1.9892836343552691
+      },
+      "Chat.render_entry": {
+        "calls": 8065,
+        "calls_per_s": 268.8289594861625,
+        "inclusive_wall_pct": 0.6695951056876305
+      }
+    }
+  }
+]
+}

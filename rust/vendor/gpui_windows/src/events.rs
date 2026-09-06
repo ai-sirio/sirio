@@ -237,6 +237,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        let _perf = sirio_perf::span("Windows.resize_input", 0);
         // Don't resize the renderer when the window is minimized, but record that it was minimized so
         // that on restore the swap chain can be recreated via `update_drawable_size_even_if_unchanged`.
         if wparam.0 == SIZE_MINIMIZED as usize {
@@ -362,6 +363,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
+        let _perf = sirio_perf::span("Windows.mouse_input", 0);
         self.start_tracking_mouse(handle, TME_LEAVE);
         self.restore_cursor_after_hide();
 
@@ -471,6 +473,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_char_msg(&self, wparam: WPARAM) -> Option<isize> {
+        let _perf = sirio_perf::span("Windows.char_input", 0);
         let input = self.parse_char_message(wparam)?;
         self.with_input_handler(|input_handler| {
             input_handler.replace_text_in_range(None, &input);
@@ -1294,6 +1297,8 @@ impl WindowsWindowInner {
 
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
+        let _perf = sirio_perf::span("Windows.draw_window", handle.0 as usize as u64);
+        if force_render { sirio_perf::event("Windows.force_render", 0); }
         let Some(_guard) = self.state.draw_coordinator.try_begin_draw() else {
             log::debug!("deferring re-entrant draw of window {handle:?}");
             if force_render {

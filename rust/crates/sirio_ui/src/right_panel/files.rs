@@ -165,6 +165,7 @@ impl RightPanel {
                     }
                     Err(error) => panel.refresh_error = Some(error),
                 }
+                sirio_perf::event("notify.RightPanel.refresh_complete", cx.entity_id().as_u64());
                 cx.notify();
             });
         }));

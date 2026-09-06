@@ -271,12 +271,14 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         params: &RenderGlyphParams,
         raster_bounds: Bounds<DevicePixels>,
     ) -> anyhow::Result<(Size<DevicePixels>, Vec<u8>)> {
+        let _perf = sirio_perf::span("DirectWrite.rasterize_glyph", 0);
         self.state
             .read()
             .rasterize_glyph(&self.components, params, raster_bounds)
     }
 
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
+        let _perf = sirio_perf::span("DirectWrite.layout_line", 0);
         self.state
             .write()
             .layout_line(&self.components, text, font_size, runs)
@@ -1967,6 +1969,90 @@ mod tests {
         D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     };
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    #[test]
+    fn text_trace_covers_real_layout_and_rasterization_without_content() -> Result<()> {
+        const CHILD: &str = "SIRIO_PERF_DIRECTWRITE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = std::env::temp_dir().join(format!(
+                "sirio-directwrite-trace-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&directory)?;
+            let path = directory.join("events.tsv");
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "direct_write::tests::text_trace_covers_real_layout_and_rasterization_without_content",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("SIRIO_PERF_TRACE", &path)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let trace = std::fs::read_to_string(path)?;
+            for name in ["DirectWrite.layout_line", "DirectWrite.rasterize_glyph"] {
+                assert_eq!(
+                    trace.matches(&format!("\tspan\t{name}\t")).count(),
+                    1,
+                    "{name}"
+                );
+            }
+            assert!(!trace.contains("private-layout-fixture"));
+            return Ok(());
+        }
+        sirio_perf::init();
+        let devices = DirectXDevices::new()?;
+        let text_system = DirectWriteTextSystem::new(&devices)?;
+        let font_id = text_system.font_id(&Font {
+            family: "Segoe UI".into(),
+            ..Default::default()
+        })?;
+        let text = "private-layout-fixture";
+        let layout = text_system.layout_line(
+            text,
+            px(14.0),
+            &[gpui::FontRun {
+                font_id,
+                len: text.len(),
+            }],
+        );
+        assert_eq!(layout.len, text.len());
+        assert!(layout.width > px(0.0));
+        let params = RenderGlyphParams {
+            font_id,
+            glyph_id: text_system
+                .glyph_for_char(font_id, 'A')
+                .expect("Segoe UI has A"),
+            font_size: px(14.0),
+            subpixel_variant: point(0u8, 0u8),
+            scale_factor: 1.0,
+            is_emoji: false,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let bounds = text_system.glyph_raster_bounds(&params)?;
+        let (_, bitmap) = text_system.rasterize_glyph(&params, bounds)?;
+        assert!(!bitmap.is_empty());
+        sirio_perf::event("test.directwrite_trace.complete", 0);
+        let path = std::env::var_os("SIRIO_PERF_TRACE").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("test.directwrite_trace.complete")
+        {
+            assert!(std::time::Instant::now() < deadline, "trace did not flush");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_cluster_map() {

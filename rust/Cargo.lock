@@ -733,6 +733,7 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
+ "hdrhistogram",
  "heapless",
  "image",
  "inventory",
@@ -1008,6 +1009,7 @@ dependencies = [
  "parking_lot",
  "rand 0.9.5",
  "raw-window-handle",
+ "sirio_perf",
  "smallvec",
  "uuid",
  "windows 0.61.3",
@@ -3542,6 +3544,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
 dependencies = [
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]
@@ -7073,6 +7085,7 @@ dependencies = [
  "bezel",
  "bezel-gpui",
  "bezel-gpui-platform",
+ "bezel-zed-scheduler",
  "chrono",
  "embed-resource",
  "gtk",
@@ -7090,6 +7103,7 @@ dependencies = [
  "sirio_apply",
  "sirio_control",
  "sirio_git",
+ "sirio_perf",
  "sirio_persistence",
  "sirio_project",
  "sirio_registry",
@@ -7119,6 +7133,9 @@ dependencies = [
 [[package]]
 name = "sirio_activity"
 version = "0.1.0"
+dependencies = [
+ "sirio_perf",
+]
 
 [[package]]
 name = "sirio_agents"
@@ -7154,6 +7171,7 @@ name = "sirio_git"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "sirio_perf",
 ]
 
 [[package]]
@@ -7166,12 +7184,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_perf"
+version = "0.1.0"
+
+[[package]]
 name = "sirio_persistence"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sirio_perf",
 ]
 
 [[package]]
@@ -7225,6 +7248,7 @@ dependencies = [
  "libghostty-vt",
  "parking_lot",
  "portable-pty",
+ "sirio_perf",
  "sirio_project",
  "sirio_theme",
 ]
@@ -7264,6 +7288,7 @@ dependencies = [
  "sirio_agents",
  "sirio_git",
  "sirio_markdown",
+ "sirio_perf",
  "sirio_persistence",
  "sirio_project",
  "sirio_registry",

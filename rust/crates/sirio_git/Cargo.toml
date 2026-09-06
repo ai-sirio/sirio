@@ -5,5 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
+sirio_perf = { path = "../sirio_perf" }
 # One libc call (killpg) for killing timed-out git process groups.
 libc = "0.2"

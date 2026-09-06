@@ -1,0 +1,310 @@
+{
+  "status": "diagnostic baseline; regression intentionally red; no performance fix",
+  "head": "22f0846b9740e9dc2c8377db96bde50bc5df782c",
+  "run": "rust/target/perf/attribution-v1",
+  "pid": 39420,
+  "exe_sha256": "f4af2a1c32c09eb3246bfc3537f521d65cd6233792b9a81195f7863b2b1e5843",
+  "trace_sha256": "1e8ea20fe4f46822dd0737cb064af3a9f07173f3e27fbf1a5e49ce543be90e08",
+  "yes_start_epoch_ns": "1788642706967421300",
+  "yes_done_epoch_ns": "1788642721867294400",
+  "regression": {
+    "name": "tests::hidden_terminal_notification_does_not_redraw_the_still_shell",
+    "command": "cargo test -p sirio --bin sirio hidden_terminal_notification_does_not_redraw_the_still_shell -- --nocapture",
+    "runs": [
+      {
+        "shell_before": 4,
+        "shell_after": 7,
+        "hidden_renders": 0,
+        "test_seconds": 12.49
+      },
+      {
+        "shell_before": 4,
+        "shell_after": 7,
+        "hidden_renders": 0,
+        "test_seconds": 12.13
+      }
+    ],
+    "classification": "new intentionally failing regression, not part of the pre-existing failure set"
+  },
+  "limitations": [
+    "Notification-window summaries are temporal candidate sets, not automatic causal proof.",
+    "The GPUI dependency edge is corroborated by source inspection and a PTY-free real-workspace regression.",
+    "Only idle and hidden-terminal scenarios were attributed in this pass.",
+    "Probe overhead remains uncalibrated; no speedup claimed."
+  ],
+"samples": [
+  {
+    "scenario": "attribution-idle-focused",
+    "pid": 39420,
+    "utc": "2026-09-05T21:11:42.183455+00:00",
+    "elapsed_s": 15.000510100013344,
+    "cpu_s": 0.921875,
+    "logical_processors": 12,
+    "cpu_pct_machine": 0.5121353617607866,
+    "cpu_pct_one_core": 6.145624341129439,
+    "start_epoch_ns": 1788642687182936300,
+    "end_epoch_ns": 1788642702183449000,
+    "foreground_samples": 150,
+    "focus_samples": 150,
+    "root_notification_windows": {
+      "renders": 15,
+      "without_observed_notification": 0,
+      "candidate_sets": {
+        "notify.RightPanel.refresh_complete:4294967311": 15
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "present_fps": 0.9999658211682325,
+    "rates": {
+      "DirectXRenderer.draw": 0.9999658211682325,
+      "DirectXRenderer.present": 0.9999658211682325,
+      "DirectXRenderer.render": 0.9999658211682325,
+      "RightPanel.render": 0.9999658211682325,
+      "Sidebar.render": 0.9999658211682325,
+      "SirioWorkspace.render": 0.9999658211682325,
+      "StatusBar.render": 0.9999658211682325,
+      "Titlebar.render": 0.9999658211682325,
+      "Windows.draw_window": 59.931284882016065,
+      "Windows.vsync": 59.931284882016065,
+      "activity.inspect_foreground_agent_in": 3.8665345085171654,
+      "activity.take_snapshot": 1.9332672542585827,
+      "git.status": 0.9999658211682325,
+      "notify.RightPanel.refresh_complete": 0.9999658211682325,
+      "trace.dropped": 0.9999658211682325
+    },
+    "view_rates": {
+      "RightPanel.render:4294967311": 0.9999658211682325,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 0.0,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:1000003": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967309": 0.9999658211682325,
+      "SirioWorkspace.render:4294967308": 0.9999658211682325,
+      "StatusBar.render:4294967305": 0.9999658211682325,
+      "TabBar.render:4294967304": 0.0,
+      "TerminalView.render:12884901906": 0.0,
+      "TerminalView.render:4294967300": 0.0,
+      "Titlebar.render:4294967310": 0.9999658211682325
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "git.status",
+        5.522379245077403
+      ],
+      [
+        "Windows.draw_window",
+        2.1125617926379276
+      ],
+      [
+        "activity.take_snapshot",
+        1.9660281344916966
+      ],
+      [
+        "DirectXRenderer.draw",
+        0.045267119436524325
+      ],
+      [
+        "SirioWorkspace.render",
+        0.03883933913805493
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  },
+  {
+    "scenario": "attribution-yes-hidden",
+    "pid": 39420,
+    "utc": "2026-09-05T21:12:04.835181+00:00",
+    "elapsed_s": 20.019101199985016,
+    "cpu_s": 5.109375,
+    "logical_processors": 12,
+    "cpu_pct_machine": 2.126874956805347,
+    "cpu_pct_one_core": 25.522499481664163,
+    "start_epoch_ns": 1788642704816071400,
+    "end_epoch_ns": 1788642724835175500,
+    "foreground_samples": 200,
+    "focus_samples": 200,
+    "root_notification_windows": {
+      "renders": 254,
+      "without_observed_notification": 0,
+      "candidate_sets": {
+        "notify.RightPanel.refresh_complete:4294967311": 19,
+        "notify.RightPanel.refresh_complete:4294967311 + notify.Terminal.output:4294967300": 1,
+        "notify.Terminal.deferred_output:4294967300": 3,
+        "notify.Terminal.output:4294967300": 229,
+        "notify.Terminal.settled_capture:4294967300": 2
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "present_fps": 12.687880473132662,
+    "rates": {
+      "DirectXRenderer.draw": 12.687880473132662,
+      "DirectXRenderer.present": 12.687880473132662,
+      "DirectXRenderer.render": 12.687880473132662,
+      "RightPanel.render": 0.9990457065458789,
+      "Sidebar.render": 12.687880473132662,
+      "SirioWorkspace.render": 12.687880473132662,
+      "StatusBar.render": 12.687880473132662,
+      "Titlebar.render": 12.687880473132662,
+      "Windows.draw_window": 59.99269467808003,
+      "Windows.vsync": 59.99269467808003,
+      "activity.inspect_foreground_agent_in": 3.7963736848743395,
+      "activity.take_snapshot": 1.8981868424371697,
+      "activity_event.osc_title": 0.04995228532729394,
+      "activity_event.output_settled": 0.09990457065458788,
+      "git.status": 0.9990457065458789,
+      "notify.RightPanel.refresh_complete": 0.9990457065458789,
+      "notify.Terminal.deferred_output": 0.14985685598188184,
+      "notify.Terminal.output": 11.489025625277607,
+      "notify.Terminal.settled_capture": 0.09990457065458788,
+      "trace.dropped": 0.9990457065458789
+    },
+    "view_rates": {
+      "RightPanel.render:4294967311": 0.9990457065458789,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 0.0,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:1000003": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967309": 12.687880473132662,
+      "SirioWorkspace.render:4294967308": 12.687880473132662,
+      "StatusBar.render:4294967305": 12.687880473132662,
+      "TabBar.render:4294967304": 0.0,
+      "TerminalView.render:12884901906": 0.0,
+      "TerminalView.render:4294967300": 0.0,
+      "Titlebar.render:4294967310": 12.687880473132662
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "Windows.draw_window",
+        14.109553983487203
+      ],
+      [
+        "git.status",
+        6.189049688792017
+      ],
+      [
+        "activity.take_snapshot",
+        2.1693648118848636
+      ],
+      [
+        "DirectXRenderer.draw",
+        0.6127012447075492
+      ],
+      [
+        "DirectXRenderer.present",
+        0.48043158934370095
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  },
+  {
+    "scenario": "attribution-idle-after-flood",
+    "pid": 39420,
+    "utc": "2026-09-05T21:13:42.749464+00:00",
+    "elapsed_s": 15.000271099997917,
+    "cpu_s": 1.15625,
+    "logical_processors": 12,
+    "cpu_pct_machine": 0.6423495017145393,
+    "cpu_pct_one_core": 7.708194020574472,
+    "start_epoch_ns": 1788642807749185600,
+    "end_epoch_ns": 1788642822749459200,
+    "foreground_samples": 150,
+    "focus_samples": 150,
+    "root_notification_windows": {
+      "renders": 15,
+      "without_observed_notification": 0,
+      "candidate_sets": {
+        "notify.RightPanel.refresh_complete:4294967311": 15
+      },
+      "interpretation": "temporal candidates, not proven causal attribution"
+    },
+    "present_fps": 0.9999817603326916,
+    "rates": {
+      "DirectXRenderer.draw": 0.9999817603326916,
+      "DirectXRenderer.present": 0.9999817603326916,
+      "DirectXRenderer.render": 0.9999817603326916,
+      "RightPanel.render": 0.9999817603326916,
+      "Sidebar.render": 0.9999817603326916,
+      "SirioWorkspace.render": 0.9999817603326916,
+      "StatusBar.render": 0.9999817603326916,
+      "Titlebar.render": 0.9999817603326916,
+      "Windows.draw_window": 59.99890561996149,
+      "Windows.vsync": 59.99890561996149,
+      "activity.inspect_foreground_agent_in": 3.866596139953074,
+      "activity.take_snapshot": 1.933298069976537,
+      "git.status": 0.9999817603326916,
+      "notify.RightPanel.refresh_complete": 0.9999817603326916,
+      "trace.dropped": 0.9999817603326916
+    },
+    "view_rates": {
+      "RightPanel.render:4294967311": 0.9999817603326916,
+      "RowView.render:0": 0.0,
+      "RowView.render:1": 0.0,
+      "RowView.render:1000000": 0.0,
+      "RowView.render:1000001": 0.0,
+      "RowView.render:1000002": 0.0,
+      "RowView.render:1000003": 0.0,
+      "RowView.render:2": 0.0,
+      "RowView.render:3": 0.0,
+      "RowView.render:4": 0.0,
+      "RowView.render:5": 0.0,
+      "RowView.render:6": 0.0,
+      "RowView.render:7": 0.0,
+      "RowView.render:8": 0.0,
+      "RowView.render:9": 0.0,
+      "Sidebar.render:4294967309": 0.9999817603326916,
+      "SirioWorkspace.render:4294967308": 0.9999817603326916,
+      "StatusBar.render:4294967305": 0.9999817603326916,
+      "TabBar.render:4294967304": 0.0,
+      "TerminalView.render:12884901906": 0.0,
+      "TerminalView.render:4294967300": 0.0,
+      "Titlebar.render:4294967310": 0.9999817603326916
+    },
+    "top_spans_inclusive_wall_pct": [
+      [
+        "git.status",
+        6.126696915714924
+      ],
+      [
+        "Windows.draw_window",
+        2.0451053639448284
+      ],
+      [
+        "activity.take_snapshot",
+        1.9600869146813429
+      ],
+      [
+        "DirectXRenderer.draw",
+        0.04345387406800367
+      ],
+      [
+        "SirioWorkspace.render",
+        0.037111989743973735
+      ]
+    ],
+    "key_to_present_ms": [],
+    "trace_dropped": 0
+  }
+]
+}

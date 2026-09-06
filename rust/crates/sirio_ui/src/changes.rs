@@ -2289,6 +2289,7 @@ impl ChangesTab {
 
 impl Render for ChangesTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("ChangesTab.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         // #193: incremented here and nowhere else -- being in a drawn frame
         // is the whole signal.
