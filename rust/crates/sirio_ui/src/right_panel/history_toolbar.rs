@@ -103,6 +103,12 @@ pub(super) fn render_search_row(
     let regex_entity = entity.clone();
     let case_entity = entity.clone();
     let key_entity = entity;
+    // `caret::bar` and not a `|` appended to the string: the bar always
+    // occupies layout, so text does not shift as it blinks. It is this
+    // repo's one way to draw a caret. An empty field carries it at the
+    // hint's start (`caret::field_placeholder`), a value after its last
+    // character.
+    let search_caret = || crate::caret::bar(px(14.0), theme.text, caret_visible);
     div()
         .id("history-toolbar")
         .debug_selector(|| "history-toolbar".to_owned())
@@ -141,16 +147,16 @@ pub(super) fn render_search_row(
                 .overflow_hidden()
                 .child(
                     if draft.is_empty() {
-                        crate::caret::field_placeholder("Text or hash".to_owned())
+                        crate::caret::field_placeholder(
+                            "Text or hash".to_owned(),
+                            Some(search_caret()),
+                        )
                     } else {
                         crate::caret::field_value(draft.to_owned())
                     }
                     .debug_selector(|| "history-search-text".to_owned()),
                 )
-                // `caret::bar` and not a `|` appended to the string: the bar
-                // always occupies layout, so text does not shift as it
-                // blinks. It is this repo's one way to draw a caret.
-                .child(crate::caret::bar(px(14.0), theme.text, caret_visible)),
+                .children((!draft.is_empty()).then(search_caret)),
         )
         .child(toggle(
             ".*",
@@ -378,6 +384,15 @@ pub(super) fn render_paths_popup(
     theme: Theme,
 ) -> impl IntoElement {
     let key_entity = entity;
+    // Same `caret::bar` the search row uses: it always occupies layout, so
+    // the pathspec does not shift by two pixels every half second as the
+    // bar blinks. An empty field carries it at the hint's start.
+    let path_caret = || {
+        div()
+            .debug_selector(|| "history-path-caret".to_owned())
+            .child(crate::caret::bar(px(14.0), theme.text, caret_visible))
+            .into_any_element()
+    };
     div()
         .id("history-paths-popup")
         .debug_selector(|| "history-paths-popup".to_owned())
@@ -415,20 +430,16 @@ pub(super) fn render_paths_popup(
                 .overflow_hidden()
                 .child(
                     if draft.is_empty() {
-                        crate::caret::field_placeholder("Path or glob".to_owned())
+                        crate::caret::field_placeholder(
+                            "Path or glob".to_owned(),
+                            Some(path_caret()),
+                        )
                     } else {
                         crate::caret::field_value(draft.to_owned())
                     }
                     .debug_selector(|| "history-path-text".to_owned()),
                 )
-                // Same `caret::bar` the search row above uses: it always
-                // occupies layout, so the pathspec does not shift by two
-                // pixels every half second as the bar blinks.
-                .child(
-                    div()
-                        .debug_selector(|| "history-path-caret".to_owned())
-                        .child(crate::caret::bar(px(14.0), theme.text, caret_visible)),
-                ),
+                .children((!draft.is_empty()).then(path_caret)),
         )
 }
 
