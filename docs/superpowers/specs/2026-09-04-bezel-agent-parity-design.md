@@ -118,8 +118,23 @@ corresponding Sirio action types are deleted.
 - **Draft persistence** (F-CORE-WSP-08): `draft_text` returns the field text,
   `set_draft_text` sets it; attachments and recorded paths are not persisted,
   as today.
-- **Queued item** (D-CHAT-03): `commit_queued_item` reads the same triple and
-  clears the field; the queued row keeps its place above the card.
+- **Queue** (D-CHAT-03): `commit_queued_item` reads the same triple, clears
+  the field and appends the text to `Chat.queue: VecDeque<String>` — every
+  Enter during a turn adds an entry, front first. The queue is drawn as its
+  own block **above the card** (between the transcript and the composer,
+  where Zed keeps its queued messages), never inside it: a header
+  ("1 message queued" / "N messages queued") with a chevron that folds the
+  entries and a ghost `Clear all`, then one row per entry — a dot (bright only
+  on the front entry, the one the running turn's end sends), the text on one
+  ellipsised line, `Send now` and ✕. The list caps at 160 px and scrolls.
+  Each turn end — completed or cancelled alike — sends exactly the front
+  entry; the rest wait for that turn's end. `Send now` moves its entry to
+  the front and cancels the running turn, so the cancelled turn's end sends
+  it through that same rule (with no turn running it sends straight away).
+  The control snapshot keeps `queuedText` as the front entry and adds
+  `queued`, the whole queue as encoded rows. Selectors: `queue`,
+  `queue-toggle`, `queue-count-N`, `queue-clear`, `queue-entry-N`,
+  `queue-text-<text>`, `queue-send-N`, `queue-remove-N`.
 
 ### Card and chip row
 
@@ -132,7 +147,7 @@ div rounded(Theme::surface_radius()) border_1 border_color(theme.border)
     bg(theme.card_glass_bg()) px 4 pt 4 pb 6 flex_col gap 4
   ├ attachment strip (only when non-empty)
   ├ field
-  ├ queued row / attach error (only when present)
+  ├ attach error (only when present; the queue is a block above the card)
   └ chip row: one flat wrapping row (flex_row flex_wrap items_center
       gap 6 gap_y 4 px 6) whose direct children are, in order, the mode
       pill (flex_none), the Model chip (the one shrinkable child:
