@@ -140,11 +140,11 @@ pub(super) fn render_search_row(
                 // typed stays in view (`caret::field_value`).
                 .overflow_hidden()
                 .child(
-                    crate::caret::field_value(if draft.is_empty() {
-                        "Text or hash".to_owned()
+                    if draft.is_empty() {
+                        crate::caret::field_placeholder("Text or hash".to_owned())
                     } else {
-                        draft.to_owned()
-                    })
+                        crate::caret::field_value(draft.to_owned())
+                    }
                     .debug_selector(|| "history-search-text".to_owned()),
                 )
                 // `caret::bar` and not a `|` appended to the string: the bar
@@ -414,11 +414,11 @@ pub(super) fn render_paths_popup(
                 .items_center()
                 .overflow_hidden()
                 .child(
-                    crate::caret::field_value(if draft.is_empty() {
-                        "Path or glob".to_owned()
+                    if draft.is_empty() {
+                        crate::caret::field_placeholder("Path or glob".to_owned())
                     } else {
-                        draft.to_owned()
-                    })
+                        crate::caret::field_value(draft.to_owned())
+                    }
                     .debug_selector(|| "history-path-text".to_owned()),
                 )
                 // Same `caret::bar` the search row above uses: it always

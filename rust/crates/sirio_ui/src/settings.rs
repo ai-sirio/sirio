@@ -2857,11 +2857,11 @@ impl Settings {
             // the end-of-text caret to the far right.
             .overflow_hidden()
             .child(
-                caret::field_value(text!(if is_empty {
-                    placeholder.to_string()
+                if is_empty {
+                    caret::field_placeholder(text!(placeholder.to_string()))
                 } else {
-                    display_text
-                }))
+                    caret::field_value(text!(display_text))
+                }
                 .id("settings-text-field-text")
                 .debug_selector(|| "settings-text-field-text".to_owned()),
             )
