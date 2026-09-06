@@ -3100,12 +3100,40 @@ impl Sidebar {
         theme: Theme,
     ) -> impl IntoElement {
         let click_entity = entity.clone();
-        // The placeholder shows only while the field is both empty and
-        // unfocused. A focused empty field is one the user is about to type
-        // into: showing the hint there put the end-of-text caret after it,
-        // so the freshly opened prompt read "branch name|" as if already
-        // typed.
-        let show_placeholder = value.is_empty() && !focused;
+        // The bar exists only while focused; where it goes depends on what
+        // the field shows, so it is built once and moved into that slot.
+        let bar = focused.then(|| {
+            div()
+                .flex_shrink_0()
+                .debug_selector(move || format!("{id}-caret"))
+                .child(caret::bar(px(14.0), theme.text, caret_shown))
+                .into_any_element()
+        });
+        // bezel's `TextField` convention: an empty field keeps its hint,
+        // focused or not, and the bar stands at the hint's start — offset 0
+        // of the empty value — never after it, which read "branch name|" as
+        // if the hint had been typed. A value has the bar after its last
+        // character.
+        let (text, trailing_bar) = if value.is_empty() {
+            (
+                caret::field_placeholder(
+                    div()
+                        .debug_selector(move || format!("{id}-placeholder"))
+                        .child(placeholder.to_owned()),
+                    bar,
+                ),
+                None,
+            )
+        } else {
+            (
+                caret::field_value(
+                    div()
+                        .debug_selector(move || format!("{id}-run"))
+                        .child(value.to_owned()),
+                ),
+                bar,
+            )
+        };
         div()
             .id(id)
             .debug_selector(move || id.to_string())
@@ -3120,7 +3148,7 @@ impl Sidebar {
             .border_color(if focused { theme.ring } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
-            .text_color(if show_placeholder {
+            .text_color(if value.is_empty() {
                 theme.text_faint
             } else {
                 theme.text
@@ -3152,37 +3180,17 @@ impl Sidebar {
             //
             // The placeholder is its own element, as in the Filter field:
             // its absence is the renderer's unambiguous representation of
-            // "focused or non-empty".
+            // a non-empty field.
             .overflow_hidden()
-            .child({
-                if show_placeholder {
-                    caret::field_placeholder(
-                        div()
-                            .debug_selector(move || format!("{id}-placeholder"))
-                            .child(placeholder.to_owned()),
-                    )
-                } else {
-                    caret::field_value(
-                        div()
-                            .debug_selector(move || format!("{id}-run"))
-                            .child(value.to_owned()),
-                    )
-                }
-                .id("worktree-prompt-field-text")
-                .debug_selector(move || format!("{id}-text"))
-            })
+            .child(
+                text.id("worktree-prompt-field-text")
+                    .debug_selector(move || format!("{id}-text")),
+            )
             // End-of-text insertion caret; these compact single-line fields
             // always append. `caret_shown` already folds in the field being
             // focused and the blink phase. The wrapper never shrinks, so the
             // bar keeps its width when the value overflows the field.
-            .when(focused, |this| {
-                this.child(
-                    div()
-                        .flex_shrink_0()
-                        .debug_selector(move || format!("{id}-caret"))
-                        .child(caret::bar(px(14.0), theme.text, caret_shown)),
-                )
-            })
+            .children(trailing_bar)
     }
 
     fn render_context_menu(
@@ -3473,7 +3481,8 @@ impl Sidebar {
                         "Repository: Folder"
                     }),
             )
-            .child(
+            .child({
+                let name_is_empty = display_name.trim().is_empty();
                 div()
                     .id("project-display-name-field")
                     .debug_selector(|| "project-display-name-field".to_owned())
@@ -3509,18 +3518,24 @@ impl Sidebar {
                     // #212: clip inside the field; must not grow, or the caret leaves the text.
                     .overflow_hidden()
                     .child(
-                        if display_name.trim().is_empty() {
-                            caret::field_placeholder("Display name".to_owned())
+                        if name_is_empty {
+                            // Empty and focused: the bar at the hint's start,
+                            // bezel's `TextField` convention.
+                            caret::field_placeholder(
+                                "Display name".to_owned(),
+                                name_focused
+                                    .then(|| caret::bar(px(14.0), theme.text, caret_visible)),
+                            )
                         } else {
                             caret::field_value(display_name)
                         }
                         .id("sidebar-display-name-text")
                         .debug_selector(|| "sidebar-display-name-text".to_owned()),
                     )
-                    .when(name_focused, |this| {
+                    .when(name_focused && !name_is_empty, |this| {
                         this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                    }),
-            )
+                    })
+            })
             .when(!card.is_git, |this| {
                 let target = project_target.clone();
                 this.child(
@@ -3705,7 +3720,8 @@ impl Sidebar {
                             .child("Use Primary"),
                     ),
             )
-            .child(
+            .child({
+                let draft_is_empty = draft.trim().is_empty();
                 div()
                     .id("project-worktree-base-field")
                     .debug_selector(|| "project-worktree-base-field".to_owned())
@@ -3741,18 +3757,23 @@ impl Sidebar {
                     // #212: see the field above.
                     .overflow_hidden()
                     .child(
-                        if draft.trim().is_empty() {
-                            caret::field_placeholder("Search branches by name…".to_owned())
+                        if draft_is_empty {
+                            // Empty and focused: the bar at the hint's start,
+                            // bezel's `TextField` convention.
+                            caret::field_placeholder(
+                                "Search branches by name…".to_owned(),
+                                focused.then(|| caret::bar(px(14.0), theme.text, caret_visible)),
+                            )
                         } else {
                             caret::field_value(draft)
                         }
                         .id("sidebar-branch-search-text")
                         .debug_selector(|| "sidebar-branch-search-text".to_owned()),
                     )
-                    .when(focused, |this| {
+                    .when(focused && !draft_is_empty, |this| {
                         this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                    }),
-            )
+                    })
+            })
     }
 
     /// F-PRJ-18: "Worktree Location" — mirrors the Swift
@@ -4618,14 +4639,26 @@ impl Render for Sidebar {
                             // element. Its absence is then the renderer's
                             // unambiguous representation of a non-empty
                             // filter, instead of replacing the contents of
-                            // the same text child.
+                            // the same text child. While focused it carries
+                            // the bar at its start (`caret::field_placeholder`),
+                            // bezel's `TextField` convention.
                             .when(filter_is_empty, |this| {
-                                this.child(
+                                this.child(caret::field_placeholder(
                                     div()
                                         .id("filter-placeholder")
                                         .debug_selector(|| "filter-placeholder".to_owned())
                                         .child("Filter"),
-                                )
+                                    filter_is_focused.then(|| {
+                                        div()
+                                            .debug_selector(|| "filter-caret".to_owned())
+                                            .child(caret::bar(
+                                                px(12.0),
+                                                theme.text,
+                                                field_caret_visible,
+                                            ))
+                                            .into_any_element()
+                                    }),
+                                ))
                             })
                             .when(!filter_is_empty, |this| {
                                 this.child(
@@ -4633,8 +4666,17 @@ impl Render for Sidebar {
                                         .debug_selector(|| "filter-text".to_owned()),
                                 )
                             })
-                            .when(filter_is_focused, |this| {
-                                this.child(caret::bar(px(12.0), theme.text, field_caret_visible))
+                            .when(filter_is_focused && !filter_is_empty, |this| {
+                                this.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .debug_selector(|| "filter-caret".to_owned())
+                                        .child(caret::bar(
+                                            px(12.0),
+                                            theme.text,
+                                            field_caret_visible,
+                                        )),
+                                )
                             }),
                     ),
             )
@@ -6375,16 +6417,15 @@ mod tests {
         }
     }
 
-    /// A focused, empty prompt field hides its placeholder, so the caret
-    /// sits at the field's start instead of after the placeholder text.
-    ///
-    /// The placeholder was rendered as the field's text whenever the draft
-    /// was empty, focused or not, and the end-of-text caret was appended
-    /// after it — so the freshly opened prompt read "branch name|", as if
-    /// that were text already typed. The placeholder comes back as soon as
-    /// focus moves to another field.
+    /// A focused, empty prompt field keeps its placeholder and draws the
+    /// bar at the placeholder's start — bezel's `TextField` convention: the
+    /// caret sits at offset 0 of the (empty) value, over the hint's first
+    /// glyph, never after the hint as if the hint had been typed. Once a
+    /// value is typed the hint goes and the bar follows the last character.
     #[gpui::test]
-    async fn focused_prompt_field_hides_its_placeholder(cx: &mut gpui::TestAppContext) {
+    async fn focused_prompt_field_keeps_its_placeholder_behind_the_bar(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let repo = scratch_repo("field-placeholder");
 
         cx.update(Theme::init);
@@ -6398,46 +6439,56 @@ mod tests {
         cx.simulate_click(row_bounds.center(), Modifiers::none());
         cx.run_until_parked();
 
-        // The prompt opens with the branch field focused: no placeholder
-        // there, while the unfocused fields keep theirs.
-        assert!(
-            cx.debug_bounds("worktree-prompt-branch-placeholder")
-                .is_none(),
-            "the focused branch field must not show its placeholder"
+        // The prompt opens with the branch field focused: hint and bar,
+        // bar first.
+        let field = cx
+            .debug_bounds("worktree-prompt-branch")
+            .expect("the branch field is drawn");
+        let placeholder = cx
+            .debug_bounds("worktree-prompt-branch-placeholder")
+            .expect("the focused, empty branch field keeps its placeholder");
+        let caret = cx
+            .debug_bounds("worktree-prompt-branch-caret")
+            .expect("the focused branch field draws its bar");
+        assert_eq!(
+            caret.left(),
+            placeholder.left(),
+            "the bar stands at the placeholder's start, not after it: caret={caret:?} placeholder={placeholder:?}"
         );
+        assert!(
+            caret.right() <= field.right() && caret.left() >= field.left(),
+            "the bar is inside the field: caret={caret:?} field={field:?}"
+        );
+
+        // The unfocused fields keep their hint and draw no bar at all.
         assert!(
             cx.debug_bounds("worktree-prompt-base-placeholder")
                 .is_some(),
             "the unfocused base field keeps its placeholder"
         );
-        let field = cx
-            .debug_bounds("worktree-prompt-branch")
-            .expect("the branch field is drawn");
-        let caret = cx
-            .debug_bounds("worktree-prompt-branch-caret")
-            .expect("the focused branch field draws its caret");
         assert!(
-            caret.left() < field.left() + gpui::px(16.0),
-            "the caret of an empty field sits at its start, not after the \
-             placeholder: caret={caret:?} field={field:?}"
+            cx.debug_bounds("worktree-prompt-base-caret").is_none(),
+            "an unfocused field draws no bar"
         );
 
-        // Clicking the base field moves focus there: its placeholder goes,
-        // the branch field's comes back.
-        let base = cx
-            .debug_bounds("worktree-prompt-base")
-            .expect("the base field is drawn");
-        cx.simulate_click(base.center(), Modifiers::none());
+        // Typing replaces the hint with the value; the bar follows it.
+        cx.simulate_input("ab");
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("worktree-prompt-base-placeholder")
-                .is_none(),
-            "the base field hides its placeholder once clicked"
-        );
-        assert!(
             cx.debug_bounds("worktree-prompt-branch-placeholder")
-                .is_some(),
-            "the branch field shows its placeholder again once unfocused"
+                .is_none(),
+            "the placeholder goes as soon as there is a value"
+        );
+        let run = cx
+            .debug_bounds("worktree-prompt-branch-run")
+            .expect("the typed value is drawn");
+        let caret = cx
+            .debug_bounds("worktree-prompt-branch-caret")
+            .expect("the bar is still drawn once there is a value");
+        assert_eq!(
+            caret.left(),
+            run.right(),
+            "the bar follows the last typed character: caret={caret:?} run={run:?}"
         );
     }
 
@@ -8755,6 +8806,51 @@ mod tests {
                 .is_git
         });
         assert!(is_git, "the open card's is_git field itself was patched");
+    }
+
+    /// The Filter field, focused and empty, keeps its placeholder and draws
+    /// the bar at the placeholder's start — the convention bezel's
+    /// `TextField` sets and every hand-rolled single-line field follows.
+    #[gpui::test]
+    async fn focused_empty_filter_draws_the_bar_at_the_placeholders_start(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let filter = cx
+            .debug_bounds("filter-field")
+            .expect("the Filter field is drawn");
+        cx.simulate_click(filter.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let placeholder = cx
+            .debug_bounds("filter-placeholder")
+            .expect("the focused, empty filter keeps its placeholder");
+        let caret = cx
+            .debug_bounds("filter-caret")
+            .expect("the focused filter draws its bar");
+        assert_eq!(
+            caret.left(),
+            placeholder.left(),
+            "the bar stands at the placeholder's start, not after it: caret={caret:?} placeholder={placeholder:?}"
+        );
+
+        cx.simulate_input("t");
+        cx.run_until_parked();
+        let text = cx
+            .debug_bounds("filter-text")
+            .expect("the typed filter is drawn");
+        let caret = cx
+            .debug_bounds("filter-caret")
+            .expect("the bar follows the value");
+        assert_eq!(
+            caret.left(),
+            text.right(),
+            "the bar follows the last typed character: caret={caret:?} text={text:?}"
+        );
     }
 
     /// F-SID-02: typing in the Filter field narrows the drawn rows to the

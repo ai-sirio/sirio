@@ -4024,6 +4024,20 @@ impl Chat {
         let cancel_entity = entity.clone();
         let placeholder = input.placeholder();
         let prefill_for_click = input.prefill.clone();
+        // The bar always occupies layout, so the answer text does not shift
+        // by two pixels every half second as it blinks. An empty field
+        // carries it at the placeholder's start (`caret::field_placeholder`,
+        // bezel's `TextField` convention), a draft after its last character.
+        let answer_caret = || {
+            div()
+                .debug_selector(|| "question-answer-caret".into())
+                .child(caret::bar(
+                    typography.body_line_height,
+                    theme.text,
+                    caret_visible,
+                ))
+                .into_any_element()
+        };
 
         // The field is a display of `question_draft` while it owns focus;
         // clicking it seeds the draft from the declared prefill when
@@ -4075,6 +4089,7 @@ impl Chat {
                         if question_answer.draft.is_empty() {
                             caret::field_placeholder(
                                 div().text_color(theme.text_faint).child(placeholder),
+                                Some(answer_caret()),
                             )
                         } else {
                             caret::field_value(
@@ -4085,17 +4100,7 @@ impl Chat {
                         }
                         .debug_selector(|| "question-answer-text".into()),
                     )
-                    // The bar always occupies layout, so the answer text does
-                    // not shift by two pixels every half second as it blinks.
-                    .child(
-                        div()
-                            .debug_selector(|| "question-answer-caret".into())
-                            .child(caret::bar(
-                                typography.body_line_height,
-                                theme.text,
-                                caret_visible,
-                            )),
-                    ),
+                    .children((!question_answer.draft.is_empty()).then(answer_caret)),
             )
             .child(
                 div()
