@@ -3100,6 +3100,12 @@ impl Sidebar {
         theme: Theme,
     ) -> impl IntoElement {
         let click_entity = entity.clone();
+        // The placeholder shows only while the field is both empty and
+        // unfocused. A focused empty field is one the user is about to type
+        // into: showing the hint there put the end-of-text caret after it,
+        // so the freshly opened prompt read "branch name|" as if already
+        // typed.
+        let show_placeholder = value.is_empty() && !focused;
         div()
             .id(id)
             .debug_selector(move || id.to_string())
@@ -3114,7 +3120,7 @@ impl Sidebar {
             .border_color(if focused { theme.ring } else { theme.border })
             .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
-            .text_color(if value.is_empty() {
+            .text_color(if show_placeholder {
                 theme.text_faint
             } else {
                 theme.text
@@ -3143,25 +3149,39 @@ impl Sidebar {
             // scrolls so its tail stays under the caret (`field_value`), a
             // placeholder keeps its start, the words that say what the
             // field is for (`field_placeholder`).
+            //
+            // The placeholder is its own element, as in the Filter field:
+            // its absence is the renderer's unambiguous representation of
+            // "focused or non-empty".
             .overflow_hidden()
             .child({
-                let text = if value.is_empty() { placeholder } else { value };
-                let run = div()
-                    .debug_selector(move || format!("{id}-run"))
-                    .child(text.to_owned());
-                if value.is_empty() {
-                    caret::field_placeholder(run)
+                if show_placeholder {
+                    caret::field_placeholder(
+                        div()
+                            .debug_selector(move || format!("{id}-placeholder"))
+                            .child(placeholder.to_owned()),
+                    )
                 } else {
-                    caret::field_value(run)
+                    caret::field_value(
+                        div()
+                            .debug_selector(move || format!("{id}-run"))
+                            .child(value.to_owned()),
+                    )
                 }
                 .id("worktree-prompt-field-text")
                 .debug_selector(move || format!("{id}-text"))
             })
             // End-of-text insertion caret; these compact single-line fields
             // always append. `caret_shown` already folds in the field being
-            // focused and the blink phase.
+            // focused and the blink phase. The wrapper never shrinks, so the
+            // bar keeps its width when the value overflows the field.
             .when(focused, |this| {
-                this.child(caret::bar(px(14.0), theme.text, caret_shown))
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .debug_selector(move || format!("{id}-caret"))
+                        .child(caret::bar(px(14.0), theme.text, caret_shown)),
+                )
             })
     }
 
@@ -6311,8 +6331,10 @@ mod tests {
     /// to project)" as "ı (optional, defaults next to project)" — the one
     /// word that says what the field is for was the word cut off.
     ///
-    /// `-run` is the text itself, not the clipped wrapper `-text` is on:
-    /// the wrapper always sits inside the field, whichever end it hides.
+    /// `-placeholder` is the hint's own run, not the clipped wrapper
+    /// `-text` is on: the wrapper always sits inside the field, whichever
+    /// end it hides. The branch field opens focused and hides its hint, so
+    /// the two unfocused fields are the ones read here.
     #[gpui::test]
     async fn prompt_placeholder_is_read_from_its_start(cx: &mut gpui::TestAppContext) {
         let repo = scratch_repo("placeholder-start");
@@ -6329,8 +6351,11 @@ mod tests {
         cx.run_until_parked();
 
         for (id, run_id) in [
-            ("worktree-prompt-base", "worktree-prompt-base-run"),
-            ("worktree-prompt-location", "worktree-prompt-location-run"),
+            ("worktree-prompt-base", "worktree-prompt-base-placeholder"),
+            (
+                "worktree-prompt-location",
+                "worktree-prompt-location-placeholder",
+            ),
         ] {
             let field = cx
                 .debug_bounds(id)
@@ -6348,6 +6373,72 @@ mod tests {
                 "`{id}`: the placeholder is truncated to the field, not laid out past it: run={run:?} field={field:?}"
             );
         }
+    }
+
+    /// A focused, empty prompt field hides its placeholder, so the caret
+    /// sits at the field's start instead of after the placeholder text.
+    ///
+    /// The placeholder was rendered as the field's text whenever the draft
+    /// was empty, focused or not, and the end-of-text caret was appended
+    /// after it — so the freshly opened prompt read "branch name|", as if
+    /// that were text already typed. The placeholder comes back as soon as
+    /// focus moves to another field.
+    #[gpui::test]
+    async fn focused_prompt_field_hides_its_placeholder(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("field-placeholder");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the New Worktree row is rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // The prompt opens with the branch field focused: no placeholder
+        // there, while the unfocused fields keep theirs.
+        assert!(
+            cx.debug_bounds("worktree-prompt-branch-placeholder")
+                .is_none(),
+            "the focused branch field must not show its placeholder"
+        );
+        assert!(
+            cx.debug_bounds("worktree-prompt-base-placeholder")
+                .is_some(),
+            "the unfocused base field keeps its placeholder"
+        );
+        let field = cx
+            .debug_bounds("worktree-prompt-branch")
+            .expect("the branch field is drawn");
+        let caret = cx
+            .debug_bounds("worktree-prompt-branch-caret")
+            .expect("the focused branch field draws its caret");
+        assert!(
+            caret.left() < field.left() + gpui::px(16.0),
+            "the caret of an empty field sits at its start, not after the \
+             placeholder: caret={caret:?} field={field:?}"
+        );
+
+        // Clicking the base field moves focus there: its placeholder goes,
+        // the branch field's comes back.
+        let base = cx
+            .debug_bounds("worktree-prompt-base")
+            .expect("the base field is drawn");
+        cx.simulate_click(base.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("worktree-prompt-base-placeholder")
+                .is_none(),
+            "the base field hides its placeholder once clicked"
+        );
+        assert!(
+            cx.debug_bounds("worktree-prompt-branch-placeholder")
+                .is_some(),
+            "the branch field shows its placeholder again once unfocused"
+        );
     }
 
     #[gpui::test]
