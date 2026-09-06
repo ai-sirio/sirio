@@ -993,6 +993,21 @@ pub struct Settings {
     /// confirmation line under the button naming where the install is
     /// running. Cleared the next time the button is clicked again.
     skill_install_launched: bool,
+    /// Host callback for the Agent Hooks card's Install button — Install
+    /// Skill's sibling for the sirioctl lifecycle hooks. The host owns the
+    /// home directory (this crate never touches it): it writes each agent's
+    /// user-global hook config on its own executor and answers through
+    /// [`Settings::set_hooks_install_report`]. Unset, the button renders
+    /// muted and inert, exactly like `on_install_skill`.
+    on_install_hooks: Option<Rc<dyn Fn()>>,
+    /// Set the instant Install Hooks is clicked and reaches a wired
+    /// `on_install_hooks`; renders the in-flight line until the host's
+    /// report replaces it.
+    hooks_install_launched: bool,
+    /// The host's per-agent outcome, one line per agent, rendered under
+    /// the button in place of the in-flight line. `None` until the host
+    /// answers; cleared by the next click.
+    hooks_install_report: Option<String>,
     /// The resolved launch source per adapter id (Task 9). The Agents
     /// screen's pill, version and Install/Update buttons render from this —
     /// a resolved fact — instead of the compiled claim they replaced.
@@ -1199,6 +1214,9 @@ impl Settings {
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             skill_install_launched: false,
+            on_install_hooks: None,
+            hooks_install_launched: false,
+            hooks_install_report: None,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
             install_states: BTreeMap::new(),
@@ -1509,6 +1527,23 @@ impl Settings {
     pub fn on_install_skill(mut self, callback: impl Fn(SkillInstallCommand) + 'static) -> Self {
         self.on_install_skill = Some(Rc::new(callback));
         self
+    }
+
+    /// Installs the host callback that writes the user-global sirioctl
+    /// hooks (Settings → Install Hooks). Unset, the Install Hooks button
+    /// renders muted and inert — see [`Settings::on_install_hooks`].
+    pub fn on_install_hooks(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_install_hooks = Some(Rc::new(callback));
+        self
+    }
+
+    /// The host's answer to an Install Hooks click: one line per agent
+    /// (where its hooks went, or why they did not). Replaces the in-flight
+    /// line; `None` clears the card back to its idle state.
+    pub fn set_hooks_install_report(&mut self, report: Option<String>, cx: &mut Context<Self>) {
+        self.hooks_install_report = report;
+        self.hooks_install_launched = false;
+        cx.notify();
     }
 
     /// Installs the host callback that runs an agent row's Install command
@@ -1836,6 +1871,18 @@ impl Settings {
         cx.notify();
         if let Some(handler) = self.on_install_skill.clone() {
             handler(sirio_project::agent_skill_install_command());
+        }
+    }
+
+    /// Handles the Agent Hooks card's Install button: hands the install to
+    /// the host and shows the in-flight line (a previous report is cleared
+    /// so the screen never shows a stale outcome next to a new attempt).
+    fn install_hooks_clicked(&mut self, cx: &mut Context<Self>) {
+        self.hooks_install_launched = true;
+        self.hooks_install_report = None;
+        cx.notify();
+        if let Some(handler) = self.on_install_hooks.clone() {
+            handler();
         }
     }
 
@@ -3630,6 +3677,69 @@ impl Settings {
             );
         }
 
+        // Install Hooks: Install Skill's sibling for the sirioctl lifecycle
+        // hooks. The host owns the home directory — this crate never touches
+        // it — so the click only reaches `on_install_hooks`; the host writes
+        // each agent's user-global config and answers through
+        // `set_hooks_install_report`.
+        let install_hooks_entity = entity.clone();
+        let install_hooks_handler = self.on_install_hooks.clone().map(|_| {
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                install_hooks_entity.update(cx, |settings, cx| settings.install_hooks_clicked(cx));
+            }
+        });
+        let mut hooks = controls::card(theme)
+            .child(controls::action_row(
+                controls::button_maybe(
+                    "general-install-hooks",
+                    "Install Hooks",
+                    theme,
+                    install_hooks_handler,
+                ),
+                theme,
+            ))
+            .child(
+                div()
+                    .id("general-install-hooks-caption")
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(text!(
+                        "Adds Sirio's sirioctl lifecycle hooks to each agent's user-level config, \
+                         for agents you start yourself inside a Sirio terminal."
+                    )),
+            );
+        if let Some(report) = &self.hooks_install_report {
+            let mut lines = div()
+                .id("general-install-hooks-report")
+                .debug_selector(|| "general-install-hooks-report".into())
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_XS))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .text_size(theme.typography.footnote)
+                .text_color(theme.text_muted);
+            for line in report.lines() {
+                lines = lines.child(text!(line.to_string()));
+            }
+            hooks = hooks.child(lines);
+        } else if self.hooks_install_launched {
+            hooks = hooks.child(
+                div()
+                    .id("general-install-hooks-status")
+                    .debug_selector(|| "general-install-hooks-status".into())
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(text!(
+                        "Installing… writing each agent's user-level hook config."
+                    )),
+            );
+        }
+
         let apply_update_handler = self
             .on_apply_update
             .clone()
@@ -3715,6 +3825,7 @@ impl Settings {
             .child(settings_section("Performance", performance, theme))
             .child(settings_section("sirioctl", control, theme))
             .child(settings_section("Agent Skill", skill, theme))
+            .child(settings_section("Agent Hooks", hooks, theme))
     }
 
     #[cfg(target_os = "macos")]
@@ -6245,6 +6356,118 @@ mod tests {
             .expect("Install Skill still renders, muted");
         cx.simulate_click(install.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    /// Install Hooks is Install Skill's sibling: the click reaches the wired
+    /// host callback (the host writes the user-global hook files — this
+    /// crate never touches the home directory) and leaves an in-flight line
+    /// under the button until the host reports back.
+    #[gpui::test]
+    async fn install_hooks_click_reaches_the_wired_host_callback(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let calls = Rc::new(RefCell::new(0usize));
+        let recorder = calls.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_hooks(move || *recorder.borrow_mut() += 1)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let install = cx
+            .debug_bounds("general-install-hooks")
+            .expect("Install Hooks renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(*calls.borrow(), 1, "the click reaches the host once");
+        assert!(
+            cx.debug_bounds("general-install-hooks-status").is_some(),
+            "an in-flight line appears once the install is handed off"
+        );
+        assert!(
+            cx.debug_bounds("general-install-hooks-report").is_none(),
+            "no report yet — the host has not answered"
+        );
+    }
+
+    /// Unwired, Install Hooks must not look wired — muted and inert, the
+    /// same dead-control-avoidance convention Install Skill follows.
+    #[gpui::test]
+    async fn install_hooks_renders_muted_and_inert_when_unwired(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let install = cx
+            .debug_bounds("general-install-hooks")
+            .expect("Install Hooks still renders, muted");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("general-install-hooks-status").is_none(),
+            "an unwired click hands nothing off, so it claims nothing"
+        );
+    }
+
+    /// The host's per-agent outcome replaces the in-flight line: the user
+    /// reads where each agent's hooks went (or why they did not), not a
+    /// permanent "installing…".
+    #[gpui::test]
+    async fn install_hooks_report_replaces_the_in_flight_line(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).on_install_hooks(|| {})
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+        let install = cx
+            .debug_bounds("general-install-hooks")
+            .expect("Install Hooks renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_hooks_install_report(
+                Some("Claude Code: /home/me/.claude/settings.json".into()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("general-install-hooks-report").is_some(),
+            "the host's report renders under the button"
+        );
+        assert!(
+            cx.debug_bounds("general-install-hooks-status").is_none(),
+            "the in-flight line is gone once the host has answered"
+        );
     }
 
     /// F-SET-14: clicking a provider card's Add Account button hands the
