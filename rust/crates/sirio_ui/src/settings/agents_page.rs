@@ -1022,7 +1022,10 @@ mod tests {
                 &settings,
                 move |_entity, event: &SettingsEvent, _| match event {
                     SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
-                    SettingsEvent::InstallAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                    SettingsEvent::InstallAgent(_)
+                    | SettingsEvent::RefreshAgentSources
+                    | SettingsEvent::StartAccountLogin(_)
+                    | SettingsEvent::RefreshUsage => {}
                 },
             );
             std::mem::forget(subscription);
@@ -1070,7 +1073,10 @@ mod tests {
                 &settings,
                 move |_entity, event: &SettingsEvent, _| match event {
                     SettingsEvent::UpdateAgent(id) => recorder.borrow_mut().push(id.clone()),
-                    SettingsEvent::InstallAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                    SettingsEvent::InstallAgent(_)
+                    | SettingsEvent::RefreshAgentSources
+                    | SettingsEvent::StartAccountLogin(_)
+                    | SettingsEvent::RefreshUsage => {}
                 },
             );
             std::mem::forget(subscription);
@@ -1330,7 +1336,10 @@ mod tests {
                 &settings,
                 move |_entity, event: &SettingsEvent, _| match event {
                     SettingsEvent::InstallAgent(id) => recorder.borrow_mut().push(id.clone()),
-                    SettingsEvent::UpdateAgent(_) | SettingsEvent::RefreshAgentSources => {}
+                    SettingsEvent::UpdateAgent(_)
+                    | SettingsEvent::RefreshAgentSources
+                    | SettingsEvent::StartAccountLogin(_)
+                    | SettingsEvent::RefreshUsage => {}
                 },
             );
             // The subscription must outlive this update scope for the whole

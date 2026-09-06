@@ -299,7 +299,7 @@ impl StatusBar {
     /// tick. Segments flip to `Loading` right away — the refresh control
     /// spins and the numbers leave the bar until the fetches return — so
     /// the click has a visible effect before any result is in.
-    fn on_refresh_clicked(&mut self, cx: &mut Context<Self>) {
+    pub fn on_refresh_clicked(&mut self, cx: &mut Context<Self>) {
         if let Some(callback) = &self.on_refresh {
             callback();
         }
