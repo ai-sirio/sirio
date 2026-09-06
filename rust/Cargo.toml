@@ -7,6 +7,7 @@ resolver = "2"
 # (which conflicts with its own `[workspace]` table).
 exclude = ["vendor/gpui_linux", "vendor/gpui_windows"]
 members = [
+    "crates/sirio_perf",
     "crates/sirio",
     "crates/sirio_theme",
     "crates/sirio_ui",

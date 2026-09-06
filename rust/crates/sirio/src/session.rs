@@ -1762,6 +1762,7 @@ impl SessionStore {
     /// than merely delayed, so the switch calls this first, synchronously,
     /// for the worktree it is about to leave.
     pub fn save_layout_now(&self, layout: &SessionLayout) {
+        let _perf = sirio_perf::span("SessionStore.save_layout_now", 0);
         let mut db = self
             .inner
             .db
@@ -1832,6 +1833,7 @@ impl SessionStore {
     /// Persistence failures are logged and do not make the UI fail. This
     /// matches the session layout's best-effort failure policy.
     pub fn save_settings(&self, settings: &AppSettings) {
+        let _perf = sirio_perf::span("SessionStore.save_settings", 0);
         let mut db = self
             .inner
             .db
@@ -1983,6 +1985,7 @@ impl SessionStore {
     /// debounce window. Called on window close so quitting never loses the
     /// last change.
     pub fn flush_now(&self) {
+        let _perf = sirio_perf::span("SessionStore.flush_now", 0);
         *self
             .inner
             .next_flush

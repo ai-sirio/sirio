@@ -41,6 +41,9 @@ test-support = ["gpui/test-support"]
 name = "gpui_windows"
 path = "src/gpui_windows.rs"
 
+[dependencies.sirio_perf]
+path = "../../crates/sirio_perf"
+
 [dependencies.gpui]
 version = "0.3.8+zed.82aeef"
 default-features = false
