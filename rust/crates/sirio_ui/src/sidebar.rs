@@ -3138,16 +3138,25 @@ impl Sidebar {
             // interpolates a filesystem path into
             // "optional -- defaults to the pinned location ({location})",
             // so the overflow is bounded only by how deep the path is.
+            //
+            // Which end gets clipped depends on what the text is: a value
+            // scrolls so its tail stays under the caret (`field_value`), a
+            // placeholder keeps its start, the words that say what the
+            // field is for (`field_placeholder`).
             .overflow_hidden()
-            .child(
-                caret::field_value(if value.is_empty() {
-                    placeholder.to_owned()
+            .child({
+                let text = if value.is_empty() { placeholder } else { value };
+                let run = div()
+                    .debug_selector(move || format!("{id}-run"))
+                    .child(text.to_owned());
+                if value.is_empty() {
+                    caret::field_placeholder(run)
                 } else {
-                    value.to_owned()
-                })
+                    caret::field_value(run)
+                }
                 .id("worktree-prompt-field-text")
-                .debug_selector(move || format!("{id}-text")),
-            )
+                .debug_selector(move || format!("{id}-text"))
+            })
             // End-of-text insertion caret; these compact single-line fields
             // always append. `caret_shown` already folds in the field being
             // focused and the blink phase.
@@ -3480,11 +3489,11 @@ impl Sidebar {
                     // #212: clip inside the field; must not grow, or the caret leaves the text.
                     .overflow_hidden()
                     .child(
-                        caret::field_value(if display_name.trim().is_empty() {
-                            "Display name".to_owned()
+                        if display_name.trim().is_empty() {
+                            caret::field_placeholder("Display name".to_owned())
                         } else {
-                            display_name
-                        })
+                            caret::field_value(display_name)
+                        }
                         .id("sidebar-display-name-text")
                         .debug_selector(|| "sidebar-display-name-text".to_owned()),
                     )
@@ -3712,11 +3721,11 @@ impl Sidebar {
                     // #212: see the field above.
                     .overflow_hidden()
                     .child(
-                        caret::field_value(if draft.trim().is_empty() {
-                            "Search branches by name…".to_owned()
+                        if draft.trim().is_empty() {
+                            caret::field_placeholder("Search branches by name…".to_owned())
                         } else {
-                            draft
-                        })
+                            caret::field_value(draft)
+                        }
                         .id("sidebar-branch-search-text")
                         .debug_selector(|| "sidebar-branch-search-text".to_owned()),
                     )
@@ -6290,6 +6299,55 @@ mod tests {
             text.left() >= field.left(),
             "nor past its left edge: text={text:?} field={field:?}"
         );
+    }
+
+    /// An empty prompt field shows its placeholder from the *start*.
+    ///
+    /// #208 kept the text inside the field, but by routing the placeholder
+    /// through `caret::field_value`, which scrolls a value so its tail stays
+    /// under the caret. A hint is not being typed into: clipped from the
+    /// start, "base branch (optional, defaults to HEAD)" read as "branch
+    /// (optional, defaults to HEAD)" and "location (optional, defaults next
+    /// to project)" as "ı (optional, defaults next to project)" — the one
+    /// word that says what the field is for was the word cut off.
+    ///
+    /// `-run` is the text itself, not the clipped wrapper `-text` is on:
+    /// the wrapper always sits inside the field, whichever end it hides.
+    #[gpui::test]
+    async fn prompt_placeholder_is_read_from_its_start(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("placeholder-start");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the New Worktree row is rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for (id, run_id) in [
+            ("worktree-prompt-base", "worktree-prompt-base-run"),
+            ("worktree-prompt-location", "worktree-prompt-location-run"),
+        ] {
+            let field = cx
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("the `{id}` field is drawn"));
+            let run = cx
+                .debug_bounds(run_id)
+                .unwrap_or_else(|| panic!("the `{id}` placeholder is drawn"));
+
+            assert!(
+                run.left() >= field.left(),
+                "`{id}`: the placeholder's start is in view, not scrolled off to the left: run={run:?} field={field:?}"
+            );
+            assert!(
+                run.right() <= field.right(),
+                "`{id}`: the placeholder is truncated to the field, not laid out past it: run={run:?} field={field:?}"
+            );
+        }
     }
 
     #[gpui::test]
