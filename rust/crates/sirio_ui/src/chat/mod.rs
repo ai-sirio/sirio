@@ -30,7 +30,7 @@ use sirio_persistence::{
 };
 use sirio_theme::Theme;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -239,6 +239,10 @@ impl IntoElement for MarkdownBody {
 /// copies.
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
+/// The tallest the queue's entry list grows before it scrolls (D-CHAT-03):
+/// about five rows, Zed's `max_h_40`, so a long queue never pushes the
+/// composer card off the pane.
+pub(crate) const QUEUE_MAX_HEIGHT: f32 = 160.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 
 /// The user turn's bubble: rounded, right-aligned, capped at the Bezel
@@ -594,7 +598,12 @@ enum Entry {
 pub struct ChatControlSnapshot {
     pub status: String,
     pub composer_text: String,
+    /// The front of the queue — what sends when the running turn ends.
+    /// Kept as a flat string for the `surface.chat.read` readers that
+    /// predate the multi-entry queue.
     pub queued_text: String,
+    /// The whole queue, front first.
+    pub queued: Vec<String>,
     pub transcript: Vec<BTreeMap<String, String>>,
 }
 
@@ -1372,10 +1381,14 @@ pub struct Chat {
     /// test, hence the lint allowance.
     #[allow(dead_code)]
     streaming_border_timer_pending: bool,
-    /// D-CHAT-03: the draft committed (Enter) while a turn streams, to be
-    /// sent as the next user turn when the turn ends — one slot, latest
-    /// commit wins. `None` when nothing is queued.
-    queued_item: Option<String>,
+    /// D-CHAT-03: the drafts committed (Enter) while a turn streams, front
+    /// first. Each turn end sends exactly one — the front — so the rest
+    /// wait for the turn that send starts. Empty when nothing is queued.
+    queue: VecDeque<String>,
+    /// Whether the queue block above the composer shows its entries or
+    /// only its counting header. Starts unfolded; the reader's toggle
+    /// holds for the life of the surface and is not persisted.
+    queue_expanded: bool,
     connecting: bool,
     has_completed_turn: bool,
     /// F-CHAT-33: how many of `AcpClient::mcp_warnings()` have already been
@@ -1669,7 +1682,8 @@ impl Chat {
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
             streaming_border_timer_pending: false,
-            queued_item: None,
+            queue: VecDeque::new(),
+            queue_expanded: true,
             connecting: false,
             has_completed_turn: false,
             mcp_warnings_shown: 0,
@@ -2329,9 +2343,10 @@ impl Chat {
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
                 // D-CHAT-03: a turn ended — completed or cancelled alike,
-                // one rule — drains the queued item as the next turn,
-                // exactly once. The footer lands before the queued turn so
-                // the transcript reads: stop stated, then the redirect.
+                // one rule — drains the queue's front entry as the next
+                // turn, exactly once; the rest wait for that turn's end.
+                // The footer lands before the queued turn so the transcript
+                // reads: stop stated, then the redirect.
                 self.send_queued_item(cx);
                 // F-CORE-DOM-07: tell the workspace a turn just settled so
                 // throttled auto-naming has a signal to react to. Emitted
@@ -2549,7 +2564,8 @@ impl Chat {
         ChatControlSnapshot {
             status: status.to_string(),
             composer_text: self.draft.to_string(),
-            queued_text: self.queued_item.clone().unwrap_or_default(),
+            queued_text: self.queue.front().cloned().unwrap_or_default(),
+            queued: self.queue.iter().cloned().collect(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
         }
     }
@@ -3418,10 +3434,10 @@ impl Chat {
         cx.notify();
     }
 
-    /// D-CHAT-03: while a turn streams, a send commits the draft as the
-    /// queued item — one slot, latest commit wins. Mirrors `send`'s
-    /// consumption of the composer; an empty draft commits nothing and
-    /// leaves any previous item in place.
+    /// D-CHAT-03: while a turn streams, a send commits the draft as a new
+    /// entry at the back of the queue. Mirrors `send`'s consumption of the
+    /// composer; an empty draft commits nothing and leaves the queue as
+    /// it was.
     fn commit_queued_item(&mut self, cx: &mut Context<Self>) {
         if self.draft.trim().is_empty() && self.attachments.is_empty() {
             return;
@@ -3430,26 +3446,59 @@ impl Chat {
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
-        self.queued_item = Some(text);
+        self.queue.push_back(text);
         cx.notify();
     }
 
-    /// D-CHAT-03: the ✕ on the queued row. The item is dropped; nothing
-    /// sends when the turn ends.
-    fn remove_queued_item(&mut self, cx: &mut Context<Self>) {
-        self.queued_item = None;
+    /// D-CHAT-03: the ✕ on one entry. That entry is dropped; the others
+    /// keep their order.
+    fn remove_queued_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.queue.remove(index);
         cx.notify();
     }
 
-    /// D-CHAT-03: drains the queued item as the next user turn. Only the
-    /// turn-end path calls this — completed and cancelled alike — so a
-    /// committed item sends exactly once. A turn end without a client is a
-    /// transport death: the item stays queued rather than firing nowhere.
+    /// "Clear all" in the queue header: nothing sends when the turn ends.
+    fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        self.queue.clear();
+        cx.notify();
+    }
+
+    /// The queue header's disclosure: folds the entries away or unfolds
+    /// them. The counting header stays either way.
+    fn toggle_queue_folded(&mut self, cx: &mut Context<Self>) {
+        self.queue_expanded = !self.queue_expanded;
+        cx.notify();
+    }
+
+    /// "Send now" on one entry. The entry jumps to the front and the
+    /// running turn is cancelled, so the cancelled turn's end sends it
+    /// through the one turn-end rule — the same redirect a stop with a
+    /// queued entry already is, with no second send path to keep in step.
+    /// With no turn running (a queue that outlived its turn because the
+    /// transport died) it sends straight away.
+    fn send_queued_entry_now(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(text) = self.queue.remove(index) else {
+            return;
+        };
+        self.queue.push_front(text);
+        if self.streaming {
+            self.cancel_turn(cx);
+        } else {
+            self.send_queued_item(cx);
+        }
+        cx.notify();
+    }
+
+    /// D-CHAT-03: drains the front entry as the next user turn. Only the
+    /// turn-end path calls this — completed and cancelled alike — so each
+    /// entry sends exactly once, and the next waits for this turn's end.
+    /// A turn end without a client is a transport death: the queue stays
+    /// as it is rather than firing nowhere.
     fn send_queued_item(&mut self, cx: &mut Context<Self>) {
         if self.client.is_none() {
             return;
         }
-        let Some(text) = self.queued_item.take() else {
+        let Some(text) = self.queue.pop_front() else {
             return;
         };
         self.submit_turn(text, Vec::new(), Vec::new(), cx);
@@ -5214,6 +5263,179 @@ impl Chat {
         cx.notify();
     }
 
+    /// D-CHAT-03: the queue block above the composer card — a header that
+    /// counts the entries and folds them, then one row per entry with its
+    /// text, "Send now" and ✕. The front entry is the one the running
+    /// turn's end sends; its dot is the only bright one. The list caps its
+    /// height and scrolls, so a long queue never pushes the card off the
+    /// pane. Callers draw it only while the queue is non-empty.
+    fn render_queue(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let typography = theme.typography;
+        let entity = cx.entity();
+        let count = self.queue.len();
+        let expanded = self.queue_expanded;
+        let title = if count == 1 {
+            "1 message queued".to_string()
+        } else {
+            format!("{count} messages queued")
+        };
+        let toggle_entity = entity.clone();
+        let clear_entity = entity.clone();
+        div()
+            .id("queue")
+            .debug_selector(|| "queue".into())
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .mb(px(8.0))
+            .rounded(px(bezel::theme::Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .text_size(typography.footnote)
+            .child(
+                div()
+                    .id("queue-header")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pl(px(8.0))
+                    .pr(px(4.0))
+                    .py(px(4.0))
+                    .child(
+                        div()
+                            .id("queue-toggle")
+                            .debug_selector(|| "queue-toggle".into())
+                            .flex()
+                            .flex_1()
+                            .items_center()
+                            .gap(px(6.0))
+                            .py(px(2.0))
+                            .cursor(CursorStyle::PointingHand)
+                            .on_click(move |_, _, cx| {
+                                toggle_entity.update(cx, |chat, cx| chat.toggle_queue_folded(cx));
+                            })
+                            .child(
+                                IconElement::new(
+                                    if expanded {
+                                        Icon::ChevronDown
+                                    } else {
+                                        Icon::ChevronRight
+                                    },
+                                    IconSize::XSmall,
+                                )
+                                .text_color(theme.text_faint),
+                            )
+                            .child(
+                                div()
+                                    .id("queue-count")
+                                    .debug_selector(move || format!("queue-count-{count}"))
+                                    .text_color(theme.text_muted)
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("queue-clear")
+                            .debug_selector(|| "queue-clear".into())
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.caption2)
+                            .text_color(theme.text_faint)
+                            .cursor(CursorStyle::PointingHand)
+                            .hover(|style| style.bg(theme.overlay))
+                            .on_click(move |_, _, cx| {
+                                clear_entity.update(cx, |chat, cx| chat.clear_queue(cx));
+                            })
+                            .child("Clear all"),
+                    ),
+            )
+            .when(expanded, |block| {
+                block.child(
+                    div()
+                        .id("queue-entries")
+                        .flex()
+                        .flex_col()
+                        .max_h(px(QUEUE_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .children(self.queue.iter().enumerate().map(|(index, text)| {
+                            let send_entity = entity.clone();
+                            let remove_entity = entity.clone();
+                            let text_for_id = text.clone();
+                            let is_next = index == 0;
+                            div()
+                                .id(("queue-entry", index))
+                                .debug_selector(move || format!("queue-entry-{index}"))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .when(index + 1 < count, |row| {
+                                    row.border_b_1().border_color(theme.border)
+                                })
+                                .child(bezel::ui::widgets::status_dot(if is_next {
+                                    theme.text.into()
+                                } else {
+                                    theme.text_faint.into()
+                                }))
+                                .child(
+                                    div()
+                                        .id(("queue-text", index))
+                                        .debug_selector(move || format!("queue-text-{text_for_id}"))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .text_color(theme.text)
+                                        .child(text.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id(("queue-send", index))
+                                        .debug_selector(move || format!("queue-send-{index}"))
+                                        .flex_none()
+                                        .px(px(8.0))
+                                        .py(px(3.0))
+                                        .rounded(theme.radii.control)
+                                        .text_size(typography.caption2)
+                                        .text_color(theme.text_muted)
+                                        .cursor(CursorStyle::PointingHand)
+                                        .hover(|style| style.bg(theme.overlay))
+                                        .on_click(move |_, _, cx| {
+                                            send_entity.update(cx, |chat, cx| {
+                                                chat.send_queued_entry_now(index, cx);
+                                            });
+                                        })
+                                        .child("Send now"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("queue-remove", index))
+                                        .debug_selector(move || format!("queue-remove-{index}"))
+                                        .flex_none()
+                                        .px(px(4.0))
+                                        .rounded(px(3.0))
+                                        .text_color(theme.text_faint)
+                                        .cursor(CursorStyle::PointingHand)
+                                        .hover(|style| style.bg(theme.overlay))
+                                        .on_click(move |_, _, cx| {
+                                            remove_entity.update(cx, |chat, cx| {
+                                                chat.remove_queued_entry(index, cx);
+                                            });
+                                        })
+                                        .child("×"),
+                                )
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_composer(
         &mut self,
         theme: &Theme,
@@ -6542,48 +6764,6 @@ impl Chat {
                         )
                     }),
             )
-            .when_some(self.queued_item.clone(), |this, queued| {
-                // D-CHAT-03: the committed next-turn item, its text and a
-                // remove ✕. One slot: the latest commit replaces the row.
-                let remove_entity = entity.clone();
-                let queued_for_id = queued.clone();
-                this.child(
-                    div()
-                        .id("queued-item")
-                        .debug_selector(|| "queued-item".into())
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(theme.radii.control)
-                        .bg(theme.surface_raised)
-                        .text_size(typography.footnote)
-                        .child(div().text_color(theme.text_faint).child("Queued:"))
-                        .child(
-                            div()
-                                .id("queued-text")
-                                .debug_selector(move || format!("queued-text-{queued_for_id}"))
-                                .text_color(theme.text)
-                                .child(queued),
-                        )
-                        .child(
-                            div()
-                                .id("queued-remove")
-                                .debug_selector(|| "queued-remove".into())
-                                .px(px(4.0))
-                                .rounded(px(3.0))
-                                .text_color(theme.text_faint)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    remove_entity.update(cx, |chat, cx| {
-                                        chat.remove_queued_item(cx);
-                                    });
-                                })
-                                .child("×"),
-                        ),
-                )
-            })
             .when_some(self.attach_error.clone(), |this, message| {
                 this.child(
                     div()
@@ -7226,6 +7406,14 @@ impl Render for Chat {
                     // dropped from the sidebar rows. `agent_cwd` itself stays:
                     // it is load-bearing for prompt content, mention
                     // resolution and the ACP client's launch directory.
+                    //
+                    // D-CHAT-03: the queue sits between the transcript and
+                    // the card, where Zed keeps its queued messages — what
+                    // sends next reads above what is being typed, not
+                    // tucked under it. Drawn only while something is queued.
+                    .when(!self.queue.is_empty(), |this| {
+                        this.child(self.render_queue(&theme, cx))
+                    })
                     .child(self.render_composer(&theme, window, cx)),
             )
             .child({
@@ -11213,23 +11401,29 @@ let answer = 42;
         focus_and_type(cx, "queued msg");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        let (queued, entries) = chat.read_with(&cx.cx, |chat, _| {
-            (chat.queued_item.clone(), chat.entries.len())
-        });
+        let entries = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
         assert_eq!(
-            queued.as_deref(),
-            Some("queued msg"),
-            "Enter during a stream commits the draft as the queued item"
+            queue_texts(&chat, cx),
+            vec!["queued msg".to_string()],
+            "Enter during a stream commits the draft as the queued entry"
         );
         assert_eq!(entries, 2, "queueing does not touch the transcript");
         refresh_frame(cx);
+        let queue = cx.debug_bounds("queue").expect("the queue block is drawn");
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
         assert!(
-            cx.debug_bounds("queued-item").is_some(),
-            "the queued row is drawn in the composer"
+            queue.bottom() <= card.top(),
+            "the queue sits above the composer card: queue={queue:?} card={card:?}"
         );
         assert!(
-            cx.debug_bounds("queued-text-queued msg").is_some(),
-            "the queued text is drawn in the row"
+            cx.debug_bounds("queue-text-queued msg").is_some(),
+            "the queued text is drawn in its entry"
+        );
+        assert!(
+            cx.debug_bounds("queue-count-1").is_some(),
+            "the header counts one queued message"
         );
 
         // Text typed after the commit stays in the composer (mid-sentence
@@ -11276,7 +11470,7 @@ let answer = 42;
                     queued_count,
                     uncommitted_sent,
                     chat.draft_text(),
-                    chat.queued_item.is_none(),
+                    chat.queue.is_empty(),
                     chat.has_completed_turn,
                 )
             });
@@ -11315,24 +11509,24 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.queued_item.clone()),
-            Some("queued msg".to_string()),
-            "the ✕ row starts with the committed item"
+            queue_texts(&chat, cx),
+            vec!["queued msg".to_string()],
+            "the ✕ test starts with the committed entry"
         );
         refresh_frame(cx);
         let remove = cx
-            .debug_bounds("queued-remove")
-            .expect("the queued row's remove control is drawn");
+            .debug_bounds("queue-remove-0")
+            .expect("the entry's remove control is drawn");
         cx.simulate_click(remove.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.queued_item.is_none()),
-            "the ✕ clears the queued item"
+            chat.read_with(&cx.cx, |chat, _| chat.queue.is_empty()),
+            "the ✕ removes the entry"
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("queued-item").is_none(),
-            "the queued row is gone after the ✕"
+            cx.debug_bounds("queue").is_none(),
+            "the queue block is gone once nothing is queued"
         );
 
         // The turn ends (cancelled); the removed item must not send.
@@ -11382,9 +11576,9 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.queued_item.clone()),
-            Some("queued msg".to_string()),
-            "the stop-with-queue test starts with the committed item"
+            queue_texts(&chat, cx),
+            vec!["queued msg".to_string()],
+            "the stop-with-queue test starts with the committed entry"
         );
         refresh_frame(cx);
 
@@ -11416,13 +11610,331 @@ let answer = 42;
             );
             (
                 cancelled_footer,
-                chat.queued_item.is_none(),
+                chat.queue.is_empty(),
                 chat.has_completed_turn,
             )
         });
         assert!(cancelled_footer, "the cancelled turn's footer states it");
         assert!(queue_drained, "the queue drained into the send");
         assert!(completed, "the queued turn completes");
+    }
+
+    /// The queue's entries, front first, as the composer would send them.
+    fn queue_texts(chat: &gpui::Entity<Chat>, cx: &VisualTestContext) -> Vec<String> {
+        chat.read_with(&cx.cx, |chat, _| chat.queue.iter().cloned().collect())
+    }
+
+    /// How many user turns carrying exactly `text` the transcript holds.
+    fn user_turn_count(chat: &Chat, text: &str) -> usize {
+        chat.entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::User { text: sent, .. } if sent == text))
+            .count()
+    }
+
+    /// The index of the first user turn carrying exactly `text`.
+    fn user_turn_position(chat: &Chat, text: &str) -> Option<usize> {
+        chat.entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::User { text: sent, .. } if sent == text))
+    }
+
+    /// Sends "hello" against the `cancel` fixture and waits until its
+    /// partial reply is streaming, with a fresh frame drawn.
+    fn stream_partial_turn(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) {
+        pump_chat_until(cx, chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, chat, |chat| {
+            chat.streaming
+                && chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+        });
+        refresh_frame(cx);
+    }
+
+    /// Types `text` and presses Enter while a turn streams, so it lands in
+    /// the queue. Redraws first: each queued entry grows the block above
+    /// the card, so the card's last-known bounds would be stale.
+    fn queue_entry(cx: &mut VisualTestContext, text: &str) {
+        refresh_frame(cx);
+        focus_and_type(cx, text);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    /// D-CHAT-03, FIFO half: a second Enter during the stream appends a
+    /// second entry rather than replacing the first, both are drawn in
+    /// order under a header that counts them, and each turn end drains
+    /// exactly one entry, front first.
+    #[gpui::test]
+    async fn a_second_enter_appends_to_the_queue_and_turn_ends_drain_it_in_order(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && matches!(
+                    chat.entries.last(),
+                    Some(Entry::Assistant { text, .. }) if text == "first "
+                )
+        });
+
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        assert_eq!(
+            queue_texts(&chat, cx),
+            vec!["first q".to_string(), "second q".to_string()],
+            "the second Enter appends behind the first"
+        );
+        refresh_frame(cx);
+        let first = cx
+            .debug_bounds("queue-entry-0")
+            .expect("the first entry is drawn");
+        let second = cx
+            .debug_bounds("queue-entry-1")
+            .expect("the second entry is drawn");
+        assert!(
+            first.bottom() <= second.top(),
+            "entries are drawn in queue order: first={first:?} second={second:?}"
+        );
+        assert!(
+            cx.debug_bounds("queue-count-2").is_some(),
+            "the header counts two queued messages"
+        );
+
+        // The turn completes: the front entry sends, its turn end sends the
+        // next, and the transcript holds each exactly once in queue order.
+        std::fs::write(dir.0.join("go"), "go").expect("write go file");
+        pump_chat_until(cx, &chat, |chat| {
+            user_turn_count(chat, "second q") == 1 && chat.queue.is_empty() && !chat.streaming
+        });
+        let (first_count, first_at, second_at) = chat.read_with(&cx.cx, |chat, _| {
+            (
+                user_turn_count(chat, "first q"),
+                user_turn_position(chat, "first q"),
+                user_turn_position(chat, "second q"),
+            )
+        });
+        assert_eq!(first_count, 1, "the front entry sends exactly once");
+        assert!(
+            first_at < second_at,
+            "the front entry sends before the one behind it: {first_at:?} {second_at:?}"
+        );
+    }
+
+    /// The ✕ on one entry removes only that entry; the others keep their
+    /// place and their drawn rows renumber from the front.
+    #[gpui::test]
+    async fn removing_one_entry_keeps_the_others_queued(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        refresh_frame(cx);
+
+        let remove = cx
+            .debug_bounds("queue-remove-0")
+            .expect("the front entry's remove control is drawn");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            queue_texts(&chat, cx),
+            vec!["second q".to_string()],
+            "only the removed entry leaves the queue"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-text-second q").is_some(),
+            "the surviving entry is still drawn"
+        );
+        assert!(
+            cx.debug_bounds("queue-text-first q").is_none(),
+            "the removed entry is gone"
+        );
+        assert!(
+            cx.debug_bounds("queue-entry-1").is_none(),
+            "the surviving entry moved up to the front row"
+        );
+    }
+
+    /// "Clear all" in the header empties the queue and takes the block down.
+    #[gpui::test]
+    async fn clear_all_empties_the_queue(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        refresh_frame(cx);
+
+        let clear = cx
+            .debug_bounds("queue-clear")
+            .expect("the clear-all control is drawn");
+        cx.simulate_click(clear.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.queue.is_empty()),
+            "clear all empties the queue"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue").is_none(),
+            "the queue block is gone once nothing is queued"
+        );
+    }
+
+    /// The header folds the entries away and unfolds them again; the count
+    /// stays visible either way, so a folded queue is never a hidden one.
+    #[gpui::test]
+    async fn the_queue_header_folds_the_entries_and_keeps_the_count(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-entry-0").is_some(),
+            "the queue starts unfolded"
+        );
+
+        let toggle = cx
+            .debug_bounds("queue-toggle")
+            .expect("the header toggle is drawn");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-entry-0").is_none(),
+            "folding hides the entries"
+        );
+        assert!(
+            cx.debug_bounds("queue-count-1").is_some(),
+            "the folded header still counts the entries"
+        );
+        assert_eq!(
+            queue_texts(&chat, cx),
+            vec!["first q".to_string()],
+            "folding never touches the queue itself"
+        );
+
+        let toggle = cx
+            .debug_bounds("queue-toggle")
+            .expect("the header toggle is still drawn");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-entry-0").is_some(),
+            "unfolding shows the entries again"
+        );
+    }
+
+    /// "Send now" on a later entry jumps the queue: the running turn is
+    /// cancelled, that entry sends as the redirect exactly once, and the
+    /// entries ahead of it wait for the next turn end in their old order.
+    #[gpui::test]
+    async fn send_now_on_a_later_entry_cancels_the_turn_and_sends_that_entry_first(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        refresh_frame(cx);
+
+        let send_now = cx
+            .debug_bounds("queue-send-1")
+            .expect("the second entry's send-now control is drawn");
+        cx.simulate_click(send_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "send now stops the running turn"
+        );
+
+        pump_chat_until(cx, &chat, |chat| {
+            user_turn_count(chat, "second q") == 1
+                && user_turn_count(chat, "first q") == 1
+                && chat.queue.is_empty()
+                && !chat.streaming
+        });
+        let (cancelled_at, second_at, first_at) = chat.read_with(&cx.cx, |chat, _| {
+            let cancelled_at = chat.entries.iter().position(
+                |entry| matches!(entry, Entry::TurnFooter(text) if text.contains("cancelled")),
+            );
+            (
+                cancelled_at,
+                user_turn_position(chat, "second q"),
+                user_turn_position(chat, "first q"),
+            )
+        });
+        assert!(
+            cancelled_at < second_at,
+            "the cancelled footer lands before the redirect: {cancelled_at:?} {second_at:?}"
+        );
+        assert!(
+            second_at < first_at,
+            "the sent-now entry precedes the one that was ahead of it: {second_at:?} {first_at:?}"
+        );
+    }
+
+    /// "Send now" with no turn running sends the entry straight away — the
+    /// case of a queue that outlived its turn because the transport died.
+    #[gpui::test]
+    async fn send_now_while_no_turn_runs_sends_the_entry_immediately(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.queue.push_back("late".into());
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let send_now = cx
+            .debug_bounds("queue-send-0")
+            .expect("the entry's send-now control is drawn");
+        cx.simulate_click(send_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            user_turn_count(chat, "late") == 1
+                && chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Assistant { text, .. } if text == "reply "))
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.queue.is_empty()),
+            "the sent entry leaves the queue"
+        );
+    }
+
+    /// The control snapshot keeps `queued_text` as the front entry for the
+    /// existing `surface.chat.read` readers and exposes the whole queue
+    /// beside it.
+    #[gpui::test]
+    async fn the_control_snapshot_exposes_the_whole_queue(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        chat.update(cx, |chat, _| {
+            chat.queue.push_back("a".into());
+            chat.queue.push_back("b".into());
+        });
+        let snapshot = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
+        assert_eq!(snapshot.queued_text, "a", "queued_text is the front entry");
+        assert_eq!(
+            snapshot.queued,
+            vec!["a".to_string(), "b".to_string()],
+            "queued is the whole queue, front first"
+        );
     }
 
     fn configure_test_chat(chat: &mut Chat) {
