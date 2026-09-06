@@ -10362,6 +10362,19 @@ impl SirioWorkspace {
             ("status".to_string(), snapshot.status),
             ("composerText".to_string(), snapshot.composer_text),
             ("queuedText".to_string(), snapshot.queued_text),
+            // D-CHAT-03: the whole queue, front first, one `text` row per
+            // entry; `queuedText` above stays the front entry for readers
+            // that predate the multi-entry queue.
+            (
+                "queued".to_string(),
+                sirio_control::protocol::rows::encode(
+                    &snapshot
+                        .queued
+                        .into_iter()
+                        .map(|text| BTreeMap::from([("text".to_string(), text)]))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
             (
                 "transcript".to_string(),
                 sirio_control::protocol::rows::encode(&snapshot.transcript),
@@ -28273,6 +28286,41 @@ mod tests {
                 "{method} must reach its chat handler"
             );
         }
+    }
+
+    /// `surface.chat.read` keeps `queuedText` as the front entry for the
+    /// readers that predate the multi-entry queue (D-CHAT-03) and adds
+    /// `queued`, the whole queue front first, as encoded rows.
+    #[test]
+    fn control_chat_result_exposes_the_whole_queue() {
+        let snapshot = ChatControlSnapshot {
+            status: "streaming".into(),
+            composer_text: String::new(),
+            queued_text: "a".into(),
+            queued: vec!["a".into(), "b".into()],
+            transcript: Vec::new(),
+        };
+        let result: BTreeMap<String, String> =
+            SirioWorkspace::control_chat_result("surface-1", snapshot)
+                .into_iter()
+                .collect();
+        assert_eq!(
+            result.get("queuedText").map(String::as_str),
+            Some("a"),
+            "queuedText stays the front entry"
+        );
+        let queued = sirio_control::protocol::rows::decode(
+            result.get("queued").expect("the queued rows are present"),
+        )
+        .expect("the queued rows decode");
+        assert_eq!(
+            queued
+                .iter()
+                .map(|row| row.get("text").cloned().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["a".to_string(), "b".to_string()],
+            "queued carries every entry, front first"
+        );
     }
 
     #[test]
