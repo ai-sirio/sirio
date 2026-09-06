@@ -73,8 +73,8 @@ fn main() {
         "restore-session" => cmd_restore_session(socket, &parsed),
         "list-notifications" => cmd_list_notifications(socket, &parsed),
         "clear-notifications" => cmd_clear_notifications(socket, &parsed),
-        "notify" => cmd_notify(socket, &parsed),
-        "session-ref" => cmd_session_ref(socket, &parsed),
+        "notify" => cmd_notify(socket, &parsed, &environment),
+        "session-ref" => cmd_session_ref(socket, &parsed, &environment),
         "pane" => cmd_pane(socket, &parsed),
         "tab" => cmd_tab(socket, &parsed),
         "panel" => cmd_panel(socket, &parsed),
@@ -142,7 +142,8 @@ fn usage() {
          \x20 list-notifications [--json]       list delivered notifications\n\
          \x20 clear-notifications               clear delivered notifications\n\
          \x20 notify [--session s] [--status st] [--agent-session r] [--stdin-json] [--title t] [--subtitle s] [--body b] [extra...]\n\
-         \x20 session-ref --session s --ref r   report an agent-native session reference\n\
+         \x20 session-ref [--session s] --ref r report an agent-native session reference\n\
+         \x20   (--session defaults to $SIRIO_PANE_ID; without either, agent-status commands exit 0 silently)\n\
          \n\
          options:\n\
          \x20 --socket <path>   socket path (default: $SIRIO_SOCKET or app support)\n\
@@ -808,19 +809,81 @@ fn cmd_clear_notifications(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), 
     Ok(())
 }
 
-fn cmd_session_ref(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
-    let session = parsed.require("session")?;
+/// Which pane an agent-status command (`notify`, `session-ref`) targets,
+/// and how the pane was named.
+#[derive(Debug)]
+struct AgentSessionTarget {
+    session: String,
+    /// True when the pane came from the environment rather than
+    /// `--session`. A hook Sirio writes into a worktree names its pane
+    /// outright; a hook installed user-globally (Settings → Install Hooks)
+    /// cannot, so it relies on the `SIRIO_PANE_ID` every Sirio pane exports
+    /// — and such a hook also fires in agents Sirio never launched, where
+    /// there is nothing to report to and nothing worth saying about it.
+    implicit: bool,
+}
+
+/// Resolves the pane for an agent-status command: `--session` when given
+/// (empty is still the caller's mistake), else the pane environment under
+/// its current or pre-rebrand name, else `None` — outside a Sirio pane.
+fn agent_session_target(
+    parsed: &ParsedArgs,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<AgentSessionTarget>, String> {
+    if parsed.value("session").is_some() {
+        return Ok(Some(AgentSessionTarget {
+            session: parsed.require("session")?,
+            implicit: false,
+        }));
+    }
+    let session = environment
+        .get("SIRIO_PANE_ID")
+        .or_else(|| environment.get("TILLER_PANE_ID"))
+        .filter(|value| !value.is_empty())
+        .cloned();
+    Ok(session.map(|session| AgentSessionTarget {
+        session,
+        implicit: true,
+    }))
+}
+
+/// Sends an agent-status request for `target`. An explicit pane keeps the
+/// strict contract (a refused or unreachable socket is an error the hook
+/// author sees); an implicit one is best effort — Sirio may have quit while
+/// the agent kept running, and a user-global hook must never turn that into
+/// noise inside the agent.
+fn send_agent_status(socket: PathBuf, target: &AgentSessionTarget, request: &ControlRequest) {
+    if target.implicit {
+        let _ = round_trip(&socket, request, Duration::from_secs(5));
+    } else {
+        let _ = require_ok(socket, request);
+    }
+}
+
+fn cmd_session_ref(
+    socket: PathBuf,
+    parsed: &ParsedArgs,
+    environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some(target) = agent_session_target(parsed, environment)? else {
+        return Ok(());
+    };
     let ref_value = parsed.require("ref")?;
-    let _ = require_ok(
+    send_agent_status(
         socket,
-        &sirio_control::protocol::request::session_ref(&session, &ref_value),
+        &target,
+        &sirio_control::protocol::request::session_ref(&target.session, &ref_value),
     );
     Ok(())
 }
 
 /// The notify command: user notification (--title) or agent-status update
 /// (--session/--status), mirroring the Swift CLI's two modes.
-fn cmd_notify(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+fn cmd_notify(
+    socket: PathBuf,
+    parsed: &ParsedArgs,
+    environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
     let has_agent_mode_options = parsed.value("session").is_some()
         || parsed.value("status").is_some()
         || parsed.value("agent-session").is_some()
@@ -845,7 +908,9 @@ fn cmd_notify(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let session = parsed.require("session")?;
+    let Some(target) = agent_session_target(parsed, environment)? else {
+        return Ok(());
+    };
     let status = parsed.require("status")?;
 
     let mut ref_value = parsed.value("agent-session").map(str::to_string);
@@ -857,9 +922,10 @@ fn cmd_notify(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ref_value = session_ref_from_payload_arguments(&parsed.positional);
     }
 
-    let _ = require_ok(
+    send_agent_status(
         socket,
-        &sirio_control::protocol::request::notify(&session, &status, ref_value.as_deref()),
+        &target,
+        &sirio_control::protocol::request::notify(&target.session, &status, ref_value.as_deref()),
     );
     Ok(())
 }
@@ -906,5 +972,83 @@ mod tests {
             std::env::temp_dir().join(format!("sirioctl-version-no-socket-{}", std::process::id()));
 
         assert!(cmd_version(socket, &parsed).is_ok());
+    }
+
+    fn parsed(values: &[(&str, &str)]) -> ParsedArgs {
+        ParsedArgs {
+            values: values
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            flags: std::collections::BTreeSet::new(),
+            positional: Vec::new(),
+        }
+    }
+
+    fn environment(values: &[(&str, &str)]) -> BTreeMap<String, String> {
+        values
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// A worktree-local hook names its pane outright; `--session` must keep
+    /// winning over whatever pane the environment happens to carry.
+    #[test]
+    fn agent_session_prefers_the_explicit_option() {
+        let target = agent_session_target(
+            &parsed(&[("session", "pane-9")]),
+            &environment(&[("SIRIO_PANE_ID", "pane-1")]),
+        )
+        .expect("explicit session parses")
+        .expect("explicit session is a target");
+        assert_eq!(target.session, "pane-9");
+        assert!(!target.implicit);
+    }
+
+    /// A user-global hook (Settings → Install Hooks) cannot embed a pane id:
+    /// it relies on the `SIRIO_PANE_ID` every Sirio pane exports, under its
+    /// pre-rebrand name too.
+    #[test]
+    fn agent_session_falls_back_to_the_pane_environment() {
+        let target = agent_session_target(
+            &parsed(&[("status", "running")]),
+            &environment(&[("SIRIO_PANE_ID", "pane-1")]),
+        )
+        .expect("environment session parses")
+        .expect("environment session is a target");
+        assert_eq!(target.session, "pane-1");
+        assert!(target.implicit);
+
+        let legacy = agent_session_target(
+            &parsed(&[("status", "running")]),
+            &environment(&[("TILLER_PANE_ID", "pane-2")]),
+        )
+        .expect("legacy environment session parses")
+        .expect("legacy environment session is a target");
+        assert_eq!(legacy.session, "pane-2");
+        assert!(legacy.implicit);
+    }
+
+    /// Outside a Sirio pane a user-global hook has nothing to report to —
+    /// that is `None`, not an error, so the hook stays silent instead of
+    /// surfacing "Missing required option" in an agent that Sirio never
+    /// launched.
+    #[test]
+    fn agent_session_is_absent_outside_a_sirio_pane() {
+        let target = agent_session_target(&parsed(&[("status", "running")]), &environment(&[]))
+            .expect("an absent session is not an error");
+        assert!(target.is_none());
+    }
+
+    /// An explicit but empty `--session` is still the caller's mistake.
+    #[test]
+    fn agent_session_rejects_an_empty_explicit_option() {
+        let error = agent_session_target(
+            &parsed(&[("session", "")]),
+            &environment(&[("SIRIO_PANE_ID", "pane-1")]),
+        )
+        .expect_err("an empty explicit session is rejected");
+        assert!(error.contains("--session"), "got: {error}");
     }
 }
