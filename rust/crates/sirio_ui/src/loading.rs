@@ -18,7 +18,9 @@ use bezel::motion::Painter;
 use bezel::ui::loaders;
 use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
-use gpui::{AnyElement, App, Div, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{
+    AnyElement, App, Div, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
+};
 use sirio_theme::Theme;
 
 /// The glyph slot in an Activity-derived reasoning header.
@@ -121,8 +123,24 @@ pub fn indeterminate(
 }
 
 /// The compact Bezel mini gradient spinner for refresh/status slots.
+///
+/// The spinner sits in a wrapper that carries `id` as its debug selector:
+/// Bezel hangs no selector on the key it takes (see the module note), so
+/// without the wrapper no test could tell a slot holding a spinner from
+/// an empty one. Every caller puts it in a centered flex slot, so a flex
+/// wrapper sized by its content is layout-neutral.
 pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
-    loaders::mini_gradient_spinner(id, COMPACT_MINI_CELL, painter(window), cx).into_any_element()
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex()
+        .child(loaders::mini_gradient_spinner(
+            id,
+            COMPACT_MINI_CELL,
+            painter(window),
+            cx,
+        ))
+        .into_any_element()
 }
 
 /// A determinate progress bar with the gallery's fixed track and width.
