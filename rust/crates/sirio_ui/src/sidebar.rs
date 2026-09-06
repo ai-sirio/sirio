@@ -625,6 +625,11 @@ struct RowView {
 impl Render for RowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("RowView.render", self.inputs.row.id as u64);
+        // Read before the spinner renews this row's Bezel lease: a clock
+        // tick, not the app, is what asked for this render.
+        if sirio_perf::enabled() && Painter::of(cx).woken(cx) {
+            sirio_perf::event("motion.RowView.woken", self.inputs.row.id as u64);
+        }
         self.render_count = self.render_count.wrapping_add(1);
         let theme = *Theme::get(cx);
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
