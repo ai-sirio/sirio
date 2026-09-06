@@ -4068,20 +4068,21 @@ impl Chat {
                     .flex()
                     .items_center()
                     // A long answer is clipped from the start, so the tail
-                    // being typed stays in view (`caret::field_value`).
+                    // being typed stays in view (`caret::field_value`); the
+                    // placeholder keeps its start (`caret::field_placeholder`).
                     .overflow_hidden()
                     .child(
-                        caret::field_value(if question_answer.draft.is_empty() {
-                            div()
-                                .text_color(theme.text_faint)
-                                .child(placeholder)
-                                .into_any_element()
+                        if question_answer.draft.is_empty() {
+                            caret::field_placeholder(
+                                div().text_color(theme.text_faint).child(placeholder),
+                            )
                         } else {
-                            div()
-                                .text_color(theme.text)
-                                .child(question_answer.draft.clone())
-                                .into_any_element()
-                        })
+                            caret::field_value(
+                                div()
+                                    .text_color(theme.text)
+                                    .child(question_answer.draft.clone()),
+                            )
+                        }
                         .debug_selector(|| "question-answer-text".into()),
                     )
                     // The bar always occupies layout, so the answer text does
@@ -7890,6 +7891,28 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    /// The highlighter `init` installs into bezel-markdown is bezel-syntax's
+    /// tree-sitter classification: a fenced block's tag reaches a grammar,
+    /// so a `rust` block gets keyword spans instead of one plain run. A tag
+    /// no grammar answers is `None`, which bezel-markdown paints plain.
+    #[test]
+    fn markdown_code_blocks_are_classified_by_bezel_syntax() {
+        let code = "fn main() {}";
+        let spans = highlight_markdown_code("rust", code)
+            .expect("bezel-syntax carries a rust grammar by default");
+        assert!(
+            spans.iter().any(|(range, kind)| {
+                matches!(kind, bezel::theme::HighlightKind::Keyword) && &code[range.clone()] == "fn"
+            }),
+            "`fn` must be classified as a keyword; got {} spans",
+            spans.len()
+        );
+        assert!(
+            highlight_markdown_code("no-such-language", code).is_none(),
+            "an unknown fence tag falls back to plain code rather than guessing"
+        );
+    }
 
     #[test]
     fn composer_field_edge_hides_the_bright_focus_ring() {
