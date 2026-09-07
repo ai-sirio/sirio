@@ -114,8 +114,19 @@ pub fn create_worktree(
 /// than silently discarding their work. Branch deletion is best-effort after
 /// the worktree has been removed: a refusal there is logged, but does not
 /// turn the already-completed worktree removal into an error.
+///
+/// The worktree's `.git` file names the main repository by absolute path, so
+/// a repository renamed or moved on disk after the worktree was added leaves
+/// that link dangling — and `git worktree remove` validates it before doing
+/// anything, even under `--force` ("is not a .git file, error code 7").
+/// `git worktree repair` rewrites the link from the repository's own record
+/// and is a quiet no-op when nothing is broken, so it runs first. Best-effort
+/// too: the removal that follows is what surfaces the real failure.
 pub fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), WorktreeError> {
     let path = git::path_arg(path);
+    if let Err(error) = git::run_accepting(&["worktree", "repair", path.as_str()], repo, &[0]) {
+        eprintln!("[git] worktree repair before removal failed: {error}");
+    }
     git::run_accepting(&["worktree", "remove", path.as_str()], repo, &[0])?;
     if let Err(error) = git::run_accepting(&["branch", "-D", branch], repo, &[0]) {
         eprintln!("[git] failed to delete branch '{branch}' after removing worktree: {error}");
