@@ -936,6 +936,20 @@ struct OpenTab {
     title_is_auto_named: bool,
 }
 
+/// Where `SirioWorkspace::sync_sidebar_tabs` takes the parked rows of a
+/// worktree with no live tabs from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ParkedRows {
+    /// Its persisted strip, read once and then cached
+    /// (`SirioWorkspace::parked_sidebar_tabs_for`): the per-frame reconcile.
+    Read,
+    /// Only a strip a reconcile already read. A row-tree rebuild outside the
+    /// reconcile re-lists what was listed and leaves the first read of a
+    /// never-listed strip to the next reconcile, so the cache is filled at
+    /// the moment the field's doc promises and nowhere earlier.
+    CachedOnly,
+}
+
 /// The in-memory tab metadata paired with terminal entities parked in
 /// `terminal_pane_cache`. It is intentionally independent of the session DB:
 /// a mounted worktree must be able to come back even when its persisted row
@@ -5294,10 +5308,15 @@ impl SirioWorkspace {
             seed_sidebar_identity_and_worktree_defaults(sidebar, catalog, cx);
         });
         // `set_projects` rebuilds every row from the catalog, which drops the
-        // per-row agent facts and the urgency order with them. Re-apply both
-        // here so a refresh (a project added, a worktree created) never
-        // silently reverts a needs-input worktree back down the list.
+        // tab rows, the per-row agent facts and the urgency order with them.
+        // Re-apply all three here so a refresh (a project added, a worktree
+        // created, the window regaining focus) never silently empties a
+        // worktree with open chats -- losing its chevron with them -- or
+        // reverts a needs-input worktree back down the list.
+        self.sync_sidebar_tabs(ParkedRows::CachedOnly, cx);
         self.sync_worktree_activity(cx);
+        // A parked strip no reconcile has read yet is listed by the next one.
+        self.mark_activity_dirty();
     }
 
     fn sync_control_state(&self) {
@@ -7011,6 +7030,26 @@ impl SirioWorkspace {
             .collect()
     }
 
+    /// The parked rows already read for `worktree_path`, if any, for the
+    /// re-list that must not read (`ParkedRows::CachedOnly`). The exact key
+    /// first, then by path identity: a catalog refresh re-reads worktree
+    /// paths from git, which can hand the same checkout back spelled
+    /// differently (canonicalized, `\\?\C:\…` on Windows) from the key an
+    /// earlier reconcile cached it under, and that spelling must not read as
+    /// a worktree with nothing parked. The reconcile itself keeps the exact
+    /// lookup ([`Self::parked_sidebar_tabs_for`]): on a miss it re-reads the
+    /// strip, which is also what makes it fresh again after a switch dropped
+    /// the entry under the spelling it knew.
+    fn cached_parked_sidebar_tabs(&self, worktree_path: &Path) -> Option<Vec<SidebarTab>> {
+        if let Some(parked) = self.parked_sidebar_tabs.get(worktree_path) {
+            return Some(parked.clone());
+        }
+        self.parked_sidebar_tabs
+            .iter()
+            .find(|(path, _)| paths_name_the_same_document(path, worktree_path))
+            .map(|(_, parked)| parked.clone())
+    }
+
     /// The sidebar rows of a worktree with no live tabs: its persisted strip,
     /// as parked rows. A worktree the user switched away from keeps listing
     /// what it holds, so the sidebar tree does not empty out under every
@@ -7953,16 +7992,35 @@ impl SirioWorkspace {
             }
         });
 
-        // The sidebar receives each tab under its in-memory owner. During an
-        // unsafe switch `self.tabs` can still contain mounted tabs from the
-        // old worktree, so assigning the whole collection to the selected
-        // row would make the old tabs appear to belong to the new row.
-        //
-        // #125/#130: each owner list is filtered by
-        // `TabKind::appears_in_sidebar`, because a Browser tab is a tab like
-        // any other up there and never a row down here. Selection is still
-        // compared against the tab's real index in `self.tabs`, not its
-        // position in the filtered owner list.
+        self.sync_sidebar_tabs(ParkedRows::Read, cx);
+        self.sync_worktree_activity(cx);
+    }
+
+    /// Lists every tab row under its worktree row in the sidebar. Run by
+    /// [`Self::sync_activity`] on every reconcile, and by
+    /// [`Self::refresh_sidebar`] right after `set_projects` rebuilds the row
+    /// tree from the catalog: that rebuild drops the tab rows with
+    /// everything else, and a worktree with open chats or terminals must
+    /// come back listing them -- and carrying the chevron they earn it --
+    /// rather than sit empty until some unrelated reconcile happens to run.
+    /// The focus-regain refreshes in `render` (#114) were exactly such a
+    /// rebuild with no reconcile behind them.
+    ///
+    /// The sidebar receives each tab under its in-memory owner. During an
+    /// unsafe switch `self.tabs` can still contain mounted tabs from the
+    /// old worktree, so assigning the whole collection to the selected
+    /// row would make the old tabs appear to belong to the new row.
+    ///
+    /// #125/#130: each owner list is filtered by
+    /// `TabKind::appears_in_sidebar`, because a Browser tab is a tab like
+    /// any other up there and never a row down here. Selection is still
+    /// compared against the tab's real index in `self.tabs`, not its
+    /// position in the filtered owner list.
+    ///
+    /// `parked` says whether a worktree with no live tabs may have its
+    /// persisted strip read here, or only re-listed from what an earlier
+    /// reconcile read (see [`ParkedRows`]).
+    fn sync_sidebar_tabs(&mut self, parked: ParkedRows, cx: &mut Context<Self>) {
         let worktree_rows: Vec<(usize, PathBuf)> = self
             .project_catalog
             .projects()
@@ -7982,7 +8040,12 @@ impl SirioWorkspace {
             // the live list even when that list is empty: the user just
             // closed everything, and a strip from before must not reappear.
             if tabs.is_empty() && !paths_name_the_same_document(&path, &self.working_directory) {
-                tabs = self.parked_sidebar_tabs_for(&path);
+                tabs = match parked {
+                    ParkedRows::Read => self.parked_sidebar_tabs_for(&path),
+                    ParkedRows::CachedOnly => {
+                        self.cached_parked_sidebar_tabs(&path).unwrap_or_default()
+                    }
+                };
             }
             sidebar_updates.push((worktree_id, tabs));
         }
@@ -7991,7 +8054,6 @@ impl SirioWorkspace {
                 sidebar.set_worktree_tabs(worktree_id, tabs, cx);
             }
         });
-        self.sync_worktree_activity(cx);
     }
 
     /// F-CORE-ACT-17/18/22: everything a worktree row draws about its live
@@ -26759,6 +26821,166 @@ mod tests {
                 (other_path.to_string_lossy().into_owned(), false),
             ]
         );
+    }
+
+    /// The two refreshes `render` runs on the false→true `is_window_active`
+    /// transition (#114) -- the user minimised the app or clicked another
+    /// window, then came back -- each rebuild the sidebar rows from the
+    /// catalog. The rebuild must keep the tab rows a worktree was listing:
+    /// before the fix `refresh_sidebar` dropped them and re-applied only the
+    /// agent facts, so a worktree with open chats lost its rows and, with
+    /// them, its chevron until some unrelated activity reconcile happened
+    /// to run.
+    #[gpui::test]
+    async fn regaining_window_focus_keeps_a_worktrees_tab_rows_and_chevron(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo("focus-regain-tab-rows");
+        let repo_for_constructor = repo.clone();
+        let workspace = cx.new(|cx| {
+            // One live terminal tab (id 0), owned by the repo's worktree.
+            let mut workspace = palette_test_workspace(cx);
+            let project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "focus-regain-project".into(),
+                    name: "Focus Regain Project".into(),
+                    root_path: repo_for_constructor.clone(),
+                    is_git: true,
+                    worktrees: vec![session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo_for_constructor.clone(),
+                        is_primary: true,
+                    }],
+                }]);
+            workspace.working_directory = repo_for_constructor.clone();
+            for tab in &workspace.tabs {
+                workspace
+                    .tab_worktree_paths
+                    .insert(tab.id, repo_for_constructor.clone());
+            }
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &project_catalog,
+                &repo_for_constructor,
+            )));
+            workspace.project_catalog = project_catalog;
+            workspace.refresh_sidebar(cx);
+            // The frame's own reconcile lists the open tab under its row.
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            workspace
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            let worktree_id = workspace
+                .sidebar_worktree_id(&repo)
+                .expect("the repo's worktree has a sidebar row");
+            let before = workspace
+                .sidebar
+                .read(cx)
+                .worktree_disclosure(worktree_id)
+                .expect("the worktree row exists before any refresh");
+            assert_eq!(
+                before.1.len(),
+                1,
+                "the worktree lists its one open terminal tab: {before:?}"
+            );
+            assert!(before.0, "a worktree with tab rows starts expanded");
+
+            // Step one of the focus-regain branch in `render`.
+            let working_directory = workspace.working_directory.clone();
+            workspace.refresh_project_for_path(&working_directory, cx);
+            let after_project_refresh = workspace
+                .sidebar
+                .read(cx)
+                .worktree_disclosure(worktree_id);
+            assert_eq!(
+                after_project_refresh,
+                Some(before.clone()),
+                "refresh_project_for_path must keep the worktree's tab rows (and so its chevron)"
+            );
+
+            // Step two, made to actually rebuild: HEAD moved while the app
+            // was in the background, exactly the #114 case.
+            git_test(&repo, &["checkout", "-q", "-b", "switched-while-unfocused"]);
+            assert!(
+                workspace.refresh_worktree_branches(cx),
+                "the branch flip under the app must be noticed"
+            );
+            let after_branch_refresh = workspace
+                .sidebar
+                .read(cx)
+                .worktree_disclosure(worktree_id);
+            assert_eq!(
+                after_branch_refresh,
+                Some(before),
+                "refresh_worktree_branches must keep the worktree's tab rows (and so its chevron)"
+            );
+        });
+    }
+
+    /// The same rebuild, for a worktree the user is not looking at: its
+    /// chats are parked rows built from its persisted strip, which the
+    /// reconcile reads once and caches. A refresh re-lists them from that
+    /// cache and never reads the strip itself (`ParkedRows::CachedOnly`),
+    /// so the first read stays with the reconcile, as the cache's doc
+    /// promises.
+    #[gpui::test]
+    async fn regaining_window_focus_keeps_an_unselected_worktrees_parked_rows(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo("focus-regain-parked-rows");
+        let other = parked_rows_other_dir(&repo);
+        let (repo_for_constructor, other_for_constructor) = (repo.clone(), other.clone());
+        let workspace = cx.new(|cx| {
+            let workspace =
+                parked_rows_test_workspace(cx, &repo_for_constructor, &other_for_constructor);
+            workspace.session.save_layout_now(&persisted_layout(
+                &other_for_constructor,
+                "other",
+                vec![
+                    persisted_chat("other-a", "Other A", true),
+                    persisted_chat("other-b", "Other B", false),
+                ],
+            ));
+            workspace
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            let other_id = workspace
+                .sidebar_worktree_id(&other)
+                .expect("the second worktree has a sidebar row");
+            // The reconcile reads the strip once and lists it as parked rows.
+            workspace.mark_activity_dirty();
+            workspace.sync_activity(cx);
+            let before = workspace
+                .sidebar
+                .read(cx)
+                .worktree_disclosure(other_id)
+                .expect("the second worktree row exists before any refresh");
+            assert_eq!(
+                before.1,
+                vec![
+                    parked_tab_row_id(other_id, 0),
+                    parked_tab_row_id(other_id, 1)
+                ],
+                "the unselected worktree lists its two persisted chats as parked rows: {before:?}"
+            );
+            assert!(before.0, "a worktree with parked rows starts expanded");
+
+            let working_directory = workspace.working_directory.clone();
+            workspace.refresh_project_for_path(&working_directory, cx);
+            let after = workspace
+                .sidebar
+                .read(cx)
+                .worktree_disclosure(other_id);
+            assert_eq!(
+                after,
+                Some(before),
+                "refresh_project_for_path must keep the unselected worktree's parked rows (and so its chevron)"
+            );
+        });
     }
 
     /// #114: a catalog row's branch label must follow what its checkout
