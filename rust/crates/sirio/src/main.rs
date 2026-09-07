@@ -3450,6 +3450,7 @@ fn theme_base_color(base: BaseColor) -> sirio_theme::BaseColor {
         BaseColor::Zinc => sirio_theme::BaseColor::Zinc,
         BaseColor::Gray => sirio_theme::BaseColor::Gray,
         BaseColor::Slate => sirio_theme::BaseColor::Slate,
+        BaseColor::Notte => sirio_theme::BaseColor::Notte,
     }
 }
 
@@ -3461,6 +3462,7 @@ fn persisted_base_color(base: sirio_theme::BaseColor) -> BaseColor {
         sirio_theme::BaseColor::Zinc => BaseColor::Zinc,
         sirio_theme::BaseColor::Gray => BaseColor::Gray,
         sirio_theme::BaseColor::Slate => BaseColor::Slate,
+        sirio_theme::BaseColor::Notte => BaseColor::Notte,
     }
 }
 
@@ -25406,6 +25408,7 @@ mod tests {
             (BaseColor::Zinc, sirio_theme::BaseColor::Zinc),
             (BaseColor::Gray, sirio_theme::BaseColor::Gray),
             (BaseColor::Slate, sirio_theme::BaseColor::Slate),
+            (BaseColor::Notte, sirio_theme::BaseColor::Notte),
         ];
         for (persisted, theme) in pairs {
             assert_eq!(theme_base_color(persisted), theme, "{persisted:?} inbound");
