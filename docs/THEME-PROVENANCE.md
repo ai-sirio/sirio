@@ -97,7 +97,7 @@ path, which is why the values are restated in the trailing comments in
 | Token | Why it is not bezel's |
 |---|---|
 | `brand_coral` | Sirio's brand coral: hue 24.3° measured off the reference frames' inline-code tone, saturation and lightness chosen against two constraints — it clears WCAG AA on its own surface, and it is not any agent's brand (Claude's `#D97757` is the near one, 22 units away). `sirio_ui`'s `loading::bezel_theme` puts it on bezel's `accent` so the loaders keep painting Sirio's colour rather than bezel's grey. Held by `brand_coral_clears_contrast_on_its_own_surface` and `brand_coral_is_not_any_agent_brand`. |
-| `frame_surface` | The translucent window-frame material, `frame_fallback` softened to 0.35 (dark) / 0.30 (light). bezel's `band` is a recessed palette header or footer strip, not a window frame. |
+| `frame_surface` | The translucent window-frame material, `frame_fallback` softened to 0.85 (dark) / 0.80 (light) — the strips are the only place text sits directly on it, and 0.85 is what keeps `text_muted` at WCAG AA there over a blurred white desktop. bezel's `band` is a recessed palette header or footer strip, not a window frame. |
 | `text` | bezel's, softened 10% toward the surface — see the exception above. Not a hand-picked hex: the rule is one line and follows a bezel bump. |
 | `terminal_surface` | Paper-white in light, the pre-shell dark well in dark. bezel has no terminal-surface concept, and the terminal is deliberately independent of the shell's panel hierarchy. |
 

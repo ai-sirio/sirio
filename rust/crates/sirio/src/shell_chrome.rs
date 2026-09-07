@@ -38,13 +38,15 @@ pub(crate) fn current_platform_material(translucency_enabled: bool) -> ShellMate
 
 /// How far the shell's own veils are turned up over a blurred backdrop.
 ///
-/// The theme's defaults (`frame_surface` at 0.35 dark / 0.30 light, panels
-/// faded to [`Theme::surface_opacity`]) let most of the blurred desktop
+/// The theme's defaults (`frame_surface` at 0.85 dark / 0.80 light, panels
+/// faded to [`Theme::surface_opacity`]) let a hint of the blurred desktop
 /// through. Windows' acrylic accent -- the only blurred backdrop GPUI offers
-/// there -- is nearly untinted, and at the frame default the desktop bled
-/// through loudly enough to distract rather than hint (seen on a real
-/// desktop, 2026-09-05), so Windows turns the frame veil up. Its panels stay
-/// opaque on purpose: GPUI's Windows renderer accumulates alpha additively
+/// there -- is nearly untinted, and at the earlier 0.70 frame default the
+/// desktop bled through loudly enough to distract rather than hint (seen on
+/// a real desktop, 2026-09-05), so Windows turned the frame veil up to 0.80;
+/// the theme default has since passed that, so Windows now takes the theme's
+/// frame as-is. Its panels stay opaque on purpose: GPUI's Windows renderer
+/// accumulates alpha additively
 /// (`SrcBlendAlpha`/`DestBlendAlpha` are both `ONE`), so any panel painted
 /// over the frame veil saturates to alpha 1 before the DWM sees it -- a 0.45
 /// fade measured as a darker panel (11 against 13) with nothing showing
@@ -70,10 +72,10 @@ impl MaterialStrength {
         }
     }
 
-    /// The subtler Windows veils: a fifth of the blur through the frame --
-    /// the title strip and the gaps between panels -- and opaque panels.
+    /// The subtler Windows veils: the theme's own frame -- the title strip
+    /// and the gaps between panels -- and opaque panels.
     pub(crate) const WINDOWS: Self = Self {
-        frame_alpha: Some(0.80),
+        frame_alpha: None,
         surface_opacity: 1.0,
     };
 
@@ -232,7 +234,11 @@ mod tests {
             assert_eq!(strength, MaterialStrength::theme_default());
         }
         assert!(MaterialStrength::WINDOWS.surface_opacity > Theme::surface_opacity(true));
-        assert!(MaterialStrength::WINDOWS.frame_alpha.unwrap() > Theme::dark().frame_surface.a);
+        assert_eq!(
+            MaterialStrength::WINDOWS.frame_alpha,
+            None,
+            "the theme's frame is already the stronger veil"
+        );
     }
 
     #[gpui::test]
