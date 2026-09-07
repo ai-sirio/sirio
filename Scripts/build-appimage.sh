@@ -199,8 +199,13 @@ done
 # ././ paths, which resolve against the AppDir once AppRun has chdir'd into
 # it -- the same byte rewrite Tauri's production plugin applies to the same
 # libraries. Same width, no size change, ELF-safe.
+#
+# `-i.bak` rather than `-i`: GNU sed takes an optional suffix, BSD sed a
+# mandatory one, and this script's test runs on the macOS release runner
+# (release.yml "Verify release scripts") where bare `-i` is a syntax error.
 while IFS= read -r -d '' so; do
-  sed -i "s|/usr|././|g" "$so"
+  sed -i.bak "s|/usr|././|g" "$so"
+  rm -f "$so.bak"
 done < <(find "$APPDIR/usr/lib" -type f \( -name 'libwebkit2gtk-4.1.so.0' -o -name 'libjavascriptcoregtk-4.1.so.0' -o -name 'libwebkit2gtk-4.1.so.0.*' -o -name 'libjavascriptcoregtk-4.1.so.0.*' \) -print0)
 
 # -- AppRun -------------------------------------------------------------------
