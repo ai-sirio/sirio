@@ -411,6 +411,9 @@ pub enum BaseColor {
     Zinc,
     Gray,
     Slate,
+    /// Sirio's own preset: bezel's greys in a cool hue, on a lighter dark
+    /// surface ladder. Not one of bezel's five, so it sits last.
+    Notte,
 }
 
 impl BaseColor {
@@ -421,6 +424,7 @@ impl BaseColor {
             BaseColor::Zinc => "zinc",
             BaseColor::Gray => "gray",
             BaseColor::Slate => "slate",
+            BaseColor::Notte => "notte",
         }
     }
 
@@ -431,6 +435,7 @@ impl BaseColor {
             "zinc" => Some(BaseColor::Zinc),
             "gray" => Some(BaseColor::Gray),
             "slate" => Some(BaseColor::Slate),
+            "notte" => Some(BaseColor::Notte),
             _ => None,
         }
     }
@@ -678,6 +683,7 @@ mod tests {
             BaseColor::Zinc,
             BaseColor::Gray,
             BaseColor::Slate,
+            BaseColor::Notte,
         ] {
             assert_eq!(BaseColor::parse(base.raw()), Some(base), "{base:?}");
         }
@@ -686,6 +692,10 @@ mod tests {
             "neutral",
             "the raw values are lower-case, like every other enum setting"
         );
+        // The preset is stored under the same lower-case rule; an older
+        // build reads "notte" as unknown and falls back to Neutral in the
+        // loader, which is the downgrade path every unknown string has.
+        assert_eq!(BaseColor::Notte.raw(), "notte");
     }
 
     #[test]
