@@ -53,6 +53,36 @@ reads the tint through compositing instead of carrying it.
 `a_tinted_base_moves_the_greys_and_leaves_sirios_own_colours_alone` pins all
 three.
 
+**Preset ladders — Sirio's own.** `BaseColor::Notte` is the sixth entry of the
+picker and the one place in the theme where lightness is chosen rather than
+taken from bezel. It was given four surfaces:
+
+| Given | oklch L | oklch C | oklch H | Painted onto |
+|---|---|---|---|---|
+| `#0E1016` | 0.174 | 0.013 | 270.6 | `bg` |
+| `#202127` | 0.249 | 0.011 | 278.0 | `surface`, `surface_card` |
+| `#2B2F3A` | 0.306 | 0.021 | 269.4 | `surface_raised`, `surface_dialog`, `surface_overlay` |
+| `#313337` | 0.321 | 0.008 | 264.5 | `surface_raised_hover` |
+
+No tint reaches them: bezel's dark page is `#060606` (L 0.122) and its raised
+card L 0.235, so the given ladder starts above where bezel's ends, and
+`Brand::apply` never moves lightness. `paint_notte_ladder` in `lib.rs`
+therefore overwrites those seven tokens after `Theme::branded`, in dark only
+— four dark surfaces were given and no light ones, so light is the tint
+alone. Everything else stays bezel's: the veils compose over the new
+surfaces, the text ladder and semantic hues carry the tint like any other
+grey. That tint, `Tint::new(270.6, 0.013)`, is the mean oklch hue and chroma
+of the four values (`NOTTE_LADDER`, `base_color.rs`), not one of Tailwind's.
+
+Body text softened by `TEXT_SOFTENING` lands at `#CFD1DA`: 10.5:1 on
+`#202127`, 8.8:1 on `#2B2F3A`, 8.3:1 on `#313337`. The tests
+`notte_dark_ladder_is_the_four_given_values`,
+`notte_keeps_bezels_veils_text_and_hues`, `notte_light_is_only_a_tint`,
+`notte_body_text_clears_aaa_on_every_surface` and
+`notte_depth_ladder_reads_as_depth` pin all of the above. A bezel bump that
+adds a surface token leaves it at bezel's lightness inside Notte; the table is
+the checklist for that review.
+
 **One exception: `text`.** bezel paints body text at full contrast against its
 page — `#E5E5E5` on `#0D0D0D` is 15.4:1, `#222222` on `#F4F4F4` is 14.5:1.
 Sirio pulls it back by `TEXT_SOFTENING` (10%) toward the surface it sits on,

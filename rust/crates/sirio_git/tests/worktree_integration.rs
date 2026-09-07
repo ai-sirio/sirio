@@ -330,6 +330,30 @@ fn remove_worktree_removes_it_from_porcelain() {
 }
 
 #[test]
+fn remove_worktree_survives_a_renamed_main_repository() {
+    // The main repository is renamed on disk after the worktree was added
+    // (what happened when `tiller-rust-gpui` became `sirio`). The worktree's
+    // `.git` file still names the old location, and `git worktree remove`
+    // refuses with "is not a .git file, error code 7" — even under
+    // `--force`, since the link is validated before anything else.
+    let original = make_repo("remove-renamed");
+    let path = original.path().with_extension("wt-remove-renamed");
+    create_worktree(original.path(), "feature-x", &path, None).expect("create");
+
+    let renamed = TempDir(original.path().with_extension("renamed"));
+    std::fs::rename(original.path(), renamed.path()).expect("rename the main repository");
+
+    remove_worktree(renamed.path(), &path, "feature-x").expect("remove after the rename");
+
+    assert_eq!(
+        porcelain_worktree_count(renamed.path()),
+        1,
+        "git worktree list --porcelain no longer reports the removed worktree"
+    );
+    assert!(!path.exists(), "the checkout directory is gone");
+}
+
+#[test]
 fn remove_worktree_deletes_its_branch() {
     let repo = make_repo("remove-branch");
     let path = repo.path().with_extension("wt-remove-branch");
