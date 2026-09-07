@@ -289,28 +289,32 @@ mod tests {
         );
     }
 
-    /// Spec §3.5 (the Zed post-mortem): a Stable release whose channel
-    /// silently fell back to the dev default would update never and look
-    /// exactly like the bug that started this. The release job compiles with
-    /// `SIRIO_RELEASE_CHANNEL=stable` and runs this suite, so the gate
-    /// asserts both halves: the compiled constant really is Stable and
-    /// updating is enabled. Outside that job the test is a no-op — local
-    /// builds are dev builds by design.
+    /// Spec §3.5 (the Zed post-mortem): a release whose channel silently
+    /// fell back to the dev default would update never and look exactly
+    /// like the bug that started this. The release job compiles with
+    /// `SIRIO_RELEASE_CHANNEL=stable` (tag builds) or `=nightly` (the
+    /// scheduled build, #317) and runs this suite, so the gate asserts both
+    /// halves: the compiled constant really is that channel and updating is
+    /// enabled. Outside those jobs the test is a no-op — local builds are
+    /// dev builds by design.
     ///
     /// `option_env!` is not rebuild-tracked, so the release job must compile
     /// with the variable set (a fresh target directory, as CI does) — a stale
     /// dev-compiled binary fails here loudly instead of passing falsely.
     #[test]
-    fn release_gate_stable_build_carries_the_stable_channel_with_updates_enabled() {
-        if std::env::var("SIRIO_RELEASE_CHANNEL").as_deref() != Ok("stable") {
-            return;
-        }
+    fn release_gate_a_release_build_carries_its_channel_with_updates_enabled() {
+        let expected = match std::env::var("SIRIO_RELEASE_CHANNEL").as_deref() {
+            Ok("stable") => ReleaseChannel::Stable,
+            Ok("nightly") => ReleaseChannel::Nightly,
+            _ => return,
+        };
         assert_eq!(
             ReleaseChannel::RELEASE_CHANNEL,
-            ReleaseChannel::Stable,
-            "SIRIO_RELEASE_CHANNEL=stable did not reach the compiled channel constant"
+            expected,
+            "SIRIO_RELEASE_CHANNEL={} did not reach the compiled channel constant",
+            expected.as_str()
         );
-        assert!(ReleaseChannel::Stable.updates_enabled());
+        assert!(expected.updates_enabled());
         assert!(ReleaseChannel::RELEASE_CHANNEL.updates_enabled());
     }
 
