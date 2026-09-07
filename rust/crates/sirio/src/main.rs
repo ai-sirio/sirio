@@ -423,17 +423,16 @@ const TAB_CLOSE_WIDTH: f32 = 14.;
 const TAB_STATUS_DOT: f32 = 6.;
 const TAB_TITLE_ESTIMATED_CHAR_WIDTH: f32 = 7.5;
 
-/// Space the tab strip has left once the side panels, the gaps and the outer
-/// inset are taken out. `None` means the panel is hidden — visibility and
-/// width are one concept here, because a hidden panel subtracts neither a
+/// Space the center panel has left once the side panels, the gaps and the
+/// outer inset are taken out. `None` means the panel is hidden — visibility
+/// and width are one concept here, because a hidden panel subtracts neither a
 /// width nor a gap.
 ///
 /// The widths passed in must be the **rendered** ones from
 /// `panel_layout::resolve_panel_widths`, never the preferences: when the
 /// viewport clamp is active a preference is wider than what was actually
-/// taken, and the tab strip would size itself against space that does not
-/// exist.
-fn tab_strip_available_width_for_shell(
+/// taken, and the center would size itself against space that does not exist.
+fn center_available_width_for_shell(
     viewport_width: f32,
     sidebar_width: Option<f32>,
     right_panel_width: Option<f32>,
@@ -12609,7 +12608,13 @@ impl SirioWorkspace {
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
-        let available_width = self.center_pane_width(role, window, theme);
+        // Each strip keeps one frame for its fixed trailing control: New Tab
+        // in Primary, Close Secondary in Secondary. This reservation belongs
+        // to the strip, not the pane geometry; subtracting it from the whole
+        // center left an unpainted band beside the right panel.
+        let available_width = (self.center_pane_width(role, window, theme)
+            - f32::from(theme.spacing.titlebar_control_frame.width))
+        .max(0.0);
         // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
         // overflow_width` unconditionally reserves room for the chevron even
         // when no chevron will ever be shown, so the strip flipped into
@@ -12677,7 +12682,7 @@ impl SirioWorkspace {
     /// two widths from being resolved twice against different inputs.
     fn center_pane_widths(&self, window: &Window, theme: Theme) -> (f32, Option<f32>) {
         panel_layout::resolve_center_split(
-            self.tab_strip_available_width(window, theme),
+            self.center_available_width(window, theme),
             self.center_split_ratio,
             self.secondary_pane_visible(),
             CENTER_DIVIDER_WIDTH,
@@ -12717,7 +12722,7 @@ impl SirioWorkspace {
         }
     }
 
-    fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
+    fn center_available_width(&self, window: &Window, theme: Theme) -> f32 {
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             f32::from(window.bounds().size.width),
             self.sidebar_visible.then_some(self.sidebar_width),
@@ -12727,13 +12732,13 @@ impl SirioWorkspace {
             f32::from(theme.spacing.shell_gap),
             panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
         );
-        tab_strip_available_width_for_shell(
+        center_available_width_for_shell(
             f32::from(window.bounds().size.width),
             left_width,
             right_width,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
-        ) - f32::from(theme.spacing.titlebar_control_frame.width)
+        )
     }
 
     fn render_overflow_menu(
@@ -13220,8 +13225,8 @@ impl SirioWorkspace {
             });
 
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
-            // Same expression `tab_strip_available_width` already uses at
-            // `main.rs:10116` — not `viewport_size()`.
+            // Same expression `center_available_width` uses above — not
+            // `viewport_size()`.
             f32::from(window.bounds().size.width),
             self.sidebar_visible.then_some(self.sidebar_width),
             self.right_panel_visible.then_some(self.right_panel_width),
@@ -13465,7 +13470,7 @@ impl SirioWorkspace {
         let Some((grab_x, grab_ratio)) = self.center_drag_anchor else {
             return;
         };
-        let usable = self.tab_strip_available_width(window, theme) - CENTER_DIVIDER_WIDTH;
+        let usable = self.center_available_width(window, theme) - CENTER_DIVIDER_WIDTH;
         if usable <= 0.0 {
             return;
         }
@@ -27998,6 +28003,28 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn primary_pane_fills_center_panel_without_a_background_strip(cx: &mut TestAppContext) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        let primary = cx.debug_bounds("pane-primary").expect("primary pane");
+
+        assert!(
+            primary.right() >= center.right(),
+            "the primary pane must paint through the center panel's right edge: \
+             primary={primary:?}, center={center:?}"
+        );
+        assert!(
+            primary.right() - center.right() <= px(1.0),
+            "the primary pane may overlap only the panel's one-pixel border: \
+             primary={primary:?}, center={center:?}"
+        );
+    }
+
+    #[gpui::test]
     async fn workspace_keeps_a_long_sidebar_scrollable_and_status_bar_pinned(
         cx: &mut TestAppContext,
     ) {
@@ -28493,7 +28520,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_strip_available_width_accounts_for_visible_shell_panels_and_gaps() {
+    fn center_available_width_accounts_for_visible_shell_panels_and_gaps() {
         let viewport_width = 1_000.0;
         let outer_inset = 4.0;
         let gap = 4.0;
@@ -28504,7 +28531,7 @@ mod tests {
         let right = 405.0;
 
         assert_eq!(
-            tab_strip_available_width_for_shell(
+            center_available_width_for_shell(
                 viewport_width,
                 Some(sidebar),
                 Some(right),
@@ -28514,27 +28541,15 @@ mod tests {
             viewport_width - sidebar - right - (2.0 * gap) - (2.0 * outer_inset),
         );
         assert_eq!(
-            tab_strip_available_width_for_shell(
-                viewport_width,
-                Some(sidebar),
-                None,
-                outer_inset,
-                gap
-            ),
+            center_available_width_for_shell(viewport_width, Some(sidebar), None, outer_inset, gap),
             viewport_width - sidebar - gap - (2.0 * outer_inset),
         );
         assert_eq!(
-            tab_strip_available_width_for_shell(
-                viewport_width,
-                None,
-                Some(right),
-                outer_inset,
-                gap
-            ),
+            center_available_width_for_shell(viewport_width, None, Some(right), outer_inset, gap),
             viewport_width - right - gap - (2.0 * outer_inset),
         );
         assert_eq!(
-            tab_strip_available_width_for_shell(viewport_width, None, None, outer_inset, gap),
+            center_available_width_for_shell(viewport_width, None, None, outer_inset, gap),
             viewport_width - (2.0 * outer_inset),
         );
     }

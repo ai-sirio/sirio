@@ -4513,6 +4513,37 @@ impl Sidebar {
                         }),
                 )
             })
+            .when(is_removable_worktree, |this| {
+                let remove_entity = entity.clone();
+                this.child(
+                    div()
+                        .id(("remove-worktree", row_id))
+                        .debug_selector(move || format!("remove-worktree-{row_id}"))
+                        .w(px(16.0))
+                        .flex_none()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_faint)
+                        .rounded(theme.radii.chip)
+                        .hover(|style| style.bg(theme.element_hover))
+                        .invisible()
+                        .group_hover(hover_group.clone(), |style| style.visible())
+                        .on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            remove_entity.update(cx, |sidebar, cx| {
+                                sidebar.open_worktree_close_menu(
+                                    row_id,
+                                    event.position(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        })
+                        .child(
+                            IconElement::new(Icon::Close, IconSize::XSmall)
+                                .text_color(theme.text_faint),
+                        ),
+                )
+            })
             // F-CORE-ACT-18: `AgentActivityModel::running_agent_ids` already
             // de-duplicated these and put them in `AgentCatalog` order, so
             // the badge draws them left to right exactly as handed over —
@@ -4555,37 +4586,6 @@ impl Sidebar {
                                     },
                                 ))
                         })),
-                )
-            })
-            .when(is_removable_worktree, |this| {
-                let remove_entity = entity.clone();
-                this.child(
-                    div()
-                        .id(("remove-worktree", row_id))
-                        .debug_selector(move || format!("remove-worktree-{row_id}"))
-                        .w(px(16.0))
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_faint)
-                        .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.element_hover))
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |event, window, cx| {
-                            cx.stop_propagation();
-                            remove_entity.update(cx, |sidebar, cx| {
-                                sidebar.open_worktree_close_menu(
-                                    row_id,
-                                    event.position(),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        })
-                        .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.text_faint),
-                        ),
                 )
             })
             .when_some(tab_id, |this, tab_id| {
@@ -7806,6 +7806,72 @@ mod tests {
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
                 .is_some()
+        );
+    }
+
+    /// A linked worktree has a hover-only close control that the primary
+    /// checkout does not. That control must not leave the running-agent badge
+    /// inset from the row's trailing edge while it is hidden.
+    #[gpui::test]
+    async fn running_agent_badges_share_one_trailing_edge_across_worktrees(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let project_root = PathBuf::from("/tmp/sidebar-running-agent-alignment");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "agent-alignment".into(),
+                    name: "Agent Alignment".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees: vec![
+                        SidebarWorktree {
+                            branch: "main".into(),
+                            path: project_root.join("main"),
+                            is_primary: true,
+                            comment: None,
+                        },
+                        SidebarWorktree {
+                            branch: "feature".into(),
+                            path: project_root.join("feature"),
+                            is_primary: false,
+                            comment: None,
+                        },
+                    ],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        entity.update(&mut cx, |sidebar, cx| {
+            for row_id in [1, 2] {
+                sidebar.set_worktree_activity(
+                    row_id,
+                    Some(ActivityStatus::Running),
+                    Some(AgentBrandColor::Claude),
+                    vec![AgentMark {
+                        icon: Icon::ClaudeCode,
+                        brand: AgentBrandColor::Claude,
+                    }],
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+
+        let primary = cx
+            .debug_bounds("sidebar-running-agents-1")
+            .expect("the primary worktree has a running-agent badge");
+        let linked = cx
+            .debug_bounds("sidebar-running-agents-2")
+            .expect("the linked worktree has a running-agent badge");
+        assert_eq!(
+            linked.right(),
+            primary.right(),
+            "every worktree's running-agent badge must end at the same trailing edge"
         );
     }
 

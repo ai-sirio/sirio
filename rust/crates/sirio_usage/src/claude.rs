@@ -50,7 +50,14 @@ pub fn claude_has_credentials_at(credentials_file: &Path) -> bool {
     let Ok(data) = std::fs::read(credentials_file) else {
         return false;
     };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else {
+    credentials_json_signals_signed_in(&data)
+}
+
+/// The `claudeAiOauth.accessToken` / `hashedToken` presence check shared by
+/// the credentials file and the macOS Keychain item below — both carry the
+/// same JSON shape.
+fn credentials_json_signals_signed_in(data: &[u8]) -> bool {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(data) else {
         return false;
     };
     let oauth_token = json
@@ -64,6 +71,28 @@ pub fn claude_has_credentials_at(credentials_file: &Path) -> bool {
     json.get("hashedToken")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|token| !token.is_empty())
+}
+
+/// The `security` service name of the primary Claude Code session item. On
+/// macOS the current `claude` CLI keeps the OAuth session here, keyed by the
+/// OS username — `.credentials.json` on this platform holds only `mcpOAuth`
+/// (per-MCP-server tokens), never `claudeAiOauth`/`hashedToken`. Checking
+/// only the file made every macOS sign-in read back as "Not signed in" even
+/// though the usage fetch (which drives the real `claude` binary, and so
+/// reads its own Keychain item directly) succeeded.
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Whether the macOS Keychain's `Claude Code-credentials` item for this OS
+/// user carries a usable credential. See [`KEYCHAIN_SERVICE`].
+#[cfg(target_os = "macos")]
+pub fn claude_has_keychain_credentials() -> bool {
+    let Some(account) = std::env::var_os("USER").and_then(|value| value.into_string().ok())
+    else {
+        return false;
+    };
+    crate::opencode_go::keychain_cookie(KEYCHAIN_SERVICE, &account)
+        .is_some_and(|json| credentials_json_signals_signed_in(json.as_bytes()))
 }
 
 /// One usage window of the Claude panel.
@@ -1379,5 +1408,30 @@ mod tests {
         unsafe {
             std::env::remove_var("SIRIO_USAGE_CLAUDE_TIMEOUT_MS");
         }
+    }
+
+    /// Regression for the macOS sign-in status bug: the current `claude`
+    /// CLI writes only `mcpOAuth` into `.credentials.json` on macOS and
+    /// keeps the primary session in the Keychain instead, so a signed-in
+    /// user's file has this exact shape — no `claudeAiOauth`, no
+    /// `hashedToken`. The file-only check must therefore read "not signed
+    /// in" here (this is what `claude_has_credentials_at` sees); the
+    /// Keychain item is what actually answers "signed in" via
+    /// [`claude_has_keychain_credentials`] on macOS.
+    #[test]
+    fn mcp_oauth_only_json_is_not_a_signed_in_signal() {
+        assert!(!credentials_json_signals_signed_in(
+            br#"{"mcpOAuth":{"plugin:figma:figma|d39d3b6252bc1ac5":{"accessToken":"x"}}}"#
+        ));
+    }
+
+    /// The same JSON shape carrying `claudeAiOauth.accessToken` alongside
+    /// `mcpOAuth` — the primary session, wherever it is read from (file or
+    /// Keychain) — does signal signed in.
+    #[test]
+    fn claude_ai_oauth_access_token_alongside_mcp_oauth_is_a_signed_in_signal() {
+        assert!(credentials_json_signals_signed_in(
+            br#"{"mcpOAuth":{"x":{}},"claudeAiOauth":{"accessToken":"sk-ant-oat01-x"}}"#
+        ));
     }
 }
