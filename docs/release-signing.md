@@ -60,7 +60,14 @@ binaries were compiled with — so a key mismatch between secret and variable
 is caught before anything is published — and only then commits the manifest
 onto the `gh-pages` branch, which is what `dl.sirioai.app` serves (#312).
 Only that one file is added on the branch: the other channel's manifest and
-GitHub's own `CNAME` file survive a publish.
+GitHub's own `CNAME` file survive a publish. Last, it reads the manifest back
+from the branch and polls the Pages site until it serves that version; until
+Pages is configured the run ends with a warning saying nothing serves it.
+
+Every build job also asks the `sirioctl` it just built for its compiled
+channel and version (`sirioctl version --json`, via
+`Scripts/assert-built-channel.sh`), so a binary that fell back to the `dev`
+channel is refused before it is bundled or signed.
 
 The Stable job takes its notes from `docs/release-notes/<version>.md` and
 refuses a tag without one (see `docs/release-notes/README.md`). The Nightly

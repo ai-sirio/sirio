@@ -50,6 +50,14 @@ jobs:
       # a nightly does not need another one; the manual trigger can insist.
       # build-release.yml pins every release to its commit with `--target`,
       # which is what `targetCommitish` reads back.
+      #
+      # A release proves the assets were uploaded, not that the manifest
+      # followed: a run that died between the two leaves a release with no
+      # nightly.json behind it, and skipping on the release alone would then
+      # never publish that commit. So the skip also requires the manifest on
+      # gh-pages to carry this release's stamp. Anything unreadable -- no
+      # branch, no file, no Pages -- means "not published" and rebuilds,
+      # which is the safe direction.
       - name: Skip when main has not moved since the last nightly
         id: decide
         env:
@@ -60,8 +68,10 @@ jobs:
             --jq '[.[].tagName | select(startswith("nightly-"))][0] // empty')
           if [ -n "$LAST" ] && [ "$FORCE" != "true" ]; then
             LAST_SHA=$(gh release view "$LAST" --json targetCommitish --jq .targetCommitish)
-            if [ "$LAST_SHA" = "$GITHUB_SHA" ]; then
-              echo "main is still at $GITHUB_SHA, which $LAST already built; nothing to do"
+            PUBLISHED_STAMP=$( (gh api "repos/${GITHUB_REPOSITORY}/contents/nightly.json?ref=gh-pages" --jq .content 2>/dev/null || true) \
+              | base64 -d 2>/dev/null | jq -r '.version // empty' 2>/dev/null | sed -E 's/.*-nightly\.//' || true)
+            if [ "$LAST_SHA" = "$GITHUB_SHA" ] && [ -n "$PUBLISHED_STAMP" ] && [ "$PUBLISHED_STAMP" = "${LAST#nightly-}" ]; then
+              echo "main is still at $GITHUB_SHA, which $LAST already built and published; nothing to do"
               echo "build=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -95,10 +105,12 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
     # The called workflow cannot hold more than the caller grants: `publish`
-    # inside it needs contents: write. The build jobs in there scope
-    # themselves back down to contents: read.
+    # inside it needs contents: write, and pages: read to learn whether the
+    # manifest is served. The build jobs in there scope themselves back down
+    # to contents: read.
     permissions:
       contents: write
+      pages: read
     uses: ./.github/workflows/build-release.yml
     with:
       channel: nightly
