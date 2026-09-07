@@ -75,6 +75,7 @@ pub use status::{
     StatusEntry, StatusKind, StatusParseError, StatusSnapshot, has_head, parse_status, status,
 };
 pub use worktree::{
-    WorktreeError, create_worktree, derive_worktree_path, init_repository, remove_worktree,
-    resolve_parent_directory,
+    UpstreamBranch, WorktreeError, create_worktree, delete_remote_branch, derive_worktree_path,
+    init_repository, remove_worktree, remove_worktree_and_remote_branch, resolve_parent_directory,
+    upstream_of,
 };
