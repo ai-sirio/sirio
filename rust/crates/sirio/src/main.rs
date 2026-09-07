@@ -12693,7 +12693,7 @@ impl SirioWorkspace {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_raised)
+            .bg(theme.floating_surface)
             .shadow_lg()
             .on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |workspace, cx| {
@@ -14345,7 +14345,7 @@ impl SirioWorkspace {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_raised)
+            .bg(theme.floating_surface)
             .shadow_lg()
             .child(
                 div()
@@ -14426,7 +14426,7 @@ impl SirioWorkspace {
                 .rounded(theme.radii.control)
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.surface_raised)
+                .bg(theme.floating_surface)
                 .shadow_lg()
                 .text_size(theme.typography.footnote)
                 .text_color(theme.text)
@@ -14498,7 +14498,7 @@ impl SirioWorkspace {
                 .rounded(theme.radii.control)
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.surface_raised)
+                .bg(theme.floating_surface)
                 .shadow_lg()
                 .child(
                     div()

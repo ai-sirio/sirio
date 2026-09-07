@@ -285,7 +285,7 @@ pub(super) fn render_chip_popup(
         .rounded(theme.radii.user_pill)
         .border_1()
         .border_color(theme.border)
-        .bg(theme.surface_raised)
+        .bg(theme.floating_surface)
         .shadow_lg();
 
     if chip == FilterChip::User {
@@ -403,7 +403,7 @@ pub(super) fn render_paths_popup(
         .rounded(theme.radii.user_pill)
         .border_1()
         .border_color(theme.border)
-        .bg(theme.surface_raised)
+        .bg(theme.floating_surface)
         .shadow_lg()
         .child(
             div()
