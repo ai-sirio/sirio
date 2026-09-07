@@ -1,6 +1,7 @@
 //! The turn rail: one hairline tick per user message, along the left edge of
 //! the transcript. The tick for the turn under the viewport's top edge is
-//! drawn longer and brighter; hovering a tick previews its message in a
+//! drawn longer and brighter (the latest turn while following the tail or
+//! scrolled to the end); hovering a tick previews its message in a
 //! [`TurnPreview`] card, clicking it scrolls the transcript to that turn.
 //!
 //! Everything that decides *what* the rail shows is pure and lives up here;
@@ -221,7 +222,16 @@ impl Chat {
                     .map(|bounds| bounds.top()..bounds.bottom())
             },
         );
-        let active = active_tick(&ticks, top);
+        // The viewport can still start in an older answer at the bottom.
+        // Tail-follow also covers short transcripts and unmeasured rows,
+        // for which `is_scrolled_to_end` returns None.
+        let active = if self.list_state.is_following_tail()
+            || self.list_state.is_scrolled_to_end() == Some(true)
+        {
+            ticks.len().checked_sub(1)
+        } else {
+            active_tick(&ticks, top)
+        };
         let gap = tick_gap(ticks.len(), viewport);
         let row = gap.min(HIT_ROW);
         let count = ticks.len();
@@ -251,6 +261,7 @@ impl Chat {
                 None => format!("Turn {} of {count}", index + 1),
             };
             let line = div()
+                .debug_selector(move || format!("turn-tick-line-{index}"))
                 .h(px(1.0))
                 .w(px(if is_active { ACTIVE_TICK } else { TICK }))
                 .rounded_full()

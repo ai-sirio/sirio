@@ -9662,6 +9662,80 @@ two"
         });
     }
 
+    #[gpui::test]
+    async fn the_turn_rail_marks_the_latest_turn_at_the_bottom(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &[]);
+        push_overflowing_turns(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(Entry::User {
+                text: "last question".into(),
+                at: None,
+            });
+            chat.push_entry(Entry::Assistant {
+                document: parse_chat_markdown("short answer"),
+                text: "short answer".into(),
+            });
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(600.0), px(600.0)));
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.list_state.is_scrolled_to_end(), Some(true));
+            let ticks = turn_rail::turn_ticks(&chat.entries);
+            assert!(chat.list_state.logical_scroll_top().item_ix < ticks[3].entry_index);
+        });
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-3").unwrap().size.width,
+            px(16.0),
+            "at the bottom the latest turn must be highlighted"
+        );
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-2").unwrap().size.width,
+            px(10.0)
+        );
+        chat.update(cx, |chat, cx| {
+            let ticks = turn_rail::turn_ticks(&chat.entries);
+            chat.list_state.scroll_to(gpui::ListOffset {
+                item_ix: ticks[1].entry_index,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-1").unwrap().size.width,
+            px(16.0)
+        );
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-3").unwrap().size.width,
+            px(10.0)
+        );
+    }
+
+    #[gpui::test]
+    async fn the_turn_rail_marks_the_latest_turn_when_content_fits(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            for text in ["first", "second", "latest"] {
+                chat.push_entry(Entry::User {
+                    text: text.into(),
+                    at: None,
+                });
+            }
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(600.0), px(600.0)));
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.list_state.is_following_tail());
+            assert_eq!(chat.list_state.is_scrolled_to_end(), None);
+        });
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-2").unwrap().size.width,
+            px(16.0)
+        );
+    }
+
     /// Three tall turns for a 300px pane: enough to overflow the transcript.
     fn push_overflowing_turns(chat: &gpui::Entity<Chat>, cx: &mut VisualTestContext) {
         chat.update(cx, |chat, cx| {
