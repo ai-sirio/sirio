@@ -3373,7 +3373,7 @@ impl Sidebar {
                     .rounded(theme.radii.toast)
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.surface)
+                    .bg(theme.dialog_surface)
                     .on_mouse_down_out(move |_, _, cx| {
                         backdrop_close_entity.update(cx, |sidebar, cx| {
                             sidebar.close_project_surface(cx);
@@ -4760,7 +4760,9 @@ impl Render for Sidebar {
                                 .track_focus(&prompt.focus)
                                 .w(px(260.0))
                                 .rounded(theme.radii.toast)
-                                .bg(theme.surface)
+                                // A sheet the user is typing into stays
+                                // opaque when the shell is translucent.
+                                .bg(theme.dialog_surface)
                                 .border_1()
                                 .border_color(theme.border)
                                 .px(px(14.0))

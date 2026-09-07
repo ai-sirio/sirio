@@ -3062,7 +3062,7 @@ impl Settings {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_raised)
+            .bg(theme.floating_surface)
             .shadow_lg();
         for choice in SummarizerChoice::ALL {
             let is_selected = choice == selected;
