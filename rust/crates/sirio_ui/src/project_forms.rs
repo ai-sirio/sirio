@@ -316,7 +316,7 @@ impl Render for CloneForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.surface)
+            .bg(theme.dialog_surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)
@@ -599,7 +599,7 @@ impl Render for CreateForm {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .bg(theme.surface)
+            .bg(theme.dialog_surface)
             .child(
                 div()
                     .text_size(theme.typography.headline)

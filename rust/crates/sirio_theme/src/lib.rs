@@ -185,6 +185,18 @@ pub struct ThemeColors {
     /// Recessed wells — filter fields, code and diff insets: a step *below*
     /// the surface. Code sits *in* the card, the inverse of a raised move.
     pub input_bg: Rgba,
+    /// A sheet an event opens over the shell and that reads like a panel of
+    /// its own: the New Worktree prompt and the Clone/Create project forms.
+    /// The same value as [`ThemeColors::surface`], but **never faded** by
+    /// [`Theme::with_translucency_at`] — translucency belongs to the main
+    /// window's background, and a sheet the desktop shows through is
+    /// unreadable exactly when it is asking for input.
+    pub dialog_surface: Rgba,
+    /// A card floating over the frame that an event puts up: the modal
+    /// sheet (Set Title, Close confirm) and the toasts. The same value as
+    /// [`ThemeColors::surface_raised`], never faded, for the reason
+    /// [`ThemeColors::dialog_surface`] gives.
+    pub floating_surface: Rgba,
     /// Generic hover wash — 5% neutral. Also the transcript row hover: a step
     /// lighter than [`ThemeColors::element_hover`], because transcript rows
     /// are wider and a 6% wash over that area reads as a block.
@@ -426,6 +438,10 @@ impl ThemeColors {
             file_link: accent,
             surface_raised: raised,
             input_bg: inset,
+            // The opaque twins: same values, but `with_translucency_at` leaves
+            // them alone. See the field docs for which surfaces paint them.
+            dialog_surface: panel_surface,
+            floating_surface: raised,
             overlay,
             overlay_strong,
             border_strong,
@@ -1464,6 +1480,11 @@ impl Theme {
     /// translucent panel keeps its contrast. A surface that already carries an
     /// alpha is *scaled*, not overwritten — see
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
+    /// The surfaces an event opens over the shell
+    /// ([`ThemeColors::dialog_surface`], [`ThemeColors::floating_surface`])
+    /// are not faded either: translucency is the main window's background,
+    /// never a dialog's — see
+    /// `event_opened_surfaces_stay_opaque_when_the_panels_fade`.
     pub fn with_translucency(self, enabled: bool) -> Self {
         self.with_translucency_at(enabled, Self::surface_opacity(true))
     }
@@ -1494,6 +1515,8 @@ impl Theme {
         theme.colors.surface_raised = fade(theme.colors.surface_raised);
         theme.colors.input_bg = fade(theme.colors.input_bg);
         theme.colors.terminal_surface = fade(theme.colors.terminal_surface);
+        // `dialog_surface` and `floating_surface` are deliberately absent:
+        // a sheet or toast an event puts up stays opaque over the blur.
         theme
     }
 
@@ -1837,6 +1860,14 @@ mod tests {
             ("surface", sirio.surface, bezel.surface),
             ("surface_raised", sirio.surface_raised, bezel.surface_raised),
             ("input_bg", sirio.input_bg, bezel.input_bg),
+            // The two opaque twins carry bezel's values too; what makes them
+            // separate tokens is that the translucency fade skips them.
+            ("dialog_surface", sirio.dialog_surface, bezel.surface),
+            (
+                "floating_surface",
+                sirio.floating_surface,
+                bezel.surface_raised,
+            ),
             ("element_active", sirio.element_active, bezel.element_active),
             ("element_hover", sirio.element_hover, bezel.element_hover),
             // `text` is deliberately absent: it is bezel's, pulled one step
@@ -2561,6 +2592,43 @@ mod tests {
             base.input_bg.a,
             translucent.input_bg.a
         );
+    }
+
+    /// Translucency belongs to the main window's background alone. A surface
+    /// an event opens over the shell — the New Worktree prompt, a project
+    /// form, a modal sheet, a toast — paints one of the two tokens below,
+    /// and neither may fade with the structural panels: a sheet the desktop
+    /// shows through is unreadable exactly when it is asking for input.
+    #[test]
+    fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
+        for base in [Theme::dark(), Theme::light()] {
+            assert_eq!(
+                base.dialog_surface, base.surface,
+                "opaque twin of the panel surface"
+            );
+            assert_eq!(
+                base.floating_surface, base.surface_raised,
+                "opaque twin of the raised surface"
+            );
+            for translucent in [
+                base.with_translucency(true),
+                base.with_translucency_at(true, 0.45),
+                base.with_translucency_at(true, 0.9),
+            ] {
+                assert!(
+                    translucent.surface.a < base.surface.a,
+                    "precondition: panels fade"
+                );
+                assert!(
+                    translucent.surface_raised.a < base.surface_raised.a,
+                    "precondition: raised cards fade"
+                );
+                assert_eq!(translucent.dialog_surface, base.dialog_surface);
+                assert_eq!(translucent.floating_surface, base.floating_surface);
+                assert_eq!(translucent.dialog_surface.a, 1.0);
+                assert_eq!(translucent.floating_surface.a, 1.0);
+            }
+        }
     }
 
     #[test]

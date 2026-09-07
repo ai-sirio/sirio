@@ -1584,6 +1584,102 @@ fn sirioctl_notify_sends_agent_status() {
     );
 }
 
+/// A user-global hook (Settings → Install Hooks) cannot name its pane the
+/// way a worktree-local one does: it reports for whichever pane's
+/// `SIRIO_PANE_ID` it inherited.
+#[test]
+fn sirioctl_notify_reads_the_pane_from_the_environment() {
+    let (server, handler) = TestServer::start();
+    let output = Command::new(env!("CARGO_BIN_EXE_sirioctl"))
+        .args(["notify", "--status", "running"])
+        .env("SIRIO_SOCKET", &server.socket_path)
+        .env("SIRIO_PANE_ID", "pane-1")
+        .output()
+        .expect("sirioctl runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let seen = handler.requests();
+    let last = seen.last().expect("notify seen");
+    assert_eq!(last.method, "notify");
+    assert_eq!(
+        last.params.get("session").map(String::as_str),
+        Some("pane-1")
+    );
+    assert_eq!(
+        last.params.get("status").map(String::as_str),
+        Some("running")
+    );
+}
+
+/// The same hook fired by an agent Sirio never launched has no pane and no
+/// socket. It must exit 0 without a word — otherwise every Claude Code
+/// session started outside Sirio would print a hook failure.
+#[test]
+fn sirioctl_notify_without_a_pane_or_socket_stays_silent() {
+    let dir = TempDir::new("no-sirio");
+    let missing_socket = dir.path().join("control.sock");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_sirioctl"))
+        .args(["notify", "--status", "running"])
+        .env_remove("SIRIO_PANE_ID")
+        .env_remove("TILLER_PANE_ID")
+        .env("SIRIO_SOCKET", &missing_socket)
+        .output()
+        .expect("sirioctl runs");
+    assert!(
+        output.status.success(),
+        "no pane: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "no pane must stay silent");
+    assert!(output.stdout.is_empty(), "no pane must stay silent");
+
+    // A pane id but no socket: Sirio quit while the agent kept running.
+    let output = Command::new(env!("CARGO_BIN_EXE_sirioctl"))
+        .args(["notify", "--status", "running"])
+        .env("SIRIO_PANE_ID", "pane-1")
+        .env("SIRIO_SOCKET", &missing_socket)
+        .output()
+        .expect("sirioctl runs");
+    assert!(
+        output.status.success(),
+        "no socket: stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "no socket must stay silent");
+}
+
+/// The OpenCode plugin installed user-globally reports the session id the
+/// same way: for the pane it inherited.
+#[test]
+fn sirioctl_session_ref_reads_the_pane_from_the_environment() {
+    let (server, handler) = TestServer::start();
+    let output = Command::new(env!("CARGO_BIN_EXE_sirioctl"))
+        .args(["session-ref", "--ref", "sess-1"])
+        .env("SIRIO_SOCKET", &server.socket_path)
+        .env("SIRIO_PANE_ID", "pane-1")
+        .output()
+        .expect("sirioctl runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let seen = handler.requests();
+    let last = seen.last().expect("session.ref seen");
+    assert_eq!(last.method, "session.ref");
+    assert_eq!(
+        last.params.get("session").map(String::as_str),
+        Some("pane-1")
+    );
+    assert_eq!(last.params.get("ref").map(String::as_str), Some("sess-1"));
+}
+
 #[test]
 fn sirioctl_notify_title_sends_user_notification() {
     let (server, handler) = TestServer::start();
