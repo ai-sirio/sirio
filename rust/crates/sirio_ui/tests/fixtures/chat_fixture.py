@@ -376,6 +376,19 @@ def main():
             if mode == "composer":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
+            if mode == "echo-blocks":
+                # Name every content block of the prompt back, so a test
+                # can prove what actually reached the agent: an image block
+                # by its media type, everything else by its type alone.
+                names = []
+                for block in request.get("params", {}).get("prompt", []):
+                    kind = block.get("type", "?")
+                    if kind == "image":
+                        names.append("image(" + block.get("mimeType", "?") + ")")
+                    else:
+                        names.append(kind)
+                message_chunk("blocks: " + ",".join(names))
+                response(request["id"], {"stopReason": "end_turn"})
             if mode == "permission":
                 request_permission()
                 sys.stdin.readline()  # the client's answer to the permission

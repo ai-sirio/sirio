@@ -102,7 +102,124 @@ fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<Stri
 struct MarkdownBody {
     document: markdown::Doc,
     link_click: Option<LinkClickOverride>,
+    selection: Option<MarkdownSelection>,
     rendered: Option<AnyElement>,
+}
+
+/// Where an assistant response's rendered markdown sits in the transcript's
+/// one selection: the chat that owns it, and the entry's start in
+/// `transcript_text`, so a bezel cursor and a global offset convert both
+/// ways and a drag from user prose into the response is one highlight.
+#[derive(Clone)]
+struct MarkdownSelection {
+    interaction: TranscriptInteraction,
+    source_start: usize,
+}
+
+/// One caret-enterable part of a rendered document: its block, which part,
+/// and where its text starts (and how long it is) in the document's plain
+/// text — the text `Entry::plain_text` reports for an assistant entry.
+struct DocPart {
+    block: usize,
+    part: markdown::Part,
+    start: usize,
+    len: usize,
+}
+
+/// A rendered document's plain text, and every part's place in it.
+/// Parts of one block are joined by a newline, blocks by a blank line, so
+/// a copied selection reads like the page rather than like the source.
+struct DocParts {
+    text: String,
+    parts: Vec<DocPart>,
+}
+
+impl DocParts {
+    fn of(doc: &markdown::Doc) -> Self {
+        let mut text = String::new();
+        let mut parts = Vec::new();
+        for (block, item) in doc.blocks.iter().enumerate() {
+            if block > 0 {
+                text.push_str("\n\n");
+            }
+            for (ordinal, part) in item.parts().into_iter().enumerate() {
+                if ordinal > 0 {
+                    text.push('\n');
+                }
+                let content = item
+                    .text_at(part)
+                    .map(|text| text.text.as_str())
+                    .unwrap_or("");
+                parts.push(DocPart {
+                    block,
+                    part,
+                    start: text.len(),
+                    len: content.len(),
+                });
+                text.push_str(content);
+            }
+        }
+        Self { text, parts }
+    }
+
+    /// A pointer hit as a plain-text offset. A block no caret can enter is
+    /// never hit, so a missing part means a document out of step with the
+    /// one that was laid out; the entry's start is the safe answer.
+    fn offset_of(&self, cursor: markdown::Cursor) -> usize {
+        self.parts
+            .iter()
+            .find(|part| part.block == cursor.block && part.part == cursor.part)
+            .map(|part| part.start + cursor.offset.min(part.len))
+            .unwrap_or(0)
+    }
+
+    /// The part holding `offset`, clamped to its end — an offset inside a
+    /// separator lands at the end of the part before it.
+    fn cursor_at(&self, offset: usize) -> Option<markdown::Cursor> {
+        let part = self.parts.iter().rev().find(|part| part.start <= offset)?;
+        Some(markdown::Cursor::new(
+            part.block,
+            part.part,
+            (offset - part.start).min(part.len),
+        ))
+    }
+
+    /// The transcript range as this document's own selection: `None` when
+    /// the range lies entirely outside the entry, or touches it only at an
+    /// edge.
+    fn selection_for(
+        &self,
+        range: Range<usize>,
+        source_start: usize,
+    ) -> Option<markdown::Selection> {
+        let start = range.start.max(source_start);
+        let end = range.end.min(source_start + self.text.len());
+        if start >= end {
+            return None;
+        }
+        Some(markdown::Selection::new(
+            self.cursor_at(start - source_start)?,
+            self.cursor_at(end - source_start)?,
+        ))
+    }
+}
+
+/// What a pointer over a rendered response resolves to: the transcript
+/// offset of the glyph under it, read off the layouts the last paint
+/// recorded.
+#[derive(Clone)]
+struct DocHit {
+    parts: Rc<DocParts>,
+    layouts: markdown::BlockLayouts,
+    source_start: usize,
+}
+
+impl DocHit {
+    fn offset_at(&self, position: gpui::Point<Pixels>) -> Option<usize> {
+        self.layouts
+            .hit(position)
+            .map(|cursor| self.source_start + self.parts.offset_of(cursor))
+    }
 }
 
 impl MarkdownBody {
@@ -110,6 +227,7 @@ impl MarkdownBody {
         Self {
             document,
             link_click: None,
+            selection: None,
             rendered: None,
         }
     }
@@ -118,11 +236,119 @@ impl MarkdownBody {
         Self {
             document,
             link_click: Some(link_click),
+            selection: None,
             rendered: None,
         }
     }
 
+    /// A transcript response: part of the chat's one selection, so a drag
+    /// across it selects its visible text and Copy reads that text.
+    fn selectable(
+        document: markdown::Doc,
+        interaction: TranscriptInteraction,
+        source_start: usize,
+    ) -> Self {
+        Self {
+            document,
+            link_click: None,
+            selection: Some(MarkdownSelection {
+                interaction,
+                source_start,
+            }),
+            rendered: None,
+        }
+    }
+
+    /// The transcript's selection painted into the document, and the drag
+    /// that extends it. The same anchor/head model as
+    /// `TranscriptSelectableText`, expressed in the entry's plain-text
+    /// offsets so a drag started on user prose and ended here is one range.
+    fn build_selectable(
+        &self,
+        selection: MarkdownSelection,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let parts = Rc::new(DocParts::of(&self.document));
+        let doc_selection = selection
+            .interaction
+            .chat
+            .read(cx)
+            .transcript_selection
+            .as_ref()
+            .map(TranscriptSelection::range)
+            .and_then(|range| parts.selection_for(range, selection.source_start));
+        let layouts = markdown::BlockLayouts::default();
+        // ponytail: bezel paints its editor caret at the selection's head
+        // too — a 1.5px line at the highlight's edge, only while a
+        // selection exists. Hiding it needs a renderer flag bezel has yet
+        // to offer.
+        let rendered = markdown::render_with_selection(
+            &self.document,
+            doc_selection,
+            Some(&layouts),
+            None,
+            markdown::Caption::Shown,
+            window,
+            cx,
+        );
+        let hit = DocHit {
+            parts,
+            layouts,
+            source_start: selection.source_start,
+        };
+        let interaction = selection.interaction;
+
+        let down_hit = hit.clone();
+        let down_interaction = interaction.clone();
+        let move_hit = hit;
+        let move_interaction = interaction.clone();
+        let up_interaction = interaction;
+        div()
+            .w_full()
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                let Some(offset) = down_hit.offset_at(event.position) else {
+                    return;
+                };
+                down_interaction.chat.update(cx, |chat, cx| {
+                    chat.transcript_selection = Some(TranscriptSelection {
+                        anchor: offset,
+                        head: offset,
+                    });
+                    chat.transcript_dragging = true;
+                    cx.notify();
+                });
+                window.focus(&down_interaction.focus, cx);
+                window.prevent_default();
+            })
+            .on_mouse_move(move |event, _, cx| {
+                if !event.dragging() || !move_interaction.chat.read(cx).transcript_dragging {
+                    return;
+                }
+                let Some(offset) = move_hit.offset_at(event.position) else {
+                    return;
+                };
+                move_interaction.chat.update(cx, |chat, cx| {
+                    if let Some(selection) = &mut chat.transcript_selection {
+                        selection.head = offset;
+                    }
+                    cx.notify();
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                up_interaction.chat.update(cx, |chat, cx| {
+                    chat.transcript_dragging = false;
+                    cx.notify();
+                });
+            })
+            .child(rendered)
+            .into_any_element()
+    }
+
     fn build(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+        if let Some(selection) = self.selection.clone() {
+            return self.build_selectable(selection, window, cx);
+        }
         let Some(link_click) = self.link_click.clone() else {
             return markdown::render(&self.document, markdown::Caption::Shown, window, cx);
         };
@@ -252,6 +478,11 @@ pub(crate) const USER_PILL_H_PADDING: f32 = 14.0;
 pub(crate) const USER_PILL_V_PADDING: f32 = 9.0;
 pub(crate) const USER_PILL_TEXT_SIZE: f32 = 13.5;
 pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
+
+/// Ten megabytes: past this point a stray drop or paste would stall a turn
+/// (base64 costs about a third more than the file) instead of enriching it
+/// — the same cap as the Swift original's `FileDrop`.
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 fn parse_chat_markdown(source: &str) -> markdown::Doc {
     markdown::parse(source)
@@ -410,6 +641,9 @@ actions!(
         Send,
         Cancel,
         CopyTranscript,
+        /// Paste into the composer: a picture on the clipboard becomes an
+        /// attachment; anything else falls through to the field's own paste.
+        PasteComposer,
         PopupPrevious,
         PopupNext,
         PopupAccept
@@ -612,7 +846,10 @@ impl Entry {
         match self {
             Self::User { text, .. } => text.clone(),
             Self::Thought { text, .. } => text.clone(),
-            Self::Assistant { text, .. } => text.clone(),
+            // The page's text, not the markdown source: it is what the
+            // reader sees, selects and copies (`MarkdownBody::selectable`).
+            // The hover Copy control is the way to the source.
+            Self::Assistant { document, .. } => DocParts::of(document).text,
             Self::ToolCall {
                 title,
                 status,
@@ -1006,6 +1243,34 @@ struct TranscriptSelection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CopyTarget {
     Assistant(usize),
+}
+
+/// The composer's secondary-click menu, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerContextItem {
+    Cut,
+    Copy,
+    Paste,
+}
+
+impl ComposerContextItem {
+    const ALL: [Self; 3] = [Self::Cut, Self::Copy, Self::Paste];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cut => "Cut",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
+        }
+    }
+
+    fn selector(self) -> &'static str {
+        match self {
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+        }
+    }
 }
 
 /// A host-owned action requested by an edit-summary card.
@@ -1466,6 +1731,9 @@ pub struct Chat {
     attach_error: Option<String>,
     /// In-flight native file picker.
     attach_task: Option<Task<()>>,
+    /// The composer's secondary-click Cut / Copy / Paste menu, at the
+    /// window point it was opened from.
+    composer_context_menu: popover::Popup<gpui::Point<Pixels>>,
     /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
     overflow_focus: FocusHandle,
@@ -1712,6 +1980,7 @@ impl Chat {
             mention_task: None,
             attach_error: None,
             attach_task: None,
+            composer_context_menu: popover::Popup::default(),
             overflow_open: false,
             history_open: false,
             history_sessions: Vec::new(),
@@ -1894,7 +2163,19 @@ impl Chat {
             KeyBinding::new("up", PopupPrevious, Some("ChatComposer")),
             KeyBinding::new("down", PopupNext, Some("ChatComposer")),
             KeyBinding::new("tab", PopupAccept, Some("ChatComposer")),
+            // The platform's paste chord reaches the chat first so a picture
+            // on the clipboard becomes an attachment; `paste_composer`
+            // propagates everything else to bezel's own `Paste`. Same chords
+            // bezel's `input::init` binds, per platform.
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-v", PasteComposer, Some("ChatComposer")),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-v", PasteComposer, Some("ChatComposer")),
+            // Both copy chords: ctrl-c is the Linux/Windows one, cmd-c the
+            // macOS one — a transcript selection that only answered ctrl-c
+            // was uncopyable on the reference platform.
             KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatTranscript")),
+            KeyBinding::new("cmd-c", CopyTranscript, Some("ChatTranscript")),
             KeyBinding::new("escape", Cancel, Some("ChatModelPicker")),
             // The model picker's search field owns focus while the picker is
             // open, so Escape has to resolve from its context too.
@@ -2874,7 +3155,8 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "c" && event.keystroke.modifiers.control {
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key == "c" && (modifiers.control || modifiers.platform) {
             self.copy_transcript(&CopyTranscript, window, cx);
         }
     }
@@ -3168,6 +3450,164 @@ impl Chat {
         cx.notify();
     }
 
+    // --- Paste, and the composer's context menu ---
+
+    /// The platform paste chord, ahead of bezel's field: a picture on the
+    /// clipboard becomes an attachment exactly like the "+" picker's. With
+    /// no picture the action propagates, so the field's own `Paste` inserts
+    /// the text.
+    fn paste_composer(&mut self, _: &PasteComposer, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.paste_clipboard_image(cx) {
+            cx.propagate();
+        }
+    }
+
+    /// `true` when the clipboard carried a picture and this consumed it —
+    /// attached, or rejected with the transient message. A composer that
+    /// cannot accept a drop cannot accept a pasted picture either, and
+    /// swallows it the same way (`can_accept_drop`).
+    fn paste_clipboard_image(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        // A screenshot before its text: a clipboard carrying both carries a
+        // file name for the picture, which is not the picture.
+        let Some(image) = item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image),
+            _ => None,
+        }) else {
+            return false;
+        };
+        if !self.can_accept_drop() {
+            return true;
+        }
+        let mime = match image.format() {
+            gpui::ImageFormat::Png => "image/png",
+            gpui::ImageFormat::Jpeg => "image/jpeg",
+            gpui::ImageFormat::Gif => "image/gif",
+            gpui::ImageFormat::Webp => "image/webp",
+            _ => {
+                self.show_attach_error(
+                    "Only PNG, JPEG, GIF and WebP images can be pasted.".to_string(),
+                    cx,
+                );
+                return true;
+            }
+        };
+        if image.bytes().len() as u64 > MAX_IMAGE_BYTES {
+            self.show_attach_error("The pasted image is too large (max 10 MB).".to_string(), cx);
+            return true;
+        }
+        use base64::Engine as _;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(image.bytes());
+        self.attachments.push(ImageAttachment {
+            mime_type: mime.to_string(),
+            base64_data: base64,
+        });
+        cx.notify();
+        true
+    }
+
+    /// Secondary click on the field: the Cut / Copy / Paste menu at the
+    /// pointer. The field takes focus so every item acts on it, and keeps
+    /// whatever it had selected — bezel's field only listens to the left
+    /// button.
+    fn open_composer_context_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer_field
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        self.composer_context_menu.open(position);
+        cx.notify();
+    }
+
+    fn close_composer_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.composer_context_menu.begin_close() {
+            popover::reap_popup(cx, |chat| &mut chat.composer_context_menu);
+            cx.notify();
+        }
+    }
+
+    /// One chosen item: bezel's own field action for Cut and Copy, and for
+    /// Paste the same picture-first path as the chord, so a screenshot
+    /// attaches from the menu exactly as it does from Cmd+V.
+    fn composer_context_action(
+        &mut self,
+        item: ComposerContextItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_composer_context_menu(cx);
+        let field = self.composer_field.read(cx).focus_handle(cx);
+        field.focus(window, cx);
+        match item {
+            ComposerContextItem::Cut => field.dispatch_action(&bezel::ui::input::Cut, window, cx),
+            ComposerContextItem::Copy => field.dispatch_action(&bezel::ui::input::Copy, window, cx),
+            ComposerContextItem::Paste => {
+                if !self.paste_clipboard_image(cx) {
+                    field.dispatch_action(&bezel::ui::input::Paste, window, cx);
+                }
+            }
+        }
+    }
+
+    fn render_composer_context_menu(
+        &self,
+        bezel_theme: &bezel::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let position = *self
+            .composer_context_menu
+            .get()
+            .expect("mounted composer context menu");
+        let closing = self.composer_context_menu.closing_since();
+        let painter = bezel::motion::Painter::of(cx);
+        let entity = cx.entity();
+        let mut card = popover::popover_card(bezel_theme)
+            .id("composer-context-menu")
+            .debug_selector(|| "composer-context-menu".into())
+            .w(px(160.0));
+        for item in ComposerContextItem::ALL {
+            let selector = format!("composer-context-{}", item.selector());
+            let row_entity = entity.clone();
+            let row_selector = selector.clone();
+            card = card.child(
+                popover::menu_row(
+                    bezel_theme,
+                    false,
+                    bezel::motion::Fade::new(painter, selector.clone()),
+                )
+                .id(SharedString::from(selector))
+                .debug_selector(move || row_selector.clone())
+                .w_full()
+                .min_h(px(29.0))
+                .text_color(bezel_theme.text)
+                .on_click(move |_, window, cx| {
+                    row_entity.update(cx, |chat, cx| {
+                        chat.composer_context_action(item, window, cx)
+                    });
+                })
+                .child(item.label()),
+            );
+        }
+        // `menu_at` owns the deferred layer; dismissal stays on the card
+        // because bezel leaves that listener to the caller.
+        let card = card.on_mouse_down_out(move |_, _, cx| {
+            entity.update(cx, |chat, cx| chat.close_composer_context_menu(cx));
+        });
+        popover::menu_at(
+            "composer-context-menu-layer",
+            position,
+            card.into_any_element(),
+            closing,
+        )
+    }
+
     // --- File drop (F-CHAT-13) ---
 
     /// Mirrors F-CHAT-05's rule for typed input: a composer that cannot
@@ -3200,10 +3640,6 @@ impl Chat {
         if paths.is_empty() {
             return;
         }
-        // Ten megabytes: past this point a stray drop would stall a turn
-        // (base64 costs about a third more than the file) instead of
-        // enriching it — the same cap as the Swift original's `FileDrop`.
-        const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
         fn image_mime(path: &Path) -> Option<&'static str> {
             let extension = path
                 .extension()
@@ -3745,7 +4181,9 @@ impl Chat {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model_picker_open {
+        if self.composer_context_menu.is_open() {
+            self.close_composer_context_menu(cx);
+        } else if self.model_picker_open {
             self.model_picker_open = false;
             cx.notify();
         } else if self.mode_picker_open {
@@ -4667,7 +5105,11 @@ impl Chat {
                     .relative()
                     .group(hover_group)
                     .w_full()
-                    .child(MarkdownBody::new(document))
+                    .child(MarkdownBody::selectable(
+                        document,
+                        interaction.clone(),
+                        source_start,
+                    ))
                     .child(copy)
                     .child(
                         div()
@@ -6614,6 +7056,11 @@ impl Chat {
         // With no agent configured the chip row holds only the send disc.
         let has_agent = self.agent_command.is_some();
 
+        let composer_context_menu = self
+            .composer_context_menu
+            .get()
+            .map(|_| self.render_composer_context_menu(&bezel_theme, cx));
+
         // The composer is the gallery's `Composer` card: one frosted surface
         // at `surface_radius` carrying the field on top and the chip row
         // ending in the send disc under it.
@@ -6703,6 +7150,13 @@ impl Chat {
                     .relative()
                     .w_full()
                     .when(disabled, |input| input.opacity(0.6))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_composer_context_menu(event.position, window, cx);
+                        }),
+                    )
                     .child(self.composer_field.clone())
                     .when(focused, |this| {
                         // Covers bezel's own focus ring with the composer's
@@ -6809,7 +7263,8 @@ impl Chat {
                     ),
             )
             .children(slash_popup)
-            .children(mention_popup);
+            .children(mention_popup)
+            .children(composer_context_menu);
 
         composer_card.into_any_element()
     }
@@ -6967,6 +7422,7 @@ impl Render for Chat {
             .on_action(cx.listener(Self::send_action))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::copy_transcript))
+            .on_action(cx.listener(Self::paste_composer))
             .on_action(cx.listener(Self::popup_previous))
             .on_action(cx.listener(Self::popup_next))
             .on_action(cx.listener(Self::popup_accept))
@@ -15479,6 +15935,263 @@ let answer = 42;
         assert!(
             !chat.read_with(cx, |chat, _| chat.model_control_visible()),
             "model control should be hidden when no models"
+        );
+    }
+
+    /// The two events a real secondary click delivers, in order — gpui
+    /// does not synthesize the up from the down.
+    fn right_click(cx: &mut VisualTestContext, position: gpui::Point<Pixels>) {
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Chooses a row of the composer's context menu and lets the menu leave:
+    /// it exits through bezel's animation, staying mounted — and over the
+    /// pointer — until a timer the test clock has to be moved past.
+    fn choose_composer_context_item(cx: &mut VisualTestContext, selector: &'static str) {
+        let row = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is offered"));
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        refresh_frame(cx);
+    }
+
+    /// The composer's secondary-click menu carries Cut / Copy / Paste, and
+    /// each acts on bezel's field: Copy writes the selection, Cut removes it
+    /// after writing it, Paste inserts the clipboard at the caret.
+    #[gpui::test]
+    async fn composer_right_click_menu_offers_cut_copy_paste_on_the_field(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello menu");
+        cx.simulate_keystrokes("cmd-a");
+        cx.run_until_parked();
+
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the field is drawn");
+        let click = input.center();
+        right_click(cx, click);
+        let menu = cx
+            .debug_bounds("composer-context-menu")
+            .expect("right-click on the composer draws its context menu");
+        // At the pointer horizontally; vertically the composer sits at the
+        // window's bottom edge, so bezel's window snapping may lift the
+        // menu up over the pointer rather than hang it below.
+        assert!(
+            (menu.left() - click.x).abs() <= px(8.0)
+                && menu.top() <= click.y + px(8.0)
+                && menu.bottom() >= click.y - px(8.0),
+            "the menu opens at the pointer: menu={menu:?} click={click:?}"
+        );
+        for item in [
+            "composer-context-cut",
+            "composer-context-copy",
+            "composer-context-paste",
+        ] {
+            assert!(cx.debug_bounds(item).is_some(), "{item} is offered");
+        }
+
+        choose_composer_context_item(cx, "composer-context-copy");
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello menu".into()),
+            "Copy writes the field's selection"
+        );
+        assert!(
+            cx.debug_bounds("composer-context-menu").is_none(),
+            "choosing an item closes the menu"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "hello menu",
+            "Copy leaves the draft alone"
+        );
+
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_string("stale".into()));
+        right_click(cx, click);
+        choose_composer_context_item(cx, "composer-context-cut");
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello menu".into()),
+            "Cut writes the selection"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "",
+            "Cut removes the selection from the draft"
+        );
+
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_string("pasted text".into()));
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the field is drawn");
+        right_click(cx, input.center());
+        choose_composer_context_item(cx, "composer-context-paste");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "pasted text",
+            "Paste inserts the clipboard text into the draft"
+        );
+    }
+
+    /// Paste with a picture on the clipboard attaches it exactly like the
+    /// "+" picker does, and Send carries that attachment to the agent as an
+    /// ACP image block — the fixture names every block it received back.
+    #[gpui::test]
+    async fn pasting_an_image_into_the_composer_attaches_it_and_sends_it_to_the_agent(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["echo-blocks"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        refresh_frame(cx);
+
+        let bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_image(&gpui::Image {
+                format: gpui::ImageFormat::Png,
+                bytes: bytes.clone(),
+                id: 7,
+            }));
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        use base64::Engine as _;
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.clone()),
+            vec![ImageAttachment {
+                mime_type: "image/png".into(),
+                base64_data: expected,
+            }],
+            "a pasted picture becomes an image attachment"
+        );
+        assert!(
+            cx.debug_bounds("attachment-chip-0").is_some(),
+            "the pasted picture is drawn as a chip"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "",
+            "a picture paste inserts no text"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Assistant { text, .. } if text.contains("image(image/png)"))
+            })
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.is_empty()),
+            "Send consumes the pasted attachment"
+        );
+    }
+
+    /// macOS copies with Cmd+C: the transcript's selection must answer the
+    /// platform chord, not only the Linux ctrl-c.
+    #[gpui::test]
+    async fn cmd_c_copies_the_transcript_selection(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::User {
+                text: "user question".into(),
+                at: None,
+            });
+            chat
+        });
+        refresh_frame(cx);
+        chat.update(cx, |chat, _| {
+            chat.transcript_selection = Some(TranscriptSelection {
+                anchor: 0,
+                head: "user question".len(),
+            });
+        });
+        cx.update(|window, cx| {
+            let focus = chat.read(cx).transcript_focus.clone();
+            window.focus(&focus, cx);
+        });
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("user question".into()),
+            "Cmd+C copies the transcript selection"
+        );
+    }
+
+    /// The assistant's rendered markdown is part of the transcript's one
+    /// selection: a drag across it selects its visible text, and the copy
+    /// reads that text — not the markdown source, which is what the hover
+    /// Copy control is for.
+    #[gpui::test]
+    async fn dragging_across_an_assistant_response_selects_its_visible_text(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Assistant {
+                text: "hello **bold** world".into(),
+                document: parse_chat_markdown("hello **bold** world"),
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the response is drawn");
+        let y = response.top() + px(8.0);
+        let start = point(response.left() + px(1.0), y);
+        // Well past the short paragraph's last glyph, and well short of the
+        // hover Copy control at the response's far right.
+        let end = point(response.left() + px(250.0), y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text()),
+            Some("hello bold world".into()),
+            "the drag selects the response's visible text"
+        );
+
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello bold world".into()),
+            "Cmd+C copies what the drag selected"
         );
     }
 }
