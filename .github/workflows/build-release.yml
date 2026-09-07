@@ -471,7 +471,6 @@ jobs:
     # cryptography dependencies.
     permissions:
       contents: write
-      pages: read
     # Both channels publish onto the same gh-pages branch. Serialise, never
     # cancel: a cancelled publish is a release whose assets exist and whose
     # manifest does not, which is the ordering rule below, broken.
@@ -543,12 +542,17 @@ jobs:
               "${FLAGS[@]}"
           fi
 
+      # Every artifact built must be on the release; an asset left over from an
+      # earlier attempt is not a reason to block, because the manifest names
+      # only the files built here.
       - name: Verify every artifact is attached before the manifest names it
         run: |
           ls artifacts | sort > local-assets.txt
           gh release view "$TAG" --json assets --jq '.assets[].name' | sort > published-assets.txt
-          if ! diff local-assets.txt published-assets.txt; then
-            echo "error: the release's asset list differs from the artifacts built; refusing to publish a manifest that would 404" >&2
+          MISSING=$(comm -23 local-assets.txt published-assets.txt)
+          if [ -n "$MISSING" ]; then
+            echo "error: built artifacts missing from the release's assets; refusing to publish a manifest that would 404:" >&2
+            echo "$MISSING" >&2
             exit 1
           fi
 
@@ -667,12 +671,16 @@ jobs:
 
       # A green push is not a served manifest. Read the branch back through
       # the API rather than trusting the push's exit status, then wait for the
-      # site to serve it: GitHub Pages deploys asynchronously and can fail
-      # without touching this workflow, and a manifest that sits on the branch
-      # but is never served is the Zed post-mortem in a new shape -- every
-      # install silently stays where it is. Until #312 configures Pages there
-      # is nothing to poll; that is a warning in the run log, not a pass.
-      - name: Verify the manifest is on the branch and served
+      # URL the binaries actually poll to serve it. That URL is the one string
+      # frozen into every install (spec §2.2, `sirio_update::MANIFEST_HOST`),
+      # so it is what gets checked -- not the Pages site's own address, which
+      # would go green while every install got a 404. GitHub Pages deploys
+      # asynchronously and can fail without touching this workflow; a manifest
+      # that sits on the branch but is never served is the Zed post-mortem in
+      # a new shape. Until #312 wires dl.sirioai.app to gh-pages this step is
+      # red, and that is the honest state: the release exists, and no install
+      # can see it.
+      - name: Verify the manifest is on the branch and served where installs look
         run: |
           ON_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${CHANNEL}.json?ref=gh-pages" --jq .content \
             | base64 -d | jq -r '.version // empty')
@@ -680,20 +688,17 @@ jobs:
             echo "error: gh-pages carries $CHANNEL.json at version '$ON_BRANCH', expected $VERSION; the push did not land" >&2
             exit 1
           fi
-          PAGES_URL=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null || true)
-          if [ -z "$PAGES_URL" ]; then
-            echo "::warning::GitHub Pages is not configured for ${GITHUB_REPOSITORY}: $CHANNEL.json $VERSION is on gh-pages but nothing serves it yet (#312)"
-            exit 0
-          fi
-          URL="${PAGES_URL%/}/${CHANNEL}.json"
+          # Keep in sync with MANIFEST_HOST in rust/crates/sirio_update/src/lib.rs
+          # (test-release-workflow.sh checks the two agree).
+          MANIFEST_URL="https://dl.sirioai.app/${CHANNEL}.json"
           SERVED=""
           for attempt in $(seq 1 60); do
-            SERVED=$( (curl -fsSL "$URL" 2>/dev/null || true) | jq -r '.version // empty' 2>/dev/null || true)
+            SERVED=$( (curl -fsSL "$MANIFEST_URL" 2>/dev/null || true) | jq -r '.version // empty' 2>/dev/null || true)
             if [ "$SERVED" = "$VERSION" ]; then
-              echo "$URL serves $SERVED"
+              echo "$MANIFEST_URL serves $SERVED"
               exit 0
             fi
             sleep 10
           done
-          echo "error: $URL still serves '$SERVED' ten minutes after the push; the update is published nowhere an install can see" >&2
+          echo "error: $MANIFEST_URL does not serve $VERSION ten minutes after the push (it serves '${SERVED:-nothing}'). The release and the manifest on gh-pages are in place, but until #312 wires dl.sirioai.app to gh-pages no install can see them" >&2
           exit 1

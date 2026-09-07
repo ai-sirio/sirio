@@ -64,8 +64,11 @@ then commits the manifest onto the `gh-pages` branch, which is what
 to retry, never a public release without a manifest.
 Only that one file is added on the branch: the other channel's manifest and
 GitHub's own `CNAME` file survive a publish. Last, it reads the manifest back
-from the branch and polls the Pages site until it serves that version; until
-Pages is configured the run ends with a warning saying nothing serves it.
+from the branch and polls `https://dl.sirioai.app/<channel>.json`, the URL
+compiled into every install, until it serves that version. Until #312 wires
+that host to `gh-pages` the poll fails and the run ends red: the release and
+the manifest are in place, but no install can see them yet, and a green run
+would have said otherwise.
 
 Every build job also asks the `sirioctl` it just built for its compiled
 channel and version (`sirioctl version --json`, via

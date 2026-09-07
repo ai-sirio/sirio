@@ -74,6 +74,26 @@ if [ "$COUNT" != "2" ]; then
   exit 1
 fi
 
+# A nightly (#317) is versioned `0.6.0-nightly.<stamp>`. Apple documents
+# CFBundleVersion as period-separated integers only, so the prerelease part
+# must be stripped there; CFBundleShortVersionString, the one Finder shows,
+# keeps the full version so a nightly is recognisable as one.
+CODESIGN_ARGS="$FIXTURE/codesign-nightly.args" \
+CODESIGN_IDENTITY="Developer ID Application: Test" \
+PATH="$FIXTURE/bin:$PATH" \
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0-nightly.202609072133" "$FIXTURE/Nightly.app" >/dev/null
+NIGHTLY_PLIST="$FIXTURE/Nightly.app/Contents/Info.plist"
+if ! grep -A1 'CFBundleShortVersionString' "$NIGHTLY_PLIST" | grep -q '<string>0.6.0-nightly.202609072133</string>'; then
+  echo "FAIL: CFBundleShortVersionString must carry the full nightly version" >&2
+  cat "$NIGHTLY_PLIST" >&2
+  exit 1
+fi
+if ! grep -A1 '<key>CFBundleVersion</key>' "$NIGHTLY_PLIST" | grep -q '<string>0.6.0</string>'; then
+  echo "FAIL: CFBundleVersion must be the numeric part of a nightly version only" >&2
+  cat "$NIGHTLY_PLIST" >&2
+  exit 1
+fi
+
 if ! grep -q -- "--options runtime" "$FIXTURE/codesign.args"; then
   echo "FAIL: codesign must request the hardened runtime" >&2
   cat "$FIXTURE/codesign.args" >&2
