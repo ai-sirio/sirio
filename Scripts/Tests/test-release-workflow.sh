@@ -16,9 +16,11 @@ fail() {
 [ -f "$RELEASE" ] || fail "$RELEASE not found"
 [ -f "$BUILD" ]   || fail "$BUILD not found"
 
-# Line number of the first match, for ordering assertions.
+# Line number of the first match, for ordering assertions. Prints nothing on
+# no match rather than failing: under `set -e` a failing `$(...)` in an
+# assignment would exit the script before the `-n` check names what is missing.
 line_of() {
-  grep -n -F -- "$1" "$2" | head -1 | cut -d: -f1
+  { grep -n -F -- "$1" "$2" || true; } | head -1 | cut -d: -f1
 }
 
 # ---------------------------------------------------------------------------
@@ -84,11 +86,25 @@ JOBS_LINE=$(line_of 'jobs:' "$BUILD")
 grep -q "SIRIO_RELEASE_ACCEPTED_KEYS is empty" "$BUILD" \
   || fail "the build must refuse to run when SIRIO_RELEASE_ACCEPTED_KEYS is empty"
 
+# A malformed key degrades to an empty set at runtime, which is fail-closed
+# and therefore invisible; the guard decodes every entry, not just non-emptiness.
+grep -q "openssl base64 -d" "$BUILD" || fail "the key guard must decode each accepted key"
+
 # The version compiled into every binary is the one the manifest will carry:
 # each build job rewrites the workspace version before compiling.
 if [ "$(grep -c "Scripts/set-workspace-version.sh" "$BUILD")" -lt 3 ]; then
   fail "macos, linux and windows must each run Scripts/set-workspace-version.sh"
 fi
+
+# Spec §3.5 on the artifact, not only on the gate's test build: every job
+# asks the sirioctl it just built what channel and version it carries.
+if [ "$(grep -c "Scripts/assert-built-channel.sh" "$BUILD")" -lt 3 ]; then
+  fail "macos, linux and windows must each run Scripts/assert-built-channel.sh on the built sirioctl"
+fi
+ASSERT_LINE=$(line_of 'Scripts/assert-built-channel.sh rust/target/aarch64-apple-darwin' "$BUILD")
+BUNDLE_LINE=$(line_of 'Scripts/build-app-bundle.sh' "$BUILD")
+[ -n "$ASSERT_LINE" ] || fail "the macos job must assert the channel on the aarch64-apple-darwin sirioctl"
+[ "$ASSERT_LINE" -lt "$BUNDLE_LINE" ] || fail "the channel must be asserted before the binary is bundled and signed"
 
 # The linux job builds the AppImage and nothing else: webkit2gtk-4.1 must be
 # installed on the runner so build-appimage.sh can bundle its closure, and no
@@ -118,11 +134,13 @@ fi
 # Verified by ordering in the file: the release (with its assets) is created,
 # the asset list is read back and compared, the artifacts are signed, and only
 # then does the manifest get pushed to the branch the manifest host serves.
-CREATE_LINE=$(line_of 'gh release create' "$BUILD")
-ASSETS_LINE=$(line_of '--json assets' "$BUILD")
-SIGN_LINE=$(line_of 'sirio-release sign' "$BUILD")
-VERIFY_LINE=$(line_of 'sirio-release verify' "$BUILD")
-PAGES_LINE=$(line_of 'HEAD:gh-pages' "$BUILD")
+# The patterns are the command lines themselves, not their names, so a
+# comment that mentions a step cannot satisfy its ordering check.
+CREATE_LINE=$(line_of 'gh release create "$TAG"' "$BUILD")
+ASSETS_LINE=$(line_of '--json assets --jq' "$BUILD")
+SIGN_LINE=$(line_of 'sirio-release sign \' "$BUILD")
+VERIFY_LINE=$(line_of 'sirio-release verify \' "$BUILD")
+PAGES_LINE=$(line_of 'git push origin HEAD:gh-pages' "$BUILD")
 [ -n "$CREATE_LINE" ] || fail "publish must create the GitHub release with gh release create"
 [ -n "$ASSETS_LINE" ] || fail "publish must read the release's asset list back before signing"
 [ -n "$SIGN_LINE" ]   || fail "publish must sign the artifacts with sirio-release sign"
@@ -132,6 +150,15 @@ PAGES_LINE=$(line_of 'HEAD:gh-pages' "$BUILD")
 [ "$ASSETS_LINE" -lt "$SIGN_LINE" ]   || fail "assets must be checked before the manifest is signed"
 [ "$SIGN_LINE" -lt "$VERIFY_LINE" ]   || fail "the manifest must be verified after it is signed"
 [ "$VERIFY_LINE" -lt "$PAGES_LINE" ]  || fail "the manifest must be published last, after verification"
+
+# A green push is not a served manifest: the branch is read back through the
+# API and the Pages site is polled for the version, after the push.
+READBACK_LINE=$(line_of '.json?ref=gh-pages' "$BUILD")
+[ -n "$READBACK_LINE" ] || fail "publish must read the manifest back from gh-pages"
+[ "$PAGES_LINE" -lt "$READBACK_LINE" ] || fail "the read-back must come after the push"
+grep -qF 'repos/${GITHUB_REPOSITORY}/pages' "$BUILD" || fail "publish must look up the Pages site to poll it"
+grep -q "pages: read" "$BUILD" || fail "publish needs pages: read to look up the Pages site"
+grep -q "pages: read" "$RELEASE" || fail "release.yml must grant pages: read to the called workflow"
 
 # The artifacts live in GitHub Releases under their packaging-script names, so
 # the URL template names the file rather than reconstructing it per platform.
@@ -187,7 +214,7 @@ grep -qF "publish: \${{ github.event_name == 'push' }}" "$RELEASE" \
   || fail "release.yml must publish only on a tag push"
 
 # The build jobs' tests are the workflow's own gate; every script test runs.
-for test in test-set-workspace-version.sh test-release-workflow.sh test-nightly-workflow.sh; do
+for test in test-set-workspace-version.sh test-assert-built-channel.sh test-release-workflow.sh test-nightly-workflow.sh; do
   grep -q "Scripts/Tests/$test" "$BUILD" || fail "build-release.yml must run Scripts/Tests/$test"
 done
 

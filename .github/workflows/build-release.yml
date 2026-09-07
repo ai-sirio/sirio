@@ -92,6 +92,18 @@ jobs:
             echo "error: the repository variable SIRIO_RELEASE_ACCEPTED_KEYS is empty; see docs/release-signing.md" >&2
             exit 1
           fi
+          # Each entry must be standard base64 of exactly 32 bytes. The app
+          # degrades a malformed set to *empty* at runtime -- fail-closed, so
+          # every download is rejected and nothing says why -- and a
+          # validation-only run never reaches the publish job's verify step.
+          # openssl rather than base64: the macOS one spells decode -D.
+          for key in $SIRIO_RELEASE_ACCEPTED_KEYS; do
+            BYTES=$( (printf '%s' "$key" | openssl base64 -d -A 2>/dev/null || true) | wc -c | tr -d ' ')
+            if [ "$BYTES" != "32" ]; then
+              echo "error: an entry of SIRIO_RELEASE_ACCEPTED_KEYS is not base64 of a 32-byte Ed25519 public key" >&2
+              exit 1
+            fi
+          done
           if [ "$SIRIO_RELEASE_CHANNEL" != "stable" ] && [ "$SIRIO_RELEASE_CHANNEL" != "nightly" ]; then
             echo "error: channel must be stable or nightly, got '$SIRIO_RELEASE_CHANNEL'" >&2
             exit 1
@@ -111,6 +123,7 @@ jobs:
         run: |
           bash Scripts/Tests/test-check-release-version.sh
           bash Scripts/Tests/test-set-workspace-version.sh
+          bash Scripts/Tests/test-assert-built-channel.sh
           bash Scripts/Tests/test-build-dmg.sh
           bash Scripts/Tests/test-build-app-bundle.sh
           bash Scripts/Tests/test-build-inno.sh
@@ -170,6 +183,13 @@ jobs:
       - name: Build the release binary
         working-directory: rust
         run: cargo build --release --target aarch64-apple-darwin
+
+      # The gate asserted the channel on the *test* build. This is the binary
+      # that ships: ask it (spec §3.5, both halves, on the artifact).
+      - name: Assert the shipped binary carries the channel and version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/assert-built-channel.sh rust/target/aarch64-apple-darwin/release/sirioctl "$SIRIO_RELEASE_CHANNEL" "$VERSION"
 
       # Replaces xcodegen + xcodebuild archive + xcodebuild -exportArchive.
       # The identity is read back from the certificate just imported rather
@@ -330,6 +350,11 @@ jobs:
         working-directory: rust
         run: cargo build --release
 
+      - name: Assert the shipped binary carries the channel and version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/assert-built-channel.sh rust/target/release/sirioctl "$SIRIO_RELEASE_CHANNEL" "$VERSION"
+
       - name: Package
         id: package
         env:
@@ -393,6 +418,12 @@ jobs:
         working-directory: rust
         run: cargo build --release
 
+      - name: Assert the shipped binary carries the channel and version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/assert-built-channel.sh rust/target/release/sirioctl.exe "$SIRIO_RELEASE_CHANNEL" "$VERSION"
+
       - name: Package
         id: package
         shell: bash
@@ -429,6 +460,7 @@ jobs:
     # cryptography dependencies.
     permissions:
       contents: write
+      pages: read
     # Both channels publish onto the same gh-pages branch. Serialise, never
     # cancel: a cancelled publish is a release whose assets exist and whose
     # manifest does not, which is the ordering rule below, broken.
@@ -583,3 +615,36 @@ jobs:
           git add "$CHANNEL.json" .nojekyll
           git commit -m "publish $CHANNEL $VERSION"
           git push origin HEAD:gh-pages
+
+      # A green push is not a served manifest. Read the branch back through
+      # the API rather than trusting the push's exit status, then wait for the
+      # site to serve it: GitHub Pages deploys asynchronously and can fail
+      # without touching this workflow, and a manifest that sits on the branch
+      # but is never served is the Zed post-mortem in a new shape -- every
+      # install silently stays where it is. Until #312 configures Pages there
+      # is nothing to poll; that is a warning in the run log, not a pass.
+      - name: Verify the manifest is on the branch and served
+        run: |
+          ON_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${CHANNEL}.json?ref=gh-pages" --jq .content \
+            | base64 -d | jq -r '.version // empty')
+          if [ "$ON_BRANCH" != "$VERSION" ]; then
+            echo "error: gh-pages carries $CHANNEL.json at version '$ON_BRANCH', expected $VERSION; the push did not land" >&2
+            exit 1
+          fi
+          PAGES_URL=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null || true)
+          if [ -z "$PAGES_URL" ]; then
+            echo "::warning::GitHub Pages is not configured for ${GITHUB_REPOSITORY}: $CHANNEL.json $VERSION is on gh-pages but nothing serves it yet (#312)"
+            exit 0
+          fi
+          URL="${PAGES_URL%/}/${CHANNEL}.json"
+          SERVED=""
+          for attempt in $(seq 1 60); do
+            SERVED=$( (curl -fsSL "$URL" 2>/dev/null || true) | jq -r '.version // empty' 2>/dev/null || true)
+            if [ "$SERVED" = "$VERSION" ]; then
+              echo "$URL serves $SERVED"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "error: $URL still serves '$SERVED' ten minutes after the push; the update is published nowhere an install can see" >&2
+          exit 1

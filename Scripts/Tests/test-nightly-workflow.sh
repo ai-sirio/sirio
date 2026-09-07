@@ -46,8 +46,12 @@ if grep -q "stable" "$NIGHTLY"; then
 fi
 
 # The macOS gate runs on the maintainer's own machine. Do not rebuild a commit
-# that already has a nightly; the manual trigger can force one.
+# that already has a nightly; the manual trigger can force one. A release
+# alone is not proof: the skip must also see that commit's manifest on
+# gh-pages, or a run that died between release and manifest would never be
+# retried.
 grep -q "targetCommitish" "$NIGHTLY" || fail "nightly.yml must compare main against the last nightly's commit"
+grep -qF 'nightly.json?ref=gh-pages' "$NIGHTLY" || fail "the skip must check that the last nightly's manifest was published"
 grep -q "force" "$NIGHTLY" || fail "the manual trigger must be able to force a rebuild"
 
 # Overlapping schedules would race on the release list and on gh-pages.

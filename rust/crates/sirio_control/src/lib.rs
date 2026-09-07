@@ -103,12 +103,15 @@ pub fn format_version_lines(cli_version: &str, app_version: Option<&str>) -> Vec
     lines
 }
 
-/// Formats the machine-readable output for `sirioctl version`.
+/// Formats the machine-readable output for `sirioctl version`. `channel` is
+/// the compiled release channel: the release job asks the shipped binary for
+/// it (Scripts/assert-built-channel.sh) rather than trusting the test build.
 pub fn format_version_json(cli_version: &str, app_version: Option<&str>) -> String {
     serde_json::json!({
         "cliVersion": cli_version,
         "appVersion": app_version,
         "matches": app_version == Some(cli_version),
+        "channel": ReleaseChannel::RELEASE_CHANNEL.as_str(),
     })
     .to_string()
 }
@@ -298,9 +301,12 @@ mod tests {
     /// enabled. Outside those jobs the test is a no-op — local builds are
     /// dev builds by design.
     ///
-    /// `option_env!` is not rebuild-tracked, so the release job must compile
-    /// with the variable set (a fresh target directory, as CI does) — a stale
-    /// dev-compiled binary fails here loudly instead of passing falsely.
+    /// Cargo records `option_env!` reads in dep-info, so a changed value
+    /// recompiles this crate rather than reusing a stale dev-compiled rlib.
+    /// This test still runs on the gate's build, not on the artifact: the
+    /// release job also asks the shipped `sirioctl version --json` for its
+    /// channel (Scripts/assert-built-channel.sh), so the two halves of §3.5
+    /// are asserted on the binary that ships as well as here.
     #[test]
     fn release_gate_a_release_build_carries_its_channel_with_updates_enabled() {
         let expected = match std::env::var("SIRIO_RELEASE_CHANNEL").as_deref() {
@@ -326,5 +332,17 @@ mod tests {
         assert_eq!(value["cliVersion"], "cli-version");
         assert_eq!(value["appVersion"], "app-version");
         assert_eq!(value["matches"], false);
+    }
+
+    /// The release job asserts the channel on the *shipped* binary, not
+    /// only on the test build (spec §3.5): `sirioctl version --json` is the
+    /// one place a compiled artifact reports what it was compiled as.
+    #[test]
+    fn version_json_reports_the_compiled_channel() {
+        let output = format_version_json("cli-version", None);
+        let value: serde_json::Value = serde_json::from_str(&output).expect("version JSON");
+
+        assert_eq!(value["channel"], ReleaseChannel::RELEASE_CHANNEL.as_str());
+        assert_eq!(value["appVersion"], serde_json::Value::Null);
     }
 }
