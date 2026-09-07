@@ -24,7 +24,10 @@ use gpui::{
     MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba,
     StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
-use sirio_git::{create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory};
+use sirio_git::{
+    UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
+    remove_worktree_and_remote_branch, resolve_parent_directory, upstream_of,
+};
 use sirio_project::{TabKind, display_absolute_path, display_path};
 use sirio_theme::{AgentBrandColor, Theme};
 
@@ -335,10 +338,15 @@ pub enum SidebarContextAction {
     RemoveProject,
     SetPrimary,
     UnsetPrimary,
-    /// F-SID-15: the context menu's confirm-gated counterpart to the
-    /// hover-x button, which used to call `remove_worktree_row` (a
-    /// real on-disk deletion) directly with no confirmation at all.
+    /// Remove the checkout and its local branch. A deliberate menu choice
+    /// is the confirmation: the row's hover-x opens the same two choices
+    /// (see `Sidebar::open_worktree_close_menu`), so neither route reaches
+    /// `remove_worktree_row` from a stray click.
     RemoveWorktree,
+    /// [`Self::RemoveWorktree`] preceded by deleting the branch on the
+    /// remote it tracks; disabled with a reason while the upstream is
+    /// unknown or absent.
+    RemoveWorktreeAndRemoteBranch,
     NewTab(NewTabAction),
 }
 
@@ -350,6 +358,11 @@ pub enum SidebarDisabledReason {
     /// #372: the primary checkout cannot be `git worktree remove`d —
     /// deleting its directory would destroy the repository itself.
     PrimaryWorktree,
+    /// The branch's upstream is still being looked up.
+    ResolvingUpstream,
+    /// The branch tracks no remote branch, so there is nothing to delete
+    /// remotely.
+    NoUpstreamBranch,
 }
 
 impl std::fmt::Display for SidebarDisabledReason {
@@ -359,6 +372,8 @@ impl std::fmt::Display for SidebarDisabledReason {
             Self::PrimaryWorktree => {
                 formatter.write_str("The primary worktree cannot be removed")
             }
+            Self::ResolvingUpstream => formatter.write_str("Checking the remote…"),
+            Self::NoUpstreamBranch => formatter.write_str("No remote branch to delete"),
         }
     }
 }
@@ -375,6 +390,53 @@ pub struct SidebarContextItem {
 struct OpenContextMenu {
     target: SidebarContextTarget,
     position: Point<gpui::Pixels>,
+    /// Resolved off the render thread after the menu opens; only read for
+    /// a worktree target.
+    remote_tracking: RemoteTracking,
+}
+
+/// Whether a worktree's branch tracks a remote branch — resolved off the
+/// render thread while a removal menu is open, so the "and remote branch"
+/// choice can say why it is unavailable instead of failing on click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteTracking {
+    /// The lookup has not answered yet.
+    Resolving,
+    /// The branch tracks nothing: there is no remote branch to delete.
+    Untracked,
+    /// The branch tracks this remote branch.
+    Tracks(UpstreamBranch),
+}
+
+impl RemoteTracking {
+    /// The remote branch to delete, once known.
+    pub fn upstream(&self) -> Option<&UpstreamBranch> {
+        match self {
+            Self::Tracks(upstream) => Some(upstream),
+            Self::Resolving | Self::Untracked => None,
+        }
+    }
+
+    /// Why a remote deletion is unavailable, if it is.
+    pub fn disabled_reason(&self) -> Option<SidebarDisabledReason> {
+        match self {
+            Self::Resolving => Some(SidebarDisabledReason::ResolvingUpstream),
+            Self::Untracked => Some(SidebarDisabledReason::NoUpstreamBranch),
+            Self::Tracks(_) => None,
+        }
+    }
+}
+
+/// The closure menu the hover-x opens on a worktree row: the same two
+/// removals as the context menu's, anchored at the click.
+#[derive(Clone)]
+struct OpenWorktreeCloseMenu {
+    row_id: usize,
+    /// The branch, named in the menu heading so the target is explicit at
+    /// the moment of choice (#372).
+    branch: String,
+    position: Point<gpui::Pixels>,
+    remote_tracking: RemoteTracking,
 }
 
 #[derive(Clone)]
@@ -570,6 +632,8 @@ pub struct Sidebar {
     notice: Option<String>,
     context_menu: Popup<OpenContextMenu>,
     context_menu_focus: FocusHandle,
+    /// The hover-x's closure menu; shares `context_menu_focus` for Escape.
+    worktree_close_menu: Popup<OpenWorktreeCloseMenu>,
     project_settings: Option<ProjectSettingsCard>,
     add_project_menu: Popup<()>,
     project_form: Option<ProjectFormSurface>,
@@ -770,6 +834,7 @@ impl Sidebar {
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
+            worktree_close_menu: Popup::default(),
             project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
@@ -876,6 +941,7 @@ impl Sidebar {
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
+            worktree_close_menu: Popup::default(),
             project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
@@ -1081,7 +1147,10 @@ impl Sidebar {
     /// Returns the complete context menu contract for a project or worktree.
     /// Disabled rows stay visible with their typed reason so the user can
     /// distinguish an unavailable transition from a missing affordance.
-    pub fn context_menu_items(target: &SidebarContextTarget) -> Vec<SidebarContextItem> {
+    pub fn context_menu_items(
+        target: &SidebarContextTarget,
+        remote_tracking: &RemoteTracking,
+    ) -> Vec<SidebarContextItem> {
         let item = |label, action, enabled, disabled_reason| SidebarContextItem {
             label,
             action,
@@ -1179,20 +1248,29 @@ impl Sidebar {
                         true,
                         None,
                     ),
-                    // F-SID-15: the only other removal path was the row's
-                    // hover-x button, which had no confirmation state at
-                    // all and deleted the on-disk worktree immediately.
-                    // The context menu route is confirm-gated in
-                    // dispatch_context_action; the hover-x button now goes
-                    // through the same gate instead of bypassing it.
-                    // #372: the primary checkout cannot be removed —
-                    // `git worktree remove` refuses the main worktree and
-                    // deleting its directory would destroy the repository.
+                    // Both removals are listed; choosing one is the
+                    // confirmation (the hover-x opens the same pair, see
+                    // `open_worktree_close_menu`). #372: the primary checkout
+                    // cannot be removed — `git worktree remove` refuses the
+                    // main worktree and deleting its directory would destroy
+                    // the repository — so both stay visible but disabled
+                    // with that reason; the remote variant also needs a
+                    // known upstream.
                     item(
                         "Remove Worktree",
                         SidebarContextAction::RemoveWorktree,
                         !is_primary,
                         is_primary.then_some(SidebarDisabledReason::PrimaryWorktree),
+                    ),
+                    item(
+                        "Remove Worktree and Remote Branch",
+                        SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+                        !is_primary && remote_tracking.upstream().is_some(),
+                        if *is_primary {
+                            Some(SidebarDisabledReason::PrimaryWorktree)
+                        } else {
+                            remote_tracking.disabled_reason()
+                        },
                     ),
                 ]);
                 items
@@ -1224,10 +1302,38 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         if let Some(target) = self.context_target(row_id) {
-            self.context_menu.open(OpenContextMenu { target, position });
+            let worktree_path = match &target {
+                SidebarContextTarget::Worktree { path, .. } => Some(path.clone()),
+                SidebarContextTarget::Project { .. } => None,
+            };
+            self.context_menu.open(OpenContextMenu {
+                target,
+                position,
+                remote_tracking: if worktree_path.is_some() {
+                    RemoteTracking::Resolving
+                } else {
+                    RemoteTracking::Untracked
+                },
+            });
+            self.worktree_close_menu.close();
             self.project_settings = None;
             self.context_menu_focus.focus(window, cx);
             cx.notify();
+            if let Some(path) = worktree_path {
+                self.resolve_remote_tracking(row_id, cx, move |sidebar, tracking, cx| {
+                    // Only the menu this lookup was started for takes the
+                    // answer; a menu reopened elsewhere runs its own.
+                    if let Some(menu) = sidebar.context_menu.open_mut()
+                        && matches!(
+                            &menu.target,
+                            SidebarContextTarget::Worktree { path: open, .. } if *open == path
+                        )
+                    {
+                        menu.remote_tracking = tracking;
+                        cx.notify();
+                    }
+                });
+            }
         }
     }
 
@@ -1239,8 +1345,16 @@ impl Sidebar {
     }
 
     fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
+        let mut closed = false;
         if self.context_menu.get().is_some() {
             self.context_menu.close();
+            closed = true;
+        }
+        if self.worktree_close_menu.get().is_some() {
+            self.worktree_close_menu.close();
+            closed = true;
+        }
+        if closed {
             cx.notify();
         }
     }
@@ -1670,6 +1784,12 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The remote branch, if the menu had resolved one, is read before
+        // the menu unmounts — the removal below needs it.
+        let upstream = self
+            .context_menu
+            .get()
+            .and_then(|menu| menu.remote_tracking.upstream().cloned());
         // A chosen command is a completed transition, so unmount immediately;
         // keeping the exit overlay alive would occlude an immediate follow-up
         // right-click on the same row. Pointer dismissal still animates via
@@ -1682,7 +1802,11 @@ impl Sidebar {
             }
             return;
         }
-        if action == SidebarContextAction::RemoveWorktree {
+        if matches!(
+            action,
+            SidebarContextAction::RemoveWorktree
+                | SidebarContextAction::RemoveWorktreeAndRemoteBranch
+        ) {
             if let SidebarContextTarget::Worktree { path, .. } = &target
                 && let Some(row_id) = self
                     .rows
@@ -1692,7 +1816,17 @@ impl Sidebar {
                     })
                     .map(|row| row.id)
             {
-                self.request_remove_worktree_row(row_id, window, cx);
+                let remote = if action == SidebarContextAction::RemoveWorktreeAndRemoteBranch {
+                    // The item is disabled until an upstream is known, so
+                    // reaching here without one is a stale menu: do nothing.
+                    let Some(upstream) = upstream else {
+                        return;
+                    };
+                    Some(upstream)
+                } else {
+                    None
+                };
+                self.remove_worktree_row(row_id, remote, cx);
             }
             return;
         }
@@ -2618,70 +2752,124 @@ impl Sidebar {
         self.notice = None;
     }
 
-    /// #372: the confirm dialog names its target — branch and checkout
-    /// path — like the Changes panel's "Discard changes?" names its file,
-    /// so a reorder between right-click and confirm cannot silently retarget
-    /// a destructive, irreversible deletion.
-    fn remove_worktree_prompt(branch: &str, path: &Path) -> (String, String) {
-        (
-            format!("Remove worktree `{branch}`?"),
-            format!(
-                "This permanently deletes the worktree at `{}` and its branch \
-                 `{branch}` on disk. This cannot be undone.",
-                path.display()
-            ),
-        )
-    }
-
-    /// F-SID-15: confirm-gated entry point for worktree removal. Both the
-    /// context menu's "Remove Worktree" and the row's hover-x button route
-    /// through this instead of calling `remove_worktree_row` (a real
-    /// on-disk deletion, spawned immediately) with no safety confirmation.
-    fn request_remove_worktree_row(
+    /// The hover-x's closure menu: two removals — from disk, or from disk
+    /// after deleting the remote branch — with the branch named in the
+    /// heading (#372). Choosing is the confirmation; no native prompt
+    /// follows, and a click outside dismisses without removing anything.
+    fn open_worktree_close_menu(
         &mut self,
         row_id: usize,
+        position: Point<gpui::Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((branch, worktree_path, is_primary)) = self
+        let Some(branch) = self
+            .rows
+            .iter()
+            .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .map(|row| row.title.clone())
+        else {
+            // #372: the primary checkout is not removable — the hover-x is
+            // not drawn for it, so reaching here means a stale row id.
+            return;
+        };
+        self.worktree_close_menu.open(OpenWorktreeCloseMenu {
+            row_id,
+            branch,
+            position,
+            remote_tracking: RemoteTracking::Resolving,
+        });
+        self.context_menu.close();
+        self.project_settings = None;
+        self.context_menu_focus.focus(window, cx);
+        cx.notify();
+        self.resolve_remote_tracking(row_id, cx, move |sidebar, tracking, cx| {
+            if let Some(menu) = sidebar.worktree_close_menu.open_mut()
+                && menu.row_id == row_id
+            {
+                menu.remote_tracking = tracking;
+                cx.notify();
+            }
+        });
+    }
+
+    fn close_worktree_close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.worktree_close_menu.begin_close() {
+            popover::reap_popup(cx, |sidebar| &mut sidebar.worktree_close_menu);
+            cx.notify();
+        }
+    }
+
+    /// A choice in the closure menu: unmount at once (a chosen command is a
+    /// completed transition, as in `dispatch_context_action`) and remove.
+    fn choose_worktree_close(&mut self, with_remote_branch: bool, cx: &mut Context<Self>) {
+        let Some(menu) = self.worktree_close_menu.get().cloned() else {
+            return;
+        };
+        self.worktree_close_menu.close();
+        cx.notify();
+        let remote = if with_remote_branch {
+            // The row is disabled until an upstream is known.
+            let Some(upstream) = menu.remote_tracking.upstream().cloned() else {
+                return;
+            };
+            Some(upstream)
+        } else {
+            None
+        };
+        self.remove_worktree_row(menu.row_id, remote, cx);
+    }
+
+    /// Looks up, off the render thread, whether the worktree row's branch
+    /// tracks a remote branch, then hands the answer to `apply` on the
+    /// sidebar — which decides whether the menu it was meant for is still
+    /// the one open.
+    fn resolve_remote_tracking(
+        &mut self,
+        row_id: usize,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, RemoteTracking, &mut Context<Self>) + 'static,
+    ) {
+        let Some(repo_root) = self.project_root(row_id) else {
+            return;
+        };
+        let Some(branch) = self
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree)
-            .map(|row| {
-                (
-                    row.title.clone(),
-                    row.path.clone().unwrap_or_default(),
-                    row.is_primary,
-                )
-            })
+            .map(|row| row.title.clone())
         else {
             return;
         };
-        // #372: the primary checkout is not removable — the menu item and
-        // the hover-x button already hide it, so reaching here means a
-        // stale row id; do nothing rather than prompt for the repository
-        // itself.
-        if is_primary {
-            return;
-        }
-        let (title, detail) = Self::remove_worktree_prompt(&branch, &worktree_path);
-        let receiver = window.prompt(
-            PromptLevel::Warning,
-            &title,
-            Some(&detail),
-            &["Remove Worktree", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |sidebar, cx| {
-            if receiver.await.unwrap_or(1) == 0 {
-                let _ = sidebar.update(cx, |sidebar, cx| sidebar.remove_worktree_row(row_id, cx));
-            }
+        cx.spawn(async move |this, cx| {
+            let tracking = cx
+                .background_executor()
+                .spawn(async move {
+                    match upstream_of(&repo_root, &branch) {
+                        Ok(Some(upstream)) => RemoteTracking::Tracks(upstream),
+                        Ok(None) => RemoteTracking::Untracked,
+                        Err(error) => {
+                            eprintln!("[git] failed to read the upstream of '{branch}': {error}");
+                            RemoteTracking::Untracked
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |sidebar, cx| apply(sidebar, tracking, cx))
+                .ok();
         })
         .detach();
     }
 
     /// Removes a worktree on the background executor and drops its rows.
-    fn remove_worktree_row(&mut self, row_id: usize, cx: &mut Context<Self>) {
+    /// With `remote`, its branch is deleted on that remote first (see
+    /// `sirio_git::remove_worktree_and_remote_branch` for why that order).
+    fn remove_worktree_row(
+        &mut self,
+        row_id: usize,
+        remote: Option<UpstreamBranch>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(repo_root) = self.project_root(row_id) else {
             return;
         };
@@ -2698,7 +2886,7 @@ impl Sidebar {
             return;
         };
         // #372: defensive — the primary checkout must never reach
-        // `git worktree remove`; see `request_remove_worktree_row`.
+        // `git worktree remove`; see `open_worktree_close_menu`.
         if is_primary {
             return;
         }
@@ -2713,11 +2901,19 @@ impl Sidebar {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    remove_worktree(
-                        &repo_root_for_task,
-                        &worktree_path_for_task,
-                        &branch_for_task,
-                    )
+                    match remote {
+                        Some(upstream) => remove_worktree_and_remote_branch(
+                            &repo_root_for_task,
+                            &worktree_path_for_task,
+                            &branch_for_task,
+                            &upstream,
+                        ),
+                        None => remove_worktree(
+                            &repo_root_for_task,
+                            &worktree_path_for_task,
+                            &branch_for_task,
+                        ),
+                    }
                 })
                 .await;
             this.update(cx, |sidebar, cx| match result {
@@ -3066,6 +3262,9 @@ impl Sidebar {
             SidebarContextAction::SetPrimary => "set-primary",
             SidebarContextAction::UnsetPrimary => "unset-primary",
             SidebarContextAction::RemoveWorktree => "remove-worktree-context",
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch => {
+                "remove-worktree-and-remote-context"
+            }
             SidebarContextAction::NewTab(NewTabAction::NewTerminal) => "new-terminal",
             SidebarContextAction::NewTab(NewTabAction::ClaudeCode) => "claude-code",
             SidebarContextAction::NewTab(NewTabAction::Codex) => "codex",
@@ -3201,6 +3400,7 @@ impl Sidebar {
     ) -> impl IntoElement {
         let menu = popup.get().expect("mounted context menu").clone();
         let closing = popup.closing_since();
+        let remote_tracking = menu.remote_tracking.clone();
         let target = menu.target;
         let position = menu.position;
         let bezel_theme = theme.to_bezel_theme();
@@ -3209,7 +3409,7 @@ impl Sidebar {
             .debug_selector(|| "sidebar-context-menu".to_owned())
             .w(px(240.0));
 
-        for item in Self::context_menu_items(&target) {
+        for item in Self::context_menu_items(&target, &remote_tracking) {
             let selector = format!(
                 "sidebar-context-item-{}",
                 Self::context_action_selector(item.action)
@@ -3339,6 +3539,99 @@ impl Sidebar {
             .text_color(theme.text)
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
             .child(label)
+    }
+
+    fn render_worktree_close_menu(
+        popup: &Popup<OpenWorktreeCloseMenu>,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        painter: Painter,
+    ) -> impl IntoElement {
+        let menu = popup.get().expect("mounted closure menu").clone();
+        let closing = popup.closing_since();
+        let bezel_theme = theme.to_bezel_theme();
+        let remote_reason = menu.remote_tracking.disabled_reason();
+        let disk_entity = entity.clone();
+        let remote_entity = entity.clone();
+
+        let disk_row = popover::menu_row(
+            &bezel_theme,
+            false,
+            Fade::new(painter, "worktree-close-item-remove-disk"),
+        )
+        .id("worktree-close-item-remove-disk")
+        .debug_selector(|| "worktree-close-item-remove-disk".to_owned())
+        .w_full()
+        .min_h(px(29.0))
+        .text_color(bezel_theme.text)
+        .on_click(move |_, _, cx| {
+            disk_entity.update(cx, |sidebar, cx| sidebar.choose_worktree_close(false, cx));
+        })
+        .child("Remove from disk");
+
+        let mut remote_row = popover::menu_row(
+            &bezel_theme,
+            false,
+            Fade::new(painter, "worktree-close-item-remove-remote-and-disk"),
+        )
+        .id("worktree-close-item-remove-remote-and-disk")
+        .debug_selector(|| "worktree-close-item-remove-remote-and-disk".to_owned())
+        .w_full()
+        .min_h(px(29.0))
+        .justify_between()
+        .text_color(if remote_reason.is_none() {
+            bezel_theme.text
+        } else {
+            bezel_theme.text_faint
+        })
+        .child("Remove from disk and remote branch");
+        match remote_reason {
+            Some(reason) => {
+                remote_row = remote_row
+                    .cursor_default()
+                    .bg(gpui::transparent_black())
+                    .child(
+                        div()
+                            .text_size(theme.typography.scaled(11.0))
+                            .text_color(bezel_theme.text_faint)
+                            .child(reason.to_string()),
+                    );
+            }
+            None => {
+                remote_row = remote_row.on_click(move |_, _, cx| {
+                    remote_entity.update(cx, |sidebar, cx| sidebar.choose_worktree_close(true, cx));
+                });
+            }
+        }
+
+        // The heading names the target at the moment of choice (#372), in
+        // the branch's own case — a kebab branch name is unreadable
+        // uppercased, so this is a plain muted line rather than
+        // `popover::menu_heading`.
+        let card = popover::popover_card(&bezel_theme)
+            .id("worktree-close-menu")
+            .debug_selector(|| "worktree-close-menu".to_owned())
+            .w(px(280.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(4.0))
+                    .text_size(theme.typography.scaled(11.0))
+                    .text_color(bezel_theme.text_muted)
+                    .child(format!("Remove worktree {}", menu.branch)),
+            )
+            .child(disk_row)
+            .child(remote_row)
+            .on_mouse_down_out(move |_, _, cx| {
+                entity.update(cx, |sidebar, cx| sidebar.close_worktree_close_menu(cx));
+            });
+        popover::menu_at(
+            "worktree-close-menu-layer",
+            menu.position,
+            card.into_any_element(),
+            closing,
+        )
     }
 
     fn render_project_form(
@@ -4259,10 +4552,15 @@ impl Sidebar {
                         .hover(|style| style.bg(theme.element_hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |_, window, cx| {
+                        .on_click(move |event, window, cx| {
                             cx.stop_propagation();
                             remove_entity.update(cx, |sidebar, cx| {
-                                sidebar.request_remove_worktree_row(row_id, window, cx);
+                                sidebar.open_worktree_close_menu(
+                                    row_id,
+                                    event.position(),
+                                    window,
+                                    cx,
+                                );
                             });
                         })
                         .child(
@@ -4454,6 +4752,15 @@ impl Render for Sidebar {
         let context_menu = self.context_menu.get().map(|_| {
             Self::render_context_menu(&self.context_menu, entity.clone(), theme, Painter::of(cx))
                 .into_any_element()
+        });
+        let worktree_close_menu = self.worktree_close_menu.get().map(|_| {
+            Self::render_worktree_close_menu(
+                &self.worktree_close_menu,
+                entity.clone(),
+                theme,
+                Painter::of(cx),
+            )
+            .into_any_element()
         });
         let project_settings = self.project_settings.clone();
         let add_project_menu = self.add_project_menu.get().map(|_| {
@@ -4859,6 +5166,7 @@ impl Render for Sidebar {
                 )
             })
             .when_some(context_menu, |this, menu| this.child(menu))
+            .when_some(worktree_close_menu, |this, menu| this.child(menu))
             .when_some(project_settings, |this, card| {
                 this.child(Self::render_project_settings(
                     card,
@@ -5029,6 +5337,50 @@ mod tests {
                 .success()
         );
         repo
+    }
+
+    /// Gives `repo` a bare `origin` with `main` pushed and tracked, so a
+    /// branch pushed with `-u` from a worktree has an upstream to delete.
+    /// The bare repository lives under the uncanonicalized temp dir on
+    /// purpose: git does not take a verbatim-prefixed Windows path (the form
+    /// `scratch_repo` canonicalizes to) as a remote URL.
+    fn add_bare_origin(repo: &std::path::Path) -> std::path::PathBuf {
+        let mut origin_name = repo
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .expect("the scratch repo sits in a named directory")
+            .to_os_string();
+        origin_name.push("-origin.git");
+        let origin = std::env::temp_dir().join(origin_name);
+        std::fs::create_dir_all(&origin).expect("create origin dir");
+        let origin_arg = origin.to_str().expect("utf-8 path").to_string();
+        for (cwd, args) in [
+            (origin.as_path(), vec!["init", "-q", "--bare"]),
+            (repo, vec!["remote", "add", "origin", origin_arg.as_str()]),
+            (repo, vec!["push", "-q", "-u", "origin", "main"]),
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(cwd)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?} failed"
+            );
+        }
+        origin
+    }
+
+    /// The branch heads `origin` holds, one `<sha>\t<ref>` line each.
+    fn remote_heads(repo: &std::path::Path) -> String {
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "origin"])
+            .current_dir(repo)
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "ls-remote fails");
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     fn porcelain(repo: &std::path::Path) -> String {
@@ -5841,67 +6193,86 @@ mod tests {
         );
     }
 
-    /// #372: the confirm dialog must name its target — branch and checkout
-    /// path — so a reorder between right-click and confirm cannot silently
-    /// retarget a destructive, irreversible deletion.
-    #[test]
-    fn remove_worktree_prompt_names_the_branch_and_path() {
-        let (title, detail) = Sidebar::remove_worktree_prompt(
-            "qa-test-wt",
-            &PathBuf::from("/tmp/sirio-qa-test-wt"),
-        );
-        assert!(
-            title.contains("qa-test-wt"),
-            "the title must name the branch, got {title:?}"
-        );
-        assert!(
-            detail.contains("qa-test-wt"),
-            "the detail must name the branch, got {detail:?}"
-        );
-        assert!(
-            detail.contains("/tmp/sirio-qa-test-wt"),
-            "the detail must name the checkout path, got {detail:?}"
-        );
-    }
-
     /// #372: the primary checkout cannot be `git worktree remove`d, so its
-    /// context-menu entry stays visible but disabled with a reason instead
-    /// of offering the destructive dialog; any other worktree stays enabled.
+    /// context-menu entries stay visible but disabled with a reason instead
+    /// of offering the destructive choice; any other worktree stays enabled,
+    /// and the remote variant additionally needs a known upstream.
     #[test]
     fn only_a_non_primary_worktree_offers_removal() {
-        let primary = Sidebar::context_menu_items(&SidebarContextTarget::Worktree {
-            path: PathBuf::from("/tmp/sirio"),
-            is_primary: true,
+        let find = |items: &[SidebarContextItem], action: SidebarContextAction| {
+            items
+                .iter()
+                .find(|item| item.action == action)
+                .cloned()
+                .unwrap_or_else(|| panic!("{action:?} is listed"))
+        };
+        let tracked = RemoteTracking::Tracks(UpstreamBranch {
+            remote: "origin".to_string(),
+            branch: "qa-test-wt".to_string(),
         });
-        let primary_item = primary
-            .iter()
-            .find(|item| item.action == SidebarContextAction::RemoveWorktree)
-            .expect("the primary worktree still exposes Remove Worktree");
-        assert!(
-            !primary_item.enabled,
-            "Remove Worktree must be disabled on the primary checkout"
-        );
-        assert_eq!(
-            primary_item.disabled_reason,
-            Some(SidebarDisabledReason::PrimaryWorktree),
-            "the disabled primary entry must say why"
-        );
 
-        let secondary = Sidebar::context_menu_items(&SidebarContextTarget::Worktree {
+        let primary = Sidebar::context_menu_items(
+            &SidebarContextTarget::Worktree {
+                path: PathBuf::from("/tmp/sirio"),
+                is_primary: true,
+            },
+            &tracked,
+        );
+        for action in [
+            SidebarContextAction::RemoveWorktree,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        ] {
+            let item = find(&primary, action);
+            assert!(
+                !item.enabled,
+                "{action:?} must be disabled on the primary checkout"
+            );
+            assert_eq!(
+                item.disabled_reason,
+                Some(SidebarDisabledReason::PrimaryWorktree),
+                "the disabled primary entry must say why"
+            );
+        }
+
+        let secondary = SidebarContextTarget::Worktree {
             path: PathBuf::from("/tmp/sirio-qa-test-wt"),
             is_primary: false,
-        });
-        let secondary_item = secondary
-            .iter()
-            .find(|item| item.action == SidebarContextAction::RemoveWorktree)
-            .expect("a secondary worktree exposes Remove Worktree");
+        };
+        let untracked = Sidebar::context_menu_items(&secondary, &RemoteTracking::Untracked);
+        let disk = find(&untracked, SidebarContextAction::RemoveWorktree);
         assert!(
-            secondary_item.enabled,
+            disk.enabled && disk.disabled_reason.is_none(),
             "Remove Worktree stays enabled off the primary checkout"
         );
+        let remote = find(
+            &untracked,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        );
+        assert!(!remote.enabled, "no upstream, no remote deletion");
         assert_eq!(
-            secondary_item.disabled_reason, None,
-            "an enabled entry carries no disabled reason"
+            remote.disabled_reason,
+            Some(SidebarDisabledReason::NoUpstreamBranch)
+        );
+
+        let resolving = Sidebar::context_menu_items(&secondary, &RemoteTracking::Resolving);
+        let remote = find(
+            &resolving,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        );
+        assert!(!remote.enabled, "unknown upstream, no remote deletion yet");
+        assert_eq!(
+            remote.disabled_reason,
+            Some(SidebarDisabledReason::ResolvingUpstream)
+        );
+
+        let with_upstream = Sidebar::context_menu_items(&secondary, &tracked);
+        let remote = find(
+            &with_upstream,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        );
+        assert!(
+            remote.enabled && remote.disabled_reason.is_none(),
+            "with an upstream the remote variant is live"
         );
     }
 
@@ -6016,7 +6387,7 @@ mod tests {
             path: PathBuf::from("/tmp/git"),
             is_git: true,
         };
-        let items = Sidebar::context_menu_items(&git_project);
+        let items = Sidebar::context_menu_items(&git_project, &RemoteTracking::Untracked);
         let initialize = items
             .iter()
             .find(|item| item.action == SidebarContextAction::InitializeGit)
@@ -6031,7 +6402,7 @@ mod tests {
             path: PathBuf::from("/tmp/git-main"),
             is_primary: false,
         };
-        let worktree_items = Sidebar::context_menu_items(&worktree);
+        let worktree_items = Sidebar::context_menu_items(&worktree, &RemoteTracking::Untracked);
         assert!(
             worktree_items
                 .iter()
@@ -6227,12 +6598,11 @@ mod tests {
         );
     }
 
-    /// F-SID-15: the context menu's "Remove Worktree" is confirm-gated the
-    /// same way the hover-x button is -- nothing is deleted until the user
-    /// answers the prompt, and it routes to a real removal (not just an
-    /// event nobody outside sidebar.rs would act on) once they do.
+    /// The context menu's "Remove Worktree" is a real removal (not just an
+    /// event nobody outside sidebar.rs would act on), and the deliberate
+    /// menu choice is the confirmation: no native prompt follows it.
     #[gpui::test]
-    async fn right_click_context_menu_remove_worktree_confirms_before_removing(
+    async fn right_click_context_menu_remove_worktree_removes_without_a_native_prompt(
         cx: &mut gpui::TestAppContext,
     ) {
         // See remove_button_removes_the_worktree's identical comment: widen
@@ -6295,17 +6665,10 @@ mod tests {
         cx.simulate_click(remove.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
-
         assert!(
-            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
-                .rows
-                .iter()
-                .any(|row| row.id == row_id)),
-            "nothing is removed before the user answers"
+            !cx.has_pending_prompt(),
+            "the menu choice is the confirmation; no native prompt follows"
         );
-
-        cx.simulate_prompt_answer("Remove Worktree");
         cx.condition(&sidebar_entity, |sidebar, _cx| {
             !sidebar
                 .rows
@@ -6671,6 +7034,189 @@ mod tests {
         );
     }
 
+    /// Clicking a worktree row's hover-x must open a closure menu with two
+    /// choices -- remove the worktree from disk, or remove it from disk and
+    /// delete its remote branch too -- instead of jumping straight to a
+    /// native confirm dialog.
+    #[gpui::test]
+    async fn remove_button_opens_a_closure_menu_with_disk_and_remote_choices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // SAFETY: test process; the only reader is the crate's per-call
+        // `SIRIO_GIT_TIMEOUT_MS` lookup.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("closure-menu");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = cx.debug_bounds("new-worktree-row").expect("row rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("to-close");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let row_id = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == "to-close")
+                    .map(|row| row.id)
+            })
+            .expect("the new worktree row exists");
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the hover-x is drawn once the row is hovered");
+        cx.simulate_click(remove_button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("worktree-close-menu").is_some(),
+            "clicking the x opens the closure menu"
+        );
+        assert!(
+            cx.debug_bounds("worktree-close-item-remove-disk").is_some(),
+            "the menu offers removing the worktree from disk"
+        );
+        assert!(
+            cx.debug_bounds("worktree-close-item-remove-remote-and-disk")
+                .is_some(),
+            "the menu offers removing the remote branch and the worktree from disk"
+        );
+        assert!(
+            !cx.has_pending_prompt(),
+            "the x must not jump straight to a native confirm dialog"
+        );
+        assert!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .rows
+                .iter()
+                .any(|row| row.id == row_id)),
+            "nothing is removed before a choice is made"
+        );
+        assert_eq!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .worktree_close_menu
+                .get()
+                .map(|menu| menu.remote_tracking.clone())),
+            Some(RemoteTracking::Untracked),
+            "a branch never pushed has no remote branch to delete"
+        );
+    }
+
+    /// With an upstream, the closure menu's second choice deletes the
+    /// branch on the remote and then removes the checkout.
+    #[gpui::test]
+    async fn remove_button_menu_deletes_the_remote_branch_too(cx: &mut gpui::TestAppContext) {
+        // SAFETY: test process; the only reader is the crate's per-call
+        // `SIRIO_GIT_TIMEOUT_MS` lookup.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("closure-remote");
+        add_bare_origin(&repo);
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = cx.debug_bounds("new-worktree-row").expect("row rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("to-close");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let (row_id, worktree_path) = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == "to-close")
+                    .map(|row| (row.id, row.path.clone().expect("a worktree row has a path")))
+            })
+            .expect("the new worktree row exists");
+        assert!(
+            Command::new("git")
+                .args(["push", "-q", "-u", "origin", "to-close"])
+                .current_dir(&worktree_path)
+                .status()
+                .expect("git")
+                .success(),
+            "the fixture pushes the branch so it has an upstream"
+        );
+        assert!(
+            remote_heads(&repo).contains("refs/heads/to-close"),
+            "origin holds the branch before the removal"
+        );
+
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the hover-x is drawn once the row is hovered");
+        cx.simulate_click(remove_button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .worktree_close_menu
+                .get()
+                .map(|menu| menu.remote_tracking.clone())),
+            Some(RemoteTracking::Tracks(UpstreamBranch {
+                remote: "origin".to_string(),
+                branch: "to-close".to_string(),
+            })),
+            "the menu resolved the branch's upstream"
+        );
+        let remove_both = cx
+            .debug_bounds("worktree-close-item-remove-remote-and-disk")
+            .expect("the closure menu offers the remote removal");
+        cx.simulate_click(remove_both.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !cx.has_pending_prompt(),
+            "a menu choice is the confirmation"
+        );
+
+        cx.condition(&sidebar_entity, |sidebar, _cx| {
+            !sidebar
+                .rows
+                .iter()
+                .any(|row| row.kind == RowKind::Worktree && row.title == "to-close")
+        })
+        .await;
+        assert!(
+            !remote_heads(&repo).contains("refs/heads/to-close"),
+            "the remote branch is gone from origin"
+        );
+        assert!(!worktree_path.exists(), "the checkout is gone from disk");
+    }
+
     #[gpui::test]
     async fn remove_button_removes_the_worktree(cx: &mut gpui::TestAppContext) {
         // The sidebar's create/remove go through `sirio_git`, whose runner
@@ -6729,10 +7275,17 @@ mod tests {
         cx.simulate_click(remove_button, Modifiers::none());
         cx.run_until_parked();
 
-        // F-SID-15: the hover-x button is confirm-gated now instead of
-        // deleting the on-disk worktree immediately on click.
-        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
-        cx.simulate_prompt_answer("Remove Worktree");
+        // The x opens the closure menu; "Remove from disk" is the
+        // confirmation -- no native prompt follows.
+        let remove_from_disk = cx
+            .debug_bounds("worktree-close-item-remove-disk")
+            .expect("the closure menu offers removing from disk");
+        cx.simulate_click(remove_from_disk.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !cx.has_pending_prompt(),
+            "a menu choice is the confirmation"
+        );
 
         let sidebar_entity =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));

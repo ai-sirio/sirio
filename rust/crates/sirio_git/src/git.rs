@@ -524,14 +524,6 @@ pub(crate) fn strip_verbatim_prefix(path: &str) -> Option<String> {
     }
 }
 
-/// Runs `git <args>` with `cwd` as the working directory, capturing stdout
-/// and stderr, with the default timeout. Never checks the exit code —
-/// callers decide what to accept — but surfaces spawn failures as
-/// [`GitError::Spawn`] and deadline misses as [`GitError::TimedOut`].
-pub(crate) fn run(args: &[&str], cwd: &Path) -> Result<GitOutput, GitError> {
-    run_with_timeout(args, cwd, configured_timeout())
-}
-
 /// The deadline for default-path invocations: the `SIRIO_GIT_TIMEOUT_MS`
 /// override when set and parseable, else [`DEFAULT_GIT_TIMEOUT`]. Consulted
 /// per call so an override set mid-process (a test process, or an operator
@@ -550,7 +542,10 @@ fn timeout_from_env(raw: Option<&str>) -> Duration {
     }
 }
 
-/// Like [`run`], with an explicit wall-clock timeout.
+/// Runs `git <args>` with `cwd` as the working directory, capturing stdout
+/// and stderr, within an explicit wall-clock timeout. Never checks the exit
+/// code — callers decide what to accept — but surfaces spawn failures as
+/// [`GitError::Spawn`] and deadline misses as [`GitError::TimedOut`].
 pub(crate) fn run_with_timeout(
     args: &[&str],
     cwd: &Path,
@@ -717,7 +712,19 @@ pub(crate) fn run_accepting(
     cwd: &Path,
     accepted: &[i32],
 ) -> Result<GitOutput, GitError> {
-    let output = run(args, cwd)?;
+    run_accepting_with_timeout(args, cwd, accepted, configured_timeout())
+}
+
+/// Like [`run_accepting`], with an explicit wall-clock timeout — for the
+/// few invocations that talk to a remote and cannot be held to the local
+/// default.
+pub(crate) fn run_accepting_with_timeout(
+    args: &[&str],
+    cwd: &Path,
+    accepted: &[i32],
+    timeout: Duration,
+) -> Result<GitOutput, GitError> {
+    let output = run_with_timeout(args, cwd, timeout)?;
     if output
         .status
         .is_some_and(|status| accepted.contains(&status))
