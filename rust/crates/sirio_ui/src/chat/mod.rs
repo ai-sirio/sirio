@@ -5427,38 +5427,26 @@ impl Chat {
         let can_send = self.can_send();
         let entity = cx.entity();
 
-        // Swift's `modePill` (ComposerControlBar.swift) always pairs a
-        // status dot with a label, whether that label is a raw state word
-        // ("idle"/"working") or a mode name ("Ask") — the dot survives the
-        // switch to the post-turn mode dropdown, it never disappears.
+        // Swift's `modePill` (ComposerControlBar.swift) pairs a status dot
+        // with the permission mode's name: the dot carries the connection
+        // state, the label the mode, and a raw state word ("idle"/"working")
+        // only stands in while no mode is known. The port used to let
+        // "working" and "connecting" take the label over from the mode, so
+        // the permission the user picked was unreadable exactly while a
+        // turn ran (`status_pill_content`, `composer_view.rs`).
         let connecting = self.connecting;
-        // F-CHAT-15: once a live mode catalog exists, the "Ask" fallback
-        // gives way to the agent's own current-mode name — the pill was a
-        // hardcoded word before this row, now it reflects what
-        // `AcpClient::set_mode` would actually change.
-        let live_mode_name = self.mode_catalog.as_ref().and_then(|catalog| {
-            catalog
-                .options
-                .iter()
-                .find(|mode| mode.id == catalog.current_id)
-                .map(|mode| mode.name.clone())
-        });
-        let (dot, label) = if connecting {
-            (rgb(0xf5a623), "connecting".to_string())
-        } else if self.streaming {
-            (rgb(0xf5a623), "working".to_string())
-        } else if self.mode_catalog.is_some() {
-            // #136: a known mode names itself from the first frame. This
-            // used to wait on `has_completed_turn`, so a fresh chat read
-            // "idle" while the agent had already told us it was in "build".
-            (
-                rgb(0x53c653),
-                live_mode_name.unwrap_or_else(|| "Ask".into()),
-            )
-        } else if self.client.is_some() {
-            (rgb(0x53c653), "idle".to_string())
-        } else {
-            (rgb(0x8a8d99), "offline".to_string())
+        // F-CHAT-15 / #136: a known mode names itself from the first frame,
+        // never waiting on `has_completed_turn`.
+        let (dot, label) = composer_view::status_pill_content(
+            connecting,
+            self.streaming,
+            self.client.is_some(),
+            self.mode_catalog.as_ref(),
+        );
+        let dot = match dot {
+            composer_view::PillDot::Busy => rgb(0xf5a623),
+            composer_view::PillDot::Ready => rgb(0x53c653),
+            composer_view::PillDot::Offline => rgb(0x8a8d99),
         };
         let mode_selectable = self.mode_selectable();
         let status_pill = div()
