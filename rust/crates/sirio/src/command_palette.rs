@@ -89,6 +89,8 @@ impl PaletteDisabledReason {
             Self::Sidebar(SidebarDisabledReason::PrimaryWorktree) => {
                 "The primary worktree cannot be removed"
             }
+            Self::Sidebar(SidebarDisabledReason::ResolvingUpstream) => "Checking the remote…",
+            Self::Sidebar(SidebarDisabledReason::NoUpstreamBranch) => "No remote branch to delete",
             Self::NoActiveTab => "No active tab",
             Self::NoRetainedChat => "No retained chat sessions",
             Self::NoSelectedProject => "No selected project",
