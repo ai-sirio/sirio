@@ -40,9 +40,10 @@ if grep -qE 'tag=v\$|tag=v\{' "$NIGHTLY"; then
   fail "a nightly tag must not start with v"
 fi
 
-# A nightly run touches nightly.json only: stable.json must not appear at all.
-if grep -q "stable" "$NIGHTLY"; then
-  fail "nightly.yml must not mention the stable channel or its manifest"
+# A nightly run touches nightly.json only: the other channel's manifest and
+# channel value must not appear anywhere in this caller.
+if grep -qE "stable\.json|channel: stable|SIRIO_RELEASE_CHANNEL=stable" "$NIGHTLY"; then
+  fail "nightly.yml must not name the stable channel or its manifest"
 fi
 
 # The macOS gate runs on the maintainer's own machine. Do not rebuild a commit
@@ -52,7 +53,7 @@ fi
 # retried.
 grep -q "targetCommitish" "$NIGHTLY" || fail "nightly.yml must compare main against the last nightly's commit"
 grep -qF 'nightly.json?ref=gh-pages' "$NIGHTLY" || fail "the skip must check that the last nightly's manifest was published"
-grep -q "force" "$NIGHTLY" || fail "the manual trigger must be able to force a rebuild"
+grep -qF 'FORCE: ${{ inputs.force }}' "$NIGHTLY" || fail "the manual trigger's force input must reach the skip step"
 
 # Overlapping schedules would race on the release list and on gh-pages.
 grep -q "concurrency:" "$NIGHTLY" || fail "nightly.yml must declare a concurrency group"

@@ -41,7 +41,9 @@ grep -qF 'serde = { version = "1.0", features = ["derive"] }' "$TMP/Cargo.toml" 
   || fail "an inline dependency version was altered"
 grep -qF 'sirio_release = { path = "crates/sirio_release", version = "0.6.0" }' "$TMP/Cargo.toml" \
   || fail "an inline dependency version equal to the old workspace version was altered"
-ls "$TMP" | grep -q '\.bak$' && fail "a sed backup file was left behind"
+if ls "$TMP" | grep -q '\.bak$'; then
+  fail "a sed backup file was left behind"
+fi
 
 # --- a second run is idempotent ----------------------------------------------
 bash "$SCRIPT" 0.6.0-nightly.202609072133 "$TMP/Cargo.toml" >/dev/null

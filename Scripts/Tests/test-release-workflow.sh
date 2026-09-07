@@ -66,6 +66,9 @@ fi
 if [ "$(grep -c "mozilla-actions/sccache-action" "$BUILD")" -lt 3 ]; then
   fail "linux, windows and publish must all install sccache"
 fi
+# The self-hosted macOS runner is not provisioned by the workflow, so it must
+# at least be checked (spec §9.5).
+grep -q "command -v sccache" "$BUILD" || fail "the macos job must check that sccache is on the runner"
 
 # --- spec §3.3 / §3.5: the channel and the accepted keys reach the compiler ---
 # Workflow-level env applies to every step of every job, so the CI gate, the
@@ -150,6 +153,23 @@ PAGES_LINE=$(line_of 'git push origin HEAD:gh-pages' "$BUILD")
 [ "$ASSETS_LINE" -lt "$SIGN_LINE" ]   || fail "assets must be checked before the manifest is signed"
 [ "$SIGN_LINE" -lt "$VERIFY_LINE" ]   || fail "the manifest must be verified after it is signed"
 [ "$VERIFY_LINE" -lt "$PAGES_LINE" ]  || fail "the manifest must be published last, after verification"
+
+# Nothing is public until the signatures verify: the release is created as a
+# draft and un-drafted after verification, before the manifest names its
+# assets. A failure in between leaves a draft to retry, not a public release
+# with no manifest that §9.3 forbids deleting -- and a re-run re-uploads into
+# the existing release instead of failing on a second `create`.
+grep -qF -- '--draft \' "$BUILD" || fail "the release must be created as a draft"
+grep -qF 'gh release upload "$TAG" artifacts/* --clobber' "$BUILD" || fail "a re-run must re-upload into the existing release"
+UNDRAFT_LINE=$(line_of 'gh release edit "$TAG" --draft=false' "$BUILD")
+[ -n "$UNDRAFT_LINE" ] || fail "publish must un-draft the release after verification"
+[ "$VERIFY_LINE" -lt "$UNDRAFT_LINE" ] || fail "the release must go public only after the manifest verifies"
+[ "$UNDRAFT_LINE" -lt "$PAGES_LINE" ]  || fail "the release must be public before the manifest is pushed"
+
+# Re-signing the same bytes yields the same manifest; that is "already
+# published", not a failed commit. A rejected push is rebased and retried.
+grep -q "git diff --cached --quiet" "$BUILD" || fail "an unchanged manifest must not fail the publish"
+grep -q "git rebase FETCH_HEAD" "$BUILD" || fail "a rejected gh-pages push must be rebased and retried"
 
 # A green push is not a served manifest: the branch is read back through the
 # API and the Pages site is polled for the version, after the push.

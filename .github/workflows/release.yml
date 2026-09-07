@@ -68,13 +68,16 @@ jobs:
             echo "error: no hand-written release notes at $NOTES_FILE; seed them with Scripts/generate-changelog.sh and commit before tagging" >&2
             exit 1
           fi
-          # `$(cat ...)` strips trailing newlines and printf adds exactly one
-          # back, so the closing delimiter always sits on its own line even
-          # when the file was saved without a final newline.
+          # A random delimiter, as GitHub's own guidance asks: a fixed one is
+          # a line the notes file could contain, and everything after it would
+          # be parsed as further outputs. `$(cat ...)` strips trailing newlines
+          # and printf adds exactly one back, so the delimiter always sits on
+          # its own line even when the file was saved without a final newline.
+          DELIMITER="notes-$(openssl rand -hex 16)"
           {
-            echo "notes<<SIRIO_NOTES_EOF"
+            echo "notes<<$DELIMITER"
             printf '%s\n' "$(cat "$NOTES_FILE")"
-            echo "SIRIO_NOTES_EOF"
+            echo "$DELIMITER"
           } >> "$GITHUB_OUTPUT"
 
   build:

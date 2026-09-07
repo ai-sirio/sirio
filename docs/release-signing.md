@@ -53,12 +53,15 @@ either is missing:
 | Repository **secret** | `SIRIO_RELEASE_SIGNING_KEY` | The contents of `sirio-release-signing.key` (the base64 seed). Read by the `publish` job only, written to a `0600` file for the length of one `sign` call, then deleted. |
 
 The `publish` job then, in this order and never another (spec §9.1): creates
-the GitHub release with every artifact attached, reads the asset list back and
-refuses to continue unless it matches what was built, signs the artifacts into
-`<channel>.json`, verifies that manifest against the *public* keys the
+the GitHub release as a **draft** with every artifact attached (or re-uploads
+into an existing one, so a re-run is idempotent), reads the asset list back
+and refuses to continue unless it matches what was built, signs the artifacts
+into `<channel>.json`, verifies that manifest against the *public* keys the
 binaries were compiled with — so a key mismatch between secret and variable
-is caught before anything is published — and only then commits the manifest
-onto the `gh-pages` branch, which is what `dl.sirioai.app` serves (#312).
+is caught before anything is public — makes the release public, and only
+then commits the manifest onto the `gh-pages` branch, which is what
+`dl.sirioai.app` serves (#312). A failure before the un-draft leaves a draft
+to retry, never a public release without a manifest.
 Only that one file is added on the branch: the other channel's manifest and
 GitHub's own `CNAME` file survive a publish. Last, it reads the manifest back
 from the branch and polls the Pages site until it serves that version; until
