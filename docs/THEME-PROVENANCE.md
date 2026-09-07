@@ -101,6 +101,16 @@ path, which is why the values are restated in the trailing comments in
 | `text` | bezel's, softened 10% toward the surface — see the exception above. Not a hand-picked hex: the rule is one line and follows a bezel bump. |
 | `terminal_surface` | Paper-white in light, the pre-shell dark well in dark. bezel has no terminal-surface concept, and the terminal is deliberately independent of the shell's panel hierarchy. |
 
+Two tokens are bezel's values under Sirio's own names, kept separate for what
+the translucency fade does to them rather than for their colour:
+`dialog_surface` (bezel's `surface`) and `floating_surface` (bezel's
+`surface_raised`). `Theme::with_translucency_at` fades the structural
+surfaces so the desktop shows through the *main window*; a sheet an event
+opens over the shell — the New Worktree prompt, the Clone/Create project
+forms, the modal sheet, the toasts — paints one of these two instead, and
+stays opaque. `event_opened_surfaces_stay_opaque_when_the_panels_fade` holds
+the invariant, `assert_palette_comes_from_bezel` the values.
+
 Two more values are Sirio's choice but derived rather than measured:
 `VEIL_FAINT` (0.05) and `VEIL_MID` (0.12), the alphas behind `overlay`,
 `overlay_strong`, `tree_guide` and the two diff washes. They are fed through
