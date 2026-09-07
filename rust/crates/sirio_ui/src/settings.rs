@@ -22,7 +22,11 @@ use sirio_usage::{
 };
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Duration;
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
+
+/// How long an account action error stays visible before it self-dismisses.
+const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
 
 // The action bound to Escape while the summarizer picker menu is focused.
 // Scoped to the menu's key context so the shell's own Escape handling is
@@ -1731,6 +1735,9 @@ impl Settings {
         self.account_login_surface = None;
         let succeeded = result.is_ok();
         self.account_action_error = result.err().map(|message| (provider, message));
+        if self.account_action_error.is_some() {
+            self.schedule_account_error_dismissal(id, cx);
+        }
         self.refresh_provider_accounts(cx);
         if succeeded {
             cx.emit(SettingsEvent::RefreshUsage);
@@ -1743,7 +1750,26 @@ impl Settings {
         };
         self.account_login_surface = None;
         self.account_action_error = Some((provider, "Sign-in canceled".to_string()));
+        self.schedule_account_error_dismissal(self.account_login_id, cx);
         cx.notify();
+    }
+
+    /// Clears `account_action_error` after a delay, unless a newer login
+    /// attempt already took its place — same dismissal shape as
+    /// `chat::ChatView::show_attach_error`.
+    fn schedule_account_error_dismissal(&mut self, id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(ACCOUNT_ERROR_DISMISS)
+                .await;
+            let _ = this.update(cx, |settings, cx| {
+                if settings.account_login_id == id {
+                    settings.account_action_error = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Re-runs agent discovery for the Agents screen's "↻ Refresh" button
@@ -4062,6 +4088,72 @@ mod tests {
             1,
             "only the current successful login refreshes usage"
         );
+    }
+
+    #[gpui::test]
+    async fn account_error_self_dismisses_after_the_delay(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            let id = settings.account_login_id;
+            settings.complete_account_login(id, Err("login failed".into()), cx);
+        });
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert!(settings.account_action_error.is_some());
+        });
+
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS);
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert!(
+                settings.account_action_error.is_none(),
+                "the error must self-dismiss after the delay"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_newer_account_error_survives_a_stale_dismissal_timer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            let first = settings.account_login_id;
+            settings.complete_account_login(first, Err("first failure".into()), cx);
+        });
+        cx.run_until_parked();
+
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS / 2);
+        cx.run_until_parked();
+
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Codex, cx);
+            let second = settings.account_login_id;
+            settings.complete_account_login(second, Err("second failure".into()), cx);
+        });
+        cx.run_until_parked();
+
+        // The stale timer from the first failure fires here; the guard on
+        // `account_login_id` must keep it from wiping the second error.
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS / 2);
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert_eq!(
+                settings.account_action_error.as_ref().unwrap().1,
+                "second failure",
+                "a stale dismissal must not clear a newer error"
+            );
+        });
+
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS / 2);
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert!(settings.account_action_error.is_none());
+        });
     }
 
     #[gpui::test]
