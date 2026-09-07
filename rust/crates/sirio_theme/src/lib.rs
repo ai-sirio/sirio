@@ -252,7 +252,7 @@ pub struct ThemeColors {
 }
 
 fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::theme::Theme {
-    bezel::theme::Theme::branded(
+    let mut theme = bezel::theme::Theme::branded(
         &bezel::theme::Brand {
             tint: base_color.tint(),
             ..Default::default()
@@ -261,7 +261,44 @@ fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::them
             Appearance::Dark => bezel::theme::Appearance::Dark,
             Appearance::Light => bezel::theme::Appearance::Light,
         },
-    )
+    );
+    if base_color == BaseColor::Notte && appearance == Appearance::Dark {
+        paint_notte_ladder(&mut theme);
+    }
+    theme
+}
+
+/// The one place lightness moves.
+///
+/// bezel's `Brand::apply` rotates hue and never lightness, and the Notte
+/// preset was given four surfaces that are *lighter* than bezel's dark page
+/// (`#202127` is above bezel's raised card), so no tint reaches them. They
+/// are painted here, after `branded`, onto the seven surface tokens and
+/// nothing else: the veils (`element_hover`, `border`, `input_bg`, …) are
+/// white-alpha washes that compose over whatever is beneath them, and the
+/// text ladder and semantic hues stay bezel's. Done in this builder, not in
+/// `ThemeColors::for_appearance`, because `to_bezel_theme` calls the same
+/// function and hands the result to `install_custom` — so bezel's own widgets
+/// and Sirio's tokens see one ladder by construction.
+///
+/// Mutation of the local, in bezel's own `Brand::apply` style; struct-update
+/// syntax would need every one of bezel's 72 fields restated.
+fn paint_notte_ladder(theme: &mut bezel::theme::Theme) {
+    let ladder = base_color::NOTTE_LADDER;
+    theme.bg = opaque_hsla(ladder.page);
+    theme.surface = opaque_hsla(ladder.surface);
+    // A card sits on the page, as it does in bezel's own dark
+    // (`surface_card` #0E0E0E beside `surface` #0D0D0D).
+    theme.surface_card = opaque_hsla(ladder.surface);
+    theme.surface_raised = opaque_hsla(ladder.raised);
+    theme.surface_dialog = opaque_hsla(ladder.raised);
+    theme.surface_overlay = opaque_hsla(ladder.raised);
+    theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
+}
+
+/// Opaque `0xRRGGBB` as the `Hsla` bezel's tokens are stored in.
+fn opaque_hsla(hex: u32) -> gpui::Hsla {
+    gpui::Hsla::from(rgb_hex(hex))
 }
 
 impl ThemeColors {
@@ -1998,6 +2035,170 @@ mod tests {
             theme.colors.border,
             "a non-faded token keeps the tinted value"
         );
+    }
+
+    /// The bezel theme Notte builds, read through the path bezel's own
+    /// widgets use, so the test covers both consumers of the builder.
+    fn notte_bezel(appearance: Appearance) -> bezel::theme::Theme {
+        let mode = match appearance {
+            Appearance::Dark => ThemeMode::Dark,
+            Appearance::Light => ThemeMode::Light,
+        };
+        Theme::for_appearance(mode, appearance, BaseColor::Notte).to_bezel_theme()
+    }
+
+    /// bezel's palette rotated onto Notte's tint and nothing else — what
+    /// Notte would be if it were only a sixth base colour.
+    fn notte_tint_only(appearance: bezel::theme::Appearance) -> bezel::theme::Theme {
+        bezel::theme::Theme::branded(
+            &bezel::theme::Brand {
+                tint: BaseColor::Notte.tint(),
+                ..Default::default()
+            },
+            appearance,
+        )
+    }
+
+    #[test]
+    fn notte_dark_ladder_is_the_four_given_values() {
+        // Written out rather than read from `NOTTE_LADDER`, so a change to
+        // the constant fails here instead of restyling the preset quietly.
+        let bezel = notte_bezel(Appearance::Dark);
+        for (name, token, hex) in [
+            ("bg", bezel.bg, 0x0E1016),
+            ("surface", bezel.surface, 0x202127),
+            ("surface_card", bezel.surface_card, 0x202127),
+            ("surface_raised", bezel.surface_raised, 0x2B2F3A),
+            ("surface_dialog", bezel.surface_dialog, 0x2B2F3A),
+            ("surface_overlay", bezel.surface_overlay, 0x2B2F3A),
+            ("surface_raised_hover", bezel.surface_raised_hover, 0x313337),
+        ] {
+            assert_eq!(token, opaque_hsla(hex), "{name}");
+        }
+
+        // Sirio's own tokens follow the same builder.
+        let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
+        assert_eq!(sirio.bg, Rgba::from(opaque_hsla(0x0E1016)));
+        assert_eq!(sirio.surface, Rgba::from(opaque_hsla(0x202127)));
+        assert_eq!(sirio.surface_raised, Rgba::from(opaque_hsla(0x2B2F3A)));
+        assert_eq!(
+            sirio.terminal_surface, sirio.surface,
+            "the dark terminal well is the pane"
+        );
+    }
+
+    #[test]
+    fn notte_light_is_only_a_tint() {
+        // Four dark surfaces were given and no light ones; inventing a light
+        // ladder was rejected (spec N3).
+        let notte = notte_bezel(Appearance::Light);
+        let tinted = notte_tint_only(bezel::theme::Appearance::Light);
+        for (name, ours, theirs) in [
+            ("bg", notte.bg, tinted.bg),
+            ("surface", notte.surface, tinted.surface),
+            ("surface_card", notte.surface_card, tinted.surface_card),
+            (
+                "surface_raised",
+                notte.surface_raised,
+                tinted.surface_raised,
+            ),
+            (
+                "surface_dialog",
+                notte.surface_dialog,
+                tinted.surface_dialog,
+            ),
+            (
+                "surface_overlay",
+                notte.surface_overlay,
+                tinted.surface_overlay,
+            ),
+            (
+                "surface_raised_hover",
+                notte.surface_raised_hover,
+                tinted.surface_raised_hover,
+            ),
+            ("text", notte.text, tinted.text),
+            ("border", notte.border, tinted.border),
+        ] {
+            assert_eq!(ours, theirs, "light {name}");
+        }
+    }
+
+    #[test]
+    fn notte_keeps_bezels_veils_text_and_hues() {
+        // Only the seven surface tokens move. Veils compose over whatever is
+        // beneath them; the text ladder and the semantic hues are bezel's,
+        // carrying Notte's tint like any other base colour.
+        let notte = notte_bezel(Appearance::Dark);
+        let tinted = notte_tint_only(bezel::theme::Appearance::Dark);
+        for (name, ours, theirs) in [
+            ("element_hover", notte.element_hover, tinted.element_hover),
+            (
+                "element_active",
+                notte.element_active,
+                tinted.element_active,
+            ),
+            ("border", notte.border, tinted.border),
+            ("border_strong", notte.border_strong, tinted.border_strong),
+            ("input_bg", notte.input_bg, tinted.input_bg),
+            ("code_wash", notte.code_wash, tinted.code_wash),
+            ("ring", notte.ring, tinted.ring),
+            ("selection", notte.selection, tinted.selection),
+            ("text", notte.text, tinted.text),
+            ("text_muted", notte.text_muted, tinted.text_muted),
+            ("text_faint", notte.text_faint, tinted.text_faint),
+            ("text_dim", notte.text_dim, tinted.text_dim),
+            ("solid", notte.solid, tinted.solid),
+            ("on_solid", notte.on_solid, tinted.on_solid),
+            ("accent", notte.accent, tinted.accent),
+            ("danger", notte.danger, tinted.danger),
+            ("warning", notte.warning, tinted.warning),
+            ("success", notte.success, tinted.success),
+            ("diff_add", notte.diff_add, tinted.diff_add),
+            ("diff_del", notte.diff_del, tinted.diff_del),
+        ] {
+            assert_eq!(ours, theirs, "dark {name}");
+        }
+    }
+
+    #[test]
+    fn notte_body_text_clears_aaa_on_every_surface() {
+        let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
+        let bezel = notte_bezel(Appearance::Dark);
+        for (name, surface) in [
+            ("bg", sirio.bg),
+            ("surface", sirio.surface),
+            ("surface_raised", sirio.surface_raised),
+            (
+                "surface_raised_hover",
+                Rgba::from(bezel.surface_raised_hover),
+            ),
+        ] {
+            let ratio = contrast_ratio(sirio.text, surface);
+            assert!(ratio >= 7.0, "text on {name} is {ratio:.1}:1, below AAA");
+        }
+    }
+
+    #[test]
+    fn notte_depth_ladder_reads_as_depth() {
+        // Ordering only: the given hover step is small, and that is the
+        // user's ladder as given (spec, Risks).
+        let bezel = notte_bezel(Appearance::Dark);
+        let rungs = [
+            ("bg", bezel.bg),
+            ("surface", bezel.surface),
+            ("surface_raised", bezel.surface_raised),
+            ("surface_raised_hover", bezel.surface_raised_hover),
+        ];
+        for pair in rungs.windows(2) {
+            let (lower, upper) = (pair[0], pair[1]);
+            assert!(
+                relative_luminance(Rgba::from(lower.1)) < relative_luminance(Rgba::from(upper.1)),
+                "{} should sit below {}",
+                lower.0,
+                upper.0
+            );
+        }
     }
 
     #[test]
