@@ -26,8 +26,6 @@ use gpui::{
 };
 use sirio_theme::Theme;
 
-use crate::controls::card;
-
 /// Visual weight of a [`ModalButton`] — which theme fill, and therefore
 /// which semantic role, it draws with. Three states rather than a bare
 /// `bool` because the two known uses need genuinely different colours for
@@ -252,7 +250,18 @@ pub fn render_modal(spec: ModalSpec, theme: Theme) -> AnyElement {
         .items_center()
         .justify_center()
         .bg(gpui::black().opacity(0.6))
-        .child(card(theme).w(px(360.0)).p(px(16.0)).child(sheet))
+        // The same shape as `controls::card`, on the floating surface rather
+        // than the raised one: a sheet asking for input stays opaque when the
+        // shell is translucent.
+        .child(
+            div()
+                .w(px(360.0))
+                .rounded(px(BezelTheme::BASE_RADIUS))
+                .overflow_hidden()
+                .bg(theme.floating_surface)
+                .p(px(16.0))
+                .child(sheet),
+        )
         .into_any_element()
 }
 

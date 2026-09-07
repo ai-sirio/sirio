@@ -7125,6 +7125,7 @@ name = "sirio_agents"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]

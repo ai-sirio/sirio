@@ -8,7 +8,7 @@ use bezel::ui::popover;
 use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, uniform_list,
 };
-use sirio_git::{DirectoryGitStatus, directory_statuses, status};
+use sirio_git::{DirectoryGitStatus, IgnoredPaths, directory_statuses, ignored_paths, status};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -46,6 +46,12 @@ pub(crate) const ROW_HEIGHT: f32 = 26.0;
 pub(super) struct GitMarkers {
     files: HashMap<PathBuf, DirectoryGitStatus>,
     directories: HashMap<PathBuf, DirectoryGitStatus>,
+    /// The third, independent half of the model: paths the ignore rules
+    /// exclude, from [`sirio_git::ignored_paths`]. Ignored paths never
+    /// appear in `files`/`directories` (the status call runs without
+    /// `--ignored`), so this cannot collide with a status marker — an
+    /// ignored row dims instead of carrying a dot.
+    ignored: IgnoredPaths,
 }
 
 impl GitMarkers {
@@ -58,6 +64,12 @@ impl GitMarkers {
             self.files.get(relative).copied()
         }
     }
+
+    /// Whether a worktree-relative path is git-ignored, itself or by
+    /// ancestry (git reports a fully-ignored directory once, collapsed).
+    fn is_ignored(&self, relative: &Path) -> bool {
+        self.ignored.is_ignored(relative)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +81,10 @@ pub(super) struct FileNode {
     /// aggregate of everything beneath it for a directory. `None` is a
     /// clean row.
     git_status: Option<DirectoryGitStatus>,
+    /// Whether the ignore rules exclude this path — the row renders its
+    /// name a step dimmer. Set by ancestry too: every row walked beneath
+    /// an ignored directory carries it.
+    is_ignored: bool,
     expanded: bool,
     /// Why the directory could not be read (permissions, a vanished
     /// mount). Rendered on the row — an unreadable directory must not
@@ -118,23 +134,33 @@ impl RightPanel {
                     // Files can browse a plain directory too; an absent Git
                     // repository means no status dots, not an unreadable
                     // filesystem. Root traversal remains the error boundary.
-                    let markers = status(&repo_root)
-                        .map(|snapshot| GitMarkers {
-                            files: snapshot
-                                .entries
-                                .iter()
-                                .map(|entry| {
-                                    (entry.path.clone(), DirectoryGitStatus::for_file(entry))
-                                })
-                                .collect(),
-                            // F-GIT-STATUS-02: the tested aggregate, not a
-                            // second implementation of it. It is what
-                            // resolves conflicted > changed > untracked on a
-                            // shared ancestor and what marks *both* sides of
-                            // a rename.
-                            directories: directory_statuses(&snapshot.entries),
+                    let (files, directories) = status(&repo_root)
+                        .map(|snapshot| {
+                            (
+                                snapshot
+                                    .entries
+                                    .iter()
+                                    .map(|entry| {
+                                        (entry.path.clone(), DirectoryGitStatus::for_file(entry))
+                                    })
+                                    .collect(),
+                                // F-GIT-STATUS-02: the tested aggregate, not a
+                                // second implementation of it. It is what
+                                // resolves conflicted > changed > untracked on a
+                                // shared ancestor and what marks *both* sides of
+                                // a rename.
+                                directory_statuses(&snapshot.entries),
+                            )
                         })
                         .unwrap_or_default();
+                    let markers = GitMarkers {
+                        files,
+                        directories,
+                        // Same rule as status above: a plain directory has
+                        // no ignore rules, which means nothing dims — not
+                        // an unreadable filesystem.
+                        ignored: ignored_paths(&repo_root).unwrap_or_default(),
+                    };
                     let tree = read_tree(&repo_root, &repo_root, &markers)
                         .map_err(|error| error.to_string())?;
                     Ok::<_, String>((markers, tree))
@@ -425,6 +451,7 @@ impl RightPanel {
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
         let git_status = row.node.git_status;
+        let is_ignored = row.node.is_ignored;
         let read_error = row.node.read_error.clone();
         // The marker's selector names both the row and the status it
         // resolved to, so a drawn test can assert that a directory holding a
@@ -480,8 +507,9 @@ impl RightPanel {
             .text_size(theme.typography.scaled(13.5))
             // Names are neutral text; the status dot carries the git state
             // (three distinguishable colours, not one "modified" amber),
-            // and unreadable directories dim rather than shout.
-            .text_color(if read_error.is_some() {
+            // and unreadable directories and git-ignored paths dim rather
+            // than shout.
+            .text_color(if read_error.is_some() || is_ignored {
                 theme.text_muted
             } else {
                 theme.text
@@ -844,11 +872,13 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
             let is_dir = entry.file_type().ok()?.is_dir();
             let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
             let git_status = markers.get(&relative, is_dir);
+            let is_ignored = markers.is_ignored(&relative);
             Some(FileNode {
                 name: path.file_name()?.to_string_lossy().to_string(),
                 path,
                 is_dir,
                 git_status,
+                is_ignored,
                 expanded: false,
                 read_error: None,
                 children: Vec::new(),
@@ -1739,6 +1769,47 @@ mod tests {
              lowercase sort puts file10 before file2"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ignored rows dim: `read_tree` must flag a path git lists as
+    /// ignored — and everything beneath an ignored directory, which git
+    /// reports once, collapsed, with a trailing slash (so the children
+    /// only exist as an ancestor match, never as their own entries).
+    #[test]
+    fn the_files_tree_marks_ignored_paths_and_their_children() {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.0.join("target").join("debug")).expect("create ignored dir");
+        std::fs::write(dir.0.join("target").join("debug").join("app"), b"bin")
+            .expect("write ignored child");
+        std::fs::create_dir_all(dir.0.join("src")).expect("create tracked dir");
+        std::fs::write(dir.0.join("src").join("main.rs"), b"fn main() {}")
+            .expect("write tracked file");
+        std::fs::write(dir.0.join(".env"), b"secret").expect("write ignored file");
+
+        let markers = GitMarkers {
+            ignored: sirio_git::parse_ignored(b"target/\0.env\0"),
+            ..GitMarkers::default()
+        };
+
+        let nodes = read_tree(&dir.0, &dir.0, &markers).expect("read the fixture tree");
+        let by_name = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.name == name)
+                .unwrap_or_else(|| panic!("fixture is missing a {name} row"))
+        };
+        assert!(by_name("target").is_ignored, "an ignored directory flags");
+        assert!(by_name(".env").is_ignored, "an ignored file flags");
+        assert!(!by_name("src").is_ignored, "a tracked directory must not");
+
+        // Expanding the ignored directory walks its children lazily,
+        // through the same `read_tree`; they inherit the flag by ancestry.
+        let children =
+            read_tree(&dir.0, &dir.0.join("target"), &markers).expect("read the ignored dir");
+        assert!(
+            !children.is_empty() && children.iter().all(|node| node.is_ignored),
+            "children of an ignored directory inherit the flag"
+        );
     }
 
     #[test]
