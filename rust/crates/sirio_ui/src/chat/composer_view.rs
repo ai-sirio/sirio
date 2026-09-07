@@ -62,9 +62,135 @@ pub(crate) fn assemble_prompt(text: &str, accepted: &[String]) -> (String, Vec<S
     (out, mention_paths)
 }
 
+/// The colour the composer's status dot carries: the connection state,
+/// kept apart from the pill's label so a known permission mode can name
+/// itself while a turn streams — the Swift reference's `statusDotColor`
+/// beside `mode.displayName` (`ComposerControlBar.swift`, `modePill`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PillDot {
+    /// Startup in flight, or a turn streaming.
+    Busy,
+    /// A live agent waiting on the user.
+    Ready,
+    /// No live agent and no startup in flight.
+    Offline,
+}
+
+/// The status pill's dot and label. The label is the session's permission
+/// mode whenever the agent has advertised one: the pill is the mode
+/// selector, and its word must not flip to "working" every time a turn
+/// streams, or the mode the user picked is unreadable exactly while it
+/// matters. Only a chat with no mode catalog names its state instead. A
+/// catalog whose current id matches no offered mode keeps the "Ask"
+/// fallback it always had.
+pub(crate) fn status_pill_content(
+    connecting: bool,
+    streaming: bool,
+    connected: bool,
+    mode_catalog: Option<&ModeCatalog>,
+) -> (PillDot, String) {
+    let dot = if connecting || streaming {
+        PillDot::Busy
+    } else if connected {
+        PillDot::Ready
+    } else {
+        PillDot::Offline
+    };
+    let label = match mode_catalog {
+        Some(catalog) => catalog
+            .options
+            .iter()
+            .find(|mode| mode.id == catalog.current_id)
+            .map(|mode| mode.name.clone())
+            .unwrap_or_else(|| "Ask".to_string()),
+        None if connecting => "connecting".to_string(),
+        None if streaming => "working".to_string(),
+        None if connected => "idle".to_string(),
+        None => "offline".to_string(),
+    };
+    (dot, label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sirio_acp::AgentMode;
+
+    fn catalog(current: &str) -> ModeCatalog {
+        ModeCatalog {
+            current_id: current.into(),
+            options: vec![
+                AgentMode {
+                    id: "default".into(),
+                    name: "Manual".into(),
+                    description: None,
+                },
+                AgentMode {
+                    id: "acceptEdits".into(),
+                    name: "Accept edits".into(),
+                    description: None,
+                },
+            ],
+            config_option_id: None,
+        }
+    }
+
+    #[test]
+    fn a_known_mode_names_the_pill_while_a_turn_streams() {
+        let catalog = catalog("acceptEdits");
+        assert_eq!(
+            status_pill_content(false, true, true, Some(&catalog)),
+            (PillDot::Busy, "Accept edits".to_string()),
+            "streaming moves to the dot; the label stays the selected permission"
+        );
+        assert_eq!(
+            status_pill_content(false, false, true, Some(&catalog)),
+            (PillDot::Ready, "Accept edits".to_string())
+        );
+    }
+
+    #[test]
+    fn a_known_mode_names_the_pill_while_reconnecting() {
+        let catalog = catalog("default");
+        assert_eq!(
+            status_pill_content(true, false, false, Some(&catalog)),
+            (PillDot::Busy, "Manual".to_string())
+        );
+        assert_eq!(
+            status_pill_content(false, false, false, Some(&catalog)),
+            (PillDot::Offline, "Manual".to_string()),
+            "an agent that went away keeps its last known mode readable; the dot says offline"
+        );
+    }
+
+    #[test]
+    fn without_a_catalog_the_pill_names_the_state() {
+        assert_eq!(
+            status_pill_content(true, false, false, None),
+            (PillDot::Busy, "connecting".to_string())
+        );
+        assert_eq!(
+            status_pill_content(false, true, true, None),
+            (PillDot::Busy, "working".to_string())
+        );
+        assert_eq!(
+            status_pill_content(false, false, true, None),
+            (PillDot::Ready, "idle".to_string())
+        );
+        assert_eq!(
+            status_pill_content(false, false, false, None),
+            (PillDot::Offline, "offline".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unlisted_current_mode_falls_back_to_ask() {
+        let catalog = catalog("bypassPermissions");
+        assert_eq!(
+            status_pill_content(false, false, true, Some(&catalog)),
+            (PillDot::Ready, "Ask".to_string())
+        );
+    }
 
     #[test]
     fn slash_token_is_the_unbroken_leading_word() {
@@ -121,6 +247,7 @@ mod tests {
 }
 
 use gpui::{AnyElement, Context, Pixels, Point, SharedString, div, prelude::*, px};
+use sirio_acp::ModeCatalog;
 
 use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
 
