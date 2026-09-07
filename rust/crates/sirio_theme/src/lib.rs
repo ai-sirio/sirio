@@ -341,8 +341,8 @@ impl ThemeColors {
         let favorite = warning;
         let frame_fallback = Rgba::from(bezel.bg);
         let frame_surface = match appearance {
-            Appearance::Dark => softened(frame_fallback, 0.35),
-            Appearance::Light => softened(frame_fallback, 0.30),
+            Appearance::Dark => softened(frame_fallback, 0.85),
+            Appearance::Light => softened(frame_fallback, 0.80),
         };
         let panel_surface = Rgba::from(bezel.surface);
         let selected_fill = Rgba::from(bezel.element_active);
@@ -1455,17 +1455,21 @@ impl Theme {
 
     /// Returns the surface opacity used when translucency is enabled.
     ///
-    /// The fade is 0.45. The earlier steps (0.96 → 0.85 → 0.70) all read as
-    /// opaque in practice because the layers *stack*: a terminal pane paints
-    /// terminal_surface over the panel's surface over the frame material, so
-    /// at 0.70 the composite still covered ~97% of the backdrop — grey, not
-    /// glass. At 0.45 over the 0.35/0.30 frame the composite lets roughly a
-    /// third of the blurred desktop through in panel areas (a fifth where a
-    /// third layer stacks), which finally reads as glass. Legibility holds
-    /// because the backdrop is blurred: text sits on an averaged tone rather
-    /// than raw desktop pixels.
+    /// The fade is 0.70 over a 0.85 (dark) / 0.80 (light) frame. The layers
+    /// *stack*: a terminal pane paints terminal_surface over the panel's
+    /// surface over the frame material, so the composite in panel areas
+    /// covers ~96% of the backdrop (~99% where a third layer stacks), and
+    /// the frame strips — title strip, status bar, the gaps between panels —
+    /// let 15–20% of the blurred desktop through. The frame is the number
+    /// that matters: the strips are the only place text sits directly on
+    /// it, and over a white desktop (blur averages the backdrop to one tone)
+    /// a 0.35 frame washed the dark shell's strips out to light grey and a
+    /// 0.70 one left `text_muted` at 3.1:1 there (2026-09-07); 0.85 clears
+    /// WCAG AA with room. The panel fade barely moves that contrast (≥6:1
+    /// across 0.70–0.90), so it stays where the glass still reads. Held by
+    /// `translucent_shell_keeps_wcag_aa_over_an_opposing_desktop`.
     pub fn surface_opacity(translucency_enabled: bool) -> f32 {
-        if translucency_enabled { 0.45 } else { 1.0 }
+        if translucency_enabled { 0.70 } else { 1.0 }
     }
 
     /// Returns the theme resolved for this theme's `mode` and `appearance`,
@@ -2563,8 +2567,8 @@ mod tests {
         assert_eq!(typography.ui_size, px(13.0));
         assert_eq!(typography.body_line_height, px(22.0));
         assert_eq!(typography.ui_line_height, px(17.0));
-        assert_eq!(Theme::dark().translucent_surface_opacity, 0.45);
-        assert_eq!(Theme::surface_opacity(true), 0.45);
+        assert_eq!(Theme::dark().translucent_surface_opacity, 0.70);
+        assert_eq!(Theme::surface_opacity(true), 0.70);
         assert_eq!(Theme::surface_opacity(false), 1.0);
     }
 
@@ -2612,7 +2616,7 @@ mod tests {
             );
             for translucent in [
                 base.with_translucency(true),
-                base.with_translucency_at(true, 0.45),
+                base.with_translucency_at(true, 0.70),
                 base.with_translucency_at(true, 0.9),
             ] {
                 assert!(
@@ -2691,6 +2695,36 @@ mod tests {
                 base,
                 "the opaque base is fully recoverable from mode + appearance"
             );
+        }
+    }
+
+    /// The translucent shell must stay legible over the desktop that fights
+    /// its appearance hardest: a white desktop under the dark shell, a black
+    /// one under the light shell. Blur averages the backdrop to one tone, so
+    /// that tone is what the veils composite onto. Seen 2026-09-07: a 0.35
+    /// frame over white washed the dark status strip to light grey.
+    #[test]
+    fn translucent_shell_keeps_wcag_aa_over_an_opposing_desktop() {
+        let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let black = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        for (label, theme, desktop) in [
+            ("dark", Theme::dark().with_translucency(true), white),
+            ("light", Theme::light().with_translucency(true), black),
+        ] {
+            let strip = composite(theme.frame_surface, desktop);
+            let panel = composite(theme.surface, strip);
+            let terminal = composite(theme.terminal_surface, panel);
+            for (place, under, text) in [
+                ("frame strip", strip, theme.text_muted),
+                ("panel", panel, theme.text_muted),
+                ("terminal", terminal, theme.text),
+            ] {
+                let ratio = contrast_ratio(text, under);
+                assert!(
+                    ratio >= 4.5,
+                    "{label} {place} over an opposing desktop: text contrast {ratio:.2}:1, under WCAG AA"
+                );
+            }
         }
     }
 
