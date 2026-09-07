@@ -479,7 +479,7 @@ const SEGMENTED_BASE_COLOR: &[&str] = &["Neutral", "Stone", "Zinc", "Gray", "Sla
 
 - [ ] **Step 11: Run the settings tests**
 
-Run: `cd rust && cargo test -p sirio_ui the_base_colour_segments_are_bezels_five_then_sirios_preset every_base_colour_maps_to_its_own_segment`
+Run: `cd rust && cargo test -p sirio_ui -- the_base_colour_segments_are_bezels_five_then_sirios_preset every_base_colour_maps_to_its_own_segment`
 Expected: both PASS.
 
 - [ ] **Step 12: Commit**
