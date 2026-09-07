@@ -105,12 +105,10 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.build == 'true'
     # The called workflow cannot hold more than the caller grants: `publish`
-    # inside it needs contents: write, and pages: read to learn whether the
-    # manifest is served. The build jobs in there scope themselves back down
-    # to contents: read.
+    # inside it needs contents: write. The build jobs in there scope
+    # themselves back down to contents: read.
     permissions:
       contents: write
-      pages: read
     uses: ./.github/workflows/build-release.yml
     with:
       channel: nightly

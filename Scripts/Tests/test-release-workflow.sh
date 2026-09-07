@@ -172,13 +172,21 @@ grep -q "git diff --cached --quiet" "$BUILD" || fail "an unchanged manifest must
 grep -q "git rebase FETCH_HEAD" "$BUILD" || fail "a rejected gh-pages push must be rebased and retried"
 
 # A green push is not a served manifest: the branch is read back through the
-# API and the Pages site is polled for the version, after the push.
+# API and the URL the binaries poll is polled for the version, after the push.
 READBACK_LINE=$(line_of '.json?ref=gh-pages' "$BUILD")
 [ -n "$READBACK_LINE" ] || fail "publish must read the manifest back from gh-pages"
 [ "$PAGES_LINE" -lt "$READBACK_LINE" ] || fail "the read-back must come after the push"
-grep -qF 'repos/${GITHUB_REPOSITORY}/pages' "$BUILD" || fail "publish must look up the Pages site to poll it"
-grep -q "pages: read" "$BUILD" || fail "publish needs pages: read to look up the Pages site"
-grep -q "pages: read" "$RELEASE" || fail "release.yml must grant pages: read to the called workflow"
+
+# The host polled must be the one compiled into every install, or the check
+# goes green while installs get a 404. The constant lives in sirio_update.
+UPDATE_LIB="$SCRIPT_DIR/../../rust/crates/sirio_update/src/lib.rs"
+COMPILED_HOST=$(grep -E '^const MANIFEST_HOST: &str = "' "$UPDATE_LIB" | sed -E 's/.*"([^"]+)".*/\1/')
+[ -n "$COMPILED_HOST" ] || fail "could not read MANIFEST_HOST from $UPDATE_LIB"
+grep -qF "MANIFEST_URL=\"${COMPILED_HOST}/\${CHANNEL}.json\"" "$BUILD" \
+  || fail "publish must poll ${COMPILED_HOST}/<channel>.json, the URL compiled into the binaries"
+POLL_LINE=$(line_of 'curl -fsSL "$MANIFEST_URL"' "$BUILD")
+[ -n "$POLL_LINE" ] || fail "publish must poll the served manifest"
+[ "$READBACK_LINE" -lt "$POLL_LINE" ] || fail "the served-manifest poll must come after the branch read-back"
 
 # The artifacts live in GitHub Releases under their packaging-script names, so
 # the URL template names the file rather than reconstructing it per platform.
@@ -209,7 +217,8 @@ fi
 # Write scope belongs to publish alone; build jobs run ~400 crates' build
 # scripts and get read only.
 grep -q "contents: write" "$BUILD" || fail "publish needs contents: write"
-grep -q "contents: read"  "$BUILD" || fail "build jobs must be scoped to contents: read"
+READ_SCOPES=$(grep -c "contents: read" "$BUILD" || true)
+[ "$READ_SCOPES" -ge 3 ] || fail "each of the three build jobs must be scoped to contents: read (found $READ_SCOPES)"
 
 # ---------------------------------------------------------------------------
 # release.yml: the stable caller
