@@ -1992,6 +1992,25 @@ impl Sidebar {
         counts
     }
 
+    /// The disclosure the worktree row `worktree_id` draws: `Some((expanded,
+    /// tab row ids))` for a worktree row, `None` when no such row exists.
+    /// The chevron exists exactly when the id list is non-empty (see
+    /// [`Self::tree_row`]). Test-only: it lets the host prove that a sidebar
+    /// rebuild keeps the tab rows a worktree was listing.
+    #[doc(hidden)]
+    pub fn worktree_disclosure(&self, worktree_id: usize) -> Option<(bool, Vec<usize>)> {
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.id == worktree_id && row.kind == RowKind::Worktree)?;
+        let tab_row_ids = self.rows[index + 1..]
+            .iter()
+            .take_while(|row| row.kind == RowKind::Tab)
+            .map(|row| row.id)
+            .collect();
+        Some((self.rows[index].expanded, tab_row_ids))
+    }
+
     /// The bezel tree shape of one row. A project is a container even when
     /// empty and always carries a chevron; a worktree earns one only while
     /// it has tab rows to hide (`has_children`), so an idle worktree with
