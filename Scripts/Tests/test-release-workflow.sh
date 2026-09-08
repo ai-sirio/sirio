@@ -111,6 +111,17 @@ if [ "$(grep -c "Scripts/set-workspace-version.sh" "$BUILD")" -lt 3 ]; then
   fail "macos, linux and windows must each run Scripts/set-workspace-version.sh"
 fi
 
+# ...but on macOS, after the gate. The gate tests the code; the version is
+# packaging, and a `-nightly.<stamp>` version fails three tests that encode the
+# shape of a release version rather than of any version. Stamping first turns
+# every nightly red for a reason that says nothing about the build (#317).
+GATE_LINE=$(line_of 'run: Scripts/ci.sh' "$BUILD")
+STAMP_LINE=$(line_of 'run: Scripts/set-workspace-version.sh "$VERSION"' "$BUILD")
+[ -n "$GATE_LINE" ]  || fail "the macos job must run the CI gate"
+[ -n "$STAMP_LINE" ] || fail "the macos job must stamp the workspace version"
+[ "$GATE_LINE" -lt "$STAMP_LINE" ] \
+  || fail "the CI gate must run before the version is stamped, not after"
+
 # Spec §3.5 on the artifact, not only on the gate's test build: every job
 # asks the sirioctl it just built what channel and version it carries.
 if [ "$(grep -c "Scripts/assert-built-channel.sh" "$BUILD")" -lt 3 ]; then
