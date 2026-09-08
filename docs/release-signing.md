@@ -66,6 +66,26 @@ sirio-release verify --manifest stable.json --platform darwin-aarch64 \
   --pub-key "$(cat /secure/sirio-signing/sirio-release-signing.pub)"
 ```
 
+## The install scripts on the download host
+
+`install.sh` and `install.ps1` sit at the repository root and are served from
+the same host as the manifest, so the documented one-liners
+(`https://dl.sirioai.app/install.sh`, `.../install.ps1`) resolve. They are
+static: they resolve the newest tag from GitHub and download the release asset
+for the platform, so they only need re-publishing when the scripts themselves
+change, not once per release. dl.sirioai.app is this repository's `gh-pages`
+branch, so publishing is a copy into it:
+
+```bash
+git checkout gh-pages
+git checkout main -- install.sh install.ps1
+git commit -m "chore: publish the install scripts" && git push
+```
+
+Unlike the manifest, these are not signed: a `curl | sh` bootstrap rests on TLS
+to this host either way (see the header comment in `install.sh`). The signed
+path is the in-app updater, below.
+
 ## The manifest format (contract for #311)
 
 `https://dl.sirioai.app/stable.json` / `nightly.json`, one file per channel:

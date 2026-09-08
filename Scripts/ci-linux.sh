@@ -293,6 +293,7 @@ run_root_stage "test-build-app-bundle.sh"      bash Scripts/Tests/test-build-app
 run_root_stage "test-build-appimage.sh"         bash Scripts/Tests/test-build-appimage.sh
 run_root_stage "test-release-workflow.sh"      bash Scripts/Tests/test-release-workflow.sh
 run_root_stage "test-generate-changelog.sh"    bash Scripts/Tests/test-generate-changelog.sh
+run_root_stage "test-install-sh.sh"            bash Scripts/Tests/test-install-sh.sh
 
 # The critics' own instrument. Both of these guard leaks that have already cost
 # this machine real resources — 184 orphaned virtual-pointers at once, and before
