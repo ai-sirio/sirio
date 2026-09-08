@@ -1,0 +1,704 @@
+name: Build release
+
+# The one build-and-publish path both channels share (spec §3.3: the nightly
+# "produces the same three artifacts as a release and signs them the same way;
+# only the channel constant, the manifest filename and the trigger differ").
+# release.yml calls it for a tag with `channel: stable`; nightly.yml calls it
+# from main on a schedule with `channel: nightly`. Neither caller builds
+# anything itself.
+#
+# macOS is the reference release platform: it runs the gate, and it is the only
+# job that signs and notarizes. Linux and Windows declare `needs: macos` so a
+# broken macOS build stops the release rather than producing artifacts nobody
+# will publish. See docs/superpowers/specs/2026-08-29-macos-release-platform-design.md
+#
+# NOT YET VERIFIED: the workspace has never been compiled for macOS. Phase 0 of
+# the spec -- `Scripts/ci.sh` printing `CI OK` on a real Mac -- was deliberately
+# deferred by the maintainer and is not in this branch. Do not push a `v*.*.*`
+# tag until it has passed there: the production path is triggered only by such
+# a tag, so the first thing an unverified macOS build breaks is a release that
+# is already public. Use release.yml's manual trigger to verify a branch with a
+# tag input.
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Release channel compiled into the binaries (stable or nightly)
+        required: true
+        type: string
+      version:
+        description: Semantic version to compile in and to publish in the manifest
+        required: true
+        type: string
+      tag:
+        description: Git tag / GitHub release name the artifacts are published under
+        required: true
+        type: string
+      notes:
+        description: Release notes, shipped inside the manifest (spec §7.4)
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a pre-release
+        required: false
+        type: boolean
+        default: false
+      publish:
+        description: Publish the release and manifest; false only validates a build
+        required: true
+        type: boolean
+
+# Workflow-level on purpose: every step of every job -- the CI gate, the
+# release compile, the packaging scripts -- sees the same channel and the same
+# accepted keys. The Zed post-mortem's bug was a default that silently
+# flipped; a step-level env on one cargo call is exactly the shape the next
+# refactor drops. `option_env!` is rebuild-tracked by cargo, so a change here
+# recompiles the crates that read it (spec §3.3, §4.2).
+env:
+  SIRIO_RELEASE_CHANNEL: ${{ inputs.channel }}
+  SIRIO_RELEASE_ACCEPTED_KEYS: ${{ vars.SIRIO_RELEASE_ACCEPTED_KEYS }}
+
+jobs:
+  macos:
+    runs-on: [self-hosted, macOS, arm64]
+    # Read only: this job compiles and runs build scripts and test binaries from
+    # roughly 400 third-party crates on the maintainer's personal, non-ephemeral
+    # Mac; handing that a repo-write token buys nothing, because no build job
+    # calls the API. The write scope lives on `publish` alone.
+    permissions:
+      contents: read
+    # 120, not 60. The first release runs on a cold self-hosted runner and has
+    # to fit a full debug `cargo build --workspace` plus `cargo test
+    # --workspace` (the CI gate), then a *second, separate* release compile:
+    # `--target aarch64-apple-darwin` uses its own target directory, so nothing
+    # from the gate is reused. Then the Apple round-trips on top. The warm
+    # `~/.cargo` and `target/` that make 60 minutes plausible only exist from
+    # the second release onward.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # First, because it is the cheapest failure and the most expensive to
+      # miss: an empty key set compiles into an app whose every download fails
+      # verification (spec §4.2, fail-closed), which from the outside looks
+      # exactly like an updater that never runs. The variable is set once, in
+      # the repository settings, from `sirio-release keygen`'s .pub output.
+      - name: Refuse to build without accepted signing keys
+        run: |
+          if [ -z "${SIRIO_RELEASE_ACCEPTED_KEYS:-}" ]; then
+            echo "error: the repository variable SIRIO_RELEASE_ACCEPTED_KEYS is empty; see docs/release-signing.md" >&2
+            exit 1
+          fi
+          # Each entry must be standard base64 of exactly 32 bytes. The app
+          # degrades a malformed set to *empty* at runtime -- fail-closed, so
+          # every download is rejected and nothing says why -- and a
+          # validation-only run never reaches the publish job's verify step.
+          # openssl rather than base64: the macOS one spells decode -D.
+          for key in $SIRIO_RELEASE_ACCEPTED_KEYS; do
+            BYTES=$( (printf '%s' "$key" | openssl base64 -d -A 2>/dev/null || true) | wc -c | tr -d ' ')
+            if [ "$BYTES" != "32" ]; then
+              echo "error: an entry of SIRIO_RELEASE_ACCEPTED_KEYS is not base64 of a 32-byte Ed25519 public key" >&2
+              exit 1
+            fi
+          done
+          if [ "$SIRIO_RELEASE_CHANNEL" != "stable" ] && [ "$SIRIO_RELEASE_CHANNEL" != "nightly" ]; then
+            echo "error: channel must be stable or nightly, got '$SIRIO_RELEASE_CHANNEL'" >&2
+            exit 1
+          fi
+
+      # The version compiled into the binaries (CARGO_PKG_VERSION) is the one
+      # the manifest will advertise, so the updater's semver comparison is
+      # against the same number the build carries. For a stable tag this is a
+      # no-op -- release.yml already checked tag == Cargo.toml -- and for a
+      # nightly it is the whole point (spec §3.2).
+      - name: Set the workspace version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/set-workspace-version.sh "$VERSION"
+
+      - name: Verify release scripts
+        run: |
+          bash Scripts/Tests/test-check-release-version.sh
+          bash Scripts/Tests/test-set-workspace-version.sh
+          bash Scripts/Tests/test-assert-built-channel.sh
+          bash Scripts/Tests/test-build-dmg.sh
+          bash Scripts/Tests/test-build-app-bundle.sh
+          bash Scripts/Tests/test-build-inno.sh
+          bash Scripts/Tests/test-build-appimage.sh
+          bash Scripts/Tests/test-release-workflow.sh
+          bash Scripts/Tests/test-nightly-workflow.sh
+          bash Scripts/Tests/test-generate-changelog.sh
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally
+      # (spec §1.5, §9.5). The hosted jobs install it; this self-hosted runner
+      # is expected to have it, and the failure without it looks nothing like
+      # its cause, so say so here rather than three crates into the build.
+      - name: Require sccache on the runner
+        run: |
+          if ! command -v sccache >/dev/null 2>&1; then
+            echo "error: sccache is not on PATH on this runner; rust/.cargo/config.toml requires it (spec §1.5)" >&2
+            exit 1
+          fi
+
+      # There was an `Unlock login keychain` step here, inherited verbatim from
+      # the Swift-era pipeline. It is gone on purpose, and should not come back
+      # with the next copy-paste from git history.
+      #
+      # `da9d18da` added it because the Swift app's `KeychainCredentialStore`
+      # made the CI gate fail intermittently against a locked keychain. That
+      # class went with the Swift app. The only macOS keychain use left in the
+      # Rust workspace is `keychain_cookie` in
+      # `rust/crates/sirio_usage/src/opencode_go.rs`, which shells out to
+      # `security find-generic-password` and returns `None` on any failure -- a
+      # locked keychain cannot fail the gate through it.
+      #
+      # What the step did cost was real: it unlocked the maintainer's personal
+      # login keychain, with its password in the environment, before every one
+      # of the ~400 crates' build scripts and test binaries ran. Nothing
+      # downstream needs it either -- this workflow creates its own
+      # `ci.keychain` and puts it first in the search list, `codesign` finds the
+      # identity there, `notarytool` authenticates with the API key file, and
+      # `stapler` needs no credentials at all. The `MAC_LOGIN_KEYCHAIN_PASSWORD`
+      # secret is therefore no longer referenced anywhere in this workflow.
+      #
+      # The gate runs with SIRIO_RELEASE_CHANNEL set (workflow env above), which
+      # is what arms the spec §3.5 assertion in sirio_control: the compiled
+      # channel really is this channel, and updating is enabled.
+      - name: Run CI gate
+        run: Scripts/ci.sh
+
+      - name: Import signing certificate
+        env:
+          DEVELOPER_ID_CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          security create-keychain -p "$KEYCHAIN_PASSWORD" ci.keychain
+          security set-keychain-settings -lut 21600 ci.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ci.keychain
+          security list-keychains -d user -s ci.keychain $(security list-keychains -d user | tr -d '"')
+
+          echo "$DEVELOPER_ID_CERTIFICATE_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k ci.keychain -P "$DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" ci.keychain
+          rm -f cert.p12
+
+      - name: Build the release binary
+        working-directory: rust
+        run: cargo build --release --target aarch64-apple-darwin
+
+      # The gate asserted the channel on the *test* build. This is the binary
+      # that ships: ask it (spec §3.5, both halves, on the artifact).
+      - name: Assert the shipped binary carries the channel and version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/assert-built-channel.sh rust/target/aarch64-apple-darwin/release/sirioctl "$SIRIO_RELEASE_CHANNEL" "$VERSION"
+
+      # Replaces xcodegen + xcodebuild archive + xcodebuild -exportArchive.
+      # The identity is read back from the certificate just imported rather
+      # than stored as its own secret, so the two cannot drift apart.
+      - name: Build the signed .app
+        id: bundle
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # This step has no `shell:` key, so it runs as `bash -e {0}` -- pipefail
+          # is off, and the pipeline's exit status is sed's (0), not grep's or
+          # head's. The `|| true` below is not load-bearing for that reason today,
+          # but it keeps the empty-identity guard reachable if this step ever gains
+          # an explicit `shell: bash` (as the windows job's Package step already
+          # does), which turns pipefail on -- otherwise a failed grep/head would
+          # abort the substitution instead of falling through to the guard, at the
+          # worst possible moment: signing on a freshly cut release.
+          CODESIGN_IDENTITY=$(security find-identity -v -p codesigning ci.keychain \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/' || true)
+          if [ -z "$CODESIGN_IDENTITY" ]; then
+            echo "error: no Developer ID Application identity in ci.keychain" >&2
+            exit 1
+          fi
+          export CODESIGN_IDENTITY
+          mkdir -p build
+          Scripts/build-app-bundle.sh \
+            rust/target/aarch64-apple-darwin/release/sirio \
+            "$VERSION" \
+            build/Sirio.app
+          echo "app=build/Sirio.app" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize and staple
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          APP_PATH: ${{ steps.bundle.outputs.app }}
+        run: |
+          echo "$ASC_API_KEY_P8" | base64 --decode > AuthKey.p8
+          ditto -c -k --keepParent "$APP_PATH" build/Sirio.zip
+          xcrun notarytool submit build/Sirio.zip --key AuthKey.p8 --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" --wait
+          xcrun stapler staple "$APP_PATH"
+          rm -f AuthKey.p8
+
+      - name: Build DMG
+        id: dmg
+        env:
+          VERSION: ${{ inputs.version }}
+          APP_PATH: ${{ steps.bundle.outputs.app }}
+        run: |
+          DMG_PATH="build/Sirio-${VERSION}.dmg"
+          Scripts/build-dmg.sh "$APP_PATH" Sirio "$DMG_PATH"
+          echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+
+      # Yes, this is a second Apple round-trip, and it costs another few minutes
+      # of wall clock on every release. It is worth it because a notarization
+      # ticket is per-artifact: the one stapled onto Sirio.app above says nothing
+      # about the DMG that now contains it. The DMG is what the user downloads,
+      # so the DMG is what carries the quarantine flag and what Gatekeeper
+      # evaluates first -- and an unnotarized container is refused before the
+      # stapled .app inside it is ever reachable.
+      #
+      # Stapling rather than relying on the ticket being fetched is the other
+      # half: with the ticket embedded, Gatekeeper resolves the check entirely
+      # offline. Without it, first open needs a live call to Apple, which is
+      # exactly the moment -- a new user, an unfamiliar app, a corporate proxy or
+      # no network -- when a failure reads as "this app is broken".
+      #
+      # No `--options runtime` here, unlike the .app: the hardened runtime is a
+      # property of an executable's code signature, and a disk image has no code
+      # to harden. Its signature exists to establish provenance, nothing more.
+      #
+      # The identity is derived exactly as in `Build the signed .app` above --
+      # same command, same `|| true`, same empty-identity guard. See that step's
+      # comment for why the `|| true` is there and why the guard has to stay
+      # reachable; the two must not drift into variants of each other.
+      - name: Sign, notarize and staple the DMG
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
+        run: |
+          CODESIGN_IDENTITY=$(security find-identity -v -p codesigning ci.keychain \
+            | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.+)"/\1/' || true)
+          if [ -z "$CODESIGN_IDENTITY" ]; then
+            echo "error: no Developer ID Application identity in ci.keychain" >&2
+            exit 1
+          fi
+          codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG_PATH"
+          echo "$ASC_API_KEY_P8" | base64 --decode > AuthKey.p8
+          xcrun notarytool submit "$DMG_PATH" --key AuthKey.p8 --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" --wait
+          xcrun stapler staple "$DMG_PATH"
+          rm -f AuthKey.p8
+
+      - name: Upload the DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain ci.keychain || true
+          security lock-keychain login.keychain-db || true
+          rm -f cert.p12 AuthKey.p8
+
+  linux:
+    needs: macos
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set the workspace version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/set-workspace-version.sh "$VERSION"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # libghostty-vt-sys shells out to `zig build`; upstream pins 0.15.2
+      # exactly, and a newer Zig fails too.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally,
+      # so a runner without it fails before compiling a single crate, in a way
+      # that looks nothing like its cause (spec §1.5). ubuntu-22.04 does not ship it.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Install GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxcb1-dev
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --release
+
+      - name: Assert the shipped binary carries the channel and version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/assert-built-channel.sh rust/target/release/sirioctl "$SIRIO_RELEASE_CHANNEL" "$VERSION"
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          Scripts/build-appimage.sh \
+            rust/target/release/sirio \
+            rust/target/release/sirioctl \
+            "$VERSION" \
+            "build/Sirio-${VERSION}-x86_64.AppImage"
+          echo "path=build/Sirio-${VERSION}-x86_64.AppImage" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error
+
+  windows:
+    needs: macos
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set the workspace version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/set-workspace-version.sh "$VERSION"
+
+      # The MSVC toolchain is required: with the GNU ABI, libghostty-vt-sys
+      # produces MSVC-shaped artifacts that rustc-gnu cannot link. See
+      # docs/prototypes/ghostty-pane-windows.md.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      # rust/.cargo/config.toml sets rustc-wrapper = "sccache" unconditionally;
+      # a job without it fails before compiling a single crate, in a way that
+      # looks nothing like its cause (spec §1.5).
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --release
+
+      - name: Assert the shipped binary carries the channel and version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/assert-built-channel.sh rust/target/release/sirioctl.exe "$SIRIO_RELEASE_CHANNEL" "$VERSION"
+
+      - name: Package
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          STAGING="build/windows"
+          mkdir -p "$STAGING"
+          cp rust/target/release/sirio.exe    "$STAGING/"
+          cp rust/target/release/sirioctl.exe "$STAGING/"
+          # The .iss is generated beside the binaries: ISCC resolves its
+          # relative Source: paths against the script's own directory, and the
+          # script's OutputBaseFilename lands SirioSetup-<version>.exe there
+          # too. The setup is compiled with the ISCC.exe the windows-latest
+          # runner image ships -- no extra install step.
+          bash Scripts/build-inno.sh "$VERSION" "$STAGING/Sirio.iss"
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "$STAGING/Sirio.iss"
+          echo "path=$STAGING/SirioSetup-${VERSION}.exe" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-22.04
+    # The only job that talks to the GitHub API, so the only one that needs the
+    # write scope. The one thing it compiles is `sirio-release`, the signing
+    # CLI -- a leaf crate with no build scripts of its own beyond its
+    # cryptography dependencies.
+    permissions:
+      contents: write
+    # Both channels publish onto the same gh-pages branch. Serialise, never
+    # cancel: a cancelled publish is a release whose assets exist and whose
+    # manifest does not, which is the ordering rule below, broken.
+    concurrency:
+      group: publish-manifest
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ inputs.channel }}
+      VERSION: ${{ inputs.version }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # rust/.cargo/config.toml sets rustc-wrapper = "sccache" unconditionally
+      # (spec §1.5); this job compiles too.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Build the signing CLI
+        working-directory: rust
+        run: cargo build --release -p sirio_release --bin sirio-release
+
+      - name: Write the release notes
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: printf '%s\n' "$NOTES" > notes.md
+
+      # Spec §9.1, step one: every asset is uploaded before the manifest that
+      # names it exists anywhere. The release starts as a *draft*: nothing is
+      # public until the artifacts have been signed and the manifest verified
+      # below, so a failure in between leaves a draft to retry, not a public
+      # release with no manifest that §9.3 forbids deleting. Re-runs are
+      # idempotent for the same reason -- an existing release (draft or not)
+      # gets its assets re-uploaded rather than a second `create` that fails.
+      # `--target` pins the release to the built commit, which is what
+      # nightly.yml compares against to skip rebuilding a commit that already
+      # has a nightly.
+      - name: Create the release as a draft with every artifact
+        env:
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists; re-uploading its assets"
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            FLAGS=()
+            if [ "$PRERELEASE" = "true" ]; then
+              FLAGS+=(--prerelease)
+            fi
+            gh release create "$TAG" artifacts/* \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "Sirio $VERSION" \
+              --notes-file notes.md \
+              "${FLAGS[@]}"
+          fi
+
+      # Every artifact built must be on the release; an asset left over from an
+      # earlier attempt is not a reason to block, because the manifest names
+      # only the files built here.
+      - name: Verify every artifact is attached before the manifest names it
+        run: |
+          ls artifacts | sort > local-assets.txt
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > published-assets.txt
+          MISSING=$(comm -23 local-assets.txt published-assets.txt)
+          if [ -n "$MISSING" ]; then
+            echo "error: built artifacts missing from the release's assets; refusing to publish a manifest that would 404:" >&2
+            echo "$MISSING" >&2
+            exit 1
+          fi
+
+      # The platform keys are the manifest's contract with the updater
+      # (`sirio_registry::current_platform_key`), mapped here from the
+      # artifact each packaging script produces. An artifact this mapping does
+      # not recognise fails the publish rather than being left out of the
+      # manifest silently.
+      - name: Sign the artifacts and write the manifest
+        env:
+          SIRIO_RELEASE_SIGNING_KEY: ${{ secrets.SIRIO_RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "${SIRIO_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "error: the SIRIO_RELEASE_SIGNING_KEY secret is empty; see docs/release-signing.md" >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$SIRIO_RELEASE_SIGNING_KEY" > signing.key
+          ARGS=()
+          for artifact in artifacts/*; do
+            case "$artifact" in
+              *.dmg)      platform=darwin-aarch64 ;;
+              *.AppImage) platform=linux-x86_64 ;;
+              *.exe)      platform=windows-x86_64 ;;
+              *)
+                echo "error: no platform key for artifact $artifact" >&2
+                exit 1 ;;
+            esac
+            ARGS+=(--artifact "$platform=$artifact")
+          done
+          rust/target/release/sirio-release sign \
+            --key signing.key \
+            --channel "$CHANNEL" \
+            --version "$VERSION" \
+            --notes "$(cat notes.md)" \
+            --url-template "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/{file}" \
+            "${ARGS[@]}" \
+            --out "$CHANNEL.json"
+          rm -f signing.key
+
+      # The secret signs; the repository variable is what the binaries were
+      # compiled to accept. Verifying one against the other here catches the
+      # key-rotation mistake that would otherwise publish a manifest every
+      # install rejects -- and, being a fail-closed rejection, one that looks
+      # exactly like an updater that never ran.
+      - name: Verify the manifest against the compiled-in keys
+        run: |
+          KEYS=()
+          for key in $SIRIO_RELEASE_ACCEPTED_KEYS; do
+            KEYS+=(--pub-key "$key")
+          done
+          for artifact in artifacts/*; do
+            case "$artifact" in
+              *.dmg)      platform=darwin-aarch64 ;;
+              *.AppImage) platform=linux-x86_64 ;;
+              *.exe)      platform=windows-x86_64 ;;
+              *)
+                echo "error: no platform key for artifact $artifact" >&2
+                exit 1 ;;
+            esac
+            rust/target/release/sirio-release verify \
+              --manifest "$CHANNEL.json" \
+              --platform "$platform" \
+              --artifact "$artifact" \
+              "${KEYS[@]}"
+          done
+
+      # The artifacts are signed and the manifest verified: now, and only now,
+      # the release goes public. Still before the manifest (§9.1): the asset
+      # URLs the manifest names resolve only once the release is not a draft.
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false
+
+      # Spec §9.1, last step. gh-pages is what dl.sirioai.app serves (spec §2.3,
+      # wired by #312). Only this channel's file is added on top of whatever the
+      # branch holds: the other channel's manifest, and the CNAME file GitHub
+      # writes there when the custom domain is set, must both survive. The
+      # branch is created from the empty tree the first time, never force-pushed.
+      #
+      # Ed25519 signatures are deterministic, so re-running a publish for the
+      # same artifacts produces a byte-identical manifest: an unchanged file is
+      # not an error, it is already published. A rejected push -- the other
+      # channel or GitHub's CNAME write landed first -- is rebased and retried;
+      # the two channels never touch the same file, so the rebase cannot conflict.
+      - name: Publish the manifest, last
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch origin gh-pages
+            git worktree add --detach site FETCH_HEAD
+          else
+            EMPTY_TREE=$(git hash-object -t tree /dev/null)
+            ROOT=$(git commit-tree "$EMPTY_TREE" -m "Manifest host for the Sirio update channels")
+            git worktree add --detach site "$ROOT"
+          fi
+          cp "$CHANNEL.json" site/
+          touch site/.nojekyll
+          cd site
+          git add "$CHANNEL.json" .nojekyll
+          if git diff --cached --quiet; then
+            echo "gh-pages already carries this exact $CHANNEL.json; nothing to push"
+            exit 0
+          fi
+          git commit -m "publish $CHANNEL $VERSION"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:gh-pages; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto the current gh-pages"
+            git fetch origin gh-pages
+            git rebase FETCH_HEAD
+          done
+          echo "error: could not push $CHANNEL.json to gh-pages after 3 attempts" >&2
+          exit 1
+
+      # A green push is not a served manifest. Read the branch back through
+      # the API rather than trusting the push's exit status, then wait for the
+      # URL the binaries actually poll to serve it. That URL is the one string
+      # frozen into every install (spec §2.2, `sirio_update::MANIFEST_HOST`),
+      # so it is what gets checked -- not the Pages site's own address, which
+      # would go green while every install got a 404. GitHub Pages deploys
+      # asynchronously and can fail without touching this workflow; a manifest
+      # that sits on the branch but is never served is the Zed post-mortem in
+      # a new shape. Until #312 wires dl.sirioai.app to gh-pages this step is
+      # red, and that is the honest state: the release exists, and no install
+      # can see it.
+      - name: Verify the manifest is on the branch and served where installs look
+        run: |
+          ON_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}/contents/${CHANNEL}.json?ref=gh-pages" --jq .content \
+            | base64 -d | jq -r '.version // empty')
+          if [ "$ON_BRANCH" != "$VERSION" ]; then
+            echo "error: gh-pages carries $CHANNEL.json at version '$ON_BRANCH', expected $VERSION; the push did not land" >&2
+            exit 1
+          fi
+          # Keep in sync with MANIFEST_HOST in rust/crates/sirio_update/src/lib.rs
+          # (test-release-workflow.sh checks the two agree).
+          MANIFEST_URL="https://dl.sirioai.app/${CHANNEL}.json"
+          SERVED=""
+          for attempt in $(seq 1 60); do
+            SERVED=$( (curl -fsSL "$MANIFEST_URL" 2>/dev/null || true) | jq -r '.version // empty' 2>/dev/null || true)
+            if [ "$SERVED" = "$VERSION" ]; then
+              echo "$MANIFEST_URL serves $SERVED"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "error: $MANIFEST_URL does not serve $VERSION ten minutes after the push (it serves '${SERVED:-nothing}'). The release and the manifest on gh-pages are in place, but until #312 wires dl.sirioai.app to gh-pages no install can see them" >&2
+          exit 1
