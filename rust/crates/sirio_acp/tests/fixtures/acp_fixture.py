@@ -446,6 +446,8 @@ def main():
             if MODE == "blocks":
                 blocks_prompt(request)
                 return
+            if MODE == "multi":
+                blocks_prompt(request)
             if MODE == "malformed":
                 sys.stdout.write("not-json\n")
                 sys.stdout.flush()
