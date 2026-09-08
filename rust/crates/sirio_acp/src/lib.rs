@@ -1221,9 +1221,14 @@ fn run_connection(
                             let prompt_id = prompt_counter.fetch_add(1, Ordering::Relaxed);
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
+                            // Dropped when the result arrives (or the connection dies
+                            // with the request pending) so the timeout thread below
+                            // wakes immediately instead of sleeping the full window.
+                            let (prompt_done_tx, prompt_done_rx) = mpsc::channel::<()>();
                             connection
                                 .send_request(PromptRequest::new(session_id, prompt_blocks))
                                 .on_receiving_result(move |result| async move {
+                                    drop(prompt_done_tx);
                                     active_prompt_for_result.store(0, Ordering::Release);
                                     match result {
                                         Ok(response) => {
@@ -1277,7 +1282,11 @@ fn run_connection(
                             let _ = thread::Builder::new()
                                 .name("sirio-acp-prompt-timeout".into())
                                 .spawn(move || {
-                                    thread::sleep(PROMPT_TIMEOUT);
+                                    if prompt_done_rx.recv_timeout(PROMPT_TIMEOUT)
+                                        != Err(mpsc::RecvTimeoutError::Timeout)
+                                    {
+                                        return;
+                                    }
                                     if active_prompt
                                         .compare_exchange(
                                             prompt_id,
