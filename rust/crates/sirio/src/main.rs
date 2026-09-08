@@ -81,6 +81,8 @@ mod command_palette;
 /// Windows, where the platform picks itself.
 #[cfg(target_os = "linux")]
 mod display_backend;
+#[cfg(not(windows))]
+mod login_path;
 mod panel_layout;
 mod panes;
 mod session;
@@ -16830,6 +16832,13 @@ fn main() {
             unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
         }
     }
+
+    // Same single-threaded window, same reason: a Finder/Dock launch carries
+    // launchd's minimal PATH, and everything that resolves a binary — agent
+    // discovery, ACP server spawns, the npm installer — reads this process's
+    // environment rather than a login shell's.
+    #[cfg(not(windows))]
+    login_path::adopt_login_shell_path();
 
     // #364: after the env setup above (which must stay single-threaded and
     // before `application()`), before any logging or window exists.
