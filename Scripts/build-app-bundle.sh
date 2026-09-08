@@ -77,6 +77,12 @@ cp "$ICON" "$APP_PATH/Contents/Resources/icon.icns"
 # and Sparkle compares the latter, so it has to grow every release. The Swift
 # bundle kept them equal for exactly that reason; preserving the rule costs
 # nothing and leaves auto-update reachable without a migration.
+#
+# Equal up to the prerelease part: Apple allows only dot-separated integers
+# in CFBundleVersion, so a nightly (`0.6.0-nightly.202609072133`) keeps its
+# full version in CFBundleShortVersionString and only `0.6.0` here. Sirio's
+# own updater never reads either key; it compares the version compiled into
+# the binary, so the nightly stamp is not lost to it.
 cat > "$APP_PATH/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -95,7 +101,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key>
 	<string>${VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>${VERSION}</string>
+	<string>${VERSION%%-*}</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>LSApplicationCategoryType</key>
