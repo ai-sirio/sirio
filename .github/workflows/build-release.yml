@@ -109,16 +109,6 @@ jobs:
             exit 1
           fi
 
-      # The version compiled into the binaries (CARGO_PKG_VERSION) is the one
-      # the manifest will advertise, so the updater's semver comparison is
-      # against the same number the build carries. For a stable tag this is a
-      # no-op -- release.yml already checked tag == Cargo.toml -- and for a
-      # nightly it is the whole point (spec §3.2).
-      - name: Set the workspace version
-        env:
-          VERSION: ${{ inputs.version }}
-        run: Scripts/set-workspace-version.sh "$VERSION"
-
       - name: Verify release scripts
         run: |
           bash Scripts/Tests/test-check-release-version.sh
@@ -191,6 +181,28 @@ jobs:
       # channel really is this channel, and updating is enabled.
       - name: Run CI gate
         run: Scripts/ci.sh
+
+      # Stamped *after* the gate, deliberately. The gate tests the code; the
+      # version is packaging. Stamping first makes the suite run against
+      # `0.6.0-nightly.<stamp>`, and three tests encode the shape of a release
+      # version rather than of any version: `version_is_a_non_empty_semantic_
+      # version` (sirio_control) splits on `.` and wants exactly three parts,
+      # and two sirio_update tests compare fixtures pinned to the plain
+      # `0.6.0`, which under semver correctly sorts *above* a `-nightly`
+      # prerelease. All three pass on an unstamped tree and told us nothing
+      # about the build -- see the first nightly run, #317.
+      #
+      # The version compiled into the binaries (CARGO_PKG_VERSION) is the one
+      # the manifest will advertise, so the updater's semver comparison is
+      # against the same number the build carries. For a stable tag this is a
+      # no-op -- release.yml already checked tag == Cargo.toml -- and for a
+      # nightly it is the whole point (spec §3.2). What the binary actually
+      # ended up carrying is not taken on trust: `assert-built-channel.sh`
+      # below asks the built `sirioctl` for its own channel and version.
+      - name: Set the workspace version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: Scripts/set-workspace-version.sh "$VERSION"
 
       - name: Import signing certificate
         env:
