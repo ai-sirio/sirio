@@ -250,6 +250,11 @@ fn agent_death_is_transport_error() {
         message.contains("closed") || message.contains("EOF") || message.contains("end of file"),
         "unexpected death message: {message}"
     );
+    // Without the agent's own last words the report names no cause at all.
+    assert!(
+        message.contains("fixture last words before dying"),
+        "death report dropped the agent's stderr: {message}"
+    );
     let _ = client.shutdown();
 }
 
