@@ -132,10 +132,27 @@ jobs:
           bash Scripts/Tests/test-nightly-workflow.sh
           bash Scripts/Tests/test-generate-changelog.sh
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
+      # Deliberately NOT `mlugg/setup-zig` here, unlike the two hosted jobs.
+      # The official Zig 0.15.2 tarball links against its own bundled
+      # `lib/libc/darwin/libSystem.tbd`, which predates macOS 26: on this
+      # runner every libc symbol comes back undefined (`_abort`, `_bzero`,
+      # `_dispatch_semaphore_create`, ...) and `zig build` dies inside
+      # `libghostty-vt-sys`'s build script. The downloaded binary cannot even
+      # run `zig libc` on itself; a fresh cache and an explicit SDKROOT change
+      # nothing. Homebrew's Zig 0.15.2, already on this Mac, builds against the
+      # real SDK and works, so the runner supplies Zig and CI only checks it.
+      # Same version pin either way -- upstream requires exactly 0.15.2 (#63).
+      - name: Require Zig 0.15.2 on the runner
+        run: |
+          if ! command -v zig >/dev/null 2>&1; then
+            echo "error: zig is not on PATH on this runner; install Zig 0.15.2 (brew install zig) -- see CLAUDE.md" >&2
+            exit 1
+          fi
+          FOUND=$(zig version)
+          if [ "$FOUND" != "0.15.2" ]; then
+            echo "error: libghostty-vt-sys pins Zig 0.15.2 exactly and this runner has $FOUND; a newer Zig fails too (#63)" >&2
+            exit 1
+          fi
 
       # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally
       # (spec §1.5, §9.5). The hosted jobs install it; this self-hosted runner

@@ -60,6 +60,18 @@ if [ "$(grep -c "version: 0.15.2" "$BUILD")" -lt 2 ]; then
   fail "both hosted runners must pin Zig 0.15.2"
 fi
 
+# ...but exactly the two hosted ones. The downloaded Zig 0.15.2 links against
+# its own bundled libSystem stub, which is older than macOS 26 and leaves every
+# libc symbol undefined; the macOS runner therefore supplies its own Zig and
+# the workflow only checks the version. Re-adding setup-zig to the macOS job
+# reintroduces a failure whose message names none of this.
+if [ "$(grep -c "uses: mlugg/setup-zig" "$BUILD")" -ne 2 ]; then
+  fail "only the linux and windows jobs may download Zig; macOS uses the one on the runner"
+fi
+grep -q "command -v zig" "$BUILD" || fail "the macos job must check that zig is on the runner"
+grep -qF '"$FOUND" != "0.15.2"' "$BUILD" \
+  || fail "the macos job must reject a runner Zig that is not exactly 0.15.2"
+
 # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally, so
 # every hosted job that runs cargo -- linux, windows, and publish, which builds
 # the signing CLI -- must install it or fail before compiling (spec §1.5).
