@@ -5852,6 +5852,27 @@ impl SirioWorkspace {
         cx.subscribe(
             terminal,
             move |workspace, _, event: &TerminalActivityEvent, cx| {
+                // Layer C's content scan (`detect_content_status`) strips
+                // ANSI, lowercases and substring-scans the whole scrollback
+                // tail -- real work, unlike the other two arms below. Doing
+                // that synchronously here means several panes settling in
+                // the same debounce window serialise on this one UI-thread
+                // callback back-to-back. The scan is a pure `&str ->
+                // Option<AgentStatus>` function (no gpui types), so it moves
+                // to the background executor; only the resulting status
+                // re-enters on the UI thread to mutate the activity model --
+                // same split as `start_process_signal_polling`'s shared
+                // snapshot (#248).
+                if let TerminalActivityEvent::OutputSettled { scrollback } = event {
+                    workspace.spawn_content_signal_scan(
+                        activity_pane_id.clone(),
+                        scrollback.clone(),
+                        Instant::now(),
+                        cx,
+                    );
+                    return;
+                }
+
                 let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
                 let transition = panes::apply_terminal_activity_event(
                     &mut workspace.activity,
@@ -5865,10 +5886,9 @@ impl SirioWorkspace {
                 }
                 // ChildExited must repaint even without a model transition:
                 // the exit status lives on TerminalView and the tab status
-                // cell reads it. An OscTitle or OutputSettled with no
-                // transition (and no title-owned clear) changes nothing the
-                // workspace draws; the terminal repaints itself through its
-                // own notify.
+                // cell reads it. An OscTitle with no transition (and no
+                // title-owned clear) changes nothing the workspace draws;
+                // the terminal repaints itself through its own notify.
                 let title_owned_clear = title_owned_before
                     && !workspace.activity.is_title_owned(&activity_pane_id);
                 if transition.is_some()
@@ -5880,6 +5900,48 @@ impl SirioWorkspace {
                 }
             },
         )
+        .detach();
+    }
+
+    /// Layer C off the UI thread: takes the cheap agent-id lookup
+    /// synchronously (nothing to scan for a plain shell), runs
+    /// `detect_content_status`'s scrollback scan on the background
+    /// executor, then re-enters on the UI thread only to apply the
+    /// already-computed status. `apply_content_signal` itself stays
+    /// synchronous on the UI thread -- `AgentActivityModel` is owned by the
+    /// workspace entity, so mutating it off-thread is not an option.
+    /// `apply_content_signal` never touches title ownership, so unlike the
+    /// sync arm above there is no title-owned-clear case to repaint for.
+    fn spawn_content_signal_scan(
+        &mut self,
+        activity_pane_id: String,
+        scrollback: String,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent_id) = self.activity.agent_id(&activity_pane_id) else {
+            return;
+        };
+        let agent_id = agent_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let status = cx
+                .background_executor()
+                .spawn(async move { sirio_activity::detect_content_status(&scrollback, &agent_id) })
+                .await;
+            let Some(status) = status else { return };
+            let _ = this.update(cx, |workspace, cx| {
+                let transition =
+                    workspace
+                        .activity
+                        .apply_content_signal(&activity_pane_id, status, now);
+                if let Some(transition) = transition.as_ref() {
+                    workspace.post_activity_notification(transition);
+                    workspace.request_auto_rename(transition, cx);
+                    workspace.mark_activity_dirty();
+                    cx.notify();
+                }
+            });
+        })
         .detach();
     }
 
@@ -21289,6 +21351,59 @@ mod tests {
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
         let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Layer C's content scan now runs on the background executor
+    /// (`SirioWorkspace::spawn_content_signal_scan`) instead of inline in
+    /// `subscribe_terminal_activity`'s synchronous callback. Drives a real
+    /// PTY through the same OSC-title-then-settled-content sequence as
+    /// `panes::tests::real_pty_activity_status_follows_osc_title_then_settled_content`,
+    /// but through the app's real subscription rather than a test-local
+    /// bypass, so a broken UI-thread/background hand-off would leave the
+    /// settled content signal never applied.
+    #[gpui::test]
+    async fn workspace_wires_real_settled_content_into_activity_model(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-activity-content-wiring-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory)
+            .expect("create content activity test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1"
+                    .into(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn content activity test terminal")
+        });
+        let workspace = cx.update(|_, app| {
+            app.new(|cx| activity_test_workspace(terminal.clone(), working_directory.clone(), cx))
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if activity_status(&workspace, &cx) == Some(AgentStatus::NeedsInput) {
+                terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+                cx.run_until_parked();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "the app-level terminal subscription never applied the background-scanned \
+             content signal; status was {:?}",
+            activity_status(&workspace, &cx)
+        );
     }
 
     /// Rendering a terminal with the same sole-tab membership must not notify
