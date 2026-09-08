@@ -143,7 +143,23 @@ Five adapters, each aware of its CLI's lifecycle — startup banners, resume fla
 
 ## Install
 
-Sirio is pre-release. Every tagged release publishes a macOS `.dmg`, a Linux AppImage and a Windows installer to [GitHub Releases](https://github.com/ai-sirio/sirio/releases) — macOS first, Linux and Windows behind it. Until the first tag lands, build from source:
+Sirio is pre-release. Every tagged release publishes a macOS `.dmg`, a Linux AppImage and a Windows installer to [GitHub Releases](https://github.com/ai-sirio/sirio/releases) — macOS first, Linux and Windows behind it.
+
+**macOS and Linux**
+
+```bash
+curl -fsSL https://dl.sirioai.app/install.sh | sh
+```
+
+**Windows**
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://dl.sirioai.app/install.ps1 | iex"
+```
+
+The script downloads the release for your platform and puts it where the OS expects it: `Sirio.app` in `/Applications`, the AppImage in `~/.local/bin`, the per-user installer under `%LOCALAPPDATA%\Programs\Sirio` — no elevated access anywhere. Pin a version with `SIRIO_VERSION=0.6.0`, and pick the Linux directory with `SIRIO_INSTALL_DIR`. Both scripts live in this repo ([`install.sh`](install.sh), [`install.ps1`](install.ps1)) if you would rather read before piping.
+
+Until the first tag lands, build from source:
 
 ```bash
 git clone https://github.com/ai-sirio/sirio
