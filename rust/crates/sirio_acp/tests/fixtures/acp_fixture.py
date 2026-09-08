@@ -473,6 +473,8 @@ def main():
                         "content": {"type": "text", "text": "partial"},
                     }
                 )
+                sys.stderr.write("fixture last words before dying\n")
+                sys.stderr.flush()
                 os._exit(17)
             if MODE == "cancel":
                 cancel_prompt(request)

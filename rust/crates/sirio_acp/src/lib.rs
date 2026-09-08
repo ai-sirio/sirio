@@ -22,7 +22,7 @@ use anyhow::{Result, anyhow};
 use async_process::Child;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -922,6 +922,11 @@ fn run_connection(
     // REQUIRED error handled below needs the advertised methods on hand.
     let auth_methods: Arc<Mutex<Vec<AuthMethodInfo>>> = Arc::new(Mutex::new(Vec::new()));
     let shutdown_ack: Arc<Mutex<Option<mpsc::SyncSender<()>>>> = Arc::new(Mutex::new(None));
+    // Every stderr line, not just the MCP-shaped ones: when the agent dies the
+    // protocol only reports "incoming transport closed", which names no cause.
+    // Its last words are the only evidence of why it went away.
+    let stderr_tail: StderrTail = Arc::new(Mutex::new(VecDeque::new()));
+    let drain_tail = Arc::clone(&stderr_tail);
     let attempted_program = command.program.clone();
     let command = command_for_process(command);
     let agent = AcpAgent::new(
@@ -1010,7 +1015,7 @@ fn run_connection(
     let _stderr_drain = thread::Builder::new()
         .name("sirio-acp-stderr".into())
         .spawn(move || {
-            block_on(drain_stderr(stderr, mcp_warnings));
+            block_on(drain_stderr(stderr, mcp_warnings, drain_tail));
         });
 
     let connection_event_tx = event_tx.clone();
@@ -1021,6 +1026,7 @@ fn run_connection(
     let worker_for_connection = worker_tx.clone();
     let shutdown_ack_for_connection = Arc::clone(&shutdown_ack);
     let child_for_connection = Arc::clone(&child);
+    let stderr_tail_for_connection = Arc::clone(&stderr_tail);
     let connection_result = block_on(async move {
         let notification_events = connection_event_tx.clone();
         let permission_events = connection_event_tx.clone();
@@ -1221,6 +1227,7 @@ fn run_connection(
                             let prompt_id = prompt_counter.fetch_add(1, Ordering::Relaxed);
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
+                            let prompt_stderr_tail = Arc::clone(&stderr_tail_for_connection);
                             // Dropped when the result arrives (or the connection dies
                             // with the request pending) so the timeout thread below
                             // wakes immediately instead of sleeping the full window.
@@ -1267,9 +1274,10 @@ fn run_connection(
                                                 .await;
                                         }
                                         Err(error) => {
+                                            let report = stderr_tail_report(&prompt_stderr_tail);
                                             let _ = event_tx
                                                 .send(AcpEvent::TransportError(format!(
-                                                    "prompt failed: {error}"
+                                                    "prompt failed: {error}{report}"
                                                 )))
                                                 .await;
                                         }
@@ -1471,14 +1479,15 @@ fn run_connection(
                 operation,
                 duration,
             });
-        } else if let Err(error) = connection_result {
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
-                "ACP transport closed unexpectedly: {error}"
-            )));
         } else {
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(
-                "ACP transport closed unexpectedly".into(),
-            ));
+            let report = stderr_tail_report(&stderr_tail);
+            let detail = match connection_result {
+                Err(error) => format!(": {error}"),
+                Ok(()) => String::new(),
+            };
+            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
+                "ACP transport closed unexpectedly{detail}{report}"
+            )));
         }
     }
 }
@@ -1496,6 +1505,7 @@ type EventStreamSender = async_channel::Sender<AcpEvent>;
 async fn drain_stderr(
     stderr: impl futures::AsyncRead + Unpin,
     mcp_warnings: Arc<Mutex<Vec<String>>>,
+    tail: StderrTail,
 ) {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
@@ -1505,12 +1515,42 @@ async fn drain_stderr(
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim_end();
-                if !trimmed.is_empty() && looks_like_mcp_warning(trimmed) {
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if looks_like_mcp_warning(trimmed) {
                     push_mcp_warning(&mcp_warnings, trimmed.to_string());
                 }
+                push_stderr_tail(&tail, trimmed.to_string());
             }
         }
     }
+}
+
+type StderrTail = Arc<Mutex<VecDeque<String>>>;
+
+/// How much of the agent's stderr is kept for the death report. Enough for a
+/// stack trace's first frames, small enough to sit inside an error message.
+const MAX_STDERR_TAIL: usize = 20;
+
+fn push_stderr_tail(tail: &StderrTail, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        if tail.len() >= MAX_STDERR_TAIL {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+fn stderr_tail_report(tail: &StderrTail) -> String {
+    let lines = tail
+        .lock()
+        .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("\nagent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
 }
 
 /// The bound on [`AcpClient::mcp_warnings`] — a long session's stderr
