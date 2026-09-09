@@ -65,6 +65,9 @@ use crate::controls;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
+#[cfg(test)]
+mod perf_baseline;
+
 /// Context lines fetched for each change. Generous enough that the
 /// collapsed-context bands carry real counts ("27 hidden lines"), cheap
 /// enough to re-fetch on the refresh interval.
@@ -1036,7 +1039,12 @@ impl ChangesTab {
     /// path to what "Open diff" does with the mouse. Inside the Changes tab
     /// there is nothing to promote *to* (the tab is already the destination),
     /// so Enter expands the row there instead, matching what a click does.
-    fn on_change_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_change_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let rows = self.selectable_rows(DiffViewMode::get(cx));
         if rows.is_empty() {
             return;
@@ -1244,6 +1252,8 @@ impl ChangesTab {
     /// hold two independent states at once. An empty section is omitted;
     /// a collapsed section keeps only its header.
     fn section_rows(&self, mode: DiffViewMode) -> Vec<SectionRows> {
+        #[cfg(test)]
+        perf_baseline::section_build();
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
@@ -1409,9 +1419,13 @@ impl ChangesTab {
             row.hash_identity(&mut hasher);
         }
         let fingerprint = hasher.finish();
+        #[cfg(test)]
+        perf_baseline::list_build(rows.len());
         if fingerprint != self.list_fingerprint {
             let old_count = self.list_state.item_count();
             self.list_state.splice(0..old_count, rows.len());
+            #[cfg(test)]
+            perf_baseline::splice();
             self.list_fingerprint = fingerprint;
         }
         if self.reveal_selected {
@@ -1450,18 +1464,18 @@ impl ChangesTab {
             } => {
                 let is_selected = selected == Some(&(section, entry.path.clone()));
                 Self::render_change_file(
-                section,
-                entry,
-                stat,
-                drag_payload,
-                expanded,
-                allows_staging,
-                draws_open_diff,
-                is_selected,
-                entity,
-                theme,
-            )
-            .into_any_element()
+                    section,
+                    entry,
+                    stat,
+                    drag_payload,
+                    expanded,
+                    allows_staging,
+                    draws_open_diff,
+                    is_selected,
+                    entity,
+                    theme,
+                )
+                .into_any_element()
             }
             ChangeRow::Hunk {
                 section,
@@ -1548,14 +1562,13 @@ impl ChangesTab {
                 .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
                 .text_color(theme.text_faint)
+                .child(div().w(px(DIFF_HUNK_GUTTER_WIDTH)).flex_none().child("⋯"))
                 .child(
                     div()
-                        .w(px(DIFF_HUNK_GUTTER_WIDTH))
-                        .flex_none()
-                        .child("⋯"),
-                )
-                .child(
-                    div().min_w(px(0.0)).overflow_hidden().text_ellipsis().child(message),
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(message),
                 )
                 .into_any_element(),
         }
@@ -1957,18 +1970,8 @@ impl ChangesTab {
     ) -> impl IntoElement {
         let (background, marker_color, marker, text_color) = match line.origin {
             DiffOrigin::Context => (theme.surface, theme.text_faint, " ", theme.text_muted),
-            DiffOrigin::Addition => (
-                diff_wash(theme.diff_add),
-                theme.diff_add,
-                "+",
-                theme.text,
-            ),
-            DiffOrigin::Deletion => (
-                diff_wash(theme.diff_del),
-                theme.diff_del,
-                "-",
-                theme.text,
-            ),
+            DiffOrigin::Addition => (diff_wash(theme.diff_add), theme.diff_add, "+", theme.text),
+            DiffOrigin::Deletion => (diff_wash(theme.diff_del), theme.diff_del, "-", theme.text),
         };
         div()
             .id(format!(
@@ -2381,6 +2384,8 @@ impl ChangesTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        perf_baseline::render_body();
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
         }
@@ -2482,7 +2487,11 @@ impl ChangesTab {
                         )
                         .into_any_element(),
                         Some(ListRow::Change(row)) => Self::render_change_row(
-                            row.clone(),
+                            {
+                                #[cfg(test)]
+                                perf_baseline::draw_row_clone(row);
+                                row.clone()
+                            },
                             allows_staging,
                             draws_open_diff,
                             selected.as_ref(),
@@ -2595,6 +2604,8 @@ fn diff_wash(color: Rgba) -> Rgba {
 /// pane can receive. Binary files have no meaningful textual payload and do
 /// not advertise a drag source.
 fn diff_payload(diff: &FileDiff) -> Option<DiffPayload> {
+    #[cfg(test)]
+    perf_baseline::payload_call();
     if diff.is_binary {
         return None;
     }
@@ -2613,6 +2624,8 @@ fn diff_payload(diff: &FileDiff) -> Option<DiffPayload> {
             text.push('\n');
         }
     }
+    #[cfg(test)]
+    perf_baseline::payload_bytes(text.len());
     Some((diff.path.clone(), text))
 }
 
@@ -3120,7 +3133,9 @@ mod tests {
     }
 
     fn settled_changes_tab(repo_root: PathBuf) -> ChangesTab {
-        let entries = status(&repo_root).expect("status for settled Changes tab").entries;
+        let entries = status(&repo_root)
+            .expect("status for settled Changes tab")
+            .entries;
         ChangesTab {
             repo_root,
             source: ChangesSource::WorkingTree,
@@ -3178,9 +3193,7 @@ mod tests {
     /// the panel Enter promotes; in the tab there is nothing to promote to,
     /// so it expands the row the way a click does.
     #[gpui::test]
-    async fn return_promotes_the_selected_change_row_only_from_the_panel(
-        cx: &mut TestAppContext,
-    ) {
+    async fn return_promotes_the_selected_change_row_only_from_the_panel(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
@@ -3944,9 +3957,7 @@ mod tests {
     /// refresh, survive a successful refresh, and clear after a successful
     /// retry of the mutation.
     #[gpui::test]
-    async fn a_failed_stage_survives_refresh_and_recovers_after_retry(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_failed_stage_survives_refresh_and_recovers_after_retry(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
@@ -4100,9 +4111,7 @@ mod tests {
     /// row controls against a real checkout, rather than calling either
     /// operation directly.
     #[gpui::test]
-    async fn a_stage_requested_during_refresh_runs_after_refresh_finishes(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_stage_requested_during_refresh_runs_after_refresh_finishes(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
@@ -4125,7 +4134,10 @@ mod tests {
             tab.read_with(cx, |tab, _| section_count(tab, "Staged") == 1)
         });
         assert_eq!(
-            status(&dir.0).expect("status after queued stage").staged().len(),
+            status(&dir.0)
+                .expect("status after queued stage")
+                .staged()
+                .len(),
             1,
             "a Stage request made during refresh is executed after the refresh"
         );
@@ -4177,9 +4189,7 @@ mod tests {
     /// A mutation error from the real drawn Changes tab must survive the
     /// periodic refreshes that still succeed through the stale index lock.
     #[gpui::test]
-    async fn drawn_stage_error_stays_visible_across_periodic_refreshes(
-        cx: &mut TestAppContext,
-    ) {
+    async fn drawn_stage_error_stays_visible_across_periodic_refreshes(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
@@ -4223,7 +4233,9 @@ mod tests {
             std::fs::write(dir.0.join(&path), format!("tick {tick}\n"))
                 .expect("create refresh marker");
             wait_for_tab(&cx, &tab, |tab| {
-                tab.entries.iter().any(|entry| entry.path == Path::new(&path))
+                tab.entries
+                    .iter()
+                    .any(|entry| entry.path == Path::new(&path))
             });
             cx.cx.run_until_parked();
             assert!(
@@ -5723,7 +5735,7 @@ mod tests {
     // them.
     // ------------------------------------------------------------------
 
-    fn synthetic_big_diff_tab(lines: usize) -> ChangesTab {
+    pub(super) fn synthetic_big_diff_tab(lines: usize) -> ChangesTab {
         let path = PathBuf::from("src/big_file.rs");
         let mut diff_lines = Vec::with_capacity(lines);
         let mut old_no = 1usize;
