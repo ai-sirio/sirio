@@ -45,6 +45,7 @@ use self::icons::{Icon, IconElement, IconSize};
 use crate::right_panel::ActivityStatus;
 
 mod row;
+mod section;
 
 #[cfg(test)]
 use row::RowStatusGlyph;
@@ -3020,13 +3021,6 @@ impl Sidebar {
                             RowKind::Tab => tabs.push(row.clone()),
                             RowKind::NewWorktree => {
                                 append_worktree(&mut filtered, &mut worktree, &mut tabs);
-                                if project_matches
-                                    && project.expanded
-                                    && project.is_git
-                                    && project.path.is_some()
-                                {
-                                    filtered.push(row.clone());
-                                }
                             }
                             RowKind::Project => {}
                         }
@@ -4138,7 +4132,19 @@ impl Render for Sidebar {
         let mut row_views = std::mem::take(&mut self.row_views);
         let mut next_views = std::collections::HashMap::with_capacity(rows.len());
         let mut rendered_rows = Vec::with_capacity(rows.len());
-        for (index, row) in rows.into_iter().enumerate() {
+        for (index, row) in rows.iter().cloned().enumerate() {
+            if row.kind == RowKind::Project {
+                let worktree_count = rows[index + 1..]
+                    .iter()
+                    .take_while(|next| next.kind != RowKind::Project)
+                    .filter(|next| next.kind == RowKind::Worktree)
+                    .count();
+                rendered_rows.push(
+                    section::render_section(row, worktree_count, entity.clone(), theme)
+                        .into_any_element(),
+                );
+                continue;
+            }
             let project_id = project_ids.get(&row.id).cloned();
             let project_icon = project_id
                 .as_ref()
