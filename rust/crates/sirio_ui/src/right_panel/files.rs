@@ -94,7 +94,7 @@ pub(super) struct FileNode {
 }
 
 #[derive(Clone, Debug)]
-struct FileRow {
+pub(super) struct FileRow {
     node: FileNode,
     depth: usize,
 }
@@ -128,6 +128,10 @@ impl RightPanel {
         self.refresh_started = true;
         self.refresh_error = None;
         let repo_root = self.repo_root.clone();
+        self.refresh_generation += 1;
+        let refresh_generation = self.refresh_generation;
+        let walk_generation = self.walk_generation;
+        let expected_repo_root = repo_root.clone();
         self.walk_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -167,6 +171,15 @@ impl RightPanel {
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
+                let is_current_refresh = panel.refresh_generation == refresh_generation
+                    && panel.walk_generation == walk_generation
+                    && panel.repo_root == expected_repo_root;
+                if !is_current_refresh {
+                    if panel.refresh_generation == refresh_generation {
+                        panel.refresh_started = false;
+                    }
+                    return;
+                }
                 panel.walk_task = None;
                 panel.refresh_started = false;
                 // The walk finished. Whichever way it went, the panel now
@@ -187,6 +200,7 @@ impl RightPanel {
                         // expansion/children for any node the fresh walk
                         // still reports at the same path.
                         panel.file_tree = preserve_expansion(&panel.file_tree, tree);
+                        panel.rebuild_file_rows();
                         panel.refresh_error = None;
                     }
                     Err(error) => panel.refresh_error = Some(error),
@@ -259,6 +273,7 @@ impl RightPanel {
             node.read_error = None;
             (node.expanded, node.expanded && node.children.is_empty())
         };
+        self.rebuild_file_rows();
         if needs_walk {
             self.start_walk(path.to_path_buf(), cx);
         } else if !expanded {
@@ -300,6 +315,7 @@ impl RightPanel {
                         Ok(children) => node.children = children,
                         Err(error) => node.read_error = Some(error),
                     }
+                    panel.rebuild_file_rows();
                 }
                 cx.notify();
             });
@@ -434,9 +450,12 @@ impl RightPanel {
     }
 
     fn file_rows(&self) -> Vec<FileRow> {
-        let mut rows = Vec::new();
-        flatten_files(&self.file_tree, 0, &mut rows);
-        rows
+        self.flattened_file_rows.clone()
+    }
+
+    fn rebuild_file_rows(&mut self) {
+        self.flattened_file_rows.clear();
+        flatten_files(&self.file_tree, 0, &mut self.flattened_file_rows);
     }
 
     fn render_file_row(
@@ -904,11 +923,13 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
 /// blind replacement in `refresh()` silently collapsed every expanded
 /// folder on the next 1s tick.
 fn preserve_expansion(old: &[FileNode], new: Vec<FileNode>) -> Vec<FileNode> {
+    let old_by_path: HashMap<(&Path, bool), &FileNode> = old
+        .iter()
+        .map(|node| ((node.path.as_path(), node.is_dir), node))
+        .collect();
     new.into_iter()
         .map(|mut node| {
-            if let Some(old_node) = old
-                .iter()
-                .find(|candidate| candidate.path == node.path && candidate.is_dir == node.is_dir)
+            if let Some(old_node) = old_by_path.get(&(node.path.as_path(), node.is_dir))
                 && old_node.expanded
             {
                 node.expanded = true;

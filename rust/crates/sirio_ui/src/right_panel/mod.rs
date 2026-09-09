@@ -192,6 +192,7 @@ pub struct RightPanel {
     /// Files/Changes surface look current while serving stale data.
     worktree_selected: bool,
     file_tree: Vec<files::FileNode>,
+    flattened_file_rows: Vec<files::FileRow>,
     git_markers: files::GitMarkers,
     activity: Vec<ActivitySurface>,
     /// The in-flight folder-expansion walk, if any. Replaced (never
@@ -214,6 +215,9 @@ pub struct RightPanel {
     /// read (whose error panel would be replaced by the placeholder on every
     /// tick, hiding the Retry the user is trying to click).
     settled: bool,
+    /// Bumped whenever a root refresh is superseded. A completed refresh must
+    /// not publish data for an earlier checkout or walk.
+    refresh_generation: u64,
     refresh_error: Option<String>,
     selected_path: Option<PathBuf>,
     file_focus: Option<FocusHandle>,
@@ -282,11 +286,13 @@ impl RightPanel {
             allowed_roots: vec![repo_root],
             worktree_selected: true,
             file_tree: Vec::new(),
+            flattened_file_rows: Vec::new(),
             git_markers: files::GitMarkers::default(),
             activity: Vec::new(),
             walk_task: None,
             refresh_started: false,
             settled: false,
+            refresh_generation: 0,
             refresh_error: None,
             selected_path: None,
             file_focus: None,
@@ -361,6 +367,7 @@ impl RightPanel {
         }
         self.worktree_selected = false;
         self.file_tree.clear();
+        self.flattened_file_rows.clear();
         self.git_markers = files::GitMarkers::default();
         self.selected_path = None;
         self.refresh_error = None;
@@ -369,6 +376,10 @@ impl RightPanel {
         self.changes_subscriptions.clear();
         self.history = None;
         self.history_subscription = None;
+        self.refresh_started = false;
+        self.refresh_generation += 1;
+        self.walk_task = None;
+        self.walk_generation += 1;
         cx.notify();
     }
 
@@ -398,6 +409,7 @@ impl RightPanel {
         self.worktree_selected = true;
         self.repo_root = repo_root;
         self.file_tree.clear();
+        self.flattened_file_rows.clear();
         self.git_markers = files::GitMarkers::default();
         self.selected_path = None;
         self.refresh_error = None;
@@ -407,6 +419,9 @@ impl RightPanel {
         self.history = None;
         self.history_subscription = None;
         self.settled = false;
+        self.refresh_started = false;
+        self.refresh_generation += 1;
+        self.walk_task = None;
         self.walk_generation += 1;
         cx.notify();
     }

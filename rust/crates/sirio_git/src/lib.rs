@@ -63,7 +63,7 @@ pub use diff::{
 pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, directory_statuses};
 pub use error::{GitActionError, GitError};
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
-pub use graph::{GraphRow, layout};
+pub use graph::{GraphRow, LayoutChunk, LayoutCursor, extend_layout, layout};
 pub use ignored::{IgnoredPaths, ignored_paths, parse_ignored};
 pub use log::{CommitRecord, GitLog, LogFilter, looks_like_hash, parse_log};
 pub use remote::{GitRemote, github_owner, project_name};
