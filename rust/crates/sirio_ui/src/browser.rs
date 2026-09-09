@@ -26,13 +26,13 @@ use gpui::{
     div, prelude::*, px, relative,
 };
 use raw_window_handle::HasWindowHandle;
-#[cfg(target_os = "linux")]
-use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HandleError, RawWindowHandle, Win32WindowHandle, WindowHandle};
+#[cfg(target_os = "linux")]
+use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
+use sirio_theme::Theme;
 #[cfg(target_os = "windows")]
 use std::num::NonZeroIsize;
-use sirio_theme::Theme;
 
 use sirio_ui::loading;
 use wry::{
@@ -1194,7 +1194,9 @@ fn steal_win32_focus_to_parent(parent_isize: isize) {
         System::Threading::{AttachThreadInput, GetCurrentThreadId},
         UI::{
             Input::KeyboardAndMouse::{GetFocus, SetFocus},
-            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow},
+            WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+            },
         },
     };
     let parent = parent_isize as HWND;
@@ -1289,10 +1291,7 @@ fn should_forward_accelerator_to_host(ctrl: bool, shift: bool, alt: bool, vk: u3
         return vk == VK_ESCAPE && !shift;
     }
     if shift {
-        matches!(
-            vk,
-            VK_P | VK_L | VK_D | VK_R | VK_H | VK_B | VK_W | VK_TAB
-        )
+        matches!(vk, VK_P | VK_L | VK_D | VK_R | VK_H | VK_B | VK_W | VK_TAB)
     } else {
         matches!(
             vk,
@@ -1553,7 +1552,7 @@ impl BrowserSurface {
             // #255: armed on first render, never here -- see `ensure_pump_task`.
             let pump_task = None;
 
-            return Self {
+            Self {
                 state,
                 address_field,
                 address_focused: false,
@@ -1566,7 +1565,7 @@ impl BrowserSurface {
                 events: Vec::new(),
                 pump_task,
                 startup_failure,
-            };
+            }
         }
         #[cfg(target_os = "windows")]
         {
@@ -1582,13 +1581,10 @@ impl BrowserSurface {
             // child) and build the child from a foreground task with no
             // borrow held. The HWND is captured here -- cheap, pump-free --
             // because the `Window` cannot cross the spawn boundary.
-            let startup_failure =
-                pending_startup_failure(webview_runtime_missing(), startup_error);
+            let startup_failure = pending_startup_failure(webview_runtime_missing(), startup_error);
             let parent_hwnd = capture_window_hwnd(window).ok();
-            let should_defer = !matches!(
-                startup_failure,
-                Some(StartupFailure::RuntimeMissing)
-            ) && parent_hwnd.is_some();
+            let should_defer = !matches!(startup_failure, Some(StartupFailure::RuntimeMissing))
+                && parent_hwnd.is_some();
             // A HWND capture failure without a runtime-missing explanation
             // still needs words in place of the content.
             let startup_failure = match (startup_failure, parent_hwnd) {
@@ -1615,8 +1611,10 @@ impl BrowserSurface {
             if should_defer {
                 let parent_hwnd = parent_hwnd.expect("deferred only when HWND captured");
                 cx.spawn(async move |this, cx| {
-                    let attempt =
-                        this.update(cx, |surface, _| surface.take_retry_attempt()).ok().flatten();
+                    let attempt = this
+                        .update(cx, |surface, _| surface.take_retry_attempt())
+                        .ok()
+                        .flatten();
                     let Some(attempt) = attempt else {
                         return;
                     };
@@ -1762,8 +1760,7 @@ impl BrowserSurface {
         use webview2_com::{
             AcceleratorKeyPressedEventHandler,
             Microsoft::Web::WebView2::Win32::{
-                COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
-                COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+                COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
             },
         };
         use wry::WebViewExtWindows;
@@ -1776,8 +1773,7 @@ impl BrowserSurface {
         };
         let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
             use windows_sys::Win32::UI::{
-                Input::KeyboardAndMouse::GetKeyState,
-                WindowsAndMessaging::PostMessageW,
+                Input::KeyboardAndMouse::GetKeyState, WindowsAndMessaging::PostMessageW,
             };
             let Some(args) = args else {
                 return Ok(());
@@ -1803,8 +1799,12 @@ impl BrowserSurface {
             const VK_CONTROL: i32 = 0x11;
             const VK_MENU: i32 = 0x12;
             let held = |vk: i32| unsafe { (GetKeyState(vk) as u16 & 0x8000) != 0 };
-            if !should_forward_accelerator_to_host(held(VK_CONTROL), held(VK_SHIFT), held(VK_MENU), vk)
-            {
+            if !should_forward_accelerator_to_host(
+                held(VK_CONTROL),
+                held(VK_SHIFT),
+                held(VK_MENU),
+                vk,
+            ) {
                 return Ok(());
             }
             steal_win32_focus_to_parent(parent_hwnd);
@@ -2950,29 +2950,29 @@ mod tests {
     fn host_chords_are_forwarded_from_the_page() {
         // Window commands, palette, settings, pane/tab chords.
         for (ctrl, shift, alt, vk) in [
-            (true, false, false, 0x4C), // Ctrl+L — Focus Address Bar
-            (true, true, false, 0x50), // Ctrl+Shift+P — palette
-            (true, true, false, 0x4C), // Ctrl+Shift+L — New Browser
-            (true, true, false, 0x44), // Ctrl+Shift+D — sidebar (#374 Windows)
-            (true, true, false, 0x52), // Ctrl+Shift+R — right panel (#374 Windows)
-            (true, true, false, 0x48), // Ctrl+Shift+H — restore launch (#374 Windows)
-            (true, true, false, 0x42), // Ctrl+Shift+B — secondary pane
-            (true, true, false, 0x57), // Ctrl+Shift+W — close tab
-            (true, false, false, 0x54), // Ctrl+T — new terminal
-            (true, false, false, 0x4F), // Ctrl+O — open file
-            (true, false, false, 0x53), // Ctrl+S — save file
-            (true, false, false, 0x57), // Ctrl+W — close tab
-            (true, false, false, 0x4B), // Ctrl+K — palette fallback
-            (true, false, false, 0xBC), // Ctrl+, — settings
+            (true, false, false, 0x4C),  // Ctrl+L — Focus Address Bar
+            (true, true, false, 0x50),   // Ctrl+Shift+P — palette
+            (true, true, false, 0x4C),   // Ctrl+Shift+L — New Browser
+            (true, true, false, 0x44),   // Ctrl+Shift+D — sidebar (#374 Windows)
+            (true, true, false, 0x52),   // Ctrl+Shift+R — right panel (#374 Windows)
+            (true, true, false, 0x48),   // Ctrl+Shift+H — restore launch (#374 Windows)
+            (true, true, false, 0x42),   // Ctrl+Shift+B — secondary pane
+            (true, true, false, 0x57),   // Ctrl+Shift+W — close tab
+            (true, false, false, 0x54),  // Ctrl+T — new terminal
+            (true, false, false, 0x4F),  // Ctrl+O — open file
+            (true, false, false, 0x53),  // Ctrl+S — save file
+            (true, false, false, 0x57),  // Ctrl+W — close tab
+            (true, false, false, 0x4B),  // Ctrl+K — palette fallback
+            (true, false, false, 0xBC),  // Ctrl+, — settings
             (false, false, false, 0x1B), // Escape — close settings/palette
-            (true, false, false, 0x09), // Ctrl+Tab — cycle tab
-            (true, true, false, 0x09), // Ctrl+Shift+Tab — cycle back
-            (true, false, false, 0x31), // Ctrl+1 — jump to tab
-            (true, false, false, 0x39), // Ctrl+9 — jump to tab
-            (true, false, true, 0x25), // Ctrl+Alt+Left — focus pane
-            (true, false, true, 0x28), // Ctrl+Alt+Down — focus pane
-            (true, false, true, 0x57), // Ctrl+Alt+W — close pane
-            (true, true, true, 0x27), // Ctrl+Alt+Shift+Right — split pane
+            (true, false, false, 0x09),  // Ctrl+Tab — cycle tab
+            (true, true, false, 0x09),   // Ctrl+Shift+Tab — cycle back
+            (true, false, false, 0x31),  // Ctrl+1 — jump to tab
+            (true, false, false, 0x39),  // Ctrl+9 — jump to tab
+            (true, false, true, 0x25),   // Ctrl+Alt+Left — focus pane
+            (true, false, true, 0x28),   // Ctrl+Alt+Down — focus pane
+            (true, false, true, 0x57),   // Ctrl+Alt+W — close pane
+            (true, true, true, 0x27),    // Ctrl+Alt+Shift+Right — split pane
         ] {
             assert!(
                 should_forward_accelerator_to_host(ctrl, shift, alt, vk),
@@ -2985,25 +2985,25 @@ mod tests {
     fn page_keys_stay_in_the_page() {
         for (ctrl, shift, alt, vk) in [
             (false, false, false, 0x41), // typing
-            (true, false, false, 0x41), // Ctrl+A — page select-all
-            (true, false, false, 0x43), // Ctrl+C — copy
-            (true, false, false, 0x56), // Ctrl+V — paste
-            (true, false, false, 0x58), // Ctrl+X — cut
-            (true, false, false, 0x5A), // Ctrl+Z — undo
+            (true, false, false, 0x41),  // Ctrl+A — page select-all
+            (true, false, false, 0x43),  // Ctrl+C — copy
+            (true, false, false, 0x56),  // Ctrl+V — paste
+            (true, false, false, 0x58),  // Ctrl+X — cut
+            (true, false, false, 0x5A),  // Ctrl+Z — undo
             (false, false, false, 0x25), // arrows — page scroll/caret
             (false, false, false, 0x74), // F5 — reload
-            (true, false, false, 0x52), // Ctrl+R — reload
-            (true, false, false, 0x50), // Ctrl+P — print
-            (true, false, false, 0x46), // Ctrl+F — find
-            (true, false, false, 0x4E), // Ctrl+N — no host binding
-            (true, false, false, 0x44), // Ctrl+D — no host binding
-            (true, true, false, 0x53), // Ctrl+Shift+S — OS hotkey, never arrives (#374)
-            (true, true, false, 0x49), // Ctrl+Shift+I — OS hotkey, never arrives (#374)
-            (true, true, false, 0x4F), // Ctrl+Shift+O — OS hotkey, never arrives (#374)
-            (false, false, true, 0x25), // Alt+Left — history back
-            (true, false, true, 0x51), // AltGr+Q typing — must not steal
-            (true, false, false, 0x1B), // Ctrl+Esc — Start menu, never swallow
-            (false, true, false, 0x1B), // Shift+Esc — never swallow
+            (true, false, false, 0x52),  // Ctrl+R — reload
+            (true, false, false, 0x50),  // Ctrl+P — print
+            (true, false, false, 0x46),  // Ctrl+F — find
+            (true, false, false, 0x4E),  // Ctrl+N — no host binding
+            (true, false, false, 0x44),  // Ctrl+D — no host binding
+            (true, true, false, 0x53),   // Ctrl+Shift+S — OS hotkey, never arrives (#374)
+            (true, true, false, 0x49),   // Ctrl+Shift+I — OS hotkey, never arrives (#374)
+            (true, true, false, 0x4F),   // Ctrl+Shift+O — OS hotkey, never arrives (#374)
+            (false, false, true, 0x25),  // Alt+Left — history back
+            (true, false, true, 0x51),   // AltGr+Q typing — must not steal
+            (true, false, false, 0x1B),  // Ctrl+Esc — Start menu, never swallow
+            (false, true, false, 0x1B),  // Shift+Esc — never swallow
             (false, false, false, 0x7B), // F12 — devtools
         ] {
             assert!(
@@ -3611,7 +3611,9 @@ mod tests {
             pending,
             "success must not clear the pending fallback error"
         );
-        let engine_error = Some(StartupFailure::Failed("WebView2 child failed: boom".to_owned()));
+        let engine_error = Some(StartupFailure::Failed(
+            "WebView2 child failed: boom".to_owned(),
+        ));
         assert_eq!(
             deferred_install_failure(pending, engine_error.clone(), false),
             engine_error,

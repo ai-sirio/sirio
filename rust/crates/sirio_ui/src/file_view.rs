@@ -1527,7 +1527,7 @@ impl EditableLine {
                 (
                     span.range,
                     HighlightStyle {
-                        color: Some(color.into()),
+                        color: Some(color),
                         ..Default::default()
                     },
                 )
