@@ -88,6 +88,8 @@ mod panes;
 mod session;
 mod shell_chrome;
 mod tab_machinery;
+#[allow(dead_code)] // Parked transition seam; main.rs remains synchronous for now.
+mod worktree_transition;
 
 /// Test-only trace of GPUI's actual paint phase. The zero-layout probe is
 /// deliberately inert in production builds, but its `Element::paint` callback
@@ -7432,7 +7434,6 @@ impl SirioWorkspace {
         else {
             return Err(format!("unknown worktree: {}", requested_path.display()));
         };
-
         let old_path = self.working_directory.clone();
         let old_sidebar_id = self.sidebar_worktree_id(&old_path);
         let new_sidebar_id = self.sidebar_worktree_id(&selected_path);
@@ -7920,7 +7921,6 @@ impl SirioWorkspace {
     ) -> Result<Vec<(String, String)>, String> {
         let snapshot = self.launch_snapshot.clone();
         self.select_worktree(snapshot.working_directory.clone(), Some(window), cx)?;
-
         let current = self.layout(cx).tabs;
         let merged = merge_launch_snapshot_tabs(&snapshot.tabs, &current);
         let missing = merged.into_iter().skip(current.len()).collect::<Vec<_>>();

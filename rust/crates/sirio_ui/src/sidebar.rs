@@ -1907,22 +1907,35 @@ impl Sidebar {
         );
         cx.spawn_in(window, async move |sidebar, cx| {
             let choice = receiver.await.unwrap_or(2);
-            let _ = sidebar.update(cx, |sidebar, cx| match choice {
-                0 => {
-                    if let Err(error) = std::process::Command::new("git")
+            if choice == 1 {
+                let _ = sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::AddProject(path)));
+                return;
+            }
+            if choice != 0 {
+                return;
+            }
+
+            let init_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::process::Command::new("git")
                         .arg("init")
                         .arg("--quiet")
-                        .current_dir(&path)
+                        .current_dir(&init_path)
                         .status()
-                    {
-                        sidebar.notice = Some(format!("could not run git init: {error}"));
-                        cx.notify();
-                        return;
-                    }
-                    cx.emit(SidebarEvent::AddProject(path));
+                })
+                .await;
+            let _ = sidebar.update(cx, |sidebar, cx| match result {
+                Ok(status) if status.success() => cx.emit(SidebarEvent::AddProject(path)),
+                Ok(status) => {
+                    sidebar.notice = Some(format!("git init failed with status {status}"));
+                    cx.notify();
                 }
-                1 => cx.emit(SidebarEvent::AddProject(path)),
-                _ => {}
+                Err(error) => {
+                    sidebar.notice = Some(format!("could not run git init: {error}"));
+                    cx.notify();
+                }
             });
         })
         .detach();

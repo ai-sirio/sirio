@@ -29,10 +29,34 @@ pub struct GraphRow {
 }
 
 /// One live lane: the commit it is waiting for, and the colour it draws in.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Lane {
     expects: String,
     color: usize,
+}
+
+/// Opaque continuation state for an incremental graph layout.
+///
+/// The lane representation is deliberately private: callers can retain and
+/// replace the cursor, but cannot construct or modify graph state themselves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayoutCursor {
+    lanes: Vec<Option<Lane>>,
+    next_color: usize,
+}
+
+/// Rows produced by one layout page and the state needed to continue it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LayoutChunk {
+    pub rows: Vec<GraphRow>,
+    cursor: LayoutCursor,
+}
+
+impl LayoutChunk {
+    /// Returns the opaque state for laying out the next page.
+    pub fn cursor(&self) -> &LayoutCursor {
+        &self.cursor
+    }
 }
 
 /// Assigns every commit a column and the edges around it.
@@ -41,9 +65,20 @@ struct Lane {
 /// (newest first). Each commit takes the lane already expecting its sha, or
 /// the leftmost free column; its first parent inherits that lane, and every
 /// further parent takes the lane already expecting it or opens a new one.
-pub fn layout(commits: &[CommitRecord]) -> Vec<GraphRow> {
-    let mut lanes: Vec<Option<Lane>> = Vec::new();
-    let mut next_color = 0usize;
+pub fn layout(commits: &[CommitRecord]) -> LayoutChunk {
+    extend_layout(
+        &LayoutCursor {
+            lanes: Vec::new(),
+            next_color: 0,
+        },
+        commits,
+    )
+}
+
+/// Continues a graph layout from a previously returned cursor.
+pub fn extend_layout(cursor: &LayoutCursor, commits: &[CommitRecord]) -> LayoutChunk {
+    let mut lanes = cursor.lanes.clone();
+    let mut next_color = cursor.next_color;
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
@@ -134,7 +169,10 @@ pub fn layout(commits: &[CommitRecord]) -> Vec<GraphRow> {
         });
     }
 
-    rows
+    LayoutChunk {
+        rows,
+        cursor: LayoutCursor { lanes, next_color },
+    }
 }
 
 /// The leftmost hole, or a new column at the right edge. Reserved by leaving
@@ -188,7 +226,7 @@ mod tests {
             commit("c1", &[]),
         ];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         assert!(rows.iter().all(|row| row.lane == 0));
         assert!(rows.iter().all(|row| row.joins_in.is_empty()));
@@ -198,7 +236,7 @@ mod tests {
     fn the_last_row_of_a_linear_history_continues_nothing() {
         let commits = [commit("c2", &["c1"]), commit("c1", &[])];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         assert_eq!(rows[0].through, vec![Some(rows[0].color)]);
         assert!(rows[1].through.iter().all(Option::is_none));
@@ -214,7 +252,7 @@ mod tests {
             commit("base", &[]),
         ];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         assert_eq!(rows[0].lane, 0, "the merge sits on the lane it inherited");
         assert_eq!(
@@ -235,7 +273,7 @@ mod tests {
             commit("base", &[]),
         ];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         let base = &rows[3];
         assert_eq!(base.lane, 0);
@@ -255,7 +293,7 @@ mod tests {
             commit("orphan", &[]),
         ];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         assert_eq!(rows[4].lane, 0);
     }
@@ -270,7 +308,7 @@ mod tests {
             commit("base", &[]),
         ];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         assert_eq!(rows[2].lane, 1, "the side lane closes in column 1");
         assert_eq!(rows[3].lane, 1, "the hole is reused while main stays live");
@@ -285,7 +323,7 @@ mod tests {
             commit("base", &[]),
         ];
 
-        let rows = layout(&commits);
+        let rows = layout(&commits).rows;
 
         let opened_colour = rows[0].edges_out[0].1;
         assert_ne!(
@@ -296,6 +334,119 @@ mod tests {
 
     #[test]
     fn an_empty_history_lays_out_to_nothing() {
-        assert!(layout(&[]).is_empty());
+        assert!(layout(&[]).rows.is_empty());
+    }
+
+    fn assert_every_partition_matches_full_layout(commits: &[CommitRecord]) {
+        let expected = layout(commits).rows;
+        for split in 0..=commits.len() {
+            let first = layout(&commits[..split]);
+            let rest = extend_layout(first.cursor(), &commits[split..]);
+            let mut actual = first.rows;
+            actual.extend(rest.rows);
+            assert_eq!(actual, expected, "partition at {split}");
+        }
+    }
+
+    #[test]
+    fn a_linear_history_continues_across_pages() {
+        let commits = [
+            commit("c4", &["c3"]),
+            commit("c3", &["c2"]),
+            commit("c2", &["c1"]),
+            commit("c1", &[]),
+        ];
+
+        assert_every_partition_matches_full_layout(&commits);
+    }
+
+    #[test]
+    fn a_merge_split_across_pages_preserves_the_open_branch() {
+        let commits = [
+            commit("merge", &["main", "side"]),
+            commit("main", &["base"]),
+            commit("side", &["base"]),
+            commit("base", &[]),
+        ];
+
+        assert_every_partition_matches_full_layout(&commits);
+    }
+
+    #[test]
+    fn a_branch_convergence_split_across_pages_preserves_the_join() {
+        let commits = [
+            commit("tip", &["left", "right"]),
+            commit("left", &["base"]),
+            commit("right", &["base"]),
+            commit("base", &[]),
+        ];
+        let first = layout(&commits[..3]);
+        let rest = extend_layout(first.cursor(), &commits[3..]);
+
+        assert_eq!(
+            rest.rows[0].joins_in,
+            vec![(1, first.rows[0].edges_out[0].1)]
+        );
+        assert_eq!(
+            first.rows.into_iter().chain(rest.rows).collect::<Vec<_>>(),
+            layout(&commits).rows
+        );
+    }
+
+    #[test]
+    fn a_reused_hole_and_palette_continue_across_pages() {
+        let commits = [
+            commit("merge", &["main", "side"]),
+            commit("main", &["base"]),
+            commit("side", &[]),
+            commit("unrelated", &[]),
+            commit("base", &[]),
+        ];
+        let first = layout(&commits[..3]);
+        let rest = extend_layout(first.cursor(), &commits[3..]);
+
+        assert_eq!(rest.rows[0].lane, 1);
+        assert_eq!(rest.rows[0].color, layout(&commits).rows[3].color);
+        assert_eq!(
+            first.rows.into_iter().chain(rest.rows).collect::<Vec<_>>(),
+            layout(&commits).rows
+        );
+    }
+
+    #[test]
+    fn an_empty_layout_cursor_is_a_valid_fresh_reset() {
+        let commits = [commit("tip", &["base"]), commit("base", &[])];
+        let fresh = layout(&[]);
+        let continued = extend_layout(fresh.cursor(), &commits);
+
+        assert_eq!(continued.rows, layout(&commits).rows);
+    }
+
+    #[test]
+    fn every_representative_partition_is_strictly_equivalent() {
+        let fixtures = [
+            vec![
+                commit("c3", &["c2"]),
+                commit("c2", &["c1"]),
+                commit("c1", &[]),
+            ],
+            vec![
+                commit("merge", &["main", "side"]),
+                commit("main", &["base"]),
+                commit("side", &["base"]),
+                commit("base", &[]),
+            ],
+            vec![
+                commit("merge", &["main", "side"]),
+                commit("main", &["base"]),
+                commit("side", &[]),
+                commit("unrelated", &[]),
+                commit("base", &[]),
+            ],
+        ];
+
+        for fixture in fixtures {
+            assert_every_partition_matches_full_layout(&fixture);
+        }
     }
 }
