@@ -5341,8 +5341,8 @@ mod tests {
         row.comment = Some(String::new());
         assert_eq!(
             Sidebar::row_min_height(&row),
-            ROW_HEIGHT,
-            "an empty comment is not content, so it must not buy a second line"
+            CARD_TWO_LINE_HEIGHT,
+            "every worktree reserves the two-line card height"
         );
 
         row.comment = None;
@@ -5357,8 +5357,8 @@ mod tests {
         }];
         assert_eq!(
             Sidebar::row_min_height(&row),
-            ROW_HEIGHT,
-            "a long leaf title must keep the action-row height as its minimum"
+            CARD_TWO_LINE_HEIGHT,
+            "a worktree with a pill still reserves the two-line card height"
         );
     }
 
