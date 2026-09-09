@@ -89,6 +89,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
   dead-transport races are fixed at their fixture synchronization points; the common
   gate now uses `cargo test --workspace --no-fail-fast` so every binary reports results.
 - **Commit messages**: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`), lower-case imperative subject.
+- **Every commit bumps the version.** `[workspace.package] version` in `rust/Cargo.toml` moves with each commit: a `feat:` bumps the minor (`0.6.0` → `0.7.0`), every other type (`fix:`, `refactor:`, `docs:`, `test:`, `chore:`) bumps the patch (`0.6.0` → `0.6.1`). Write it with `Scripts/set-workspace-version.sh <version>` — the one writer of that line — and stage it in the same commit, never as a follow-up. `Scripts/check-release-version.sh` compares a release tag against exactly this value.
 - **UI**: always build on [bezel](https://github.com/crabtalk/bezel) (`bezel::ui`, `bezel::motion`, `bezel::theme`, `bezel::agent`) — never hand-roll a UI primitive it already provides. Its `gallery` crate (`cargo run -p gallery` in a bezel checkout) is the reference example for how each component looks and is used.
 - `Scripts/ci.sh` must print `CI OK` before a PR is opened — but the run happens **only on the user's explicit request**. An agent never launches `Scripts/ci.sh` or `Scripts/ci-linux.sh` autonomously; when the gate is needed, ask the user and wait. Iterate with `cargo build/test -p <crate>` instead.
 
