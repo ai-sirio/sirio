@@ -163,7 +163,7 @@ pub(super) fn render_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, TestAppContext, VisualTestContext};
+    use gpui::{Context, TestAppContext, VisualTestContext, point, size};
 
     fn sidebar_with_one_project(cx: &mut Context<Sidebar>) -> Sidebar {
         let mut sidebar = Sidebar::from_projects(
@@ -235,5 +235,49 @@ mod tests {
         cx.run_until_parked();
 
         assert!(cx.debug_bounds("sidebar-section-count-0").is_some());
+    }
+
+    fn sidebar_with_many_worktrees(cx: &mut Context<Sidebar>) -> Sidebar {
+        let root_path = PathBuf::from("/tmp/sirio-many-worktrees");
+        let worktrees = (0..12)
+            .map(|index| SidebarWorktree {
+                branch: format!("feature-{index}"),
+                path: root_path.join(format!("feature-{index}")),
+                is_primary: index == 0,
+                comment: None,
+            })
+            .collect();
+        Sidebar::from_projects(
+            vec![SidebarProject {
+                id: "sirio".to_string(),
+                name: "sirio".to_string(),
+                is_git: true,
+                root_path,
+                worktrees,
+            }],
+            cx,
+        )
+    }
+
+    /// Scrolled past its own header, a section still says which project you are
+    /// reading — the header is pinned to the top of the viewport.
+    #[gpui::test]
+    async fn a_scrolled_section_keeps_its_header_on_screen(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.open_window(size(px(325.0), px(620.0)), |_window, cx| {
+            sidebar_with_many_worktrees(cx)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        window
+            .update(&mut cx, |sidebar, _, cx| {
+                sidebar.list_scroll.set_offset(point(px(0.0), px(-400.0)));
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("sidebar-sticky-section").is_some());
     }
 }
