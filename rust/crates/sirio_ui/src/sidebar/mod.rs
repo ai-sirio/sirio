@@ -4574,6 +4574,52 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// A card's text runs out under a veil rather than stopping at an
+    /// ellipsis, which is the whole point of the Zed treatment: on a narrow
+    /// sidebar a branch name slides under the gradient instead of being cut
+    /// with a glyph. Both lines carry one, and the title no longer asks for
+    /// `text_ellipsis`.
+    #[gpui::test]
+    async fn a_card_fades_its_title_and_second_line_instead_of_clipping_them(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_id = window
+            .update(&mut cx, |sidebar, _, _| {
+                sidebar
+                    .visible_rows()
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree)
+                    .expect("the fixture draws a worktree card")
+                    .id
+            })
+            .unwrap();
+        // `debug_bounds` takes a static selector and the row ids are
+        // assigned at build time, so leak one string per lookup.
+        let title_fade: &'static str =
+            Box::leak(format!("sidebar-row-title-fade-{row_id}").into_boxed_str());
+        let subline_fade: &'static str =
+            Box::leak(format!("sidebar-row-subline-fade-{row_id}").into_boxed_str());
+
+        assert!(
+            cx.debug_bounds(title_fade).is_some(),
+            "the branch title carries the right-edge veil"
+        );
+        assert!(
+            cx.debug_bounds(subline_fade).is_some(),
+            "so does the second line"
+        );
+        assert_eq!(
+            cx.debug_bounds(title_fade).unwrap().size.width,
+            px(super::fade::FADE_WIDTH),
+            "the veil keeps the width the design took from Zed's sidebar"
+        );
+    }
+
     /// The filter saw titles only, so neither the annotation a person left
     /// on a worktree (`worktree.set`) nor the name of the agent parked in
     /// it could find the row they were looking for. Both are searchable
@@ -5154,7 +5200,7 @@ mod tests {
     }
 
     /// A project is a container even when empty, so it always carries a
-    /// chevron; a worktree only earns one once it has tab rows to hide.
+    /// chevron; worktree cards own their pills and do not add child rows.
     #[test]
     fn a_project_is_a_branch_even_without_children() {
         assert_eq!(
@@ -5172,7 +5218,7 @@ mod tests {
     }
 
     /// The filter follows the project rule one level down: a collapsed
-    /// worktree's tab rows stay hidden unless the query matches one of them.
+    /// worktree remains represented by its card when one of its pills matches.
     #[gpui::test]
     async fn filter_reveals_a_collapsed_worktrees_matching_tab_rows_only(
         cx: &mut gpui::TestAppContext,
@@ -5203,22 +5249,30 @@ mod tests {
             assert!(ids.contains(&1), "the worktree itself matches");
             assert!(
                 !ids.contains(&2),
-                "a non-matching tab row under a collapsed worktree stays hidden"
+                "a non-matching pill does not create a child row under a collapsed card"
             );
         });
 
         sidebar.update(cx, |sidebar, _| sidebar.filter = "chat".to_string());
         sidebar.read_with(cx, |sidebar, _| {
+            let visible = sidebar.visible_rows();
+            assert!(
+                visible.iter().any(|row| row.id == 1),
+                "a matching pill reveals its owning worktree card"
+            );
+            assert!(
+                visible.iter().all(|row| row.id < TAB_ROW_ID_OFFSET),
+                "matching pills do not create separate child rows"
+            );
             assert_eq!(
-                sidebar
-                    .rows
+                visible
                     .iter()
                     .find(|row| row.id == 1)
-                    .unwrap()
+                    .expect("the matching worktree card is visible")
                     .pills
                     .len(),
                 1,
-                "a matching tab pill remains available under a collapsed worktree"
+                "the matching pill remains on its collapsed worktree card"
             );
         });
     }
@@ -5227,7 +5281,7 @@ mod tests {
     /// switched away from) but still lists from the persisted strip. Its
     /// row is drawn under the worktree, offers no ✕ (there is no live tab
     /// to close), and a click asks the host to bring the worktree back with
-    /// that tab active rather than naming a tab id that does not exist.
+    /// that pill active rather than naming a tab id that does not exist.
     #[gpui::test]
     async fn parked_tab_rows_report_a_parked_selection_and_offer_no_close(
         cx: &mut gpui::TestAppContext,
@@ -5300,7 +5354,7 @@ mod tests {
                 event,
                 SidebarEvent::SelectParkedTab { path, index: 1 } if *path == repo
             )),
-            "clicking a parked tab row reports the worktree path and the tab's index, got {emitted:?}"
+            "clicking a parked pill reports the worktree path and the tab's index, got {emitted:?}"
         );
         assert!(
             !emitted
@@ -5310,8 +5364,8 @@ mod tests {
         );
     }
 
-    /// The host re-pushes a worktree's list on every sync: live tabs
-    /// replace parked rows in place, and an empty list clears either.
+    /// The host re-pushes a worktree's list on every sync: live pills replace
+    /// parked pills in place, and an empty list clears the card.
     #[gpui::test]
     async fn live_tabs_replace_parked_rows_and_an_empty_list_clears_them(
         cx: &mut gpui::TestAppContext,
@@ -7069,7 +7123,7 @@ mod tests {
         );
     }
 
-    /// The seam this port had one level down from the worktree row: a pane
+    /// The seam this port had one level down from the worktree card: a pane
     /// whose agent is identified **after** it started must change the *tab*
     /// row's mark, not only the worktree row's.
     ///
@@ -7079,7 +7133,7 @@ mod tests {
     /// from its OSC title, or by Layer D from its process name, which is how
     /// every agent Sirio did not spawn gets identified — shows its brand
     /// mark as soon as it is known. This port took the mark from a field
-    /// fixed at spawn, so those tab rows kept the generic terminal glyph
+    /// fixed at spawn, so those tab pills kept the generic terminal glyph
     /// forever while the worktree row above them already showed the brand.
     #[gpui::test]
     async fn drawn_tab_row_takes_the_mark_an_agent_earns_after_spawn(
@@ -7134,7 +7188,7 @@ mod tests {
 
         assert!(
             cx.debug_bounds(CLAUDE).is_some(),
-            "an agent identified after spawn changes the tab row's mark on screen"
+            "an agent identified after spawn changes the tab pill's mark on screen"
         );
         assert!(
             cx.debug_bounds(GENERIC).is_none(),
@@ -7193,7 +7247,7 @@ mod tests {
     }
 
     /// The third face of the same collision, and the one that outlived the
-    /// first fix: a tab row with **no** agent.
+    /// first fix: a tab pill with **no** agent.
     ///
     /// `running_tint_never_equals_a_status_colour_and_names_the_agent` pins
     /// the branded half. The unbranded half fell back to `tab_needs_input`,
@@ -7285,8 +7339,7 @@ mod tests {
     }
 
     /// F-CORE-ACT-22, drawn: the host's urgency order actually moves the
-    /// rows on screen, and a worktree takes its own tab rows with it rather
-    /// than leaving them orphaned under whatever row lands in its place.
+    /// worktree cards on screen, and each card takes its pill group with it.
     #[gpui::test]
     async fn drawn_worktree_order_moves_a_row_with_its_tab_rows(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
@@ -7351,7 +7404,7 @@ mod tests {
         let tab_selector = "sidebar-pill-3-0";
         let tab = cx
             .debug_bounds(tab_selector)
-            .expect("the moved worktree's tab pill");
+            .expect("the moved worktree's pill");
         assert!(
             urgent.origin.y < first.origin.y && urgent.origin.y < second.origin.y,
             "the urgent worktree is drawn above both siblings"
@@ -7362,7 +7415,7 @@ mod tests {
         );
         assert!(
             tab.origin.y > urgent.origin.y && tab.origin.y < first.origin.y,
-            "the worktree's tab row travelled with it"
+            "the worktree's pill travelled with its card"
         );
 
         // Idempotent: pushing the same order again changes nothing, which is
@@ -7577,10 +7630,8 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let first = cx.debug_bounds("sidebar-pill-1-0").expect("first tab pill");
-        let second = cx
-            .debug_bounds("sidebar-pill-1-1")
-            .expect("second tab pill");
+        let first = cx.debug_bounds("sidebar-pill-1-0").expect("first pill");
+        let second = cx.debug_bounds("sidebar-pill-1-1").expect("second pill");
         assert!(
             first.origin.x < second.origin.x,
             "pills stay ordered inside their card"
@@ -7600,7 +7651,7 @@ mod tests {
                     .len()
             }),
             2,
-            "the card owns both tab pills as one worktree group"
+            "the card owns both pills as one worktree group"
         );
     }
 

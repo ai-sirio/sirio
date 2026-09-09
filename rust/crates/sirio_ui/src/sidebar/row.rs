@@ -114,6 +114,37 @@ impl Render for RowView {
 }
 
 impl Sidebar {
+    /// The right-edge veil for one line of a card. A row's background moves
+    /// under the reader — `element_hover` on hover, `element_active` when
+    /// selected — so a veil painted once in the sidebar's own colour would
+    /// sit on a highlighted row as a visible patch. The selected colour is
+    /// known at render time; the hover one is handed to `group_hover` on
+    /// the row's group, which is the same three-colour switch Zed's
+    /// `GradientFade` makes.
+    fn row_fade(
+        row_id: usize,
+        line: &'static str,
+        selected: bool,
+        hover_group: gpui::SharedString,
+        theme: Theme,
+    ) -> gpui::Div {
+        let resting = if selected {
+            theme.element_active
+        } else {
+            theme.surface
+        };
+        let hovered = if selected {
+            theme.element_active
+        } else {
+            theme.element_hover
+        };
+        super::fade::fade_right(resting, super::fade::FADE_WIDTH)
+            .debug_selector(move || format!("sidebar-row-{line}-fade-{row_id}"))
+            .group_hover(hover_group, move |style| {
+                style.bg(super::fade::fade_gradient(hovered))
+            })
+    }
+
     pub(crate) fn status_text(row: &SidebarRow) -> Option<String> {
         match row.agent_status {
             Some(ActivityStatus::Running) => Some("running".to_owned()),
@@ -578,12 +609,12 @@ impl Sidebar {
                 RowStatusGlyph::None => div().into_any_element(),
             });
         let title_element = div()
+            .relative()
             .min_w_0()
             .flex_1()
             .whitespace_nowrap()
             .overflow_hidden()
             .debug_selector(move || format!("sidebar-row-title-{row_id}"))
-            .text_ellipsis()
             .line_height(px(ROW_TITLE_LINE_HEIGHT))
             .font_weight(if is_project {
                 FontWeight::SEMIBOLD
@@ -593,7 +624,14 @@ impl Sidebar {
             .when(parked_tab.is_some(), |this| {
                 this.text_color(theme.text_faint)
             })
-            .child(title);
+            .child(title)
+            .child(Self::row_fade(
+                row_id,
+                "title",
+                selected,
+                hover_group.clone().into(),
+                theme,
+            ));
         let title_line = div()
             .w_full()
             .flex()
@@ -643,11 +681,19 @@ impl Sidebar {
             .child(
                 div()
                     .debug_selector(move || format!("sidebar-row-subline-{row_id}"))
+                    .relative()
                     .min_w_0()
                     .flex_1()
                     .whitespace_nowrap()
                     .overflow_hidden()
-                    .child(Self::sub_line_text(&row)),
+                    .child(Self::sub_line_text(&row))
+                    .child(Self::row_fade(
+                        row_id,
+                        "subline",
+                        selected,
+                        hover_group.clone().into(),
+                        theme,
+                    )),
             )
             .child(Self::render_pills(
                 &row,
