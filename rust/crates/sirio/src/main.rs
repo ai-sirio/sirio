@@ -5375,12 +5375,7 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let before = self.project_catalog.clone();
-        let selected_path = self
-            .control_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .current_workspace()
-            .map(|workspace| PathBuf::from(&workspace.path));
+        let selected_path = self.selected_workspace_path();
         let mounted_paths = self.mounted_worktree_paths(excluded_path);
         let refreshed = if mounted_paths.is_empty() {
             self.project_catalog.refresh_project(id)
@@ -5388,7 +5383,23 @@ impl SirioWorkspace {
             self.project_catalog
                 .refresh_project_with_mounted_worktrees(id, &mounted_paths)
         };
-        if let Err(error) = refreshed {
+        self.apply_catalog_refresh(before, refreshed, selected_path, cx)
+    }
+
+    /// Shared tail of a catalog refresh: reconciles the sidebar/control state
+    /// against `self.project_catalog`, which the caller has already mutated
+    /// in place on success (or left untouched, matching `before`, on
+    /// error). Used by both the synchronous `refresh_catalog_project` and
+    /// the background-spawned focus-regain refresh below, so the two paths
+    /// cannot drift apart.
+    fn apply_catalog_refresh(
+        &mut self,
+        before: ProjectCatalog,
+        result: Result<(), String>,
+        selected_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Err(error) = result {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
             return false;
@@ -5412,6 +5423,14 @@ impl SirioWorkspace {
         changed
     }
 
+    fn selected_workspace_path(&self) -> Option<PathBuf> {
+        self.control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_workspace()
+            .map(|workspace| PathBuf::from(&workspace.path))
+    }
+
     fn refresh_project_for_path(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
         let Some((project_id, is_git_root)) = self
             .project_catalog
@@ -5431,6 +5450,66 @@ impl SirioWorkspace {
             return false;
         }
         self.refresh_catalog_project(&project_id, None, cx)
+    }
+
+    /// Background counterpart to [`Self::refresh_project_for_path`], used
+    /// only by the window-focus-regain branch in `render` (#114). `render`
+    /// cannot `.await` anything and must not block the frame on the
+    /// `git worktree list` subprocess `refresh_catalog_project` shells out
+    /// to (`ProjectCatalog::refresh_project`/
+    /// `refresh_project_with_mounted_worktrees` -> `discover_project`), so
+    /// this looks up the project id synchronously (cheap, in-memory only),
+    /// runs the actual discovery on the background executor against a
+    /// cloned catalog, and applies the result back through
+    /// `apply_catalog_refresh` once it lands -- fire-and-forget, the same
+    /// shape as `ChangesTab::refresh` (`sirio_ui/src/changes.rs`).
+    ///
+    /// Other `refresh_catalog_project` call sites (`add_project`,
+    /// `WorktreeCreated`/`WorktreeRemoved`) stay synchronous: they read the
+    /// freshly-discovered catalog immediately after the call returns, which
+    /// a background refresh would race.
+    fn refresh_project_for_path_in_background(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some((project_id, is_git_root)) = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| paths_name_the_same_document(&worktree.path, path))
+            })
+            .map(|project| (project.id.clone(), is_git_repository(&project.root_path)))
+        else {
+            return;
+        };
+        if !is_git_root {
+            return;
+        }
+        let before = self.project_catalog.clone();
+        let selected_path = self.selected_workspace_path();
+        let mounted_paths = self.mounted_worktree_paths(None);
+        let mut catalog = self.project_catalog.clone();
+        cx.spawn(async move |this, cx| {
+            let (catalog, result) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result = if mounted_paths.is_empty() {
+                        catalog.refresh_project(&project_id)
+                    } else {
+                        catalog.refresh_project_with_mounted_worktrees(&project_id, &mounted_paths)
+                    };
+                    (catalog, result)
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if result.is_ok() {
+                    workspace.project_catalog = catalog;
+                }
+                workspace.apply_catalog_refresh(before, result, selected_path, cx);
+            });
+        })
+        .detach();
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -14730,7 +14809,7 @@ impl Render for SirioWorkspace {
         self.keep_active_tab_visible(window, *Theme::get(cx));
         if !was_window_active && self.window_active {
             let working_directory = self.working_directory.clone();
-            self.refresh_project_for_path(&working_directory, cx);
+            self.refresh_project_for_path_in_background(&working_directory, cx);
             self.refresh_worktree_branches(cx);
         }
         // F-TERM-05: the "Set Title" modal's field claims focus on the first
@@ -26879,10 +26958,12 @@ mod tests {
             workspace
         });
 
-        workspace.update(cx, |workspace, cx| {
-            let worktree_id = workspace
+        let worktree_id = workspace.update(cx, |workspace, _cx| {
+            workspace
                 .sidebar_worktree_id(&repo)
-                .expect("the repo's worktree has a sidebar row");
+                .expect("the repo's worktree has a sidebar row")
+        });
+        let before = workspace.update(cx, |workspace, cx| {
             let before = workspace
                 .sidebar
                 .read(cx)
@@ -26894,23 +26975,41 @@ mod tests {
                 "the worktree lists its one open terminal tab: {before:?}"
             );
             assert!(before.0, "a worktree with tab rows starts expanded");
+            before
+        });
 
-            // Step one of the focus-regain branch in `render`.
+        // Step one of the focus-regain branch in `render`: fire-and-forget,
+        // so the sidebar must be untouched the instant the call returns --
+        // the git subprocess work only runs once the background task is
+        // polled.
+        workspace.update(cx, |workspace, cx| {
             let working_directory = workspace.working_directory.clone();
-            workspace.refresh_project_for_path(&working_directory, cx);
-            let after_project_refresh = workspace
-                .sidebar
-                .read(cx)
-                .worktree_disclosure(worktree_id);
-            assert_eq!(
-                after_project_refresh,
-                Some(before.clone()),
-                "refresh_project_for_path must keep the worktree's tab rows (and so its chevron)"
-            );
+            workspace.refresh_project_for_path_in_background(&working_directory, cx);
+        });
+        let immediately_after = workspace.update(cx, |workspace, cx| {
+            workspace.sidebar.read(cx).worktree_disclosure(worktree_id)
+        });
+        assert_eq!(
+            immediately_after,
+            Some(before.clone()),
+            "refresh_project_for_path_in_background must not block render: the sidebar is unchanged the instant the call returns"
+        );
 
-            // Step two, made to actually rebuild: HEAD moved while the app
-            // was in the background, exactly the #114 case.
-            git_test(&repo, &["checkout", "-q", "-b", "switched-while-unfocused"]);
+        cx.run_until_parked();
+
+        let after_project_refresh = workspace.update(cx, |workspace, cx| {
+            workspace.sidebar.read(cx).worktree_disclosure(worktree_id)
+        });
+        assert_eq!(
+            after_project_refresh,
+            Some(before.clone()),
+            "refresh_project_for_path_in_background must keep the worktree's tab rows (and so its chevron) once the background refresh lands"
+        );
+
+        // Step two, made to actually rebuild: HEAD moved while the app was
+        // in the background, exactly the #114 case.
+        git_test(&repo, &["checkout", "-q", "-b", "switched-while-unfocused"]);
+        workspace.update(cx, |workspace, cx| {
             assert!(
                 workspace.refresh_worktree_branches(cx),
                 "the branch flip under the app must be noticed"
@@ -26955,13 +27054,16 @@ mod tests {
             workspace
         });
 
-        workspace.update(cx, |workspace, cx| {
+        let other_id = workspace.update(cx, |workspace, cx| {
             let other_id = workspace
                 .sidebar_worktree_id(&other)
                 .expect("the second worktree has a sidebar row");
             // The reconcile reads the strip once and lists it as parked rows.
             workspace.mark_activity_dirty();
             workspace.sync_activity(cx);
+            other_id
+        });
+        let before = workspace.update(cx, |workspace, cx| {
             let before = workspace
                 .sidebar
                 .read(cx)
@@ -26976,19 +27078,35 @@ mod tests {
                 "the unselected worktree lists its two persisted chats as parked rows: {before:?}"
             );
             assert!(before.0, "a worktree with parked rows starts expanded");
-
-            let working_directory = workspace.working_directory.clone();
-            workspace.refresh_project_for_path(&working_directory, cx);
-            let after = workspace
-                .sidebar
-                .read(cx)
-                .worktree_disclosure(other_id);
-            assert_eq!(
-                after,
-                Some(before),
-                "refresh_project_for_path must keep the unselected worktree's parked rows (and so its chevron)"
-            );
+            before
         });
+
+        // Fire-and-forget: the parked rows must be untouched the instant the
+        // call returns, before the background refresh has had a chance to
+        // run.
+        workspace.update(cx, |workspace, cx| {
+            let working_directory = workspace.working_directory.clone();
+            workspace.refresh_project_for_path_in_background(&working_directory, cx);
+        });
+        let immediately_after = workspace.update(cx, |workspace, cx| {
+            workspace.sidebar.read(cx).worktree_disclosure(other_id)
+        });
+        assert_eq!(
+            immediately_after,
+            Some(before.clone()),
+            "refresh_project_for_path_in_background must not block render: the parked rows are unchanged the instant the call returns"
+        );
+
+        cx.run_until_parked();
+
+        let after = workspace.update(cx, |workspace, cx| {
+            workspace.sidebar.read(cx).worktree_disclosure(other_id)
+        });
+        assert_eq!(
+            after,
+            Some(before),
+            "refresh_project_for_path_in_background must keep the unselected worktree's parked rows (and so its chevron) once the background refresh lands"
+        );
     }
 
     /// #114: a catalog row's branch label must follow what its checkout
