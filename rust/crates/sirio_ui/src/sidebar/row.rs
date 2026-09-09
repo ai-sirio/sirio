@@ -7,6 +7,18 @@
 
 use super::*;
 
+/// A tab rendered inside its worktree row instead of as a separate tree row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarPill {
+    pub tab_id: Option<usize>,
+    pub parked_tab: Option<usize>,
+    pub title: String,
+    pub icon: Icon,
+    pub brand: Option<AgentBrandColor>,
+    pub status: Option<ActivityStatus>,
+    pub selected: bool,
+}
+
 /// What the leading status column of a worktree (or collapsed project) row
 /// draws — a port of `TillerCore/SidebarGlyph.swift`'s `SidebarGlyphKind`,
 /// with the extra `Idle` case the Rust `ActivityStatus` carries folded onto
@@ -62,10 +74,6 @@ pub(super) struct RowInputs {
     pub(super) row: SidebarRow,
     pub(super) index: usize,
     pub(super) cursor: bool,
-    /// Whether the row has rows under it in the full tree — a worktree's
-    /// tab rows, which may be hidden by its own disclosure. Decides the
-    /// tree shape (`Sidebar::tree_row`), so it is an input like the rest.
-    pub(super) has_children: bool,
     pub(super) project_id: Option<String>,
     pub(super) project_icon: Option<ProjectIcon>,
     pub(super) drag: Option<RowDrag>,
@@ -88,7 +96,7 @@ impl Render for RowView {
         let theme = *Theme::get(cx);
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let inputs = self.inputs.clone();
-        let row_shape = Sidebar::tree_row(&inputs.row, inputs.has_children);
+        let row_shape = Sidebar::tree_row(&inputs.row);
         // Boxed here: the opaque return type of `render_row` captures the
         // borrow of `bezel_theme`, which ends with this frame's render.
         Sidebar::render_row(
@@ -146,16 +154,12 @@ impl Sidebar {
 
     /// The structural row handed to bezel. Sirio keeps the data and content;
     /// bezel owns branch/leaf identity, indentation, disclosure and chrome.
-    /// The bezel tree shape of one row. A project is a container even when
-    /// empty and always carries a chevron; a worktree earns one only while
-    /// it has tab rows to hide (`has_children`), so an idle worktree with
-    /// nothing under it does not grow a disclosure that opens onto nothing.
-    pub(super) fn tree_row(row: &SidebarRow, has_children: bool) -> tree::Row {
+    /// The bezel tree shape of one row. Projects retain their disclosure;
+    /// worktrees are leaves because their tabs are pills inside the row.
+    pub(super) fn tree_row(row: &SidebarRow) -> tree::Row {
         match row.kind {
             RowKind::Project => tree::Row::branch(0, row.expanded),
-            RowKind::Worktree if has_children => tree::Row::branch(1, row.expanded),
-            RowKind::Worktree | RowKind::NewWorktree => tree::Row::leaf(1),
-            RowKind::Tab => tree::Row::leaf(2),
+            RowKind::Worktree => tree::Row::leaf(0),
         }
     }
 
@@ -216,12 +220,6 @@ impl Sidebar {
             // as the tint of the status indicator and as the trailing badge
             // — see `set_worktree_activity`.
             RowKind::Worktree => Icon::GitBranch,
-            RowKind::Tab => row.agent_icon.unwrap_or(match row.tab_kind {
-                Some(TabKind::Terminal) => Icon::SquareTerminal,
-                Some(TabKind::Editor | TabKind::Diff) => Icon::File,
-                _ => Icon::MessageSquare,
-            }),
-            RowKind::NewWorktree => Icon::Plus,
         }
     }
 
@@ -261,11 +259,6 @@ impl Sidebar {
         // per distinct running agent, 3px apart, 7px clear of the title. It
         // takes its width out of the title's, so a busy worktree truncates
         // its branch name instead of pushing the hover controls off the row.
-        let running_agents: Vec<AgentMark> = if kind == RowKind::Worktree {
-            row.running_agents.clone()
-        } else {
-            Vec::new()
-        };
         // A glyph only appears for a notable status — matching the
         // reference. A collapsed project also gets one (F-SID-06): its
         // worktree rows are hidden, so `row.agent_status` was pre-aggregated
@@ -289,10 +282,7 @@ impl Sidebar {
                 .as_ref()
                 .map(|icon| icon.tint.resolve(theme))
                 .unwrap_or_else(|| Self::project_color(&title)),
-            RowKind::Tab => {
-                Self::tab_row_icon_color(row.agent_brand, row.agent_icon.is_some(), theme)
-            }
-            RowKind::Worktree | RowKind::NewWorktree => theme.text_faint,
+            RowKind::Worktree => theme.text_faint,
         };
         let entity = entity.clone();
         let remove_entity = entity.clone();
@@ -324,11 +314,7 @@ impl Sidebar {
                 .into_any_element(),
         };
 
-        let row_debug_selector = if kind == RowKind::NewWorktree {
-            "new-worktree-row".to_string()
-        } else {
-            format!("sidebar-row-{row_id}")
-        };
+        let row_debug_selector = format!("sidebar-row-{row_id}");
         let mut row_view = tree::tree_row(bezel_theme, &row_shape, selected, cursor)
             .text_size(theme.typography.scaled(12.5))
             .id(row_id)
@@ -359,10 +345,6 @@ impl Sidebar {
                     }
                     match kind {
                         RowKind::Project => sidebar.toggle_project(row_id, cx),
-                        RowKind::NewWorktree => {
-                            sidebar.begin_worktree_prompt(row_id, window, cx);
-                        }
-                        RowKind::Tab => {}
                         RowKind::Worktree => {
                             // Report the click to the host; the host decides
                             // what actually becomes selected and confirms by
@@ -459,15 +441,6 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-worktree-mark-{row_id}-{name}"))
                         .child(project_mark)
                         .into_any_element()
-                } else if kind == RowKind::Tab {
-                    // A tab row names its glyph the same way, so a drawn test
-                    // can assert that a pane identified after spawn actually
-                    // changed the mark on screen rather than only in a field.
-                    let name = Self::icon_selector_name(glyph);
-                    slot.id(("sidebar-tab-mark", row_id))
-                        .debug_selector(move || format!("sidebar-tab-mark-{row_id}-{name}"))
-                        .child(project_mark)
-                        .into_any_element()
                 } else {
                     slot.child(project_mark).into_any_element()
                 }
@@ -547,50 +520,6 @@ impl Sidebar {
                             IconElement::new(Icon::Close, IconSize::XSmall)
                                 .text_color(theme.text_faint),
                         ),
-                )
-            })
-            // F-CORE-ACT-18: `AgentActivityModel::running_agent_ids` already
-            // de-duplicated these and put them in `AgentCatalog` order, so
-            // the badge draws them left to right exactly as handed over —
-            // it never re-sorts and never de-duplicates again.
-            .when(!running_agents.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id(("sidebar-running-agents", row_id))
-                        .debug_selector(move || format!("sidebar-running-agents-{row_id}"))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(3.0))
-                        .children(running_agents.iter().enumerate().map(|(index, mark)| {
-                            div()
-                                .id(("sidebar-running-agent", row_id * 16 + index))
-                                .debug_selector({
-                                    let name = Self::icon_selector_name(mark.icon);
-                                    move || format!("sidebar-running-agent-{row_id}-{name}")
-                                })
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                // Each mark in its own brand. Every mark used
-                                // to be tinted `theme.text`, a
-                                // coral near enough to Claude's brand to read
-                                // as it, so a Codex or Pi mark was drawn in
-                                // Claude's colour. Shape carried identity;
-                                // colour actively contradicted it. Codex is the
-                                // one exception: its mark is drawn in
-                                // `theme.text` (white) like everywhere else
-                                // in the app — tab bar and status bar never
-                                // use its blue brand hex, so the badge must
-                                // not be the only blue Codex mark on screen.
-                                .child(IconElement::new(mark.icon, IconSize::Small).text_color(
-                                    if matches!(mark.icon, Icon::Codex) {
-                                        theme.text
-                                    } else {
-                                        mark.brand.color()
-                                    },
-                                ))
-                        })),
                 )
             })
             .when_some(tab_id, |this, tab_id| {
