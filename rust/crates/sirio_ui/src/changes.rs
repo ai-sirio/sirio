@@ -707,22 +707,39 @@ impl ChangesTab {
         }
     }
 
-    fn apply_snapshot(&mut self, snapshot: GitSnapshot) {
+    fn apply_snapshot(&mut self, snapshot: GitSnapshot, cx: &mut Context<Self>) {
         // A file that leaves the status list forgets its expansion; a file
         // that merely changes section (staged → unstaged) forgets it too —
         // the old (section, path) key no longer exists.
         self.expanded_changes
             .retain(|(_, path)| snapshot.entries.iter().any(|entry| &entry.path == path));
+        // A lazy refresh only re-fetches diffs for expanded rows (see
+        // `load_worktree_snapshot`), so `diffs`/`diff_errors` cannot simply
+        // be replaced wholesale by this snapshot's -- that would evict a
+        // collapsed row's already-cached diff on every tick, for a path
+        // this refresh never even asked git about. A path this refresh did
+        // fetch always takes the fresh result (in whichever of the two maps
+        // it landed); a path it left alone keeps whatever it had; a path
+        // that dropped out of the entry list entirely (staged away,
+        // reverted) is dropped from both.
+        let live_paths: HashSet<&PathBuf> =
+            snapshot.entries.iter().map(|entry| &entry.path).collect();
+        self.diffs.retain(|path, _| live_paths.contains(path));
+        self.diff_errors.retain(|path, _| live_paths.contains(path));
+        for path in snapshot.diffs.keys().chain(snapshot.diff_errors.keys()) {
+            self.diffs.remove(path);
+            self.diff_errors.remove(path);
+        }
+        self.diffs.extend(snapshot.diffs);
+        self.diff_errors.extend(snapshot.diff_errors);
         self.entries = snapshot.entries;
         self.stats = snapshot.stats;
-        self.diffs = snapshot.diffs;
-        self.diff_errors = snapshot.diff_errors;
         // F-CHG-13: replay a focus_path request that raced this snapshot.
         // Applied at most once — if the path still isn't present (e.g. it
         // was reverted before the snapshot came back), there is nothing
         // further to wait for.
         if let Some(path) = self.pending_focus.take() {
-            self.apply_focus(&path);
+            self.apply_focus(&path, cx);
         }
     }
 
@@ -732,16 +749,19 @@ impl ChangesTab {
         }
         let repo_root = self.repo_root.clone();
         let source = self.source.clone();
+        let expanded_paths = self.expanded_paths_for_load();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load_snapshot(&repo_root, &source) })
+                .background_spawn(async move {
+                    load_snapshot(&repo_root, &source, expanded_paths.as_ref())
+                })
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
                 tab.has_loaded = true;
                 match result {
                     Ok(snapshot) => {
-                        tab.apply_snapshot(snapshot);
+                        tab.apply_snapshot(snapshot, cx);
                         if !tab.git_error_from_mutation {
                             tab.git_error = None;
                         }
@@ -755,6 +775,18 @@ impl ChangesTab {
                 cx.notify();
             });
         }));
+    }
+
+    /// The diff-fetch scope for the next snapshot load: `None` (fetch every
+    /// entry) before the surface has ever settled, `Some(paths)` (fetch only
+    /// what's expanded) afterward. See `load_worktree_snapshot`.
+    fn expanded_paths_for_load(&self) -> Option<HashSet<PathBuf>> {
+        self.has_loaded.then(|| {
+            self.expanded_changes
+                .iter()
+                .map(|(_, path)| path.clone())
+                .collect()
+        })
     }
 
     /// Arms the periodic refresh loop: once immediately, then on the
@@ -810,6 +842,7 @@ impl ChangesTab {
         }
         let repo_root = self.repo_root.clone();
         let source = self.source.clone();
+        let expanded_paths = self.expanded_paths_for_load();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move {
@@ -817,7 +850,7 @@ impl ChangesTab {
                     let snapshot = result
                         .as_ref()
                         .ok()
-                        .map(|_| load_snapshot(&repo_root, &source));
+                        .map(|_| load_snapshot(&repo_root, &source, expanded_paths.as_ref()));
                     (result, snapshot)
                 })
                 .await;
@@ -827,7 +860,7 @@ impl ChangesTab {
                 let next_operation = tab.pending_operations.pop_front();
                 match outcome {
                     (Ok(()), Some(Ok(snapshot))) => {
-                        tab.apply_snapshot(snapshot);
+                        tab.apply_snapshot(snapshot, cx);
                         tab.git_error = None;
                         tab.git_error_from_mutation = false;
                     }
@@ -1042,8 +1075,52 @@ impl ChangesTab {
             self.expanded_changes.remove(&key);
         } else {
             self.expanded_changes.insert(key);
+            self.fetch_expanded_diff(path.to_path_buf(), cx);
         }
         cx.notify();
+    }
+
+    /// Fetches one file's full diff in the background and merges it into
+    /// `self.diffs` once it lands, rather than leaving a just-expanded row
+    /// waiting on the next periodic tick (up to `CHANGES_REFRESH_INTERVAL`
+    /// away) to show anything.
+    ///
+    /// A no-op when the diff (or its failure) is already cached: the first
+    /// load fetches every entry eagerly, so this only does real work for a
+    /// row a lazy refresh had dropped, or a fresh diff a mutation-triggered
+    /// refresh raced ahead of.
+    fn fetch_expanded_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) {
+            return;
+        }
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .cloned()
+        else {
+            return;
+        };
+        let repo_root = self.repo_root.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    diff_entry(&repo_root, &entry, CHANGES_CONTEXT_LINES)
+                })
+                .await;
+            let _ = this.update(cx, |tab, cx| {
+                match result {
+                    Ok(diff) => {
+                        tab.diffs.insert(path, diff);
+                    }
+                    Err(error) => {
+                        tab.diff_errors.insert(path, error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// F-CHG-13: `RightPanelActionEvent::OpenDiff(path)` and
@@ -1064,13 +1141,13 @@ impl ChangesTab {
             self.pending_focus = Some(path.to_path_buf());
             return;
         }
-        self.apply_focus(path);
+        self.apply_focus(path, cx);
         cx.notify();
     }
 
     /// Expands and un-collapses every section containing `path`. Returns
     /// whether any section matched, so callers can decide whether to defer.
-    fn apply_focus(&mut self, path: &Path) -> bool {
+    fn apply_focus(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
@@ -1086,6 +1163,9 @@ impl ChangesTab {
                 self.expanded_changes.insert((section, path.to_path_buf()));
                 matched = true;
             }
+        }
+        if matched {
+            self.fetch_expanded_diff(path.to_path_buf(), cx);
         }
         matched
     }
@@ -2705,16 +2785,38 @@ where
 /// than lying.
 /// Loads the snapshot this surface displays: the working tree's status, or
 /// one commit's files, depending on the source.
-fn load_snapshot(repo_root: &Path, source: &ChangesSource) -> Result<GitSnapshot, String> {
+///
+/// `expanded_paths` scopes the full-diff fetch for the working tree: `None`
+/// fetches every entry's diff (the first load, so the surface has something
+/// to show the instant a row is expanded); `Some(paths)` fetches only the
+/// diffs for rows actually expanded right now. A commit view ignores it —
+/// see `load_commit_snapshot`.
+fn load_snapshot(
+    repo_root: &Path,
+    source: &ChangesSource,
+    expanded_paths: Option<&HashSet<PathBuf>>,
+) -> Result<GitSnapshot, String> {
     match source {
-        ChangesSource::WorkingTree => load_worktree_snapshot(repo_root),
+        ChangesSource::WorkingTree => load_worktree_snapshot(repo_root, expanded_paths),
         ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
     }
 }
 
-/// The working-tree snapshot: `git status` entries, per-file stats and
-/// diffs against HEAD. Untouched by the commit view.
-fn load_worktree_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
+/// The working-tree snapshot: `git status` entries, per-file stats always,
+/// and diffs against HEAD only for `expanded_paths` (`None` means every
+/// entry). Untouched by the commit view.
+///
+/// This is the surface's hot loop: `ensure_refresh` re-runs it every
+/// `CHANGES_REFRESH_INTERVAL` for as long as the tab is visible. Fetching
+/// every entry's diff unconditionally here once meant one `git diff`
+/// subprocess per changed file, every tick — 50+ processes a second on a
+/// large agent-driven changeset, for rows nobody had expanded. `stats`
+/// stays unconditional: it is one batched call, not one process per file,
+/// and a collapsed row's header still shows real +/− counts.
+fn load_worktree_snapshot(
+    repo_root: &Path,
+    expanded_paths: Option<&HashSet<PathBuf>>,
+) -> Result<GitSnapshot, String> {
     let entries = status(repo_root)
         .map_err(|error| error.to_string())?
         .entries;
@@ -2722,6 +2824,11 @@ fn load_worktree_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
     let mut diffs = HashMap::new();
     let mut diff_errors = HashMap::new();
     for entry in &entries {
+        if let Some(expanded_paths) = expanded_paths {
+            if !expanded_paths.contains(&entry.path) {
+                continue;
+            }
+        }
         match diff_entry(repo_root, entry, CHANGES_CONTEXT_LINES) {
             Ok(diff) => {
                 diffs.insert(entry.path.clone(), diff);
@@ -3205,6 +3312,85 @@ mod tests {
         pump_until(cx, || {
             tab.read_with(cx, |tab, _| {
                 tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
+            })
+        });
+    }
+
+    /// The bug this fix targets, reproduced through the real refresh path
+    /// rather than the bare function: a large agent-driven edit lands a new
+    /// changed file while the tab stays open and nothing has been expanded
+    /// for it. A periodic-style refresh (`refresh()` called again once the
+    /// surface has already settled -- the shape of every tick
+    /// `ensure_refresh` arms) must not spend a `git diff` process on that
+    /// row just because `git status` now reports it; its cheap batched stat
+    /// still arrives, same as every other row.
+    #[gpui::test]
+    async fn a_periodic_refresh_never_fetches_a_diff_for_a_newly_seen_collapsed_row(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("f0.txt"), "v0\n").expect("seed first changed file");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 1));
+        assert!(
+            tab.read_with(cx, |tab, _| tab.diffs.contains_key(Path::new("f0.txt"))),
+            "the first load fetches the only entry's diff up front"
+        );
+
+        // The external edit: a second changed file appears while nothing
+        // new is expanded.
+        std::fs::write(dir.0.join("f1.txt"), "v1\n").expect("seed second changed file");
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 2));
+
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                !tab.diffs.contains_key(Path::new("f1.txt")),
+                "a periodic-style refresh must not fetch a diff for a row nobody expanded"
+            );
+            assert!(
+                tab.diffs.contains_key(Path::new("f0.txt")),
+                "an already-cached diff for a still-live, still-collapsed row survives the refresh"
+            );
+            assert_eq!(
+                tab.stats.len(),
+                2,
+                "the cheap batched stats cover the new row too"
+            );
+        });
+    }
+
+    /// Expanding a row whose diff isn't cached (e.g. a lazy refresh dropped
+    /// it while it was collapsed) fetches it immediately instead of waiting
+    /// for the next periodic tick.
+    #[gpui::test]
+    async fn expanding_a_row_missing_its_diff_fetches_it_at_once(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.diffs.contains_key(Path::new("tracked.txt"))
+            })
+        });
+
+        // Simulate a diff that a lazy refresh dropped because the row was
+        // collapsed at the time, without running a whole refresh cycle.
+        tab.update(cx, |tab, _| {
+            tab.diffs.remove(Path::new("tracked.txt"));
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.toggle_change(ChangeSection::Changed, Path::new("tracked.txt"), cx);
+        });
+
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.diffs.contains_key(Path::new("tracked.txt"))
             })
         });
     }
@@ -4529,7 +4715,7 @@ mod tests {
     fn a_missing_git_reports_spawn_not_silence() {
         let missing =
             std::env::temp_dir().join(format!("sirio-changes-missing-{}", std::process::id()));
-        let error = load_snapshot(&missing, &ChangesSource::WorkingTree)
+        let error = load_snapshot(&missing, &ChangesSource::WorkingTree, None)
             .expect_err("no repo, no git: the load must fail");
         assert!(
             error.contains("failed to spawn git"),
@@ -4538,6 +4724,56 @@ mod tests {
         assert!(
             error.contains("No such file"),
             "the OS error is included so the user can act: {error}"
+        );
+    }
+
+    /// The perf bug this fix targets: `load_worktree_snapshot` used to call
+    /// `diff_entry` for every changed file, every load — one `git diff`
+    /// subprocess per file regardless of whether its row was expanded. With
+    /// `expanded_paths` scoping the fetch, only the rows actually expanded
+    /// get a diff; the rest keep their (cheap, batched) stat but no diff
+    /// text, and `None` still means "fetch everything" for the first load.
+    #[test]
+    fn load_worktree_snapshot_only_fetches_diffs_for_expanded_paths() {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        for index in 0..5 {
+            std::fs::write(dir.0.join(format!("f{index}.txt")), format!("v{index}\n"))
+                .expect("seed changed file");
+        }
+
+        let expanded: HashSet<PathBuf> =
+            [PathBuf::from("f0.txt"), PathBuf::from("f2.txt")].into();
+        let snapshot = load_worktree_snapshot(&dir.0, Some(&expanded))
+            .expect("snapshot load must succeed");
+
+        assert_eq!(
+            snapshot.entries.len(),
+            5,
+            "status still reports every changed file"
+        );
+        assert_eq!(
+            snapshot.stats.len(),
+            5,
+            "the cheap batched stats still cover every file, expanded or not"
+        );
+        assert_eq!(
+            snapshot.diffs.len(),
+            2,
+            "only the expanded paths get a fetched diff: {:?}",
+            snapshot.diffs.keys().collect::<Vec<_>>()
+        );
+        assert!(snapshot.diffs.contains_key(Path::new("f0.txt")));
+        assert!(snapshot.diffs.contains_key(Path::new("f2.txt")));
+        assert!(!snapshot.diffs.contains_key(Path::new("f1.txt")));
+        assert!(!snapshot.diffs.contains_key(Path::new("f3.txt")));
+        assert!(!snapshot.diffs.contains_key(Path::new("f4.txt")));
+
+        let eager = load_worktree_snapshot(&dir.0, None).expect("eager load must succeed");
+        assert_eq!(
+            eager.diffs.len(),
+            5,
+            "a `None` scope (the first load) still fetches every diff"
         );
     }
 
