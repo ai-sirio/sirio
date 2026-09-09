@@ -21,7 +21,7 @@ use bezel::ui::popover::{self, Popup};
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba,
+    MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba, ScrollHandle,
     StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{
@@ -635,6 +635,7 @@ pub struct Sidebar {
     /// every spinner frame as the spinner's ancestor — would drag every row
     /// along with it.
     cache_rows: bool,
+    list_scroll: ScrollHandle,
 }
 
 impl Sidebar {
@@ -766,6 +767,7 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            list_scroll: ScrollHandle::new(),
         }
     }
 
@@ -873,7 +875,36 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            list_scroll: ScrollHandle::new(),
         }
+    }
+
+    /// Which section header belongs at the top of the viewport: the last one
+    /// whose own offset has already scrolled past. Heights are known, so this
+    /// stays arithmetic over the flattened list rather than requiring a
+    /// measurement pass.
+    fn sticky_section(&self, rows: &[SidebarRow]) -> Option<SidebarRow> {
+        let scrolled = -self.list_scroll.offset().y.as_f32();
+        if scrolled <= 0.0 {
+            return None;
+        }
+
+        let mut offset = 0.0;
+        let mut current = None;
+        for row in rows {
+            if offset > scrolled {
+                break;
+            }
+            if row.kind == RowKind::Project {
+                current = Some(row.clone());
+            }
+            let height = match row.kind {
+                RowKind::Project => section::SECTION_HEIGHT,
+                _ => CARD_TWO_LINE_HEIGHT,
+            };
+            offset += height + ROW_V_GAP;
+        }
+        current
     }
 
     pub fn set_projects(&mut self, projects: Vec<SidebarProject>, cx: &mut Context<Self>) {
@@ -4051,6 +4082,7 @@ impl Render for Sidebar {
             theme.install_into_bezel(cx);
         }
         let rows = self.visible_rows();
+        let sticky_section = self.sticky_section(&rows);
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
@@ -4370,7 +4402,9 @@ impl Render for Sidebar {
                     .flex_1()
                     .min_h(px(0.0))
                     .h_full()
+                    .relative()
                     .overflow_y_scroll()
+                    .track_scroll(&self.list_scroll)
                     // Rows reorder during the drag, so the row originally
                     // under the pointer may be a different entity by
                     // mouse-up. Commit against this stable drop surface;
@@ -4384,7 +4418,31 @@ impl Render for Sidebar {
                             .flex_none()
                             .gap(px(ROW_V_GAP))
                             .children(rendered_rows),
-                    ),
+                    )
+                    .when_some(sticky_section, |this, row| {
+                        let worktree_count = rows
+                            .iter()
+                            .skip_while(|candidate| candidate.id != row.id)
+                            .skip(1)
+                            .take_while(|candidate| candidate.kind != RowKind::Project)
+                            .filter(|candidate| candidate.kind == RowKind::Worktree)
+                            .count();
+                        this.child(
+                            div()
+                                .debug_selector(|| "sidebar-sticky-section".to_owned())
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(section::SECTION_HEIGHT))
+                                .child(section::render_section(
+                                    row,
+                                    worktree_count,
+                                    entity.clone(),
+                                    theme,
+                                )),
+                        )
+                    }),
             )
             .when(notice.is_some(), |this| {
                 this.child(
