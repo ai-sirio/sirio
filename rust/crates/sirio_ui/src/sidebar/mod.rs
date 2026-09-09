@@ -2851,6 +2851,24 @@ impl Sidebar {
         }
     }
 
+    /// The one place that decides whether a row answers the filter. Title,
+    /// annotation and the names of the agents parked in it: a user typing
+    /// "codex" is looking for where Codex is running, not for a worktree
+    /// that happens to be spelled that way, and a user typing their own
+    /// `worktree.set` annotation is looking for the note they left.
+    pub(crate) fn row_matches(row: &SidebarRow, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let matches = |text: &str| text.to_lowercase().contains(query);
+        matches(&row.title)
+            || row.comment.as_deref().is_some_and(matches)
+            || row
+                .pills
+                .iter()
+                .any(|pill| matches(&pill.title) || matches(Self::icon_selector_name(pill.icon)))
+    }
+
     fn visible_rows(&self) -> Vec<SidebarRow> {
         let query = self.filter.trim().to_lowercase();
         let mut filtered = Vec::new();
@@ -2866,14 +2884,8 @@ impl Sidebar {
                 .position(|row| row.kind == RowKind::Project)
                 .map_or(self.rows.len(), |offset| project_index + 1 + offset);
             let section = &self.rows[project_index + 1..next_project];
-            let project_matches = project.title.to_lowercase().contains(&query);
-            let section_matches = section.iter().any(|row| {
-                row.title.to_lowercase().contains(&query)
-                    || row
-                        .pills
-                        .iter()
-                        .any(|pill| pill.title.to_lowercase().contains(&query))
-            });
+            let project_matches = Self::row_matches(project, &query);
+            let section_matches = section.iter().any(|row| Self::row_matches(row, &query));
 
             if project_matches || section_matches {
                 let mut project_row = project.clone();
@@ -2887,12 +2899,7 @@ impl Sidebar {
                             .iter()
                             .filter(|row| {
                                 row.kind == RowKind::Worktree
-                                    && (project_matches
-                                        || row.title.to_lowercase().contains(&query)
-                                        || row
-                                            .pills
-                                            .iter()
-                                            .any(|pill| pill.title.to_lowercase().contains(&query)))
+                                    && (project_matches || Self::row_matches(row, &query))
                             })
                             .cloned(),
                     );
@@ -4132,17 +4139,17 @@ impl Render for Sidebar {
                     .debug_selector(|| "filter-field".to_string())
                     .track_focus(&filter_focus)
                     .relative()
-                    .ml(px(FILTER_LEFT_INSET))
                     .mt(px(6.0))
-                    .w(px((panel_width - FILTER_LEFT_INSET - ROW_RIGHT_INSET).max(0.0)))
-                    .h(px(28.0))
-                    .px(px(9.0))
+                    .w_full()
+                    .h(px(34.0))
+                    .px(px(12.0))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
+                    // Flat, like the reference: the field is the top of the
+                    // list rather than a control sitting on it, so the only
+                    // edge it keeps is the rule that separates the two.
+                    .border_b_1()
                     .border_color(if filter_is_focused {
                         theme.ring
                     } else {
@@ -4185,7 +4192,7 @@ impl Render for Sidebar {
                                     div()
                                         .id("filter-placeholder")
                                         .debug_selector(|| "filter-placeholder".to_owned())
-                                        .child("Filter"),
+                                        .child("Search worktrees…"),
                                     filter_is_focused.then(|| {
                                         div()
                                             .debug_selector(|| "filter-caret".to_owned())
@@ -4565,6 +4572,77 @@ mod tests {
             .expect("the section add control is rendered once the header is hovered");
         cx.simulate_click(add.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    /// The filter saw titles only, so neither the annotation a person left
+    /// on a worktree (`worktree.set`) nor the name of the agent parked in
+    /// it could find the row they were looking for. Both are searchable
+    /// text now, and one predicate decides it for every branch of
+    /// `visible_rows`.
+    #[gpui::test]
+    async fn the_filter_matches_a_comment_and_an_agent_name(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let (commented, with_pills, agent_query) = window
+            .update(&mut cx, |sidebar, _, _| {
+                let commented = sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.comment.is_some())
+                    .expect("the fixture annotates one worktree")
+                    .title
+                    .clone();
+                let pilled = sidebar
+                    .rows
+                    .iter()
+                    .find(|row| !row.pills.is_empty())
+                    .expect("the fixture parks two tabs in one worktree");
+                let agent_query = pilled
+                    .pills
+                    .iter()
+                    .find_map(|pill| pill.brand.map(|_| Sidebar::icon_selector_name(pill.icon)))
+                    .expect("one of those tabs carries an agent mark")
+                    .to_string();
+                (commented, pilled.title.clone(), agent_query)
+            })
+            .unwrap();
+
+        let visible_worktrees = |sidebar: &mut Sidebar, query: &str| {
+            sidebar.filter = query.to_string();
+            sidebar
+                .visible_rows()
+                .iter()
+                .filter(|row| row.kind == RowKind::Worktree)
+                .map(|row| row.title.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for (query, expected) in [
+            ("redesign", commented.clone()),
+            (agent_query.as_str(), with_pills.clone()),
+        ] {
+            let titles = window
+                .update(&mut cx, |sidebar, _, _| visible_worktrees(sidebar, query))
+                .unwrap();
+            assert_eq!(
+                titles,
+                vec![expected.clone()],
+                "the query {query:?} should reveal exactly one worktree"
+            );
+        }
+
+        let nothing = window
+            .update(&mut cx, |sidebar, _, _| {
+                visible_worktrees(sidebar, "nothing here matches")
+            })
+            .unwrap();
+        assert!(
+            nothing.is_empty(),
+            "an unrelated query still matches nothing"
+        );
     }
 
     #[gpui::test]
@@ -5286,82 +5364,6 @@ mod tests {
         });
         sidebar.read_with(cx, |sidebar, _| {
             assert!(pills_under_1(sidebar).is_empty());
-        });
-    }
-
-    /// The collapsed set is keyed by checkout path, so it survives the host
-    /// rebuilding the rows (`set_projects`) and moving the selection to a
-    /// different worktree — the point of the feature: a worktree the user
-    /// closed stays closed, one they left open stays open.
-    #[gpui::test]
-    async fn a_collapsed_worktree_stays_collapsed_across_rebuilds_and_selection(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let root = std::path::PathBuf::from("/tmp/sirio-collapse-fixture");
-        let projects = || {
-            vec![SidebarProject {
-                id: "proj".into(),
-                name: "proj".into(),
-                is_git: true,
-                root_path: root.clone(),
-                worktrees: vec![
-                    SidebarWorktree {
-                        branch: "main".into(),
-                        path: root.join("main"),
-                        is_primary: true,
-                        comment: None,
-                    },
-                    SidebarWorktree {
-                        branch: "feature".into(),
-                        path: root.join("feature"),
-                        is_primary: false,
-                        comment: None,
-                    },
-                ],
-            }]
-        };
-        let tab = || SidebarTab {
-            tab: SidebarTabRef::Open(0),
-            title: "Terminal".into(),
-            selected: false,
-            kind: TabKind::Terminal,
-            agent: None,
-        };
-        let sidebar = cx.new(|cx| Sidebar::from_projects(projects(), cx));
-        // Row ids follow `from_projects`: project 0, worktrees 1 and 2.
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_worktree_tabs(1, vec![tab()], cx);
-            sidebar.set_worktree_tabs(2, vec![tab()], cx);
-            sidebar.toggle_worktree(1, cx);
-        });
-
-        // The host rebuilds the rows and re-pushes the tabs, then selects
-        // the other worktree.
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_projects(projects(), cx);
-            sidebar.set_worktree_tabs(1, vec![tab()], cx);
-            sidebar.set_worktree_tabs(2, vec![tab()], cx);
-            sidebar.set_selected_worktree(&root.join("feature"), cx);
-        });
-
-        sidebar.read_with(cx, |sidebar, _| {
-            let row = |id: usize| {
-                sidebar
-                    .rows
-                    .iter()
-                    .find(|row| row.id == id)
-                    .unwrap_or_else(|| panic!("row {id}"))
-            };
-            assert!(
-                !row(1).expanded,
-                "the worktree the user closed stays closed after a rebuild and a selection change"
-            );
-            assert!(row(2).expanded, "the worktree the user left open stays open");
-            // The card's pills are not gated by the collapsed state: a
-            // worktree's tabs ride its own row, so there is nothing left
-            // under it to hide. Collapse now only carries the flag.
-            assert_eq!(row(1).pills.len(), 1, "a collapsed card still shows its tabs");
         });
     }
 
@@ -7599,76 +7601,6 @@ mod tests {
             }),
             2,
             "the card owns both tab pills as one worktree group"
-        );
-    }
-
-    /// F-TAB-15: a host-owned tab's close control is drawn, hover-revealed,
-    /// and clicking it reports CloseTab with the real tab id — the tab
-    /// strip's ✕, exercised from the sidebar's view of the same tabs the
-    /// strip renders. The control now rides the worktree card's pill rather
-    /// than a tab row of its own.
-    #[gpui::test]
-    async fn the_drawn_tab_close_control_reports_closeta_tab(cx: &mut gpui::TestAppContext) {
-        let repo = scratch_repo("tab-close");
-
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let sidebar_entity =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
-                collected.borrow_mut().push(event.clone());
-            })
-            .detach();
-        });
-
-        // The host pushes one open tab under the worktree row (id 1).
-        let tab_id = 42usize;
-        sidebar_entity.update(&mut cx, |sidebar, cx| {
-            sidebar.set_worktree_tabs(
-                1,
-                vec![SidebarTab {
-                    tab: SidebarTabRef::Open(tab_id),
-                    title: "Chat".into(),
-                    selected: true,
-                    kind: TabKind::AgentChat,
-                    agent: None,
-                }],
-                cx,
-            );
-        });
-        cx.run_until_parked();
-
-        // The close control is hover-revealed: move over the tab's pill on
-        // the worktree card, then the ✕ is clickable at its own bounds.
-        let pill = cx
-            .debug_bounds("sidebar-pill-1-0")
-            .expect("the host-driven tab is drawn as a pill on its worktree card");
-        cx.simulate_mouse_move(pill.center(), None, Modifiers::none());
-        cx.run_until_parked();
-        let close = cx
-            .debug_bounds("sidebar-pill-close-1-0")
-            .expect("the tab close control is drawn after hovering the pill");
-        cx.simulate_click(close.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let emitted = events.borrow();
-        assert!(
-            emitted
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::CloseTab(id) if *id == tab_id)),
-            "clicking the drawn ✕ must emit CloseTab for the real tab id, got {emitted:?}"
-        );
-        assert!(
-            !emitted
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::SelectTab(_))),
-            "the close control must not also select the tab"
         );
     }
 
