@@ -592,6 +592,7 @@ pub struct Sidebar {
     filter: String,
     filter_focus: FocusHandle,
     tree_cursor: usize,
+    pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
     /// Shared blink state for every sidebar text field's insertion caret
     /// (filter, project-settings card, worktree prompt). One is enough:
@@ -757,6 +758,7 @@ impl Sidebar {
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             tree_cursor: 0,
+            pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
@@ -842,6 +844,7 @@ impl Sidebar {
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             tree_cursor: 0,
+            pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
@@ -2021,6 +2024,7 @@ impl Sidebar {
 
     fn tree_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
         let rows = self.visible_rows();
+        self.pill_cursor = None;
         if rows.is_empty() {
             self.tree_cursor = 0;
             return;
@@ -2047,10 +2051,45 @@ impl Sidebar {
         cx.notify();
     }
 
+    fn pill_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        let Some(row) = rows.get(self.tree_cursor) else {
+            self.pill_cursor = None;
+            return;
+        };
+        let pill_count = row.pills.len();
+        match direction {
+            tree::Direction::Left => {
+                self.pill_cursor = self.pill_cursor.and_then(|index| index.checked_sub(1));
+            }
+            tree::Direction::Right => {
+                self.pill_cursor = match self.pill_cursor {
+                    None if pill_count > 0 => Some(0),
+                    Some(index) if index + 1 < pill_count => Some(index + 1),
+                    cursor => cursor,
+                };
+            }
+            tree::Direction::Up | tree::Direction::Down => return,
+        }
+        cx.notify();
+    }
+
     fn focus_tree_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.tree_cursor = index;
+        self.pill_cursor = None;
         self.tree_focus.focus(window, cx);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    fn focus_row_with_pills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree_cursor = self
+            .visible_rows()
+            .iter()
+            .position(|row| row.kind == RowKind::Worktree && !row.pills.is_empty())
+            .expect("the fixture has a worktree with pills");
+        self.pill_cursor = None;
+        self.tree_focus.focus(window, cx);
     }
 
     fn select_row(&mut self, id: usize, cx: &mut Context<Self>) {
@@ -3938,6 +3977,7 @@ impl Render for Sidebar {
             let inputs = RowInputs {
                 drag: row_drags.get(&row.id).copied(),
                 cursor: index == tree_cursor,
+                pill_cursor: (index == tree_cursor).then_some(self.pill_cursor).flatten(),
                 index,
                 project_id,
                 project_icon,
@@ -4138,6 +4178,23 @@ impl Render for Sidebar {
                     .debug_selector(|| "sidebar-tree".to_owned())
                     .key_context(tree::KEY_CONTEXT)
                     .track_focus(&tree_focus)
+                    .on_key_down(cx.listener(|sidebar, event: &KeyDownEvent, _, cx| {
+                        if event.keystroke.key != "backspace" {
+                            return;
+                        }
+                        let Some(pill_index) = sidebar.pill_cursor else {
+                            return;
+                        };
+                        let Some(tab_id) = sidebar
+                            .visible_rows()
+                            .get(sidebar.tree_cursor)
+                            .and_then(|row| row.pills.get(pill_index))
+                            .and_then(|pill| pill.tab_id)
+                        else {
+                            return;
+                        };
+                        cx.emit(SidebarEvent::CloseTab(tab_id));
+                    }))
                     .on_action(cx.listener(|sidebar, _: &tree::SelectPrevious, _, cx| {
                         sidebar.tree_step(tree::Direction::Up, cx);
                     }))
@@ -4145,10 +4202,10 @@ impl Render for Sidebar {
                         sidebar.tree_step(tree::Direction::Down, cx);
                     }))
                     .on_action(cx.listener(|sidebar, _: &tree::Collapse, _, cx| {
-                        sidebar.tree_step(tree::Direction::Left, cx);
+                        sidebar.pill_step(tree::Direction::Left, cx);
                     }))
                     .on_action(cx.listener(|sidebar, _: &tree::Expand, _, cx| {
-                        sidebar.tree_step(tree::Direction::Right, cx);
+                        sidebar.pill_step(tree::Direction::Right, cx);
                     }))
                     .mt(px(11.0))
                     .flex_1()
@@ -4441,6 +4498,38 @@ mod tests {
             .find(|row| row.kind == RowKind::Worktree && !row.pills.is_empty())
             .expect("the fixture's second worktree holds two tabs");
         assert_eq!(worktree_with_tabs.pills.len(), 2);
+    }
+
+    /// Left and right used to open and close a nesting level that no longer
+    /// exists; they now walk the row's pills, and Backspace closes the one the
+    /// keyboard is on.
+    #[gpui::test]
+    async fn arrow_keys_walk_the_pills_of_the_cursor_row(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::tree::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        window
+            .update(&mut cx, |sidebar, window, cx| {
+                sidebar.focus_row_with_pills(window, cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+
+        let pill_cursor = window
+            .update(&mut cx, |sidebar, _, _| sidebar.pill_cursor)
+            .unwrap();
+        assert_eq!(pill_cursor, Some(0), "right lands on the first pill");
+
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        let pill_cursor = window
+            .update(&mut cx, |sidebar, _, _| sidebar.pill_cursor)
+            .unwrap();
+        assert_eq!(pill_cursor, Some(1), "and then the second");
     }
 
     /// A path picker that cannot open must say so, not fail silently.
