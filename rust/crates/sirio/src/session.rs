@@ -790,6 +790,13 @@ fn catalog_project(root_path: &Path, discovered: DiscoveredProject) -> CatalogPr
             discovered
                 .worktrees
                 .into_iter()
+                // `git worktree list --porcelain` keeps reporting a worktree
+                // after its checkout directory is deleted outside Sirio,
+                // marked `prunable` -- it is not available locally, so it
+                // must not become a sidebar row (a still-mounted terminal
+                // for it is separately kept alive and labelled "(missing)"
+                // by `refresh_project_with_mounted_worktrees`).
+                .filter(|worktree| !worktree.prunable)
                 .map(|worktree| CatalogWorktree {
                     branch: worktree.branch.unwrap_or_else(|| {
                         if worktree.is_primary {
@@ -3901,6 +3908,49 @@ mod tests {
             worktree_id(&project_id(&primary), &primary),
             "a missing discovery entry must not become the primary worktree"
         );
+    }
+
+    #[test]
+    fn a_prunable_discovered_worktree_is_not_shown() {
+        // `git worktree list --porcelain` keeps reporting a worktree whose
+        // checkout directory was deleted without `git worktree remove` --
+        // marked `prunable` (see discovery.rs's parser tests for the exact
+        // reason text git emits). `catalog_project` must not turn that entry
+        // into a sidebar row: it points at a directory that no longer
+        // exists locally.
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let deleted = dir.0.join("worktree-agent-a189089dda476c29a");
+        let discovered = DiscoveredProject {
+            is_git: true,
+            worktrees: vec![
+                sirio_project::DiscoveredWorktree {
+                    path: primary.clone(),
+                    head: None,
+                    branch: Some("main".into()),
+                    is_primary: true,
+                    locked: false,
+                    prunable: false,
+                },
+                sirio_project::DiscoveredWorktree {
+                    path: deleted,
+                    head: None,
+                    branch: Some("fix/popup_error".into()),
+                    is_primary: false,
+                    locked: false,
+                    prunable: true,
+                },
+            ],
+        };
+
+        let project = catalog_project(&primary, discovered);
+
+        assert_eq!(
+            project.worktrees.len(),
+            1,
+            "a prunable worktree is not available locally and must not appear"
+        );
+        assert_eq!(project.worktrees[0].path, primary);
     }
 
     #[test]
