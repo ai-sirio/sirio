@@ -94,22 +94,16 @@ impl Render for RowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_count = self.render_count.wrapping_add(1);
         let theme = *Theme::get(cx);
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let inputs = self.inputs.clone();
-        let row_shape = Sidebar::tree_row(&inputs.row);
-        // Boxed here: the opaque return type of `render_row` captures the
-        // borrow of `bezel_theme`, which ends with this frame's render.
         Sidebar::render_row(
             inputs.row,
             inputs.index,
-            row_shape,
             inputs.cursor,
             inputs.project_id,
             inputs.project_icon,
             inputs.drag,
             self.sidebar.clone(),
             theme,
-            &bezel_theme,
             window,
             cx,
         )
@@ -118,6 +112,33 @@ impl Render for RowView {
 }
 
 impl Sidebar {
+    pub(crate) fn status_text(row: &SidebarRow) -> Option<String> {
+        match row.agent_status {
+            Some(ActivityStatus::Running) => Some("running".to_owned()),
+            Some(ActivityStatus::NeedsInput) => Some("needs input".to_owned()),
+            Some(ActivityStatus::Done) => Some("done".to_owned()),
+            Some(ActivityStatus::Error) => Some("error".to_owned()),
+            Some(ActivityStatus::Idle) | None if row.pills.len() > 1 => {
+                Some(format!("{} agents", row.pills.len()))
+            }
+            Some(ActivityStatus::Idle) => Some("idle".to_owned()),
+            None => None,
+        }
+    }
+
+    pub(crate) fn sub_line_text(row: &SidebarRow) -> String {
+        row.comment
+            .as_deref()
+            .filter(|comment| !comment.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                row.path
+                    .as_deref()
+                    .map(sirio_project::display_path)
+                    .unwrap_or_default()
+            })
+    }
+
     /// The minimum row rhythm: a single-line row is 32px (13.5px title at
     /// an 18px line height plus 7px of vertical padding — the action-row
     /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
@@ -136,16 +157,11 @@ impl Sidebar {
     /// The render and the height read this one predicate, so they cannot
     /// drift into disagreeing about whether a row has two lines.
     fn has_sub_line(row: &SidebarRow) -> bool {
-        matches!(row.kind, RowKind::Project | RowKind::Worktree)
-            && (row.is_primary
-                || row
-                    .comment
-                    .as_ref()
-                    .is_some_and(|comment| !comment.is_empty()))
+        matches!(row.kind, RowKind::Worktree)
     }
 
     pub(super) fn row_min_height(row: &SidebarRow) -> f32 {
-        if Self::has_sub_line(row) {
+        if row.kind == RowKind::Worktree {
             CARD_TWO_LINE_HEIGHT
         } else {
             ROW_HEIGHT
@@ -226,14 +242,12 @@ impl Sidebar {
     fn render_row(
         row: SidebarRow,
         row_index: usize,
-        row_shape: tree::Row,
-        cursor: bool,
+        _cursor: bool,
         project_id: Option<String>,
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
@@ -315,13 +329,21 @@ impl Sidebar {
         };
 
         let row_debug_selector = format!("sidebar-row-{row_id}");
-        let mut row_view = tree::tree_row(bezel_theme, &row_shape, selected, cursor)
-            .text_size(theme.typography.scaled(12.5))
-            .id(row_id)
+        let mut row_view = div()
+            .id(("sidebar-row", row_id))
             .debug_selector(move || row_debug_selector)
             .group(hover_group.clone())
             .relative()
-            .min_h(px(row_min_height))
+            .h(px(row_min_height))
+            .w_full()
+            .px(px(12.0))
+            .py(px(7.0))
+            .flex()
+            .gap(px(8.0))
+            .when(selected, |this| this.bg(theme.element_active))
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(theme.element_hover))
+            })
             .on_click(move |_, window, cx| {
                 click_entity.update(cx, |sidebar, cx| {
                     sidebar.focus_tree_row(row_index, window, cx);
@@ -389,52 +411,65 @@ impl Sidebar {
                 });
         }
 
-        // Sirio owns the row's content; bezel's tree row already supplied
-        // disclosure, indentation, cursor/selection paint and hover chrome.
-        let main_line = div()
+        let status_color = match status_glyph {
+            RowStatusGlyph::Running(color) | RowStatusGlyph::Dot(color) => color,
+            RowStatusGlyph::None => theme.text_faint,
+        };
+        let status_dot = div()
+            .w(px(12.0))
             .flex()
             .items_center()
-            .gap(px(7.0))
-            .min_h(px(ROW_TITLE_LINE_HEIGHT))
-            .child(
-                div()
-                    .w(px(12.0))
+            .justify_center()
+            .text_size(px(12.0))
+            .text_color(status_color)
+            .child(match status_glyph {
+                // Swift's `RunningDots`, tinted by the agent: a
+                // different *shape* from a lifecycle dot, so a
+                // running worktree can never be mistaken for a
+                // finished one at a glance, and a different tint per
+                // agent, so the one glyph carries both facts.
+                RowStatusGlyph::Running(_color) => div()
+                    .id(("sidebar-status-running", row_id))
+                    .debug_selector(move || format!("sidebar-status-running-{row_id}"))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_faint)
-                    .child(match status_glyph {
-                        // Swift's `RunningDots`, tinted by the agent: a
-                        // different *shape* from a lifecycle dot, so a
-                        // running worktree can never be mistaken for a
-                        // finished one at a glance, and a different tint per
-                        // agent, so the one glyph carries both facts.
-                        RowStatusGlyph::Running(_color) => div()
-                            .id(("sidebar-status-running", row_id))
-                            .debug_selector(move || format!("sidebar-status-running-{row_id}"))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(loading::compact("sidebar-running-spinner", window, cx))
-                            .into_any_element(),
-                        RowStatusGlyph::Dot(color) => div()
-                            .id(("sidebar-status-dot", row_id))
-                            .debug_selector(move || format!("sidebar-status-dot-{row_id}"))
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded(px(3.0))
-                            .bg(color)
-                            .into_any_element(),
-                        RowStatusGlyph::None => div().into_any_element(),
-                    }),
-            )
+                    .child(loading::compact("sidebar-running-spinner", window, cx))
+                    .into_any_element(),
+                RowStatusGlyph::Dot(color) => div()
+                    .id(("sidebar-status-dot", row_id))
+                    .debug_selector(move || format!("sidebar-status-dot-{row_id}"))
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded(px(3.0))
+                    .bg(color)
+                    .into_any_element(),
+                RowStatusGlyph::None => div().into_any_element(),
+            });
+        let title_element = div()
+            .min_w_0()
+            .flex_1()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .debug_selector(move || format!("sidebar-row-title-{row_id}"))
+            .text_ellipsis()
+            .line_height(px(ROW_TITLE_LINE_HEIGHT))
+            .font_weight(if is_project {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .when(parked_tab.is_some(), |this| {
+                this.text_color(theme.text_faint)
+            })
+            .child(title);
+        let title_line = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
             .child({
                 let slot = div().w(px(16.0)).flex().items_center().justify_center();
-                // F-CORE-ACT-17: a worktree row's mark is its agent's brand
-                // when one owns the worktree, and the branch glyph
-                // otherwise. The selector carries which, so the identity is
-                // assertable from a drawn test.
                 if is_worktree {
                     let name = Self::icon_selector_name(glyph);
                     slot.id(("sidebar-worktree-mark", row_id))
@@ -445,27 +480,45 @@ impl Sidebar {
                     slot.child(project_mark).into_any_element()
                 }
             })
+            .child(title_element)
+            .when(row.is_primary, |this| {
+                this.child(
+                    div()
+                        .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
+                        .flex_none()
+                        .text_size(px(10.0))
+                        .text_color(theme.text_faint)
+                        .child("★"),
+                )
+            })
+            .when_some(Self::status_text(&row), |this, status| {
+                this.child(
+                    div()
+                        .debug_selector(move || format!("sidebar-row-status-{row_id}"))
+                        .flex_none()
+                        .text_size(theme.typography.scaled(11.0))
+                        .text_color(status_color)
+                        .child(status),
+                )
+            });
+        let sub_line = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .line_height(px(ROW_SUB_LINE_HEIGHT))
+            .text_size(px(12.5))
+            .text_color(theme.text_faint)
             .child(
                 div()
+                    .debug_selector(move || format!("sidebar-row-subline-{row_id}"))
                     .min_w_0()
                     .flex_1()
                     .whitespace_nowrap()
                     .overflow_hidden()
-                    .debug_selector(move || format!("sidebar-row-title-{row_id}"))
-                    .text_ellipsis()
-                    .line_height(px(ROW_TITLE_LINE_HEIGHT))
-                    .font_weight(if is_project {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    // A parked tab is not live: its title reads as a record
-                    // of what the worktree holds, not as an open surface.
-                    .when(parked_tab.is_some(), |this| {
-                        this.text_color(theme.text_faint)
-                    })
-                    .child(title),
-            )
+                    .child(Self::sub_line_text(&row)),
+            );
+        let title_line = title_line
             .when(is_project, |this| {
                 this.child(
                     div()
@@ -546,7 +599,6 @@ impl Sidebar {
                         ),
                 )
             });
-
         let content = div()
             .min_w_0()
             .flex_1()
@@ -554,85 +606,72 @@ impl Sidebar {
             .flex_col()
             .justify_center()
             .gap(px(ROW_GAP))
-            .child(main_line)
-            .when(has_sub_line, |this| {
-                this.child(
-                    div()
-                        // Aligned under the title: 12px leading slot + 7px gap
-                        // + 16px glyph + 7px gap.
-                        .pl(px(42.0))
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(12.5))
-                        .line_height(px(ROW_SUB_LINE_HEIGHT))
-                        .text_color(theme.text_faint)
-                        .when(row.is_primary, |this| {
-                            this.child(
-                                div()
-                                    .id(("sidebar-primary-pill", row_id))
-                                    .debug_selector(move || {
-                                        format!("sidebar-primary-pill-{row_id}")
-                                    })
-                                    .px(px(5.0))
-                                    .rounded(theme.radii.chip)
-                                    .bg(theme.surface_raised)
-                                    .text_color(theme.text)
-                                    .text_size(theme.typography.scaled(11.0))
-                                    .child("Primary"),
-                            )
-                        })
-                        // F-SID-11: the durable `worktree.comment` annotation
-                        // (`worktree.set` over the control socket) was already
-                        // persisted and read by the status bar; the worktree
-                        // row itself never rendered it.
-                        .when_some(
-                            row.comment.filter(|comment| !comment.is_empty()),
-                            |this, comment| {
-                                this.child(
-                                    div()
-                                        .id(("sidebar-worktree-comment", row_id))
-                                        .debug_selector(move || {
-                                            format!("sidebar-worktree-comment-{row_id}")
-                                        })
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(theme.text_faint)
-                                        .child(comment),
-                                )
-                            },
-                        ),
-                )
-            });
+            .child(title_line)
+            .when(has_sub_line, |this| this.child(sub_line));
 
-        // A worktree's disclosure is its own control, unlike a project's,
-        // whose whole row toggles: the row body must keep meaning "select
-        // this worktree". bezel draws the chevron with no handler of its
-        // own, so a hit target the size of its column sits over it and
-        // stops the click before the row's selection handler sees it.
-        let chevron_entity = entity.clone();
-        let worktree_chevron = is_worktree && row_shape.expanded.is_some();
-        let chevron_left = tree::INDENT * row_shape.depth as f32;
-        row_view.child(content).when(worktree_chevron, |this| {
-            this.child(
-                div()
-                    .id(("sidebar-worktree-chevron", row_id))
-                    .debug_selector(move || format!("sidebar-worktree-chevron-{row_id}"))
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(chevron_left))
-                    .w(px(16.0))
-                    .cursor_pointer()
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        chevron_entity.update(cx, |sidebar, cx| {
-                            sidebar.focus_tree_row(row_index, window, cx);
-                            sidebar.toggle_worktree(row_id, cx);
-                        });
-                    }),
-            )
-        })
+        row_view.child(status_dot).child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn worktree(id: usize, title: &str) -> SidebarRow {
+        SidebarRow {
+            id,
+            kind: RowKind::Worktree,
+            depth: 1,
+            title: title.to_owned(),
+            selected: false,
+            expanded: true,
+            is_primary: false,
+            agent_status: None,
+            is_git: true,
+            path: None,
+            tab_id: None,
+            parked_tab: None,
+            tab_kind: None,
+            agent_icon: None,
+            agent_brand: None,
+            comment: None,
+            pills: Vec::new(),
+        }
+    }
+
+    fn pill(tab_id: usize) -> SidebarPill {
+        SidebarPill {
+            tab_id: Some(tab_id),
+            parked_tab: None,
+            title: "Claude".to_owned(),
+            icon: Icon::MessageSquare,
+            brand: None,
+            status: Some(ActivityStatus::Idle),
+            selected: false,
+        }
+    }
+
+    #[test]
+    fn a_running_worktree_says_running_and_a_still_one_counts_its_agents() {
+        let mut row = worktree(3, "main");
+        row.agent_status = Some(ActivityStatus::Running);
+        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("running"));
+        row.agent_status = Some(ActivityStatus::NeedsInput);
+        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("needs input"));
+        row.agent_status = Some(ActivityStatus::Idle);
+        row.pills = vec![pill(1), pill(2)];
+        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("2 agents"));
+        row.pills = vec![pill(1)];
+        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn the_second_line_is_the_comment_when_there_is_one_and_the_path_otherwise() {
+        let mut row = worktree(4, "feat/x");
+        row.path = Some(PathBuf::from("/tmp/projects/sirio-wt/feat-x"));
+        assert!(Sidebar::sub_line_text(&row).contains("feat-x"));
+        row.comment = Some("redesign the sidebar".to_owned());
+        assert_eq!(Sidebar::sub_line_text(&row), "redesign the sidebar");
     }
 }
