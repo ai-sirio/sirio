@@ -284,6 +284,12 @@ impl Sidebar {
                     .child(
                         div()
                             .group_hover(pill_group.clone(), |style| style.invisible())
+                            .debug_selector(move || {
+                                format!(
+                                    "sidebar-pill-mark-{row_id}-{index}-{}",
+                                    Self::icon_selector_name(pill.icon)
+                                )
+                            })
                             .child(IconElement::new(pill.icon, IconSize::XSmall).text_color(
                                 pill.brand.map_or(theme.text_muted, |brand| brand.color()),
                             )),
