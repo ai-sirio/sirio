@@ -74,6 +74,7 @@ pub(super) struct RowInputs {
     pub(super) row: SidebarRow,
     pub(super) index: usize,
     pub(super) cursor: bool,
+    pub(super) pill_cursor: Option<usize>,
     pub(super) project_id: Option<String>,
     pub(super) project_icon: Option<ProjectIcon>,
     pub(super) drag: Option<RowDrag>,
@@ -99,6 +100,7 @@ impl Render for RowView {
             inputs.row,
             inputs.index,
             inputs.cursor,
+            inputs.pill_cursor,
             inputs.project_id,
             inputs.project_icon,
             inputs.drag,
@@ -243,6 +245,7 @@ impl Sidebar {
 
     fn render_pills(
         row: &SidebarRow,
+        pill_cursor: Option<usize>,
         entity: gpui::Entity<Sidebar>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -273,7 +276,7 @@ impl Sidebar {
                     .justify_center()
                     .rounded(theme.radii.chip)
                     .bg(theme.surface_raised)
-                    .when(pill.selected, |this| {
+                    .when(pill.selected || pill_cursor == Some(index), |this| {
                         this.border_1().border_color(theme.accent)
                     })
                     .when(parked.is_some(), |this| this.opacity(0.6))
@@ -363,7 +366,8 @@ impl Sidebar {
     fn render_row(
         row: SidebarRow,
         row_index: usize,
-        _cursor: bool,
+        cursor: bool,
+        pill_cursor: Option<usize>,
         project_id: Option<String>,
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
@@ -639,7 +643,12 @@ impl Sidebar {
                     .overflow_hidden()
                     .child(Self::sub_line_text(&row)),
             )
-            .child(Self::render_pills(&row, entity.clone(), theme));
+            .child(Self::render_pills(
+                &row,
+                cursor.then_some(pill_cursor).flatten(),
+                entity.clone(),
+                theme,
+            ));
         let title_line = title_line
             .when(is_project, |this| {
                 this.child(
