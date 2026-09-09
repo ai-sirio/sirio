@@ -185,7 +185,7 @@ impl Sidebar {
     /// visible, depth-annotated rows. Expansion remains Sirio state; bezel
     /// reports only the intent.
     /// Stable semantic debug/test names, independent of vendored filenames.
-    fn icon_selector_name(icon: Icon) -> &'static str {
+    pub(super) fn icon_selector_name(icon: Icon) -> &'static str {
         match icon {
             Icon::FolderFill => "folder",
             Icon::GitBranch => "git-branch",
