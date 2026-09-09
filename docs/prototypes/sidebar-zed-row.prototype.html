@@ -1,0 +1,274 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers only domanda 7: dove va lo stato in chiaro e cosa
+  resta sulla seconda riga della card worktree (larghezza reale 325px).
+  Decisioni già prese e applicate a tutte e tre: header di sezione sticky con + e ⋯,
+  ricerca piatta, niente tempo relativo, pastiglie cliccabili con x su hover e +.
+  Non è codice di produzione, non è gpui. Doppio click per aprire.
+-->
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>Domanda 7 — seconda riga della card</title>
+<style>
+  :root {
+    --page:#0E1016; --surface:#202127; --raised:#2B2F3A; --hover:#313337;
+    --border:#2B2D35; --text:#E4E6EC; --text-2:#9BA0AB; --text-3:#6E727D;
+    --accent:#E08B52; --running:#E08B52; --needs:#E0B341; --done:#6FBF73; --error:#E0605E;
+    --sw:325px;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 24px 90px; background:var(--page); color:var(--text);
+         font:13px/1.4 ui-sans-serif,-apple-system,"Segoe UI",system-ui,sans-serif; }
+  #stage { display:flex; gap:22px; align-items:flex-start; flex-wrap:wrap; }
+  h2.caption { font:600 12px/1 ui-sans-serif; color:var(--text-3); margin:0 0 4px 2px; }
+  p.hint { font:11.5px/1.5 ui-sans-serif; color:var(--text-3); margin:0 0 8px 2px; width:var(--sw); min-height:34px; }
+
+  .box { position:relative; }
+  .grip { position:absolute; top:0; right:-3px; width:6px; height:100%; cursor:col-resize; }
+  .grip:hover { background:var(--accent); opacity:.5; }
+  .sidebar { width:var(--sw); height:560px; background:var(--surface); border:1px solid var(--border);
+             border-radius:6px; overflow:hidden; display:flex; flex-direction:column; padding-top:8px; }
+  .head { height:20px; padding:0 20px; display:flex; align-items:center; justify-content:space-between;
+          color:var(--text-3); font-weight:600; font-size:12.5px; }
+  .filter { display:flex; align-items:center; gap:7px; height:34px; padding:0 12px; margin-top:6px;
+            border-bottom:1px solid var(--border); color:var(--text-3); }
+  .filter svg { width:13px; height:13px; opacity:.7; }
+  .list { flex:1; overflow-y:auto; position:relative; padding-bottom:10px; }
+  .list::-webkit-scrollbar { width:8px; }
+  .list::-webkit-scrollbar-thumb { background:#35373F; border-radius:4px; }
+
+  .section { position:sticky; top:0; z-index:2; background:#1A1B21; border-top:1px solid var(--border);
+             border-bottom:1px solid var(--border); height:26px; padding:0 12px; display:flex;
+             align-items:center; gap:6px; color:var(--text-2); font-size:12px; }
+  .section .count { color:var(--text-3); font-size:11px; }
+  .section .acts { margin-left:auto; display:flex; gap:2px; opacity:0; }
+  .section:hover .acts { opacity:1; }
+  .section .acts div { width:18px; height:18px; display:grid; place-items:center; border-radius:4px;
+                       color:var(--text-3); cursor:pointer; font-size:14px; }
+  .section .acts div:hover { background:var(--hover); color:var(--text); }
+
+  .row { position:relative; display:flex; gap:8px; padding:7px 12px; cursor:pointer; align-items:flex-start; }
+  .row:hover { background:#26272E; }
+  .row.sel { background:var(--raised); }
+  .row.sel::before { content:""; position:absolute; left:0; top:0; bottom:0; width:2px; background:var(--accent); }
+  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:6px; }
+  .col { display:flex; flex-direction:column; gap:4px; min-width:0; flex:1; }
+  .line { display:flex; align-items:center; gap:6px; min-width:0; }
+  /* Dissolvenza alla Zed al posto dei puntini: il testo scivola sotto un velo
+     che va dal colore della riga al trasparente (GradientFade, width 92 / stop .7).
+     Qui è reso con una mask, in gpui sarà un div assoluto con linear_gradient. */
+  .title, .sub { white-space:nowrap; overflow:hidden;
+                 mask-image:linear-gradient(90deg,#000 calc(100% - 34px),transparent);
+                 -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 34px),transparent); }
+  .title { font-size:13px; color:var(--text); }
+  .star { color:var(--text-3); font-size:10px; flex:none; }
+  .sub { font-size:11.5px; color:var(--text-3); }
+  .state { font-size:11px; flex:none; white-space:nowrap; }
+  .sep { color:#41444C; flex:none; font-size:11px; }
+
+  .pills { display:flex; gap:4px; align-items:center; flex:none; }
+  .pill { position:relative; width:20px; height:20px; border-radius:5px; display:grid; place-items:center;
+          font-size:10.5px; font-weight:700; background:#2A2C34; color:var(--text-2); cursor:pointer; }
+  .pill:hover { background:var(--hover); }
+  .pill.on { outline:1px solid var(--accent); }
+  .pill .badge { position:absolute; right:-2px; top:-2px; width:6px; height:6px; border-radius:50%;
+                 border:1.5px solid var(--surface); }
+  .pill .g { display:block; }
+  .pill:hover .g { visibility:hidden; }
+  .pill .x { display:none; position:absolute; inset:0; place-items:center; font-size:11px; color:var(--text); }
+  .pill:hover .x { display:grid; }
+  .pill.add { background:transparent; border:1px dashed #3A3D46; color:var(--text-3); font-weight:400; }
+  .pill.add:hover { border-color:var(--text-3); color:var(--text); }
+  .pill.add .g, .pill.add:hover .g { visibility:visible; }
+  .pill.add .x { display:none !important; }
+
+  #bar { position:fixed; left:0; right:0; bottom:0; background:#16171C; border-top:1px solid var(--border);
+         padding:10px 16px; display:flex; gap:8px; align-items:center; }
+  #bar button { background:#23252C; color:var(--text-2); border:1px solid var(--border); border-radius:6px;
+                padding:6px 12px; font:12px ui-sans-serif; cursor:pointer; }
+  #bar button.on { background:var(--accent); color:#17181C; border-color:var(--accent); font-weight:600; }
+  #state { margin-left:auto; color:var(--text-3); font:11.5px ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="bar">
+  <button data-v="A">A</button>
+  <button data-v="B">B</button>
+  <button data-v="C">C</button>
+  <button data-v="all">tutte affiancate</button>
+  <span id="state"></span>
+</div>
+
+<script>
+// Casi limite deliberati: branch lungo, commento lungo, niente commento, 3 tab, 0 tab.
+const DATA = [
+  { name:"sirio", worktrees:[
+    { branch:"main", primary:true, comment:null, status:"running",
+      path:"~/Progetti/sirio",
+      tabs:[{a:"claude",label:"Claude",status:"running"},{a:"term",label:"zsh",status:"idle"}] },
+    { branch:"feat/sidebar-zed-like-redesign", primary:false,
+      comment:"aspetta review di #318 prima del merge", status:"needs",
+      path:"~/Progetti/sirio-wt/feat-sidebar-zed-like-redesign",
+      tabs:[{a:"codex",label:"Codex",status:"needs"},{a:"claude",label:"Claude",status:"idle"},{a:"term",label:"zsh",status:"idle"}] },
+    { branch:"fix/acp-watchdog", primary:false, comment:null, status:"done",
+      path:"~/Progetti/sirio-wt/fix-acp-watchdog",
+      tabs:[{a:"pi",label:"Pi",status:"done"}] },
+    { branch:"chore/bezel-bump", primary:false, comment:"bloccato su gpui 0.2.2", status:"error",
+      path:"~/Progetti/sirio-wt/chore-bezel-bump",
+      tabs:[{a:"omp",label:"omp",status:"error"}] },
+    { branch:"exp/terminal-perf", primary:false, comment:null, status:"idle",
+      path:"~/Progetti/sirio-wt/exp-terminal-perf", tabs:[] },
+  ]},
+  { name:"herdr", worktrees:[
+    { branch:"main", primary:true, comment:null, status:"idle", path:"~/Progetti/herdr", tabs:[] },
+    { branch:"calm-forest-c8d9", primary:false, comment:"worktree di Pi", status:"running",
+      path:"~/Progetti/herdr-wt/calm-forest-c8d9", tabs:[{a:"pi",label:"Pi",status:"running"}] },
+  ]},
+];
+const AGENT = { claude:{g:"C",c:"#D97757"}, codex:{g:"X",c:"#4FB6A0"}, opencode:{g:"O",c:"#7C8CF8"},
+                pi:{g:"π",c:"#A78BFA"}, omp:{g:"ω",c:"#EC8FC0"}, term:{g:"▮",c:"#8A8F99"} };
+const COLOR = { running:"var(--running)", needs:"var(--needs)", done:"var(--done)", error:"var(--error)", idle:"#4A4E58" };
+const LABEL = { running:"running", needs:"needs input", done:"done", error:"error", idle:"idle" };
+
+let sel = { project:"sirio", branch:"feat/sidebar-zed-like-redesign", tab:null };
+const isSel = (p,w) => sel.project===p.name && sel.branch===w.branch;
+const el = (t,c,x) => { const n=document.createElement(t); if(c) n.className=c; if(x!=null) n.textContent=x; return n; };
+
+function stateText(w) {
+  if (w.status === "idle" && w.tabs.length > 1) return `${w.tabs.length} agenti`;
+  return LABEL[w.status];
+}
+function pill(t,i,w,p) {
+  const m = AGENT[t.a] || AGENT.term;
+  const n = el("div","pill" + (isSel(p,w) && sel.tab===i ? " on" : ""));
+  const g = el("span","g",m.g); g.style.color = m.c; n.append(g);
+  n.append(el("span","x","×"));
+  if (t.status !== "idle") { const b = el("div","badge"); b.style.background = COLOR[t.status]; n.append(b); }
+  n.title = `${t.label} · ${LABEL[t.status]}`;
+  n.onclick = e => { e.stopPropagation(); sel = {project:p.name, branch:w.branch, tab:i}; render(); };
+  return n;
+}
+function pills(w,p,withAdd) {
+  const box = el("div","pills");
+  w.tabs.forEach((t,i) => box.append(pill(t,i,w,p)));
+  if (withAdd) { const a = el("div","pill add"); a.append(el("span","g","+")); a.title="Nuovo agente"; box.append(a); }
+  return box;
+}
+function short(path) { const parts = path.split("/"); return parts.length > 3 ? `~/…/${parts.slice(-1)}` : path; }
+
+/* A — stato in riga 1 a destra; riga 2: commento o path + pastiglie */
+function rowA(w,p) {
+  const r = el("div","row" + (isSel(p,w) ? " sel" : ""));
+  const d = el("div","dot"); d.style.background = COLOR[w.status]; r.append(d);
+  const col = el("div","col");
+  const l1 = el("div","line");
+  const t = el("div","title",w.branch); t.style.flex="1"; l1.append(t);
+  if (w.primary) l1.append(el("div","star","★"));
+  const s = el("div","state",stateText(w)); s.style.color = COLOR[w.status]; l1.append(s);
+  const l2 = el("div","line");
+  l2.append(el("div","sub", w.comment || short(w.path)));
+  const pb = pills(w,p,isSel(p,w)); pb.style.marginLeft="auto"; l2.append(pb);
+  col.append(l1,l2); r.append(col);
+  r.onclick = () => { sel={project:p.name,branch:w.branch,tab:null}; render(); };
+  return r;
+}
+/* B — riga 1 solo branch; riga 2: stato · commento + pastiglie; path solo tooltip */
+function rowB(w,p) {
+  const r = el("div","row" + (isSel(p,w) ? " sel" : ""));
+  r.title = w.path;
+  const d = el("div","dot"); d.style.background = COLOR[w.status]; r.append(d);
+  const col = el("div","col");
+  const l1 = el("div","line");
+  const t = el("div","title",w.branch); t.style.flex="1"; l1.append(t);
+  if (w.primary) l1.append(el("div","star","★"));
+  const l2 = el("div","line");
+  const s = el("div","state",stateText(w)); s.style.color = COLOR[w.status]; l2.append(s);
+  if (w.comment) { l2.append(el("div","sep","·")); l2.append(el("div","sub",w.comment)); }
+  const pb = pills(w,p,isSel(p,w)); pb.style.marginLeft="auto"; l2.append(pb);
+  col.append(l1,l2); r.append(col);
+  r.onclick = () => { sel={project:p.name,branch:w.branch,tab:null}; render(); };
+  return r;
+}
+/* C — riga 1 branch + stato; riga 2 solo pastiglie a sinistra; commento e path nel tooltip */
+function rowC(w,p) {
+  const r = el("div","row" + (isSel(p,w) ? " sel" : ""));
+  r.title = w.comment ? `${w.comment}\n${w.path}` : w.path;
+  const d = el("div","dot"); d.style.background = COLOR[w.status]; r.append(d);
+  const col = el("div","col");
+  const l1 = el("div","line");
+  const t = el("div","title",w.branch); t.style.flex="1"; l1.append(t);
+  if (w.primary) l1.append(el("div","star","★"));
+  const s = el("div","state",stateText(w)); s.style.color = COLOR[w.status]; l1.append(s);
+  const l2 = el("div","line");
+  l2.append(pills(w,p,true));
+  col.append(l1,l2); r.append(col);
+  r.onclick = () => { sel={project:p.name,branch:w.branch,tab:null}; render(); };
+  return r;
+}
+
+const ROWS = { A:rowA, B:rowB, C:rowC };
+const HINT = {
+  A: "Stato in alto a destra, commento (o path) sempre visibile in basso. Due informazioni diverse su due righe diverse.",
+  B: "Riga 1 pulita col solo branch; stato e commento condividono la riga 2 — il commento lungo viene tagliato prima.",
+  C: "Riga 2 riservata alle pastiglie: la riga è la più leggibile ma commento e path spariscono dentro il tooltip.",
+};
+
+// Bordo trascinabile: cambia la larghezza di tutte le sidebar insieme, per
+// guardare la dissolvenza mentre il titolo entra sotto il velo.
+function grip(sb) {
+  const g = el("div","grip");
+  g.onmousedown = e => {
+    e.preventDefault();
+    const startX = e.clientX, startW = sb.getBoundingClientRect().width;
+    const move = ev => {
+      const w = Math.max(200, Math.min(520, startW + ev.clientX - startX));
+      document.documentElement.style.setProperty("--sw", `${Math.round(w)}px`);
+      document.getElementById("state").textContent =
+        `larghezza=${Math.round(w)}px  selected=${sel.project}/${sel.branch}`;
+    };
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); render(); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+  return g;
+}
+
+function sidebar(v) {
+  const box = el("div","box");
+  box.append(el("h2","caption", `${v} — ${v==="A"?"stato in riga 1, commento in riga 2":v==="B"?"stato · commento in riga 2":"riga 2 solo pastiglie"}`));
+  box.append(el("p","hint",HINT[v]));
+  const sb = el("div","sidebar");
+  const head = el("div","head"); head.append(el("span",null,"Projects"), el("span",null,"+"));
+  const f = el("div","filter");
+  f.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>';
+  f.append(el("span",null,"Search worktrees…"));
+  const list = el("div","list");
+  for (const p of DATA) {
+    const sec = el("div","section");
+    sec.append(el("span",null,p.name), el("span","count",String(p.worktrees.length)));
+    const acts = el("div","acts"); acts.append(el("div",null,"+"), el("div",null,"⋯")); sec.append(acts);
+    list.append(sec);
+    for (const w of p.worktrees) list.append(ROWS[v](w,p));
+  }
+  sb.append(head,f,list); box.append(sb); box.append(grip(sb));
+  return box;
+}
+
+let current = new URLSearchParams(location.search).get("v") || "all";
+function render() {
+  const stage = document.getElementById("stage");
+  stage.innerHTML = "";
+  (current === "all" ? ["A","B","C"] : [current]).forEach(v => stage.append(sidebar(v)));
+  document.querySelectorAll("#bar button").forEach(b => b.classList.toggle("on", b.dataset.v === current));
+  document.getElementById("state").textContent =
+    `layout=${current}  selected=${sel.project}/${sel.branch}` + (sel.tab != null ? `  tab=#${sel.tab}` : "  tab=—");
+}
+document.querySelectorAll("#bar button").forEach(b => {
+  b.onclick = () => { current = b.dataset.v; history.replaceState(null,"",`?v=${current}`); render(); };
+});
+render();
+</script>
+</body>
+</html>
