@@ -2851,6 +2851,24 @@ impl Sidebar {
         }
     }
 
+    /// The one place that decides whether a row answers the filter. Title,
+    /// annotation and the names of the agents parked in it: a user typing
+    /// "codex" is looking for where Codex is running, not for a worktree
+    /// that happens to be spelled that way, and a user typing their own
+    /// `worktree.set` annotation is looking for the note they left.
+    pub(crate) fn row_matches(row: &SidebarRow, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let matches = |text: &str| text.to_lowercase().contains(query);
+        matches(&row.title)
+            || row.comment.as_deref().is_some_and(matches)
+            || row
+                .pills
+                .iter()
+                .any(|pill| matches(&pill.title) || matches(Self::icon_selector_name(pill.icon)))
+    }
+
     fn visible_rows(&self) -> Vec<SidebarRow> {
         let query = self.filter.trim().to_lowercase();
         let mut filtered = Vec::new();
@@ -2866,14 +2884,8 @@ impl Sidebar {
                 .position(|row| row.kind == RowKind::Project)
                 .map_or(self.rows.len(), |offset| project_index + 1 + offset);
             let section = &self.rows[project_index + 1..next_project];
-            let project_matches = project.title.to_lowercase().contains(&query);
-            let section_matches = section.iter().any(|row| {
-                row.title.to_lowercase().contains(&query)
-                    || row
-                        .pills
-                        .iter()
-                        .any(|pill| pill.title.to_lowercase().contains(&query))
-            });
+            let project_matches = Self::row_matches(project, &query);
+            let section_matches = section.iter().any(|row| Self::row_matches(row, &query));
 
             if project_matches || section_matches {
                 let mut project_row = project.clone();
@@ -2887,12 +2899,7 @@ impl Sidebar {
                             .iter()
                             .filter(|row| {
                                 row.kind == RowKind::Worktree
-                                    && (project_matches
-                                        || row.title.to_lowercase().contains(&query)
-                                        || row
-                                            .pills
-                                            .iter()
-                                            .any(|pill| pill.title.to_lowercase().contains(&query)))
+                                    && (project_matches || Self::row_matches(row, &query))
                             })
                             .cloned(),
                     );
@@ -4132,17 +4139,17 @@ impl Render for Sidebar {
                     .debug_selector(|| "filter-field".to_string())
                     .track_focus(&filter_focus)
                     .relative()
-                    .ml(px(FILTER_LEFT_INSET))
                     .mt(px(6.0))
-                    .w(px((panel_width - FILTER_LEFT_INSET - ROW_RIGHT_INSET).max(0.0)))
-                    .h(px(28.0))
-                    .px(px(9.0))
+                    .w_full()
+                    .h(px(34.0))
+                    .px(px(12.0))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
+                    // Flat, like the reference: the field is the top of the
+                    // list rather than a control sitting on it, so the only
+                    // edge it keeps is the rule that separates the two.
+                    .border_b_1()
                     .border_color(if filter_is_focused {
                         theme.ring
                     } else {
@@ -4185,7 +4192,7 @@ impl Render for Sidebar {
                                     div()
                                         .id("filter-placeholder")
                                         .debug_selector(|| "filter-placeholder".to_owned())
-                                        .child("Filter"),
+                                        .child("Search worktrees…"),
                                     filter_is_focused.then(|| {
                                         div()
                                             .debug_selector(|| "filter-caret".to_owned())
@@ -4549,6 +4556,77 @@ pub(super) mod tests_support {
 mod tests {
     use super::*;
     use crate::project_identity::ProjectGlyph;
+
+    /// The filter saw titles only, so neither the annotation a person left
+    /// on a worktree (`worktree.set`) nor the name of the agent parked in
+    /// it could find the row they were looking for. Both are searchable
+    /// text now, and one predicate decides it for every branch of
+    /// `visible_rows`.
+    #[gpui::test]
+    async fn the_filter_matches_a_comment_and_an_agent_name(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let (commented, with_pills, agent_query) = window
+            .update(&mut cx, |sidebar, _, _| {
+                let commented = sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.comment.is_some())
+                    .expect("the fixture annotates one worktree")
+                    .title
+                    .clone();
+                let pilled = sidebar
+                    .rows
+                    .iter()
+                    .find(|row| !row.pills.is_empty())
+                    .expect("the fixture parks two tabs in one worktree");
+                let agent_query = pilled
+                    .pills
+                    .iter()
+                    .find_map(|pill| pill.brand.map(|_| Sidebar::icon_selector_name(pill.icon)))
+                    .expect("one of those tabs carries an agent mark")
+                    .to_string();
+                (commented, pilled.title.clone(), agent_query)
+            })
+            .unwrap();
+
+        let visible_worktrees = |sidebar: &mut Sidebar, query: &str| {
+            sidebar.filter = query.to_string();
+            sidebar
+                .visible_rows()
+                .iter()
+                .filter(|row| row.kind == RowKind::Worktree)
+                .map(|row| row.title.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for (query, expected) in [
+            ("redesign", commented.clone()),
+            (agent_query.as_str(), with_pills.clone()),
+        ] {
+            let titles = window
+                .update(&mut cx, |sidebar, _, _| visible_worktrees(sidebar, query))
+                .unwrap();
+            assert_eq!(
+                titles,
+                vec![expected.clone()],
+                "the query {query:?} should reveal exactly one worktree"
+            );
+        }
+
+        let nothing = window
+            .update(&mut cx, |sidebar, _, _| {
+                visible_worktrees(sidebar, "nothing here matches")
+            })
+            .unwrap();
+        assert!(
+            nothing.is_empty(),
+            "an unrelated query still matches nothing"
+        );
+    }
 
     #[gpui::test]
     async fn a_worktree_with_tabs_is_still_one_row(cx: &mut TestAppContext) {
