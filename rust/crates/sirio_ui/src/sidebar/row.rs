@@ -239,6 +239,127 @@ impl Sidebar {
         }
     }
 
+    const PILL_SIZE: f32 = 20.0;
+
+    fn render_pills(
+        row: &SidebarRow,
+        entity: gpui::Entity<Sidebar>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let row_id = row.id;
+        let worktree_path = row.path.clone();
+        div()
+            .flex()
+            .flex_none()
+            .ml_auto()
+            .items_center()
+            .gap(px(4.0))
+            .children(row.pills.iter().enumerate().map(|(index, pill)| {
+                let select_entity = entity.clone();
+                let close_entity = entity.clone();
+                let pill_group = format!("sidebar-pill-group-{row_id}-{index}");
+                let tab_id = pill.tab_id;
+                let parked = pill.parked_tab;
+                let path = worktree_path.clone();
+                div()
+                    .id(("sidebar-pill", row_id * 32 + index))
+                    .debug_selector(move || format!("sidebar-pill-{row_id}-{index}"))
+                    .group(pill_group.clone())
+                    .relative()
+                    .w(px(Self::PILL_SIZE))
+                    .h(px(Self::PILL_SIZE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.chip)
+                    .bg(theme.surface_raised)
+                    .when(pill.selected, |this| {
+                        this.border_1().border_color(theme.accent)
+                    })
+                    .when(parked.is_some(), |this| this.opacity(0.6))
+                    .hover(|style| style.bg(theme.element_hover))
+                    .child(
+                        div()
+                            .group_hover(pill_group.clone(), |style| style.invisible())
+                            .child(IconElement::new(pill.icon, IconSize::XSmall).text_color(
+                                pill.brand.map_or(theme.text_muted, |brand| brand.color()),
+                            )),
+                    )
+                    .when_some(pill.status, |this, status| {
+                        this.when(status != ActivityStatus::Idle, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top(px(-2.0))
+                                    .right(px(-2.0))
+                                    .w(px(6.0))
+                                    .h(px(6.0))
+                                    .rounded_full()
+                                    .bg(crate::right_panel::status_color(status, theme)),
+                            )
+                        })
+                    })
+                    .when_some(tab_id, |this, tab_id| {
+                        this.child(
+                            div()
+                                .id(("sidebar-pill-close", row_id * 32 + index))
+                                .debug_selector(move || {
+                                    format!("sidebar-pill-close-{row_id}-{index}")
+                                })
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .invisible()
+                                .group_hover(pill_group.clone(), |style| style.visible())
+                                .child(IconElement::new(Icon::Close, IconSize::XSmall))
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    close_entity.update(cx, |_, cx| {
+                                        cx.emit(SidebarEvent::CloseTab(tab_id));
+                                    });
+                                }),
+                        )
+                    })
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        select_entity.update(cx, |_, cx| match (tab_id, parked, path.clone()) {
+                            (Some(id), _, _) => cx.emit(SidebarEvent::SelectTab(id)),
+                            (None, Some(index), Some(path)) => {
+                                cx.emit(SidebarEvent::SelectParkedTab { path, index })
+                            }
+                            _ => {}
+                        });
+                    })
+            }))
+            .when(row.selected, |this| {
+                let add_entity = entity.clone();
+                this.child(
+                    div()
+                        .id(("sidebar-pill-add", row_id))
+                        .debug_selector(move || format!("sidebar-pill-add-{row_id}"))
+                        .w(px(Self::PILL_SIZE))
+                        .h(px(Self::PILL_SIZE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radii.chip)
+                        .border_1()
+                        .border_color(theme.border)
+                        .text_color(theme.text_faint)
+                        .hover(|style| style.bg(theme.element_hover))
+                        .child("+")
+                        .on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            add_entity.update(cx, |sidebar, cx| {
+                                sidebar.open_context_menu(row_id, event.position(), window, cx);
+                            });
+                        }),
+                )
+            })
+    }
+
     fn render_row(
         row: SidebarRow,
         row_index: usize,
@@ -517,7 +638,8 @@ impl Sidebar {
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .child(Self::sub_line_text(&row)),
-            );
+            )
+            .child(Self::render_pills(&row, entity.clone(), theme));
         let title_line = title_line
             .when(is_project, |this| {
                 this.child(
@@ -616,6 +738,8 @@ impl Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sidebar::tests_support;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::path::PathBuf;
 
     fn worktree(id: usize, title: &str) -> SidebarRow {
@@ -673,5 +797,73 @@ mod tests {
         assert!(Sidebar::sub_line_text(&row).contains("feat-x"));
         row.comment = Some("redesign the sidebar".to_owned());
         assert_eq!(Sidebar::sub_line_text(&row), "redesign the sidebar");
+    }
+
+    #[gpui::test]
+    async fn clicking_a_pill_selects_its_tab(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let pill = cx
+            .debug_bounds("sidebar-pill-1-0")
+            .expect("the first pill is rendered");
+        cx.simulate_click(pill.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(matches!(
+            events.borrow().last(),
+            Some(SidebarEvent::SelectTab(1))
+        ));
+    }
+
+    #[gpui::test]
+    async fn the_pill_close_reports_close_tab(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let close = cx
+            .debug_bounds("sidebar-pill-close-1-0")
+            .expect("the pill close control is rendered");
+        cx.simulate_mouse_move(close.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(close.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(matches!(
+            events.borrow().last(),
+            Some(SidebarEvent::CloseTab(1))
+        ));
+    }
+
+    #[gpui::test]
+    async fn a_parked_pill_restores_instead_of_selecting(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_parked_tab(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar, &mut cx);
+        let pill = cx
+            .debug_bounds("sidebar-pill-1-0")
+            .expect("the parked pill is rendered");
+        cx.simulate_click(pill.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(matches!(
+            events.borrow().last(),
+            Some(SidebarEvent::SelectParkedTab { .. })
+        ));
     }
 }
