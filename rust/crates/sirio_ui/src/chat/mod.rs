@@ -10,9 +10,9 @@ use gpui::{
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
     FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
-    StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px, quad, rgb,
-    transparent_black,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
+    SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
+    quad, rgb, transparent_black,
 };
 use sirio_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
@@ -483,6 +483,11 @@ pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
 /// (base64 costs about a third more than the file) instead of enriching it
 /// — the same cap as the Swift original's `FileDrop`.
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Caps the model picker's result list at roughly 8 rows before it scrolls,
+/// so an agent advertising dozens of models (`github-copilot/*`, `nvidia/*`)
+/// renders a popover instead of a window-filling one.
+const MODEL_PICKER_LIST_MAX_H: f32 = 260.0;
 
 fn parse_chat_markdown(source: &str) -> markdown::Doc {
     markdown::parse(source)
@@ -1662,6 +1667,9 @@ pub struct Chat {
     model_config_id: Option<String>,
     selected_model: Option<String>,
     model_picker_open: bool,
+    /// Scroll position of the model picker's result list, kept across
+    /// re-renders the way `settings.rs`'s `detail_scroll` is.
+    model_picker_scroll: ScrollHandle,
     /// F-CHAT-16: the model picker's own search query — live in the field,
     /// read from it at render time. Matches `ModelPickerFilter`'s Swift
     /// semantics — trimmed, case-insensitive substring match against
@@ -1955,6 +1963,7 @@ impl Chat {
             model_config_id: None,
             selected_model: None,
             model_picker_open: false,
+            model_picker_scroll: ScrollHandle::new(),
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
@@ -6137,78 +6146,94 @@ impl Chat {
                                             .child(self.model_search_field.clone()),
                                     )
                                 })
-                                .when(self.available_models.is_empty(), |this| {
-                                    this.child(
-                                        div()
-                                            .p(px(8.0))
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.text_faint)
-                                            .child(
-                                                "The connected agent did not report any models.",
-                                            ),
-                                    )
-                                })
-                                .when(
-                                    !self.available_models.is_empty() && filtered_models.is_empty(),
-                                    |this| {
-                                        this.child(
-                                            div()
-                                                .id("model-picker-no-match")
-                                                .debug_selector(|| "model-picker-no-match".into())
-                                                .p(px(8.0))
-                                                .text_size(typography.footnote)
-                                                .text_color(theme.text_faint)
-                                                .child("No models match"),
-                                        )
-                                    },
-                                )
-                                .children(filtered_models.iter().cloned().map(|option| {
-                                    let option_id = option.id.clone();
-                                    let option_name = option.name.clone();
-                                    let option_entity = picker_entity.clone();
-                                    let is_recommended =
-                                        recommended_id.as_deref() == Some(option_id.as_str());
-                                    let is_selected =
-                                        selected_id.as_deref() == Some(option_id.as_str());
-                                    popover::menu_row_nav(
-                                        &bezel_theme,
-                                        is_selected,
-                                        false,
-                                        bezel::motion::Fade::new(
-                                            view,
-                                            format!("model-option-{option_id}"),
-                                        ),
-                                    )
-                                    .id(format!("model-option-{option_id}"))
-                                    .debug_selector(move || format!("model-option-{option_id}"))
-                                    .on_click(move |_, _, cx| {
-                                        option_entity.update(cx, |chat, cx| {
-                                            chat.select_model(option.clone(), cx);
-                                        });
-                                    })
-                                    .child(
-                                        div().flex_1().min_w_0().text_ellipsis().child(option_name),
-                                    )
-                                    .when(
-                                        is_recommended,
-                                        |this| {
+                                .child(
+                                    div()
+                                        .id("model-picker-list")
+                                        .debug_selector(|| "model-picker-list".into())
+                                        .max_h(px(MODEL_PICKER_LIST_MAX_H))
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.model_picker_scroll)
+                                        .flex()
+                                        .flex_col()
+                                        .when(self.available_models.is_empty(), |this| {
                                             this.child(
                                                 div()
-                                                    .id("model-option-recommended")
-                                                    .debug_selector(|| {
-                                                        "model-option-recommended".into()
-                                                    })
-                                                    .flex_shrink_0()
-                                                    .px(px(5.0))
-                                                    .rounded(px(4.0))
-                                                    .text_size(typography.caption2)
-                                                    .text_color(theme.text)
-                                                    .bg(theme.overlay_strong)
-                                                    .child("Recommended"),
+                                                    .p(px(8.0))
+                                                    .text_size(typography.footnote)
+                                                    .text_color(theme.text_faint)
+                                                    .child(
+                                                        "The connected agent did not report any models.",
+                                                    ),
                                             )
-                                        },
-                                    )
-                                }))
+                                        })
+                                        .when(
+                                            !self.available_models.is_empty()
+                                                && filtered_models.is_empty(),
+                                            |this| {
+                                                this.child(
+                                                    div()
+                                                        .id("model-picker-no-match")
+                                                        .debug_selector(|| {
+                                                            "model-picker-no-match".into()
+                                                        })
+                                                        .p(px(8.0))
+                                                        .text_size(typography.footnote)
+                                                        .text_color(theme.text_faint)
+                                                        .child("No models match"),
+                                                )
+                                            },
+                                        )
+                                        .children(filtered_models.iter().cloned().map(|option| {
+                                            let option_id = option.id.clone();
+                                            let option_name = option.name.clone();
+                                            let option_entity = picker_entity.clone();
+                                            let is_recommended = recommended_id.as_deref()
+                                                == Some(option_id.as_str());
+                                            let is_selected =
+                                                selected_id.as_deref() == Some(option_id.as_str());
+                                            popover::menu_row_nav(
+                                                &bezel_theme,
+                                                is_selected,
+                                                false,
+                                                bezel::motion::Fade::new(
+                                                    view,
+                                                    format!("model-option-{option_id}"),
+                                                ),
+                                            )
+                                            .id(format!("model-option-{option_id}"))
+                                            .debug_selector(move || {
+                                                format!("model-option-{option_id}")
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                option_entity.update(cx, |chat, cx| {
+                                                    chat.select_model(option.clone(), cx);
+                                                });
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_ellipsis()
+                                                    .child(option_name),
+                                            )
+                                            .when(is_recommended, |this| {
+                                                this.child(
+                                                    div()
+                                                        .id("model-option-recommended")
+                                                        .debug_selector(|| {
+                                                            "model-option-recommended".into()
+                                                        })
+                                                        .flex_shrink_0()
+                                                        .px(px(5.0))
+                                                        .rounded(px(4.0))
+                                                        .text_size(typography.caption2)
+                                                        .text_color(theme.text)
+                                                        .bg(theme.overlay_strong)
+                                                        .child("Recommended"),
+                                                )
+                                            })
+                                        })),
+                                )
                                 .when_some(self.effort.clone(), |this, effort| {
                                     if effort.choices.is_empty() {
                                         return this;
@@ -13404,6 +13429,52 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
                 && chat.attachments.is_empty()),
             "backspace inside the search field must not have eaten composer text"
+        );
+    }
+
+    /// A long model list must scroll inside a capped-height list, not grow
+    /// the popover to the content's full size (which is how it ended up
+    /// covering the whole window with dozens of `github-copilot/*` entries).
+    #[gpui::test]
+    async fn model_picker_list_scrolls_instead_of_growing_unbounded(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = (0..40)
+                .map(|i| ModelOption {
+                    id: format!("model-{i}"),
+                    name: format!("Model {i}"),
+                    description: None,
+                })
+                .collect();
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("model chip is rendered");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let list = cx
+            .debug_bounds("model-picker-list")
+            .expect("the model list sits in its own scrollable region");
+        assert!(
+            list.size.height <= px(MODEL_PICKER_LIST_MAX_H),
+            "list should stay capped at {MODEL_PICKER_LIST_MAX_H}px and scroll instead of \
+             growing with all 40 models (was {}px)",
+            f32::from(list.size.height),
         );
     }
 
