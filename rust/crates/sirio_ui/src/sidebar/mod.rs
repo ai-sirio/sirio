@@ -4362,7 +4362,7 @@ pub(super) mod tests_support {
             cx,
         );
         sidebar.set_worktree_tabs(
-            2,
+            1,
             vec![
                 SidebarTab {
                     tab: SidebarTabRef::Open(1),
@@ -4382,6 +4382,37 @@ pub(super) mod tests_support {
             cx,
         );
         sidebar
+    }
+
+    pub(super) fn sidebar_with_parked_tab(cx: &mut Context<Sidebar>) -> Sidebar {
+        let mut sidebar = sidebar_with_one_project(cx);
+        sidebar.set_worktree_tabs(
+            1,
+            vec![SidebarTab {
+                tab: SidebarTabRef::Parked(0),
+                title: "Old Terminal".to_string(),
+                selected: false,
+                kind: TabKind::Terminal,
+                agent: None,
+            }],
+            cx,
+        );
+        sidebar
+    }
+
+    pub(super) fn collect_events(
+        sidebar: &gpui::Entity<Sidebar>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Rc<RefCell<Vec<SidebarEvent>>> {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(sidebar, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        events
     }
 }
 
