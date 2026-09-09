@@ -108,10 +108,14 @@ No behaviour changes in this step; it is a move plus `mod` declarations.
   drawn twice.
 - `visible_rows` filtering widens from titles only to project name, branch,
   comment and agent name.
-- Two events join the existing set: close-tab (from a pill's `×`) and
-  new-agent-for-worktree (from the `+`). Closing a tab from the sidebar is new —
-  today it is only reachable from the tab bar — so it emits the same host
-  transition the tab bar's close does, rather than a second path into teardown.
+- No new event is needed for either pill action, which was checked rather than
+  assumed. `SidebarEvent::CloseTab` already exists and is what the `×` emits, so
+  closing from the sidebar reaches the same host transition the tab bar's close
+  does rather than opening a second path into teardown. The `+` opens the
+  worktree context menu Sirio already builds (`sidebar.rs:1297`, entries at
+  `1211-1247`), whose `SidebarContextAction::NewTab(..)` items the host already
+  routes with the clicked path captured (`sirio/src/main.rs:6610-6632`) — and
+  that menu, unlike a bare event, lets the user say *which* agent.
 
 ## Render and interaction
 
