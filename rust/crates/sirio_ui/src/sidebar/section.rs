@@ -100,7 +100,12 @@ pub(super) fn render_section(
                 .flex_1()
                 .whitespace_nowrap()
                 .overflow_hidden()
-                .child(row.title),
+                .child(row.title)
+                .child(
+                    super::fade::fade_right(theme.surface_raised, super::fade::FADE_WIDTH)
+                        .id(("sidebar-section-fade", row_id))
+                        .debug_selector(move || format!("sidebar-section-fade-{row_id}")),
+                ),
         )
         .child(
             div()
@@ -231,5 +236,4 @@ mod tests {
 
         assert!(cx.debug_bounds("sidebar-section-count-0").is_some());
     }
-
 }

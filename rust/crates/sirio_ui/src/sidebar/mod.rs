@@ -44,6 +44,7 @@ pub mod icons;
 use self::icons::{Icon, IconElement, IconSize};
 use crate::right_panel::ActivityStatus;
 
+mod fade;
 mod row;
 mod section;
 
