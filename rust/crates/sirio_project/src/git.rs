@@ -78,6 +78,24 @@ const GIT_BINARY: &str = "git";
 /// directories while still bounding a hung process.
 pub const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Environment variable that overrides [`DEFAULT_GIT_TIMEOUT`], in
+/// milliseconds — the same variable `sirio_git` reads, deliberately, so one
+/// setting covers both runners.
+///
+/// This crate has its own runner and for a while did not read the variable at
+/// all, which made the override look like it worked while leaving half the git
+/// calls on the shipped ten-second budget: `.github/workflows/build-release.yml`
+/// set it to 60 s to survive a Mac compiling thirteen crates, `sirio_ui`'s
+/// `changes` tests went green, and `ProjectCatalog::add` kept dying on
+/// `git worktree list --porcelain did not finish within 10s`. A budget sized
+/// for a user's machine is the wrong one for a machine under a release build,
+/// and the override has to reach every runner for that statement to hold.
+///
+/// It affects the *default* path only. An explicit budget passed to
+/// [`run_with_timeout`] is honored as given, so the deadline-enforcement test
+/// below stays honest. Consulted per call, never cached.
+const TIMEOUT_ENV_VAR: &str = "SIRIO_GIT_TIMEOUT_MS";
+
 /// How often the runner polls the child while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -100,7 +118,23 @@ pub(crate) struct GitOutput {
 /// callers decide what to accept — but surfaces spawn failures as
 /// [`GitError::Spawn`] and deadline misses as [`GitError::TimedOut`].
 pub(crate) fn run(args: &[&str], cwd: &Path) -> Result<GitOutput, GitError> {
-    run_with_timeout(args, cwd, DEFAULT_GIT_TIMEOUT)
+    run_with_timeout(args, cwd, configured_timeout())
+}
+
+/// The deadline for default-path invocations: the [`TIMEOUT_ENV_VAR`]
+/// override when set and parseable, else [`DEFAULT_GIT_TIMEOUT`].
+fn configured_timeout() -> Duration {
+    timeout_from_env(std::env::var(TIMEOUT_ENV_VAR).ok().as_deref())
+}
+
+/// Pure version of [`configured_timeout`], separated for testing: `None` or a
+/// non-numeric value falls back to the default; a numeric value is taken as
+/// milliseconds (including zero — the operator asked for it).
+fn timeout_from_env(raw: Option<&str>) -> Duration {
+    match raw.and_then(|value| value.parse::<u64>().ok()) {
+        Some(millis) => Duration::from_millis(millis),
+        None => DEFAULT_GIT_TIMEOUT,
+    }
 }
 
 /// Like [`run`], with an explicit wall-clock timeout.
@@ -246,16 +280,40 @@ pub(crate) fn run_success(args: &[&str], cwd: &Path) -> Result<String, GitError>
     }
 }
 
-/// Unix-only as a whole: every test in here (and the scratch-directory
-/// helper they share) depends on the `#!/bin/sh` fake git below, so on
-/// Windows the module would compile to nothing but dead imports and a dead
-/// helper — which `-D warnings` rejects. A portable test added later moves
-/// this gate back to a plain `#[cfg(test)]` and pushes `#[cfg(unix)]` down
-/// onto the shell-script fixtures instead.
-#[cfg(all(test, unix))]
+/// The two tests that drive a real child process depend on the `#!/bin/sh`
+/// fake git below and carry their own `#[cfg(unix)]`, as does the scratch
+/// directory helper they share — without that, Windows would see nothing here
+/// but dead imports and a dead helper, which `-D warnings` rejects. The module
+/// itself is portable: [`timeout_from_env`] is pure and is checked everywhere.
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn timeout_from_env_parses_override_and_falls_back() {
+        assert_eq!(
+            timeout_from_env(Some("60000")),
+            Duration::from_secs(60),
+            "a numeric value is milliseconds"
+        );
+        assert_eq!(
+            timeout_from_env(None),
+            DEFAULT_GIT_TIMEOUT,
+            "unset falls back to the production default"
+        );
+        assert_eq!(
+            timeout_from_env(Some("not-a-number")),
+            DEFAULT_GIT_TIMEOUT,
+            "an unparseable value falls back to the production default"
+        );
+        assert_eq!(
+            timeout_from_env(Some("0")),
+            Duration::ZERO,
+            "zero is honoured — the operator asked for it"
+        );
+    }
 
     /// Proves the timeout fires for real: a fake `git` script that sleeps for
     /// ten seconds is put first on `PATH` and the runner is pointed at it
@@ -335,6 +393,80 @@ mod tests {
         );
     }
 
+    /// The pure test above proves [`timeout_from_env`] reads the value; this
+    /// one proves the *default* path actually calls it, which is the half that
+    /// was missing. `.github/workflows/build-release.yml` set
+    /// `SIRIO_GIT_TIMEOUT_MS=60000` and `ProjectCatalog::add` went on dying at
+    /// ten seconds, because this crate's runner passed the constant straight
+    /// through — an override that reaches one of two runners is worse than
+    /// none, since it looks like it worked.
+    ///
+    /// The fake `git` sleeps 30 s, so the two outcomes are far apart: with the
+    /// override honoured the child comes back in ~200 ms, and without it in
+    /// ~10 s, the shipped default. `TimedOut` alone would not tell them apart,
+    /// which is why the elapsed assertion is the real one here.
+    ///
+    /// Same self-re-execution as `git_timeout_fires` and for the same reason:
+    /// `PATH` and the environment are process-global, so the poisoned pair
+    /// lives in a child and no sibling test ever sees either.
+    #[cfg(unix)]
+    #[test]
+    fn the_default_path_honours_the_timeout_environment_variable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os("SIRIO_GIT_ENV_TIMEOUT_TEST").is_none() {
+            let scratch = scratch_dir();
+            let fake_dir = scratch.join("fake-bin");
+            std::fs::create_dir_all(&fake_dir).expect("create fake bin dir");
+            let fake_git = fake_dir.join("git");
+            std::fs::write(&fake_git, "#!/bin/sh\nsleep 30\n").expect("write fake git");
+            std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+                .expect("make fake git executable");
+
+            let exe = std::env::current_exe().expect("test binary path");
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let output = Command::new(exe)
+                .args([
+                    "--exact",
+                    "git::tests::the_default_path_honours_the_timeout_environment_variable",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("SIRIO_GIT_ENV_TIMEOUT_TEST", "1")
+                .env(TIMEOUT_ENV_VAR, "200")
+                .env(
+                    "PATH",
+                    format!("{}:{}", fake_dir.display(), path.to_string_lossy()),
+                )
+                .output()
+                .expect("rerun the test with the fake git and the override in place");
+            let _ = std::fs::remove_dir_all(&scratch);
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            assert!(
+                output.status.success(),
+                "child test failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Child: `git` is the sleeping fake and the override says 200 ms.
+        let started = Instant::now();
+        let result = run(&["rev-parse", "HEAD"], Path::new("/"));
+        let elapsed = started.elapsed();
+        println!("measured elapsed: {elapsed:?}");
+
+        assert!(
+            matches!(result, Err(GitError::TimedOut { .. })),
+            "expected TimedOut, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the default path took {elapsed:?} with SIRIO_GIT_TIMEOUT_MS=200 — it is still using the compiled-in {DEFAULT_GIT_TIMEOUT:?}"
+        );
+    }
+
+    #[cfg(unix)]
     fn scratch_dir() -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
