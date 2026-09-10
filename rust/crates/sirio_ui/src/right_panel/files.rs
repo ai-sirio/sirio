@@ -122,17 +122,21 @@ impl RightPanel {
             .any(|root| normalize_path(root) == normalize_path(&self.repo_root))
         {
             self.settled = true;
+            // A panel restored from a snapshot arrives with `updating` set:
+            // clear it here too, or the progress bar runs forever on a root
+            // this panel is never going to walk.
+            self.updating = false;
             self.refresh_error = Some("worktree is outside the project roots".to_string());
             return;
         }
         self.refresh_started = true;
+        self.updating = true;
         self.refresh_error = None;
         let repo_root = self.repo_root.clone();
         self.refresh_generation += 1;
         let refresh_generation = self.refresh_generation;
-        let walk_generation = self.walk_generation;
         let expected_repo_root = repo_root.clone();
-        self.walk_task = Some(cx.spawn(async move |this, cx| {
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     // Files can browse a plain directory too; an absent Git
@@ -172,7 +176,6 @@ impl RightPanel {
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 let is_current_refresh = panel.refresh_generation == refresh_generation
-                    && panel.walk_generation == walk_generation
                     && panel.repo_root == expected_repo_root;
                 if !is_current_refresh {
                     if panel.refresh_generation == refresh_generation {
@@ -180,7 +183,7 @@ impl RightPanel {
                     }
                     return;
                 }
-                panel.walk_task = None;
+                panel.refresh_task = None;
                 panel.refresh_started = false;
                 // The walk finished. Whichever way it went, the panel now
                 // has something truthful to show — a tree, an empty tree, or
@@ -202,12 +205,21 @@ impl RightPanel {
                         panel.file_tree = preserve_expansion(&panel.file_tree, tree);
                         panel.rebuild_file_rows();
                         panel.refresh_error = None;
+                        panel.is_stale = false;
                     }
-                    Err(error) => panel.refresh_error = Some(error),
+                    Err(error) => {
+                        panel.refresh_error = Some(error);
+                        panel.is_stale = !panel.file_tree.is_empty();
+                    }
                 }
+                panel.updating = false;
                 cx.notify();
             });
         }));
+    }
+
+    pub(super) fn is_files_updating(&self) -> bool {
+        self.updating && self.settled
     }
 
     /// Arms the periodic tree refresh: once immediately, then on a fixed
@@ -768,7 +780,9 @@ impl RightPanel {
                     cx,
                 ))
                 .into_any_element()
-        } else if let Some(error) = &self.refresh_error {
+        } else if self.file_tree.is_empty()
+            && let Some(error) = &self.refresh_error
+        {
             let retry_entity = entity.clone();
             div()
                 .id("files-error")
@@ -795,6 +809,7 @@ impl RightPanel {
                 ))
                 .into_any_element()
         } else {
+            let retry_entity = entity.clone();
             let list = uniform_list(
                 "right-panel-files",
                 rows.len(),
@@ -819,13 +834,47 @@ impl RightPanel {
             .on_key_down(cx.listener(Self::on_file_key))
             .flex_1()
             .min_h(px(0.0));
-            list.into_any_element()
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .when_some(self.refresh_error.clone(), |this, error| {
+                    this.child(
+                        div()
+                            .id("files-refresh-error")
+                            .debug_selector(|| "files-refresh-error".to_owned())
+                            .flex_none()
+                            .p(theme.spacing.card_gap)
+                            .text_color(theme.danger)
+                            .child(format!("Files refresh failed: {error}")),
+                    )
+                    .child(files_action_button(
+                        "Retry",
+                        "files-refresh-retry",
+                        theme,
+                        move |cx| retry_entity.update(cx, |panel, cx| panel.refresh(cx)),
+                    ))
+                })
+                .child(list)
+                .into_any_element()
         };
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .when(self.is_files_updating(), |this| {
+                this.child(
+                    div()
+                        .id("files-refresh-progress")
+                        .debug_selector(|| "files-refresh-progress".to_owned())
+                        .h(px(2.0))
+                        .w_full()
+                        .flex_none()
+                        .bg(theme.accent),
+                )
+            })
             .child(body)
             .into_any_element()
     }
@@ -957,6 +1006,24 @@ fn flatten_files(nodes: &[FileNode], depth: usize, rows: &mut Vec<FileRow>) {
         if node.is_dir && node.expanded {
             flatten_files(&node.children, depth + 1, rows);
         }
+    }
+}
+
+pub(super) fn collect_expanded(nodes: &[FileNode]) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+    for node in nodes {
+        if node.expanded {
+            expanded.push(node.path.clone());
+            expanded.extend(collect_expanded(&node.children));
+        }
+    }
+    expanded
+}
+
+pub(super) fn restore_expanded(nodes: &mut [FileNode], expanded: &[PathBuf]) {
+    for node in nodes {
+        node.expanded = expanded.iter().any(|path| path == &node.path);
+        restore_expanded(&mut node.children, expanded);
     }
 }
 
@@ -1227,6 +1294,97 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_root_outside_the_allowlist_stops_the_progress_bar(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let elsewhere = TempDir::new();
+        let panel = cx.new(|_| {
+            RightPanel::with_activity_and_roots(
+                dir.0.clone(),
+                vec![elsewhere.0.clone()],
+                Vec::new(),
+            )
+        });
+        panel.update(cx, |panel, cx| {
+            // What a snapshot-restored panel looks like before its first
+            // refresh: a tree on screen and the bar running.
+            panel.settled = true;
+            panel.updating = true;
+            panel.refresh(cx);
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.refresh_error.is_some(), "a rejected root reports why");
+            assert!(
+                !panel.is_files_updating(),
+                "a root this panel will never walk stops the progress bar"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_completed_refresh_replaces_stale_rows_without_duplicates(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let old_file = dir.0.join("old.txt");
+        let new_file = dir.0.join("new.txt");
+        std::fs::write(&old_file, "old").expect("write old file");
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || panel.read_with(cx, |panel, _| panel.settled));
+
+        std::fs::remove_file(&old_file).expect("remove old file");
+        std::fs::write(&new_file, "new").expect("write new file");
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                !panel.refresh_started && find_node(&panel.file_tree, &new_file).is_some()
+            })
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert!(find_node(&panel.file_tree, &old_file).is_none());
+            assert_eq!(
+                panel
+                    .file_tree
+                    .iter()
+                    .filter(|node| node.path == new_file)
+                    .count(),
+                1,
+                "a completed refresh publishes each new row once"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn an_expansion_during_refresh_survives_the_refresh_result(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let folder = dir.0.join("folder");
+        seed_dir_with_files(&folder, 2000);
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &folder).is_some()
+            })
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.refresh(cx);
+            assert!(panel.refresh_started, "the root refresh is still loading");
+            panel.toggle_file(&folder, cx);
+        });
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| !panel.refresh_started)
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(!panel.refresh_started);
+            let node = find_node(&panel.file_tree, &folder).expect("folder node");
+            assert!(node.expanded, "the user's expansion survives refresh");
+            assert_eq!(node.children.len(), 2000);
+        });
+    }
+
+    #[gpui::test]
     async fn a_superseded_walk_is_dropped(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let first = dir.0.join("first");
@@ -1372,6 +1530,12 @@ mod tests {
                 window.root::<RightPanel>().flatten().expect("panel root")
             })
             .expect("window");
+        cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &dir.0.join("visible.txt")).is_some()
+            })
+        });
         std::fs::remove_dir_all(&dir.0).expect("break root refresh");
         cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1381,11 +1545,17 @@ mod tests {
         cx.cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("files-error").is_some(),
-            "a failed refresh is drawn as an error"
+            cx.debug_bounds("files-refresh-error").is_some(),
+            "a failed refresh keeps its error visible above the previous tree"
+        );
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &dir.0.join("visible.txt")).is_some()
+            }),
+            "a failed refresh keeps the previous tree visible"
         );
         let retry = cx
-            .debug_bounds("files-retry")
+            .debug_bounds("files-refresh-retry")
             .expect("Retry is drawn for a failed refresh");
 
         std::fs::create_dir_all(&dir.0).expect("restore root");
