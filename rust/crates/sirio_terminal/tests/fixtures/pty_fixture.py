@@ -33,6 +33,17 @@ Modes (argv[1]); every mode ends by staying alive or by exiting 0.
       and it must be the child that expands it, since the point of the test
       is that the child inherited the variable.
 
+  titles <text>... [--sleep S]
+      Write the first <text> (unescaped), then write each of the remaining
+      ones only once a full line has arrived on the PTY, and finally stay
+      alive for S seconds (default `inf`). The stand-in for a script that
+      alternates `printf` with `IFS= read -r _`: a test that has to observe
+      one title, assert on it, and only then release the next one needs the
+      child to wait for its cue instead of racing a timer. Either CR or LF
+      ends the line, since one Enter can reach a ConPTY as either. Nothing
+      is echoed back — unlike `cat` and `prompt`, no assertion here reads
+      what was typed, only what was written in response to it.
+
   lines <prefix> <count>
       Write <count> lines `<prefix>%03d`, numbered from zero, then exit 0.
       Fills the scrollback past the viewport the way the unix `while` loop
@@ -206,6 +217,22 @@ def read_some():
     return data.decode("utf-8", "replace")
 
 
+def read_line():
+    """Block until a whole line has arrived on the PTY.
+
+    Returns False once the input side is gone, so a caller can stop instead
+    of waiting for a cue that will never come. Either CR or LF closes the
+    line: a unix tty hands `read` the LF the test typed, while a ConPTY may
+    deliver the same Enter as CR.
+    """
+    while True:
+        chunk = read_some()
+        if chunk == "":
+            return False
+        if "\r" in chunk or "\n" in chunk:
+            return True
+
+
 def stay_alive(seconds):
     if seconds == float("inf"):
         seconds = FOREVER
@@ -258,6 +285,15 @@ def main():
         if delay:
             time.sleep(delay)
         write(text)
+        stay_alive(parse_seconds(option(args, "--sleep", "inf")))
+        return 0
+
+    if mode == "titles":
+        write(unescape(positional[0]))
+        for text in positional[1:]:
+            if not read_line():
+                return 0
+            write(unescape(text))
         stay_alive(parse_seconds(option(args, "--sleep", "inf")))
         return 0
 
