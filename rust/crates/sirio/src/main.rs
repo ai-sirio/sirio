@@ -27091,10 +27091,10 @@ mod tests {
             let before = workspace
                 .sidebar
                 .read(cx)
-                .worktree_disclosure(worktree_id)
+                .worktree_pill_tabs(worktree_id)
                 .expect("the worktree row exists before any refresh");
             assert_eq!(
-                before.1.len(),
+                before.len(),
                 1,
                 "the worktree lists its one open terminal tab: {before:?}"
             );
@@ -27111,7 +27111,7 @@ mod tests {
             workspace.refresh_project_for_path_in_background(&working_directory, cx);
         });
         let immediately_after = workspace.update(cx, |workspace, cx| {
-            workspace.sidebar.read(cx).worktree_disclosure(worktree_id)
+            workspace.sidebar.read(cx).worktree_pill_tabs(worktree_id)
         });
         assert_eq!(
             immediately_after,
@@ -27122,12 +27122,12 @@ mod tests {
         cx.run_until_parked();
 
         let after_project_refresh = workspace.update(cx, |workspace, cx| {
-            workspace.sidebar.read(cx).worktree_disclosure(worktree_id)
+            workspace.sidebar.read(cx).worktree_pill_tabs(worktree_id)
         });
         assert_eq!(
             after_project_refresh,
             Some(before.clone()),
-            "refresh_project_for_path_in_background must keep the worktree's tab rows (and so its chevron) once the background refresh lands"
+            "refresh_project_for_path_in_background must keep the worktree's tab pills once the background refresh lands"
         );
 
         // Step two, made to actually rebuild: HEAD moved while the app was
@@ -27138,14 +27138,11 @@ mod tests {
                 workspace.refresh_worktree_branches(cx),
                 "the branch flip under the app must be noticed"
             );
-            let after_branch_refresh = workspace
-                .sidebar
-                .read(cx)
-                .worktree_disclosure(worktree_id);
+            let after_branch_refresh = workspace.sidebar.read(cx).worktree_pill_tabs(worktree_id);
             assert_eq!(
                 after_branch_refresh,
                 Some(before),
-                "refresh_worktree_branches must keep the worktree's tab rows (and so its chevron)"
+                "refresh_worktree_branches must keep the worktree's tab pills"
             );
         });
     }
@@ -27191,10 +27188,10 @@ mod tests {
             let before = workspace
                 .sidebar
                 .read(cx)
-                .worktree_disclosure(other_id)
+                .worktree_pill_tabs(other_id)
                 .expect("the second worktree row exists before any refresh");
             assert_eq!(
-                before.1,
+                before,
                 vec![
                     parked_tab_row_id(other_id, 0),
                     parked_tab_row_id(other_id, 1)
@@ -27213,7 +27210,7 @@ mod tests {
             workspace.refresh_project_for_path_in_background(&working_directory, cx);
         });
         let immediately_after = workspace.update(cx, |workspace, cx| {
-            workspace.sidebar.read(cx).worktree_disclosure(other_id)
+            workspace.sidebar.read(cx).worktree_pill_tabs(other_id)
         });
         assert_eq!(
             immediately_after,
@@ -27224,12 +27221,12 @@ mod tests {
         cx.run_until_parked();
 
         let after = workspace.update(cx, |workspace, cx| {
-            workspace.sidebar.read(cx).worktree_disclosure(other_id)
+            workspace.sidebar.read(cx).worktree_pill_tabs(other_id)
         });
         assert_eq!(
             after,
             Some(before),
-            "refresh_project_for_path_in_background must keep the unselected worktree's parked rows (and so its chevron) once the background refresh lands"
+            "refresh_project_for_path_in_background must keep the unselected worktree's parked pills once the background refresh lands"
         );
     }
 

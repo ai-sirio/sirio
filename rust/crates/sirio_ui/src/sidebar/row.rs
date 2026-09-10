@@ -215,6 +215,19 @@ impl Sidebar {
     /// Apply one of bezel's standard tree directions to the currently
     /// visible, depth-annotated rows. Expansion remains Sirio state; bezel
     /// reports only the intent.
+    /// The tint of a pill's glyph.
+    ///
+    /// A branded agent mark is drawn in its brand. A pill with no agent — an
+    /// unstarted chat, a plain terminal — takes the row grey. It must never
+    /// fall back to `warning`: that amber means "answer me", and spending it
+    /// as decoration made an idle terminal pixel-identical to an agent
+    /// genuinely waiting on the reader. That bug survived one fix already,
+    /// which is why the choice lives here instead of inline in the pill,
+    /// where no test could reach it.
+    pub(super) fn pill_icon_color(brand: Option<AgentBrandColor>, theme: Theme) -> Rgba {
+        brand.map_or(theme.text_muted, AgentBrandColor::color)
+    }
+
     /// Stable semantic debug/test names, independent of vendored filenames.
     pub(super) fn icon_selector_name(icon: Icon) -> &'static str {
         match icon {
@@ -321,9 +334,10 @@ impl Sidebar {
                                     Self::icon_selector_name(pill.icon)
                                 )
                             })
-                            .child(IconElement::new(pill.icon, IconSize::XSmall).text_color(
-                                pill.brand.map_or(theme.text_muted, |brand| brand.color()),
-                            )),
+                            .child(
+                                IconElement::new(pill.icon, IconSize::XSmall)
+                                    .text_color(Self::pill_icon_color(pill.brand, theme)),
+                            ),
                     )
                     .when_some(pill.status, |this, status| {
                         this.when(status != ActivityStatus::Idle, |this| {

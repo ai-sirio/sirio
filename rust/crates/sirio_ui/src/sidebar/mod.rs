@@ -169,7 +169,6 @@ pub struct SidebarTab {
 /// pushes a different one, through [`Sidebar::set_panel_width`].
 const DEFAULT_SIDEBAR_WIDTH: f32 = 325.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
-const ROW_RIGHT_INSET: f32 = 7.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
@@ -602,11 +601,6 @@ pub struct Sidebar {
     field_blink: caret::Blink,
     /// The open worktree-creation prompt, if any.
     prompt: Option<WorktreePrompt>,
-    /// Checkout paths of the worktrees whose disclosure the user closed.
-    /// Keyed by path rather than row id because rows are rebuilt from the
-    /// catalog on every `set_projects`; see [`Self::set_row_expanded`].
-    /// Session-scoped: not persisted.
-    collapsed_worktrees: std::collections::HashSet<PathBuf>,
     /// A transient error message (failed creation/removal) shown at the
     /// bottom of the sidebar.
     notice: Option<String>,
@@ -765,7 +759,6 @@ impl Sidebar {
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
-            collapsed_worktrees: std::collections::HashSet::new(),
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
@@ -852,7 +845,6 @@ impl Sidebar {
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
-            collapsed_worktrees: std::collections::HashSet::new(),
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
@@ -906,7 +898,6 @@ impl Sidebar {
         self.project_worktree_defaults = replacement.project_worktree_defaults;
         self.filter = filter;
         self.pending_reorder = None;
-        self.apply_collapsed_worktrees();
         // F-PRJ-12: an already-open Project Settings card snapshots
         // is_git/path once, when it's opened (open_project_settings). If
         // the rebuilt rows above changed that same project -- e.g.
@@ -2037,22 +2028,21 @@ impl Sidebar {
         counts
     }
 
-    /// The worktree's expansion state and pill tab ids. Test-only compatibility
+    /// The tab ids the worktree's pills carry. Test-only compatibility
     /// surface for callers that inspect the row model.
     #[doc(hidden)]
-    pub fn worktree_disclosure(&self, worktree_id: usize) -> Option<(bool, Vec<usize>)> {
+    pub fn worktree_pill_tabs(&self, worktree_id: usize) -> Option<Vec<usize>> {
         let index = self
             .rows
             .iter()
             .position(|row| row.id == worktree_id && row.kind == RowKind::Worktree)?;
-        Some((
-            self.rows[index].expanded,
+        Some(
             self.rows[index]
                 .pills
                 .iter()
                 .filter_map(|pill| pill.tab_id)
                 .collect(),
-        ))
+        )
     }
 
     fn tree_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
@@ -2328,31 +2318,11 @@ impl Sidebar {
         self.select_row(id, cx);
     }
 
-    /// Opens or closes the disclosure of the worktree row `id`. Unlike
-    /// [`Self::toggle_project`] this never touches the selection: the chevron
-    /// is its own control, and which worktree is selected stays the host's
-    /// decision (`SidebarEvent::SelectWorktree`).
-    fn toggle_worktree(&mut self, id: usize, cx: &mut Context<Self>) {
-        let Some(expanded) = self
-            .rows
-            .iter()
-            .find(|row| row.id == id && row.kind == RowKind::Worktree)
-            .map(|row| row.expanded)
-        else {
-            return;
-        };
-        self.set_row_expanded(id, RowKind::Worktree, !expanded);
-        cx.notify();
-    }
-
-    /// The one place a row's `expanded` flag is written. For a worktree the
-    /// same fact is mirrored into `collapsed_worktrees`, keyed by checkout
-    /// path, so it outlives the row: `set_projects` rebuilds every row from
-    /// the catalog and re-applies the set, and a selection change never
-    /// consults it at all — a worktree the user closed stays closed, one
-    /// they left open stays open, whichever worktree is current.
+    /// The one place a row's `expanded` flag is written. Only a project
+    /// discloses: `tree_row` makes a worktree a leaf, because its tabs are
+    /// pills inside the row rather than children under it.
     fn set_row_expanded(&mut self, id: usize, kind: RowKind, expanded: bool) {
-        if !matches!(kind, RowKind::Project | RowKind::Worktree) {
+        if kind != RowKind::Project {
             return;
         }
         let Some(row) = self
@@ -2363,27 +2333,6 @@ impl Sidebar {
             return;
         };
         row.expanded = expanded;
-        if kind == RowKind::Worktree
-            && let Some(path) = row.path.clone()
-        {
-            if expanded {
-                self.collapsed_worktrees.remove(&path);
-            } else {
-                self.collapsed_worktrees.insert(path);
-            }
-        }
-    }
-
-    /// Re-applies `collapsed_worktrees` to freshly built worktree rows.
-    fn apply_collapsed_worktrees(&mut self) {
-        for row in &mut self.rows {
-            if row.kind == RowKind::Worktree {
-                row.expanded = !row
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| self.collapsed_worktrees.contains(path));
-            }
-        }
     }
 
     // ------------------------------------------------------------------
@@ -2937,29 +2886,6 @@ impl Sidebar {
             .filter_map(|row| row.agent_status)
             .filter(|status| urgency(*status) > 0)
             .max_by_key(|status| urgency(*status))
-    }
-
-    /// The tint of a tab row's icon.
-    ///
-    /// A branded agent mark is drawn in its brand, exactly as the reference
-    /// draws one `AgentIcon` wherever a tab is listed. A tab with no agent —
-    /// an unstarted chat, a plain terminal — used to fall back to
-    /// `tab_needs_input`, spending the "answer me" amber as a decorative
-    /// tint, so an idle terminal wore the colour of an agent genuinely
-    /// waiting on the reader. It takes `meta` instead: the same grey the
-    /// worktree rows it sits under already use.
-    ///
-    /// Lifted out of the row body because a colour chosen inline is a colour
-    /// no test can reach — which is exactly how the amber survived the first
-    /// pass at this collision.
-    fn tab_row_icon_color(
-        agent_brand: Option<AgentBrandColor>,
-        has_agent_icon: bool,
-        theme: Theme,
-    ) -> Rgba {
-        agent_brand
-            .filter(|_| has_agent_icon)
-            .map_or(theme.text_faint, AgentBrandColor::color)
     }
 
     fn context_action_selector(action: SidebarContextAction) -> &'static str {
@@ -5217,10 +5143,10 @@ mod tests {
         );
     }
 
-    /// The filter follows the project rule one level down: a collapsed
-    /// worktree remains represented by its card when one of its pills matches.
+    /// A worktree whose pill matches stays represented by its own card: the
+    /// match never promotes a pill into a row of its own.
     #[gpui::test]
-    async fn filter_reveals_a_collapsed_worktrees_matching_tab_rows_only(
+    async fn filter_reveals_a_worktree_through_its_matching_pill_only(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
@@ -5237,7 +5163,6 @@ mod tests {
                 }],
                 cx,
             );
-            sidebar.toggle_worktree(1, cx);
             sidebar.filter = "main".to_string();
         });
         sidebar.read_with(cx, |sidebar, _| {
@@ -5249,7 +5174,7 @@ mod tests {
             assert!(ids.contains(&1), "the worktree itself matches");
             assert!(
                 !ids.contains(&2),
-                "a non-matching pill does not create a child row under a collapsed card"
+                "a non-matching pill does not create a child row under the card"
             );
         });
 
@@ -7255,27 +7180,21 @@ mod tests {
     /// same amber — the very thing that test exists to forbid, one branch
     /// over.
     #[test]
-    fn a_tab_row_without_an_agent_never_borrows_the_needs_input_amber() {
+    fn a_pill_without_an_agent_never_borrows_the_needs_input_amber() {
         for theme in [Theme::dark(), Theme::light()] {
-            let plain = Sidebar::tab_row_icon_color(None, false, theme);
+            let plain = Sidebar::pill_icon_color(None, theme);
             assert_eq!(
-                plain, theme.text_faint,
-                "a tab with no agent takes the row grey"
+                plain, theme.text_muted,
+                "a pill with no agent takes the row grey"
             );
             assert_ne!(
                 plain, theme.warning,
-                "an idle tab must not wear the colour of one waiting on an answer"
-            );
-
-            // A brand only reaches the tint when there is a mark to draw it on.
-            assert_eq!(
-                Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), true, theme),
-                AgentBrandColor::Codex.color()
+                "an idle pill must not wear the colour of one waiting on an answer"
             );
             assert_eq!(
-                Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), false, theme),
-                theme.text_faint,
-                "a brand with no mark to paint falls back like any other tab"
+                Sidebar::pill_icon_color(Some(AgentBrandColor::Codex), theme),
+                AgentBrandColor::Codex.color(),
+                "a branded mark is drawn in its brand"
             );
         }
     }
