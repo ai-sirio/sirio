@@ -17418,6 +17418,86 @@ fn main() {
     });
 }
 
+/// The deterministic PTY child the Windows arm of these tests runs.
+///
+/// This is `sirio_terminal`'s own fixture, reached through the workspace
+/// rather than copied: both crates' tests spawn the same program, so each
+/// mode's behaviour is described once, in that file's docstring, and stays
+/// described in one place. Its modes are argv-driven and documented there.
+#[cfg(all(test, not(unix)))]
+const PTY_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../sirio_terminal/tests/fixtures/pty_fixture.py"
+);
+
+/// The child a test spawns when it needs a pane with a real process behind
+/// a real PTY — one that stays alive, or emits exact bytes, or both.
+///
+/// On unix this stays the real `/bin/sh -c <script>` it has always been,
+/// byte for byte. That is deliberate: macOS is the reference release
+/// platform, and these tests earn their keep by driving a genuine POSIX
+/// shell through a genuine PTY — swapping the shell out everywhere would
+/// weaken them on exactly the platform that gates a release.
+///
+/// Windows has no `/bin/sh`, no `sleep` and no `printf`, so the same test
+/// drives `pty_fixture.py` under `python3`. The shell scripts here only
+/// ever ask for those same two things, and the fixture's argv modes cover
+/// both. Both halves are named at every call site so the pairing stays
+/// visible and reviewable. Deliberately the same shape, and the same name,
+/// as `sirio_terminal`'s own helper: that one is `#[cfg(test)]` in another
+/// crate and so cannot be reached from here.
+#[cfg(test)]
+fn pty_fixture_shell(unix_script: &str, windows_fixture_args: &[&str]) -> TerminalShell {
+    #[cfg(unix)]
+    {
+        let _ = windows_fixture_args;
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), unix_script.to_string()],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = unix_script;
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: std::iter::once(PTY_FIXTURE.to_string())
+                .chain(
+                    windows_fixture_args
+                        .iter()
+                        .map(|argument| (*argument).to_string()),
+                )
+                .collect(),
+        }
+    }
+}
+
+/// A child that exits immediately with `code`, so a test can assert on the
+/// status a pane reports for a finished process.
+///
+/// This is the one child that is not the PTY fixture: every fixture mode
+/// ends by staying alive or by exiting 0, and a nonzero status is exactly
+/// what these tests are about. `/bin/sh -c "exit N"` on unix, unchanged;
+/// `cmd /C exit N` on Windows — the same idea in the same role, the
+/// platform's own shell asked for nothing but a status.
+#[cfg(test)]
+fn exiting_shell(code: i32) -> TerminalShell {
+    #[cfg(unix)]
+    {
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), format!("exit {code}")],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        TerminalShell::WithArguments {
+            program: "cmd".to_string(),
+            args: vec!["/C".to_string(), "exit".to_string(), code.to_string()],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18707,10 +18787,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create breadcrumb test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn breadcrumb test terminal")
@@ -18742,10 +18819,30 @@ mod tests {
         worktree_urgency_test_workspace_with_shell(
             cx,
             root,
-            TerminalShell::WithArguments {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), "sleep 60".into()],
-            },
+            pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+        )
+    }
+
+    /// The same fixture, with a child that *reads* what is typed at it.
+    ///
+    /// The default child is `sleep 60`, which never reads its own input. On
+    /// unix that is still enough to see a keystroke come back, because the
+    /// tty line discipline echoes it; a ConPTY echoes only inside a cooked
+    /// read, so on Windows nothing types back at all and a test that waits
+    /// for its own needle waits forever. `cat` is the child that reads:
+    /// through the same real `/bin/sh` and the same real PTY as before on
+    /// unix — where the assertion still rides the line discipline's echo,
+    /// which fires before `cat` has a completed line to write back — and
+    /// through the fixture's `cat` mode on Windows, which switches input to
+    /// raw VT and does the echo itself.
+    fn worktree_echo_test_workspace(
+        cx: &mut Context<SirioWorkspace>,
+        root: &Path,
+    ) -> SirioWorkspace {
+        worktree_urgency_test_workspace_with_shell(
+            cx,
+            root,
+            pty_fixture_shell("exec cat", &["cat"]),
         )
     }
 
@@ -20317,10 +20414,7 @@ mod tests {
             // and the later one the question.
             workspace.add_terminal_tab_with_shell(
                 "Terminal 2",
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
                 None,
                 cx,
             );
@@ -20397,10 +20491,7 @@ mod tests {
             let background_pane = workspace.tabs[0].focused_pane;
             workspace.add_terminal_tab_with_shell(
                 "Terminal 2",
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
                 None,
                 cx,
             );
@@ -20681,10 +20772,7 @@ mod tests {
                 .agent_spawned("pane-0", "claude", Instant::now());
             workspace.add_terminal_tab_with_shell(
                 "Terminal 2",
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
                 None,
                 cx,
             );
@@ -20946,7 +21034,7 @@ mod tests {
         let (root, _worktrees) = urgency_test_root("control-no-dialog");
         let root_for_window = root.clone();
         let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+            cx.add_window(|_window, cx| worktree_echo_test_workspace(cx, &root_for_window));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -21018,7 +21106,7 @@ mod tests {
         let (root, _worktrees) = urgency_test_root("leak-ctrl-alt-w");
         let root_for_window = root.clone();
         let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+            cx.add_window(|_window, cx| worktree_echo_test_workspace(cx, &root_for_window));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -21188,10 +21276,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-cached-pane-frames-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create cached-pane test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn cached-pane test terminal")
@@ -21265,10 +21350,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-cached-rows-frames-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create cached-rows test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn cached-rows test terminal")
@@ -21379,10 +21461,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-close-tab-activity-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create close-tab test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn close-tab test terminal")
@@ -21432,10 +21511,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create regression test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn regression test terminal")
@@ -21486,10 +21562,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create reconcile test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn reconcile test terminal")
@@ -21549,14 +21622,22 @@ mod tests {
         ));
         std::fs::create_dir_all(&working_directory)
             .expect("create content activity test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1"
-                    .into(),
+        // The Windows fixture writes the title and the question in one go
+        // rather than with a gap between them: `print` emits once. Nothing
+        // here depends on the gap — the content scan runs when output
+        // settles, and both bytes are on the grid by then, in the same
+        // order.
+        let shell = pty_fixture_shell(
+            "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1",
+            &[
+                "print",
+                "\\033]0;. working\\007Do you want to proceed?\\n",
+                "--delay",
+                "0.1",
+                "--sleep",
+                "1",
             ],
-        };
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn content activity test terminal")
@@ -21595,10 +21676,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create terminal notify test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn terminal notify test terminal")
@@ -21650,13 +21728,10 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-activity-wiring-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create activity test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf '\\033]0;. working\\007'; exec sleep 1".into(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "printf '\\033]0;. working\\007'; exec sleep 1",
+            &["print", "\\033]0;. working\\007", "--sleep", "1"],
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn activity test terminal")
@@ -23219,10 +23294,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-tab-status-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create status test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "sleep 30".into()],
-        };
+        let shell = pty_fixture_shell("sleep 30", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn status test terminal")
@@ -23271,10 +23343,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-wsp01-kinds-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create wsp01 test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "sleep 30".into()],
-        };
+        let shell = pty_fixture_shell("sleep 30", &["sleep", "inf"]);
         let (terminal_a, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal leaf a")
         });
@@ -23628,10 +23697,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-tab-exit-status-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create exit test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exit 3".into()],
-        };
+        let shell = exiting_shell(3);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn exit status test terminal")
@@ -23688,10 +23754,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&working_directory)
             .expect("create split exit status test directory");
-        let exited_shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exit 0".into()],
-        };
+        let exited_shell = exiting_shell(0);
         let (exited_terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, exited_shell, cx)
                 .expect("spawn exited split status test terminal")
@@ -23704,10 +23767,7 @@ mod tests {
             let live_terminal = cx.new(|cx| {
                 TerminalView::with_shell(
                     &working_directory,
-                    TerminalShell::WithArguments {
-                        program: "/bin/sh".into(),
-                        args: vec!["-c".into(), "sleep 30".into()],
-                    },
+                    pty_fixture_shell("sleep 30", &["sleep", "inf"]),
                     cx,
                 )
                 .expect("spawn live split status test terminal")
@@ -31591,10 +31651,7 @@ browser  profile  "
             cx.new(|cx| {
                 TerminalView::with_shell(
                     &working_directory,
-                    TerminalShell::WithArguments {
-                        program: "/bin/sh".into(),
-                        args: vec!["-c".into(), "exec sleep 1".into()],
-                    },
+                    pty_fixture_shell("exec sleep 1", &["sleep", "1"]),
                     cx,
                 )
                 .expect("create deterministic restore test terminal")
