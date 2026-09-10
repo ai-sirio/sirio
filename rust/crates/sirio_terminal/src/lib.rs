@@ -3838,10 +3838,10 @@ impl TerminalView {
         match action {
             TerminalContextAction::Copy => self.copy_text(cx, false),
             TerminalContextAction::Paste => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    if let Some(terminal) = self.running_terminal() {
-                        terminal.paste(text.into_bytes());
-                    }
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                    && let Some(terminal) = self.running_terminal()
+                {
+                    terminal.paste(text.into_bytes());
                 }
             }
             TerminalContextAction::CopyContext => self.copy_text(cx, true),
@@ -8012,7 +8012,11 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Liveness probe for the `cfg(unix)` process-group tests above. Gated
+    /// on `unix` as well as the OS split: every caller is unix-only, so on
+    /// Windows this would be a dead `/proc` reader — and `-D warnings`
+    /// rejects dead code.
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn process_is_running(pid: i32) -> bool {
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
             return false;
@@ -9337,6 +9341,10 @@ mod view_tests {
     /// `perf_grid_rebuild_per_frame`. Ignored because it sleeps for four
     /// seconds and measures wall clock, which makes it a bad citizen in a
     /// loaded workspace run.
+    /// Unix-only: the measurement is `getrusage(RUSAGE_SELF)` and the idle
+    /// child is `/bin/cat`, neither of which exists on Windows — where the
+    /// bare `libc::rusage` reference is a hard compile error, not a warning.
+    #[cfg(unix)]
     #[test]
     #[ignore = "diagnostic: sleeps 4s and measures wall-clock CPU"]
     fn perf_idle_terminals_burn_cpu() {

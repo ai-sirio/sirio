@@ -2096,6 +2096,30 @@ mod tests {
         assert!(status.success(), "git {:?} failed: {status}", arguments);
     }
 
+    /// The spelling git accepts for a fixture path on its command line.
+    ///
+    /// [`TempDir`] canonicalizes, which on Windows yields a *verbatim*
+    /// `\\?\C:\...` path. Git does not understand that prefix and refuses
+    /// the argument outright (`could not create leading directories of
+    /// '//?/C:/...': Invalid argument`), so every fixture below that hands
+    /// a path straight to `git` converts it here first. Production code has
+    /// the same conversion built in (`sirio_git::git::path_arg`), which is
+    /// why only the fixtures are affected. Only the argv string changes;
+    /// the `Path` itself keeps its verbatim form, so Rust-side fs calls and
+    /// the path comparisons against what the catalog stores are untouched.
+    /// On other platforms the path passes through byte for byte.
+    fn git_path_arg(path: &Path) -> String {
+        let spelling = path.to_string_lossy();
+        #[cfg(windows)]
+        if let Some(rest) = spelling.strip_prefix(r"\\?\") {
+            return match rest.strip_prefix("UNC\\") {
+                Some(unc) => format!(r"\\{unc}"),
+                None => rest.to_string(),
+            };
+        }
+        spelling.into_owned()
+    }
+
     fn layout(path: &Path, tabs: Vec<SessionTab>) -> SessionLayout {
         SessionLayout {
             working_directory: path.to_path_buf(),
@@ -2340,7 +2364,12 @@ mod tests {
         let settings = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
-            terminal_font_size: 19,
+            // Inside `settings_ranges::TERMINAL_FONT_SIZE` (12..=18, narrowed
+            // from 9..=24 on 2026-09-05 with the stepper fix) and not the
+            // default 13: `AppDatabase::settings` clamps on load, so a value
+            // above the range would come back as 18 and prove nothing about
+            // the round trip.
+            terminal_font_size: 16,
             base_color: BaseColor::Neutral,
             control_socket_enabled: false,
             updates_enabled: true,
@@ -2388,7 +2417,7 @@ mod tests {
                 ("appearance.centerSplitRatio".into(), "610".into()),
                     ("appearance.rightPanelWidth".into(), "500".into()),
                 ("appearance.sidebarWidth".into(), "300".into()),
-                ("appearance.terminalFontSize".into(), "19".into()),
+                ("appearance.terminalFontSize".into(), "16".into()),
                 ("appearance.theme".into(), "dark".into()),
                 ("appearance.translucency".into(), "true".into()),
                 ("appearance.uiFontSize".into(), "17".into()),
@@ -2838,11 +2867,15 @@ mod tests {
     fn project_catalog_treats_bare_repositories_as_safe_projects() {
         let dir = TempDir::new();
         let bare_root = dir.0.join("repo.git");
-        std::process::Command::new("git")
+        let status = std::process::Command::new("git")
             .args(["init", "--bare", "--quiet"])
-            .arg(&bare_root)
+            .arg(git_path_arg(&bare_root))
             .status()
             .expect("git init --bare");
+        // Asserted, not ignored: a silently failed `init` used to surface
+        // three lines further down as `catalog.add` reporting os error 2,
+        // which reads like a defect in the code under test.
+        assert!(status.success(), "git init --bare failed: {status}");
 
         let mut catalog = ProjectCatalog::default();
         assert!(catalog.add(&bare_root).expect("discover bare repo"));
@@ -2867,7 +2900,7 @@ mod tests {
         run_git(&primary, &["commit", "--quiet", "-m", "fixture"]);
         let status = std::process::Command::new("git")
             .args(["worktree", "add", "--quiet", "-b", "linked"])
-            .arg(&linked)
+            .arg(git_path_arg(&linked))
             .current_dir(&primary)
             .status()
             .expect("git worktree add");
@@ -2948,7 +2981,7 @@ mod tests {
 
         let status = std::process::Command::new("git")
             .args(["worktree", "add", "--quiet", "-b", "linked"])
-            .arg(&linked)
+            .arg(git_path_arg(&linked))
             .current_dir(&primary)
             .status()
             .expect("git worktree add");
@@ -3050,7 +3083,7 @@ mod tests {
         for (branch, path) in [("preceding", &preceding), ("linked", &linked)] {
             let status = std::process::Command::new("git")
                 .args(["worktree", "add", "--quiet", "-b", branch])
-                .arg(path)
+                .arg(git_path_arg(path))
                 .current_dir(&primary)
                 .status()
                 .expect("git worktree add");
@@ -3097,7 +3130,7 @@ mod tests {
 
         let status = std::process::Command::new("git")
             .args(["worktree", "remove", "--force"])
-            .arg(&preceding)
+            .arg(git_path_arg(&preceding))
             .current_dir(&primary)
             .status()
             .expect("git worktree remove");
@@ -3247,7 +3280,7 @@ mod tests {
         ] {
             let status = std::process::Command::new("git")
                 .args(["worktree", "add", "--quiet", "-b", branch])
-                .arg(path)
+                .arg(git_path_arg(path))
                 .current_dir(&primary)
                 .status()
                 .expect("git worktree add");
@@ -3272,7 +3305,7 @@ mod tests {
 
         let status = std::process::Command::new("git")
             .args(["worktree", "add", "--quiet", "-b", "added"])
-            .arg(&added)
+            .arg(git_path_arg(&added))
             .current_dir(&primary)
             .status()
             .expect("git worktree add");
@@ -3288,7 +3321,7 @@ mod tests {
 
         let status = std::process::Command::new("git")
             .args(["worktree", "remove", "--force"])
-            .arg(&removed)
+            .arg(git_path_arg(&removed))
             .current_dir(&primary)
             .status()
             .expect("git worktree remove");
@@ -3315,7 +3348,7 @@ mod tests {
         // selectable as if it still existed.
         let status = std::process::Command::new("git")
             .args(["worktree", "remove", "--force"])
-            .arg(&mounted)
+            .arg(git_path_arg(&mounted))
             .current_dir(&primary)
             .status()
             .expect("git worktree remove");

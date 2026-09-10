@@ -246,7 +246,13 @@ pub(crate) fn run_success(args: &[&str], cwd: &Path) -> Result<String, GitError>
     }
 }
 
-#[cfg(test)]
+/// Unix-only as a whole: every test in here (and the scratch-directory
+/// helper they share) depends on the `#!/bin/sh` fake git below, so on
+/// Windows the module would compile to nothing but dead imports and a dead
+/// helper — which `-D warnings` rejects. A portable test added later moves
+/// this gate back to a plain `#[cfg(test)]` and pushes `#[cfg(unix)]` down
+/// onto the shell-script fixtures instead.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

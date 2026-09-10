@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use sirio_git::{
     DiffOrigin, DirectoryGitStatus, DirectoryStatusAggregator, GitBranches, GitClone,
-    GitDiffSideBySide, GitError, GitRemote, GitRunner,
+    GitDiffSideBySide, GitError, GitRemote,
 };
 
 struct TempDir(PathBuf);
@@ -71,6 +71,10 @@ fn repo(tag: &str) -> TempDir {
 #[cfg(unix)]
 #[test]
 fn streaming_runner_delivers_stderr_before_the_child_exits() {
+    // Imported here, not at the top of the file: this is the only user of
+    // the streaming runner, and a top-level import would be dead on
+    // Windows, where `-D warnings` turns that into a build failure.
+    use sirio_git::GitRunner;
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = TempDir::new("stream");
