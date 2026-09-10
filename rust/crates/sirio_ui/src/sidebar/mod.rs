@@ -2828,8 +2828,30 @@ impl Sidebar {
                 .any(|pill| matches(&pill.title) || matches(Self::icon_selector_name(pill.icon)))
     }
 
+    /// How many worktrees a project's header counts.
+    ///
+    /// It used to count the rows that were *visible*, which was the same
+    /// number for as long as a project could not really fold (see
+    /// `visible_rows`). Now that folding works, that spelling would make a
+    /// folded header read "sirio 0" over an empty section — throwing away
+    /// the one number worth having while a project is folded, which is how
+    /// much is hidden under it. The count comes from the model instead,
+    /// narrowed to what the filter matches when there is one, so a search
+    /// still counts its hits.
+    fn worktree_count(&self, project_id: usize) -> usize {
+        let query = self.filter.trim().to_lowercase();
+        self.rows
+            .iter()
+            .skip_while(|row| !(row.id == project_id && row.kind == RowKind::Project))
+            .skip(1)
+            .take_while(|row| row.kind != RowKind::Project)
+            .filter(|row| row.kind == RowKind::Worktree && Self::row_matches(row, &query))
+            .count()
+    }
+
     fn visible_rows(&self) -> Vec<SidebarRow> {
         let query = self.filter.trim().to_lowercase();
+        let searching = !query.is_empty();
         let mut filtered = Vec::new();
         let mut project_index = 0;
         while project_index < self.rows.len() {
@@ -2852,7 +2874,18 @@ impl Sidebar {
                     project_row.agent_status = Self::collapsed_project_status(section);
                 }
                 filtered.push(project_row);
-                if project.expanded || section_matches {
+                // A collapsed project opens itself when the filter reaches
+                // one of its worktrees — but only when there *is* a filter.
+                // `row_matches` answers `true` for an empty query, so
+                // `section_matches` was unconditionally true while the
+                // search field was blank, and this clause then held every
+                // project open no matter what `expanded` said. Collapsing a
+                // project did nothing whatsoever: not from the header
+                // click, not from the context menu, not from the keyboard.
+                // The defect was invisible because nothing on the header
+                // announced that a project could be folded at all; adding
+                // the disclosure chevron is what surfaced it.
+                if project.expanded || (searching && section_matches) {
                     filtered.extend(
                         section
                             .iter()
@@ -3864,6 +3897,11 @@ impl Render for Sidebar {
         }
         let rows = self.visible_rows();
         let sticky_section = self.sticky_section(&rows);
+        // Read off `self` here: the closure that draws the sticky header
+        // runs inside the element builder, where `self` is already borrowed.
+        let sticky_worktree_count = sticky_section
+            .as_ref()
+            .map_or(0, |row| self.worktree_count(row.id));
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
@@ -3948,11 +3986,7 @@ impl Render for Sidebar {
         let mut rendered_rows = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().cloned().enumerate() {
             if row.kind == RowKind::Project {
-                let worktree_count = rows[index + 1..]
-                    .iter()
-                    .take_while(|next| next.kind != RowKind::Project)
-                    .filter(|next| next.kind == RowKind::Worktree)
-                    .count();
+                let worktree_count = self.worktree_count(row.id);
                 rendered_rows.push(
                     section::render_section(row, worktree_count, entity.clone(), theme)
                         .into_any_element(),
@@ -4218,13 +4252,6 @@ impl Render for Sidebar {
                             .children(rendered_rows),
                     )
                     .when_some(sticky_section, |this, row| {
-                        let worktree_count = rows
-                            .iter()
-                            .skip_while(|candidate| candidate.id != row.id)
-                            .skip(1)
-                            .take_while(|candidate| candidate.kind != RowKind::Project)
-                            .filter(|candidate| candidate.kind == RowKind::Worktree)
-                            .count();
                         this.child(
                             div()
                                 .debug_selector(|| "sidebar-sticky-section".to_owned())
@@ -4235,7 +4262,7 @@ impl Render for Sidebar {
                                 .h(px(section::SECTION_HEIGHT))
                                 .child(section::render_section(
                                     row,
-                                    worktree_count,
+                                    sticky_worktree_count,
                                     entity.clone(),
                                     theme,
                                 )),
@@ -4510,15 +4537,22 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// A card's text runs out under a veil rather than stopping at an
-    /// ellipsis, which is the whole point of the Zed treatment: on a narrow
-    /// sidebar a branch name slides under the gradient instead of being cut
-    /// with a glyph. Both lines carry one, and the title no longer asks for
-    /// `text_ellipsis`.
+    /// The veil is gone from both card lines.
+    ///
+    /// It was meant to be invisible — a gradient in the row's own colour,
+    /// so text appeared to run out rather than stop at a glyph. On a
+    /// **highlighted** row it was not invisible at all: `element_active`
+    /// and `element_hover` are translucent tints, so painting one of them
+    /// again over a row already filled with it composited twice and drew a
+    /// lighter bar across the title and another across the second line.
+    /// Both were plainly visible in a capture of the running app, and only
+    /// on the selected row — the resting veil is opaque `surface`, which
+    /// matches what is behind it and hides the same mistake.
+    ///
+    /// The lines are clipped with an ellipsis again, which is the treatment
+    /// the veil replaced.
     #[gpui::test]
-    async fn a_card_fades_its_title_and_second_line_instead_of_clipping_them(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_card_draws_no_veil_over_its_title_or_second_line(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -4540,20 +4574,67 @@ mod tests {
             Box::leak(format!("sidebar-row-title-fade-{row_id}").into_boxed_str());
         let subline_fade: &'static str =
             Box::leak(format!("sidebar-row-subline-fade-{row_id}").into_boxed_str());
+        let title: &'static str =
+            Box::leak(format!("sidebar-row-title-{row_id}").into_boxed_str());
 
         assert!(
-            cx.debug_bounds(title_fade).is_some(),
-            "the branch title carries the right-edge veil"
+            cx.debug_bounds(title).is_some(),
+            "the card still draws its title"
         );
         assert!(
-            cx.debug_bounds(subline_fade).is_some(),
-            "so does the second line"
+            cx.debug_bounds(title_fade).is_none(),
+            "no veil is painted over the branch title"
         );
-        assert_eq!(
-            cx.debug_bounds(title_fade).unwrap().size.width,
-            px(super::fade::FADE_WIDTH),
-            "the veil keeps the width the design took from Zed's sidebar"
+        assert!(
+            cx.debug_bounds(subline_fade).is_none(),
+            "and none over the second line"
         );
+    }
+
+    /// The branch title names its own colour.
+    ///
+    /// It did not, and nothing above it did either — the row, the tree, the
+    /// panel and the window root all leave the text colour alone (the root
+    /// sets only `font_family`) — so the title inherited gpui's default
+    /// `TextStyle`, which is black, and branch names were drawn all but
+    /// invisible on the dark sidebar. The contrast assertion is the part
+    /// worth keeping: it fails for any token that would repeat the defect,
+    /// not just for the one value that caused it.
+    #[test]
+    fn a_branch_title_is_legible_against_the_sidebar_surface() {
+        fn channel(value: f32) -> f32 {
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(color: gpui::Rgba) -> f32 {
+            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+        }
+        fn contrast(one: gpui::Rgba, other: gpui::Rgba) -> f32 {
+            let (a, b) = (luminance(one), luminance(other));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+
+        for theme in [Theme::dark(), Theme::light()] {
+            let title = Sidebar::title_color(false, theme);
+            assert!(
+                contrast(title, theme.surface) >= 4.5,
+                "a branch title must clear WCAG AA against the sidebar surface, got {:.2}",
+                contrast(title, theme.surface)
+            );
+            let parked = Sidebar::title_color(true, theme);
+            assert!(
+                contrast(parked, theme.surface) >= 2.5,
+                "a parked title is quieter but still readable, got {:.2}",
+                contrast(parked, theme.surface)
+            );
+            assert_ne!(
+                title, parked,
+                "a parked tab still reads as a record rather than a live surface"
+            );
+        }
     }
 
     /// The filter saw titles only, so neither the annotation a person left

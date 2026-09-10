@@ -16,8 +16,10 @@ pub(super) fn render_section(
     theme: Theme,
 ) -> impl IntoElement {
     let row_id = row.id;
+    let expanded = row.expanded;
     let group = SharedString::from(format!("sidebar-section-group-{row_id}"));
     let collapse_entity = entity.clone();
+    let chevron_entity = entity.clone();
     let add_entity = entity.clone();
     let menu_entity = entity.clone();
     let menu_click_entity = entity.clone();
@@ -28,7 +30,7 @@ pub(super) fn render_section(
     div()
         .id(("sidebar-section", row_id))
         .debug_selector(move || format!("sidebar-section-{row_id}"))
-        .group(group.clone())
+        .group(group)
         .relative()
         .h(px(SECTION_HEIGHT))
         .w_full()
@@ -125,8 +127,11 @@ pub(super) fn render_section(
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .invisible()
-                .group_hover(group.clone(), |style| style.visible())
+                // Always drawn, never hover-revealed. "New worktree" is the
+                // one action a project header exists to offer, and hiding it
+                // until the pointer lands made the header look inert: there
+                // was nothing on screen to say a project could be added to.
+                // The same goes for its overflow menu below.
                 .hover(|style| style.bg(theme.element_hover))
                 .child(IconElement::new(Icon::Plus, IconSize::XSmall))
                 .on_click(move |_, window, cx| {
@@ -146,8 +151,6 @@ pub(super) fn render_section(
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .invisible()
-                .group_hover(group, |style| style.visible())
                 .hover(|style| style.bg(theme.element_hover))
                 .text_color(theme.text_muted)
                 .child("⋯")
@@ -158,12 +161,50 @@ pub(super) fn render_section(
                     });
                 }),
         )
+        // The disclosure, last in the row and after the overflow menu.
+        // Collapsing a project has always been possible — a click anywhere
+        // on the header does it, and that still works — but nothing on
+        // screen said so, so a person with a dozen worktrees had no way to
+        // learn they could fold them away. The chevron is the affordance
+        // for the behaviour that already existed, and it points the way the
+        // rest of the app points: down when the section is open, right when
+        // it is folded (`changes.rs` and the chat's tool calls both do).
+        //
+        // `stop_propagation` matters here: without it the click would reach
+        // the header's own handler underneath and toggle a second time,
+        // leaving the section exactly as it was.
+        .child(
+            div()
+                .id(("sidebar-section-collapse", row_id))
+                .debug_selector(move || format!("sidebar-section-collapse-{row_id}"))
+                .w(px(18.0))
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radii.control)
+                .hover(|style| style.bg(theme.element_hover))
+                .child(IconElement::new(
+                    if expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    IconSize::XSmall,
+                ))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    chevron_entity.update(cx, |sidebar, cx| {
+                        sidebar.toggle_project(row_id, cx);
+                    });
+                }),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, TestAppContext, VisualTestContext, point, size};
+    use gpui::{Context, Modifiers, TestAppContext, VisualTestContext, point, size};
 
     fn sidebar_with_one_project(cx: &mut Context<Sidebar>) -> Sidebar {
         let mut sidebar = Sidebar::from_projects(
@@ -212,6 +253,13 @@ mod tests {
         sidebar
     }
 
+    /// Both controls exist on the header. Note what this cannot see: gpui's
+    /// `.invisible()` sets a style, it does not remove the element, so this
+    /// test stayed green for as long as the two icons were hover-revealed
+    /// and a project header looked like it offered nothing at all. There is
+    /// no seam in the test harness that reads a painted element's
+    /// visibility, so "always visible" is verified against a capture of the
+    /// running app rather than here.
     #[gpui::test]
     async fn a_project_header_offers_add_and_menu_instead_of_a_new_worktree_row(
         cx: &mut TestAppContext,
@@ -225,6 +273,63 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-section-add-0").is_some());
         assert!(cx.debug_bounds("sidebar-section-menu-0").is_some());
         assert!(cx.debug_bounds("sidebar-new-worktree-row").is_none());
+    }
+
+    /// The disclosure folds the whole project away and brings it back.
+    ///
+    /// The second click is the half worth having a test for. The header
+    /// itself toggles on click, so a chevron that did not stop the event
+    /// would toggle once on its own handler and once again on the header's
+    /// underneath, and the section would sit there looking broken — open
+    /// after every click, no matter how many times you pressed it.
+    #[gpui::test]
+    async fn the_header_chevron_folds_and_unfolds_the_whole_project(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let worktrees = |cx: &mut VisualTestContext| {
+            window
+                .update(cx, |sidebar, _, _| {
+                    sidebar
+                        .visible_rows()
+                        .iter()
+                        .filter(|row| row.kind == RowKind::Worktree)
+                        .count()
+                })
+                .unwrap()
+        };
+        assert!(worktrees(&mut cx) > 0, "the fixture lists a worktree");
+
+        let chevron = cx
+            .debug_bounds("sidebar-section-collapse-0")
+            .expect("the header draws its disclosure");
+        cx.simulate_click(chevron.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            worktrees(&mut cx),
+            0,
+            "one click folds every worktree of the project away"
+        );
+        assert_eq!(
+            window
+                .update(&mut cx, |sidebar, _, _| sidebar.worktree_count(0))
+                .unwrap(),
+            2,
+            "a folded header still counts what it is hiding, rather than 0"
+        );
+
+        let chevron = cx
+            .debug_bounds("sidebar-section-collapse-0")
+            .expect("the disclosure survives the fold");
+        cx.simulate_click(chevron.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            worktrees(&mut cx) > 0,
+            "and the next click brings them back — the header underneath \
+             must not toggle a second time"
+        );
     }
 
     #[gpui::test]
