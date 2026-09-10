@@ -581,14 +581,7 @@ mod tests {
     use std::time::Duration;
 
     fn unique_root() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sirio-events-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        crate::scratch_dir("sirio-events")
     }
 
     /// Polls the monitor until an event matching `predicate` arrives or a
@@ -688,14 +681,7 @@ mod tests {
 
     #[test]
     fn reports_real_create_modify_and_remove_events() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-events-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::scratch_dir("sirio-events");
         fs::create_dir_all(&root).unwrap();
         let monitor = FileSystemEventMonitor::new(&root).unwrap();
         let file = root.join("note.md");
