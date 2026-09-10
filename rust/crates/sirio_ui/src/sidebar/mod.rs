@@ -2028,8 +2028,13 @@ impl Sidebar {
         counts
     }
 
-    /// The tab ids the worktree's pills carry. Test-only compatibility
-    /// surface for callers that inspect the row model.
+    /// One id per pill the worktree carries, in pill order: an open tab by
+    /// its [`SidebarTabRef::Open`] id, a parked one by
+    /// [`parked_tab_row_id`] — the same identifier its row used before the
+    /// tabs became pills. Reporting only `tab_id` would make a worktree
+    /// whose chats are all parked indistinguishable from one with no tabs
+    /// at all. Test-only compatibility surface for callers that inspect the
+    /// row model.
     #[doc(hidden)]
     pub fn worktree_pill_tabs(&self, worktree_id: usize) -> Option<Vec<usize>> {
         let index = self
@@ -2040,7 +2045,12 @@ impl Sidebar {
             self.rows[index]
                 .pills
                 .iter()
-                .filter_map(|pill| pill.tab_id)
+                .filter_map(|pill| {
+                    pill.tab_id.or_else(|| {
+                        pill.parked_tab
+                            .map(|parked| parked_tab_row_id(worktree_id, parked))
+                    })
+                })
                 .collect(),
         )
     }

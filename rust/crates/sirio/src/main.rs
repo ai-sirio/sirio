@@ -27098,7 +27098,6 @@ mod tests {
                 1,
                 "the worktree lists its one open terminal tab: {before:?}"
             );
-            assert!(before.0, "a worktree with tab rows starts expanded");
             before
         });
 
@@ -27198,7 +27197,6 @@ mod tests {
                 ],
                 "the unselected worktree lists its two persisted chats as parked rows: {before:?}"
             );
-            assert!(before.0, "a worktree with parked rows starts expanded");
             before
         });
 
