@@ -18864,10 +18864,23 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// A fresh worktree-urgency fixture root plus its three worktrees.
+    ///
+    /// The root carries `TEST_WORKSPACE_ID` and not just the tag, because
+    /// the very first thing every caller does with it is `remove_dir_all`:
+    /// two tests that happen to pass the same tag do not merely share a
+    /// directory, they delete each other's worktrees mid-run, and which one
+    /// loses depends on how the harness interleaves them. That is exactly
+    /// how `reselecting_a_worktree_reuses_the_mounted_terminal_handle` and
+    /// `missing_worktree_switch_keeps_live_terminals_and_database_rows_intact`
+    /// (both tagged `reselect-terminal`) turned into load-dependent
+    /// failures. The counter makes the collision unrepresentable rather
+    /// than leaving it to tag discipline.
     fn urgency_test_root(tag: &str) -> (PathBuf, Vec<PathBuf>) {
         let root = std::env::temp_dir().join(format!(
-            "sirio-worktree-urgency-{tag}-{}",
-            std::process::id()
+            "sirio-worktree-urgency-{tag}-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&root);
         let worktrees: Vec<PathBuf> = (0..3)
@@ -21237,8 +21250,15 @@ mod tests {
     }
 
     /// With every sidebar row its own cached view, the spinner lease of a
-    /// running worktree must re-render that row alone: the project row (and
-    /// any other row) is replayed while the running row keeps animating.
+    /// running worktree must re-render that row alone: every other row is
+    /// replayed while the running row keeps animating.
+    ///
+    /// The "other row" is a second worktree, not the project row. Since
+    /// 45d974ba a project is a section header, drawn inline by the sidebar's
+    /// render loop and `continue`d before it can become a cached `RowView`
+    /// — so it is invisible to `row_render_counts`, and a fixture with one
+    /// project and one worktree has no replayable row left to check at all.
+    /// The fixture therefore adds an idle sibling worktree.
     #[gpui::test]
     async fn a_spinner_frame_replays_the_other_sidebar_rows(cx: &mut TestAppContext) {
         use sirio_ui::sidebar::RowKind;
@@ -21258,7 +21278,32 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(|_, cx| {
             activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
         });
+        // The idle row a spinner frame has to replay. `activity_test_workspace`
+        // gives the project a single worktree, which the running pane owns;
+        // a second one is what makes "the other rows" exist at all.
+        let idle_sibling = working_directory.join("idle-sibling");
+        std::fs::create_dir_all(&idle_sibling).expect("create idle sibling worktree");
         workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "activity-project".into(),
+                    name: "Activity Project".into(),
+                    root_path: working_directory.clone(),
+                    is_git: false,
+                    worktrees: vec![
+                        session::CatalogWorktree {
+                            branch: "main".into(),
+                            path: working_directory.clone(),
+                            is_primary: true,
+                        },
+                        session::CatalogWorktree {
+                            branch: "idle-sibling".into(),
+                            path: idle_sibling.clone(),
+                            is_primary: false,
+                        },
+                    ],
+                }]);
+            workspace.refresh_sidebar(cx);
             workspace.cache_child_views = true;
             workspace
                 .sidebar
@@ -21284,27 +21329,41 @@ mod tests {
                 workspace.sidebar.read(app).row_render_counts(app)
             })
         };
+        // `Sidebar::from_projects` numbers rows project-major: the sole
+        // project row is 0 and its worktrees follow in catalog order, so the
+        // running (primary) worktree is row 1 and the idle sibling row 2.
+        const RUNNING_ROW: usize = 1;
         let before = counts(cx);
         assert!(
-            before.iter().any(|(_, kind, _)| *kind == RowKind::Worktree)
-                && before.iter().any(|(_, kind, _)| *kind == RowKind::Project),
-            "the fixture draws a project row and a worktree row: {before:?}"
+            before.iter().all(|(_, kind, _)| *kind == RowKind::Worktree),
+            "only worktree rows become cached row views; a project is a section header: {before:?}"
+        );
+        assert!(
+            before.iter().any(|(id, _, _)| *id == RUNNING_ROW)
+                && before.iter().any(|(id, _, _)| *id != RUNNING_ROW),
+            "the fixture draws the running worktree row and at least one idle row: {before:?}"
         );
 
         for _ in 0..10 {
             tick(cx);
         }
         let after = counts(cx);
+        assert_eq!(
+            before.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            after.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            "spinner frames must not add or drop sidebar rows"
+        );
         for ((id, kind, was), (_, _, now)) in before.iter().zip(after.iter()) {
-            match kind {
-                RowKind::Worktree => assert!(
+            if *id == RUNNING_ROW {
+                assert!(
                     *now >= was + 5,
                     "the running worktree row {id} must keep rendering with its spinner ({was} -> {now})"
-                ),
-                _ => assert_eq!(
+                );
+            } else {
+                assert_eq!(
                     now, was,
                     "row {id} ({kind:?}) must be replayed, not re-rendered, by spinner frames"
-                ),
+                );
             }
         }
 
@@ -25990,10 +26049,7 @@ mod tests {
             .expect("sibling sirioctl should be installed");
         assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
         assert!(resolved.is_absolute());
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("installed sirioctl exists"),
-            std::fs::canonicalize(&sirioctl).expect("source sirioctl exists")
-        );
+        assert_installed_from(&resolved, &sirioctl);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -26047,10 +26103,7 @@ mod tests {
             resolved,
             data_home.join("Sirio").join("bin").join("sirioctl.exe")
         );
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("installed sirioctl exists"),
-            std::fs::canonicalize(&sirioctl).expect("source sirioctl exists")
-        );
+        assert_installed_from(&resolved, &sirioctl);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -26069,7 +26122,12 @@ mod tests {
         std::fs::create_dir_all(&executable_dir).expect("create app fixture");
         std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
         let current_exe = executable_dir.join("sirio");
-        let path_sirioctl = path_dir.join("sirioctl");
+        // The PATH entry is named the way the platform ships it, exactly as
+        // in the sibling-directory fixture above: the Windows build emits
+        // `sirioctl.exe` and `find_executable_in_path` deliberately probes
+        // the PATHEXT spellings only, never the bare name (see
+        // `sirioctl_binary_name`).
+        let path_sirioctl = path_dir.join(sirioctl_binary_name());
         std::fs::write(&current_exe, b"sirio").expect("write app fixture");
         std::fs::write(&path_sirioctl, b"sirioctl").expect("write PATH fixture");
         make_executable(&current_exe);
@@ -26085,10 +26143,7 @@ mod tests {
         let resolved = resolve_sirioctl_path(&current_exe, &environment)
             .expect("PATH sirioctl should be installed");
         assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("PATH installation exists"),
-            std::fs::canonicalize(&path_sirioctl).expect("PATH source exists")
-        );
+        assert_installed_from(&resolved, &path_sirioctl);
 
         environment.insert(
             "XDG_DATA_HOME".into(),
@@ -26185,6 +26240,28 @@ mod tests {
 
     #[cfg(not(unix))]
     fn make_executable(_path: &Path) {}
+
+    /// The installed control CLI must be the very artifact the resolver
+    /// picked, and `install_sirioctl` reaches that end state by two
+    /// different transports: a symlink on unix, a byte copy on Windows
+    /// (`std::fs::copy`, because a link is not a primitive a plain user may
+    /// create there). Carrying the source's bytes is the claim both
+    /// transports make and is therefore asserted on every platform; the
+    /// symlink's stronger claim — one file, reachable under two names — is
+    /// asserted where the installer actually makes it.
+    fn assert_installed_from(installed: &Path, source: &Path) {
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::canonicalize(installed).expect("installed sirioctl exists"),
+            std::fs::canonicalize(source).expect("source sirioctl exists"),
+            "a unix install must be a symlink back to the source"
+        );
+        assert_eq!(
+            std::fs::read(installed).expect("read the installed sirioctl"),
+            std::fs::read(source).expect("read the source sirioctl"),
+            "the installed sirioctl must carry the source artifact's bytes"
+        );
+    }
 
     #[test]
     fn restoring_launch_snapshot_adds_missing_tabs_without_replacing_current_tabs() {
@@ -29887,6 +29964,31 @@ mod tests {
         assert_eq!(unknown_worktree.error.as_deref(), Some("unknown worktree"));
     }
 
+    /// Whether a control server is really serving the endpoint, asked the
+    /// only way that means the same thing on every platform: by talking to
+    /// it.
+    ///
+    /// `socket_path.exists()` is a unix-shaped proxy for this. There the
+    /// endpoint *is* a file the listener creates and `stop` unlinks; on
+    /// Windows the transport is a named pipe bound from
+    /// `ControlServer::start`'s `#[cfg(windows)]` arm, so nothing ever
+    /// appears at that path and the file test reports a healthy server as
+    /// absent. A ping round-trip is also the stronger claim on both: it
+    /// fails for a bound endpoint whose accept loop is not running, which
+    /// the file test would happily pass.
+    fn control_endpoint_answers(socket_path: &Path) -> bool {
+        sirio_control::round_trip(
+            socket_path,
+            &ControlRequest {
+                id: "socket-toggle-probe".into(),
+                method: "system.ping".into(),
+                params: BTreeMap::new(),
+            },
+            Duration::from_secs(5),
+        )
+        .is_ok_and(|response| response.ok)
+    }
+
     #[test]
     fn socket_controller_starts_and_stops_the_server_for_the_setting() {
         let socket_path =
@@ -29911,10 +30013,18 @@ mod tests {
 
         controller.set_enabled(true);
         assert!(info.enabled());
-        assert!(socket_path.exists());
+        assert!(
+            control_endpoint_answers(&socket_path),
+            "an enabled controller must leave a server answering on {}",
+            socket_path.display()
+        );
         controller.set_enabled(false);
         assert!(!info.enabled());
-        assert!(!socket_path.exists());
+        assert!(
+            !control_endpoint_answers(&socket_path),
+            "a disabled controller must leave nothing serving {}",
+            socket_path.display()
+        );
     }
 
     fn missing_directory(tag: &str) -> std::path::PathBuf {
@@ -30335,8 +30445,15 @@ mod tests {
         });
 
         wait_for_drawn(&mut cx, "changes-file-row");
+        // `changes-open-file` is the expanded-row marker this test needs:
+        // it is drawn inside the row's `when(expanded, …)` block in both
+        // hosts of `ChangesTab`. The row's `Open diff` control used to serve
+        // the same purpose, but since 57054845 it is drawn only for the
+        // right-panel host (`embedded_in_panel`), where the event can
+        // actually move somewhere — never inside the Changes tab this
+        // fixture opens.
         assert!(
-            cx.debug_bounds("changes-open-diff").is_none(),
+            cx.debug_bounds("changes-open-file").is_none(),
             "the existing Changes tab starts with its file collapsed"
         );
 
@@ -30344,7 +30461,7 @@ mod tests {
             workspace.active_tab = 0;
             workspace.add_changes_tab(Some(PathBuf::from("changed.md")), cx);
         });
-        wait_for_drawn(&mut cx, "changes-open-diff");
+        wait_for_drawn(&mut cx, "changes-open-file");
 
         workspace.read_with(&cx.cx, |workspace, _| {
             assert_eq!(
@@ -30368,6 +30485,17 @@ mod tests {
         });
     }
 
+    /// The per-file `Open diff` control, clicked in the drawn frame, must
+    /// reveal the Diff tab the worktree already has instead of opening a
+    /// second one.
+    ///
+    /// The fixture puts the control where 57054845 left it: `ChangesTab`
+    /// draws it only for the right panel's Diff view (`in_right_panel` sets
+    /// `embedded_in_panel`), because from inside the Changes tab the event
+    /// could only reveal the tab the click already happened in. So the panel
+    /// is switched to Diff and the existing Changes tab is parked in a
+    /// closed Secondary — which also keeps `changes-file-row` unambiguous,
+    /// with exactly one `ChangesTab` drawing rows in the frame.
     #[gpui::test]
     async fn drawn_changes_open_diff_action_reveals_the_existing_diff_tab(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -30383,6 +30511,15 @@ mod tests {
                 .flatten()
                 .expect("workspace root")
         });
+        cx.update(|_, cx| right_panel::PanelView::set(right_panel::PanelView::Diff, cx));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(
+                !workspace.secondary_pane_visible(),
+                "the regression starts with an existing Changes tab in a closed Secondary"
+            );
+        });
+        cx.run_until_parked();
 
         let row = wait_for_drawn(&mut cx, "changes-file-row");
         cx.simulate_click(row.center(), Modifiers::none());
@@ -30400,6 +30537,10 @@ mod tests {
             }),
             1,
             "the host subscriber reveals the existing Diff tab after the drawn action"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.secondary_pane_visible()),
+            "revealing the existing Diff tab must reopen the Secondary it was parked in"
         );
     }
 
