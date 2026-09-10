@@ -972,13 +972,26 @@ mod tests {
         // one is allowed out. On unix that is `printf` and `IFS= read -r _`;
         // the fixture's `titles` mode is the same alternation, one argument
         // per `printf`.
+        //
+        // The two idle titles must differ in text, and this is the whole
+        // reason the test needs a comment. The terminal's owner thread diffs
+        // the emulator's title and emits `TerminalEvent::Title` only when it
+        // *changes* (`sirio_terminal`, "3. Diff observable terminal state
+        // into events"), so a fixture that prints the same `✳ idle` twice
+        // delivers exactly one event and the second half of this test waits
+        // out its 30-second deadline for one that cannot arrive. It did,
+        // deterministically, on every platform, and was read as load
+        // flakiness for days because it sits next to tests that really are
+        // timing-sensitive. Both strings still classify as Claude's idle
+        // convention -- `detect_claude` accepts `✳` followed by anything --
+        // which is what this test is actually about.
         let shell = crate::pty_fixture_shell(
-            "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; exec sleep 1",
+            "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; IFS= read -r _; printf '\\033]0;✳ idle again\\007'; exec sleep 1",
             &[
                 "titles",
                 "\\033]0;. working\\007",
                 "\\033]0;✳ idle\\007",
-                "\\033]0;✳ idle\\007",
+                "\\033]0;✳ idle again\\007",
                 "--sleep",
                 "1",
             ],
@@ -1007,7 +1020,7 @@ mod tests {
                         state
                             .0
                             .notify("pane-debounce-pty", AgentStatus::Running, evidence_start);
-                    } else if title == "✳ idle" {
+                    } else if title.starts_with('✳') {
                         let status_before = state.0.status("pane-debounce-pty");
                         let evidence_time = evidence_start
                             + if state.1.is_empty() {
