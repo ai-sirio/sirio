@@ -416,6 +416,20 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.11
 
+      # Derived from what the crates actually link: `gtk = "0.18.2"` is
+      # gtk3-rs, hence libgtk-3-dev; gpui's wayland and x11 features need
+      # libwayland-dev, libxkbcommon-dev and libxcb1-dev.
+      #
+      # libxkbcommon-x11-dev is the one this list was missing, and it took the
+      # first run that ever reached this job to find out: every earlier nightly
+      # died on the macOS gate, so `build / linux` was always skipped and the
+      # list had never been executed anywhere. The task brief that wrote it
+      # said so at the time -- the package *names* had been checked against the
+      # apt indices, which rules out a typo but not insufficiency. gpui's X11
+      # backend links `-lxkbcommon-x11`, which lives in its own package rather
+      # than in libxkbcommon-dev, and the build failed at link time after
+      # twelve minutes of compiling. lld names every library it cannot
+      # resolve, not just the first, and it named exactly this one.
       - name: Install GUI build dependencies
         run: |
           sudo apt-get update
@@ -425,6 +439,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libwayland-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
             libxcb1-dev
 
       - name: Cache cargo registry and build artifacts
