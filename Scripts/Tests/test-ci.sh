@@ -70,3 +70,37 @@ if grep -q '^CI OK$' "$FIXTURE/ci-fail.log"; then
 fi
 
 echo "PASS: ci.sh fails without printing CI OK when cargo fails"
+
+# The release-gate flag. .github/workflows/build-release.yml sets
+# SIRIO_CI_RELEASE_GATE=1 so the two `sirio_agents` conformance tests that probe the
+# agent CLIs installed on the runner cannot stop a release; nothing else sets it. Both
+# directions are pinned here because the interesting failure is the silent one -- a
+# skip list that leaked into every local run would quietly stop checking the adapters'
+# ACP claims, which is the only place those claims are ever checked.
+cat > "$FIXTURE/bin/cargo" <<'EOF'
+#!/bin/bash
+printf '%s
+' "$*" >> "$CI_CARGO_ARGS"
+exit 0
+EOF
+chmod +x "$FIXTURE/bin/cargo"
+: > "$FIXTURE/cargo.args"
+
+CI_CARGO_ARGS="$FIXTURE/cargo.args" PATH="$FIXTURE/bin:$PATH" SIRIO_CI_RELEASE_GATE=1   bash "$REPO_ROOT/Scripts/ci.sh" > "$FIXTURE/ci-gate.log"
+
+gate_test_args=$(sed -n '2p' "$FIXTURE/cargo.args")
+expected="test --workspace --no-fail-fast -- --skip opencode_answers_the_acp_handshake_it_claims --skip oh_my_pi_is_only_claimed_once_it_answers"
+case "$gate_test_args" in
+  "$expected") ;;
+  *) echo "FAIL: release gate should run '$expected', got: $gate_test_args" >&2; exit 1 ;;
+esac
+grep -q '^CI OK$' "$FIXTURE/ci-gate.log"
+
+# The build stage is untouched by the flag: it is the same workspace either way.
+gate_build_args=$(sed -n '1p' "$FIXTURE/cargo.args")
+case "$gate_build_args" in
+  "build --workspace") ;;
+  *) echo "FAIL: the release gate must not change the build stage, got: $gate_build_args" >&2; exit 1 ;;
+esac
+
+echo "PASS: SIRIO_CI_RELEASE_GATE=1 skips only the agent-CLI probes, and only then"

@@ -179,7 +179,19 @@ jobs:
       # The gate runs with SIRIO_RELEASE_CHANNEL set (workflow env above), which
       # is what arms the spec §3.5 assertion in sirio_control: the compiled
       # channel really is this channel, and updating is enabled.
+      #
+      # SIRIO_CI_RELEASE_GATE marks this as the release path, which skips the
+      # two `sirio_agents` conformance tests that probe the agent CLIs
+      # installed on this machine (see the comment above the test stage in
+      # Scripts/ci.sh). They belong in a development run, where settling an
+      # adapter's ACP claim against the real binary is the point; they do not
+      # belong in a gate that decides whether a release exists, because a
+      # `brew install`/`npm i -g` on this Mac would then be able to stop one.
+      # Every other test in the workspace still runs, including the two
+      # hermetic tests in the same file.
       - name: Run CI gate
+        env:
+          SIRIO_CI_RELEASE_GATE: "1"
         run: Scripts/ci.sh
 
       # Stamped *after* the gate, deliberately. The gate tests the code; the
