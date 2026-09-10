@@ -1499,6 +1499,24 @@ fn default_restored(fallback_directory: &Path) -> RestoredSession {
     }
 }
 
+/// The layout for a worktree whose directory is gone: no tabs at all.
+///
+/// Deliberately not [`default_restored`]. A directory that does not exist
+/// cannot host a shell, so handing back the default Chat and Terminal strip
+/// only builds a pane whose spawn fails — and a failed pane reports `Error`,
+/// which `requires_close_confirmation` reads as live work worth protecting,
+/// leaving the centre pane bolted to a worktree that is not there any more.
+/// [`write_layout`] already refuses to persist a layout for exactly this
+/// case; this is the read side agreeing with the write side.
+fn empty_restored(fallback_directory: &Path) -> RestoredSession {
+    RestoredSession {
+        working_directory: fallback_directory.to_path_buf(),
+        tabs: Vec::new(),
+        tab_states: Vec::new(),
+        diagnostics: Vec::new(),
+    }
+}
+
 /// The debounced writer. Cloneable: every clone shares the same database
 /// slot, pending snapshot and write counter.
 #[derive(Clone)]
@@ -1632,9 +1650,14 @@ impl SessionStore {
     /// that opens its own isolated database (as several in `main.rs` do),
     /// where reaching for `database_path()` here would silently read the
     /// wrong file.
+    ///
+    /// A directory that is *gone* is the one case that yields no tabs at
+    /// all rather than the default strip -- see [`empty_restored`] for why
+    /// handing back a Chat and a Terminal there is worse than handing back
+    /// nothing.
     pub fn restore_tabs_for(&self, working_directory: &Path) -> RestoredSession {
         if !working_directory.is_dir() {
-            return default_restored(working_directory);
+            return empty_restored(working_directory);
         }
         let db = self
             .inner
@@ -2175,6 +2198,41 @@ mod tests {
 
         let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
         assert_eq!(restored.tabs[0].agent_id, Some(AgentRef::adapter("codex")));
+    }
+
+    /// A worktree the user deleted from disk restores nothing, not the
+    /// default strip. Handing back a Chat and a Terminal for a directory
+    /// that is gone only builds a pane whose spawn fails, and a failed pane
+    /// counts as live work in `requires_close_confirmation` — which is what
+    /// left the centre pane bolted to the dead worktree. `write_layout`
+    /// already refuses to persist this case, so the read side has to agree
+    /// with it.
+    #[test]
+    fn a_worktree_whose_directory_is_gone_restores_no_tabs() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("missing-worktree");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&working_directory, three_tabs()));
+        store.flush_now();
+        assert_eq!(
+            store.restore_tabs_for(&working_directory).tabs.len(),
+            3,
+            "the fixture must start from a worktree that really has tabs"
+        );
+
+        std::fs::remove_dir_all(&working_directory).expect("delete the checkout");
+
+        let restored = store.restore_tabs_for(&working_directory);
+        assert!(
+            restored.tabs.is_empty(),
+            "a worktree whose directory is gone restores nothing, not the \
+             default Chat and Terminal strip: {:?}",
+            restored.tabs
+        );
+        assert!(restored.tab_states.is_empty());
     }
 
     #[test]
