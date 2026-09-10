@@ -5290,6 +5290,157 @@ fn mouse_input(
     })
 }
 
+/// The deterministic PTY child the Windows arm of the real-PTY tests runs.
+/// Its own docstring is the reference for every mode named below.
+#[cfg(all(test, not(unix)))]
+const PTY_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pty_fixture.py");
+
+/// The child a real-PTY test spawns, chosen per platform.
+///
+/// On unix this stays the real `/bin/sh -c <script>` it has always been,
+/// byte for byte. That is deliberate: macOS is the reference release
+/// platform, and the tests named `real_pty_*` earn the name by driving a
+/// genuine POSIX shell through a genuine PTY — swapping the shell out
+/// everywhere would weaken them on exactly the platform that gates a
+/// release.
+///
+/// Windows has no `/bin/sh`, no `sleep`, no `cat` and no `printf`, so the
+/// same test drives `tests/fixtures/pty_fixture.py` under `python3`. The
+/// shell scripts here only ever ask for two things — stay alive, or emit
+/// exact bytes — and the fixture's argv modes cover both. Both halves are
+/// named at every call site so the pairing stays visible and reviewable.
+#[cfg(test)]
+fn pty_fixture_shell(unix_script: &str, windows_fixture_args: &[&str]) -> TerminalShell {
+    #[cfg(unix)]
+    {
+        let _ = windows_fixture_args;
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), unix_script.to_string()],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = unix_script;
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: std::iter::once(PTY_FIXTURE.to_string())
+                .chain(
+                    windows_fixture_args
+                        .iter()
+                        .map(|argument| (*argument).to_string()),
+                )
+                .collect(),
+        }
+    }
+}
+
+/// A child that puts a prompt on the grid, goes quiet, and speaks again as
+/// soon as something is typed at it.
+///
+/// The drawn tests that use this spawn an interactive `/bin/sh -i`, and lean
+/// on exactly two of its behaviours: `settled_drawn_terminal` waits for
+/// non-empty scrollback that then stops changing, and the retained-grid
+/// tests type at the pane and require output to come back. None of them
+/// reads the *result* of a command, so the Windows stand-in prompts and
+/// echoes without running anything.
+#[cfg(test)]
+fn interactive_prompt_shell() -> TerminalShell {
+    #[cfg(unix)]
+    {
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-i".to_string()],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: vec![PTY_FIXTURE.to_string(), "prompt".to_string()],
+        }
+    }
+}
+
+/// A child that echoes back whatever is written to the PTY, and nothing
+/// else — the tightest echo path there is, with no prompt and no timers of
+/// its own.
+///
+/// On unix that is `cat` on a canonical tty: the line discipline echoes the
+/// bytes. A ConPTY only echoes during a cooked read, so the fixture's `cat`
+/// mode switches Windows input to raw VT mode and does the echo itself,
+/// which is what makes a single keystroke — or a paste with no trailing
+/// newline — come straight back.
+#[cfg(test)]
+fn echo_child_shell() -> TerminalShell {
+    #[cfg(unix)]
+    {
+        TerminalShell::WithArguments {
+            program: "/bin/cat".to_string(),
+            args: Vec::new(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: vec![PTY_FIXTURE.to_string(), "cat".to_string()],
+        }
+    }
+}
+
+/// A child that reports the PTY's size back through the PTY when something
+/// is typed at it.
+///
+/// On unix that is a real interactive `/bin/sh` answering a real `stty
+/// size`. Windows has neither, so the fixture's `size` mode answers any
+/// input with `<rows> <columns>` read from its own console — the same
+/// observable line, produced by the same round trip through the PTY.
+#[cfg(test)]
+fn size_probe_shell() -> TerminalShell {
+    #[cfg(unix)]
+    {
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-i".to_string()],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: vec![PTY_FIXTURE.to_string(), "size".to_string()],
+        }
+    }
+}
+
+/// A program that is not a shell, printing its own argv and exiting.
+///
+/// `/bin/echo` on unix; the fixture's `echo` mode on Windows, which is just
+/// as much "not a shell" — the point of the test using it is that nothing
+/// interposes a shell between the PTY and the named program.
+#[cfg(test)]
+fn argv_probe_shell(marker: &str) -> TerminalShell {
+    #[cfg(unix)]
+    {
+        TerminalShell::WithArguments {
+            program: "/bin/echo".to_string(),
+            args: vec![marker.to_string()],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: vec![
+                PTY_FIXTURE.to_string(),
+                "echo".to_string(),
+                marker.to_string(),
+            ],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::StreamExt as _;
@@ -7302,13 +7453,16 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 0.1".to_string(),
+        let shell = pty_fixture_shell(
+            "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 0.1",
+            &[
+                "print",
+                "pane=${SIRIO_PANE_ID}\\n",
+                "--expand",
+                "--sleep",
+                "0.1",
             ],
-        };
+        );
         let (handle, mut events) =
             TerminalHandle::new_with_pane_id(&working_directory, &shell, Some("pane-real-env"))
                 .expect("spawn PTY");
@@ -7435,6 +7589,17 @@ mod tests {
     /// `tcgetpgrp`-based definition this test would fail (the method did not
     /// exist before this change; any process-existence stand-in would return
     /// `true` here, since the shell itself is always alive).
+    ///
+    /// unix only, and genuinely so: the subject is
+    /// `TerminalHandle::foreground_command_running`, whose definition *is*
+    /// `tcgetpgrp` on the PTY master — POSIX job control, which Windows has
+    /// no equivalent of. There the method is `#[cfg(not(unix))] { false }`
+    /// by construction (see its own doc comment), so an "idle prompt
+    /// reports false" assertion would pass there for a reason that has
+    /// nothing to do with what this test is about, and its sibling below
+    /// could never pass at all. Gating suppresses no coverage that could
+    /// exist today.
+    #[cfg(unix)]
     #[test]
     fn foreground_command_running_is_false_at_an_idle_prompt() {
         let working_directory = test_working_directory("idle-prompt");
@@ -7475,6 +7640,12 @@ mod tests {
     /// by `running_pill_state_is_replaced_by_exit_status_when_the_child_exits`
     /// below, which also proves the exit-state hand-off Swift's
     /// `statusChip` ordering requires.
+    ///
+    /// unix only for the same reason as its sibling above: `tcgetpgrp` and
+    /// the foreground process group it reads have no Windows equivalent, so
+    /// `foreground_command_running` is a hardcoded `false` there and the
+    /// positive case this test exists for cannot occur.
+    #[cfg(unix)]
     #[test]
     fn foreground_command_running_is_true_while_a_command_executes_then_false_again() {
         let working_directory = test_working_directory("running-then-idle");
@@ -7532,14 +7703,10 @@ mod tests {
     fn scrollback_can_be_viewed_after_output_exceeds_the_viewport() {
         let working_directory = test_working_directory("scroll");
         std::fs::create_dir_all(&working_directory).unwrap();
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "i=0; while [ \"$i\" -lt 100 ]; do printf 'P4_SCROLL_%03d\\n' \"$i\"; i=$((i + 1)); done"
-                    .to_string(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "i=0; while [ \"$i\" -lt 100 ]; do printf 'P4_SCROLL_%03d\\n' \"$i\"; i=$((i + 1)); done",
+            &["lines", "P4_SCROLL_", "100"],
+        );
         let (handle, mut wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
         let output_reached_screen = futures::executor::block_on(async {
             while let Some(event) = wakeup_rx.next().await {
@@ -7599,13 +7766,10 @@ mod tests {
             std::env::temp_dir().join(format!("sirio-terminal-test-state-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).unwrap();
         let nonce = format!("P30_SCROLLBACK_NONCE_{}", std::process::id());
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                format!("printf '%s\\n' '{nonce}'; exec sleep 60"),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            &format!("printf '%s\\n' '{nonce}'; exec sleep 60"),
+            &["print", &format!("{nonce}\\n")],
+        );
         let (source, _source_events) = TerminalHandle::new(&working_directory, &shell).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -7624,10 +7788,7 @@ mod tests {
         );
         let (restored, _restored_events) = TerminalHandle::new(
             &working_directory,
-            &TerminalShell::WithArguments {
-                program: "/bin/sh".to_string(),
-                args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-            },
+            &pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
         )
         .unwrap();
         restored.replay_scrollback(&captured);
@@ -7646,10 +7807,7 @@ mod tests {
         std::fs::create_dir_all(&working_directory).unwrap();
         let (restored, _restored_events) = TerminalHandle::new(
             &working_directory,
-            &TerminalShell::WithArguments {
-                program: "/bin/sh".to_string(),
-                args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-            },
+            &pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
         )
         .unwrap();
         // This is the plain-text format produced by capture_scrollback_text
@@ -7731,10 +7889,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-test-resize-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).unwrap();
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-i".to_string()],
-        };
+        let shell = size_probe_shell();
         let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
         handle.resize(37, 11, 8, 18);
         std::thread::sleep(Duration::from_millis(150));
@@ -7761,10 +7916,7 @@ mod tests {
             std::env::temp_dir().join(format!("sirio-terminal-test-args-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).unwrap();
 
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/echo".to_string(),
-            args: vec!["ARGV_PROBE".to_string()],
-        };
+        let shell = argv_probe_shell("ARGV_PROBE");
         let (handle, mut wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -7797,13 +7949,15 @@ mod tests {
         ));
         std::fs::create_dir_all(&working_directory).unwrap();
         let pid_file = working_directory.join("child.pid");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                format!("printf '%s' \"$$\" > {}; exec sleep 60", pid_file.display()),
+        let shell = pty_fixture_shell(
+            &format!("printf '%s' \"$$\" > {}; exec sleep 60", pid_file.display()),
+            &[
+                "pid-file",
+                &pid_file.display().to_string(),
+                "--sleep",
+                "inf",
             ],
-        };
+        );
         let (handle, mut wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -8046,12 +8200,31 @@ mod tests {
             .is_some_and(|state| *state != b'Z')
     }
 
+    #[cfg(unix)]
     fn process_exists(pid: i32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    /// Windows has no `kill -0`, and the `kill` that a Git Bash install puts
+    /// on `PATH` is an MSYS one that speaks MSYS pids — it would answer
+    /// about the wrong process, or about none. `tasklist` is the shipped,
+    /// always-present equivalent: it filters on the real Win32 pid and
+    /// prints one CSV row per match, or an `INFO:` line when nothing
+    /// matches. It costs a process spawn per probe, so the callers' polling
+    /// loops simply run fewer, slower iterations inside the same deadline.
+    #[cfg(not(unix))]
+    fn process_exists(pid: i32) -> bool {
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+            })
     }
 }
 
@@ -8229,10 +8402,7 @@ mod view_tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-drop-focus-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create drop directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let dropped = gpui::ExternalPaths([PathBuf::from("src/one.rs")].into_iter().collect());
         let window = cx.add_window(|_, cx| {
             let terminal = cx.new(|cx| {
@@ -8331,17 +8501,40 @@ mod view_tests {
         // The user's own shell, not a hardcoded one. This used to assert
         // "/bin/sh", which pinned the defect: whoever resolved a conflict was
         // dropped into a POSIX-minimal shell with none of their own setup.
-        if let Ok(configured) = std::env::var("SHELL")
-            && !configured.is_empty()
+        //
+        // "The user's own shell" is a POSIX notion, and the product says so.
+        // `system_pane_shell` reads `$SHELL` on unix and deliberately
+        // ignores it on Windows, where the value Git Bash exports
+        // (`/bin/bash.exe`) is an MSYS path `CreateProcessW` cannot resolve
+        // — honouring it made every pane fail to start (#230). Reading
+        // `$SHELL` here without that guard asserted the opposite of what the
+        // product promises, and under Git Bash it is always set. The command
+        // flag splits the same way (`-lc` is POSIX; cmd.exe wants `/C`), so
+        // both halves branch on the platform the product branches on.
+        #[cfg(not(windows))]
         {
-            assert_eq!(program, configured);
-        } else {
-            assert!(
-                std::path::Path::new(&program).exists(),
-                "the fallback must name a shell present on this platform, got: {program}"
-            );
+            if let Ok(configured) = std::env::var("SHELL")
+                && !configured.is_empty()
+            {
+                assert_eq!(program, configured);
+            } else {
+                assert!(
+                    std::path::Path::new(&program).exists(),
+                    "the fallback must name a shell present on this platform, got: {program}"
+                );
+            }
+            assert_eq!(args[0], "-lc");
         }
-        assert_eq!(args[0], "-lc");
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                program,
+                std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
+                "Windows resolves its interpreter from COMSPEC, never from a \
+                 POSIX $SHELL an MSYS environment may have exported (#230)"
+            );
+            assert_eq!(args[0], "/C");
+        }
         assert!(args[1].contains("git diff --cc -- 'src/conflicted file.txt'"));
         assert!(args[1].contains("Resolve conflict at"));
         assert!(
@@ -8721,13 +8914,10 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'SCROLLBACK_SOURCE_TEST\\n'; exec sleep 1".to_string(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "printf 'SCROLLBACK_SOURCE_TEST\\n'; exec sleep 1",
+            &["print", "SCROLLBACK_SOURCE_TEST\\n", "--sleep", "1"],
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -8796,10 +8986,7 @@ mod view_tests {
         let window = cx.add_window(|_, cx| {
             TerminalView::with_shell(
                 &working_directory,
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "exec sleep 60".into()],
-                },
+                pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
                 cx,
             )
             .expect("spawn PTY")
@@ -8840,14 +9027,17 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "sleep 0.1; printf '\\033]0;✳ idle\\007'; printf 'Do you want to proceed?\\n'; exec sleep 1"
-                    .to_string(),
+        let shell = pty_fixture_shell(
+            "sleep 0.1; printf '\\033]0;✳ idle\\007'; printf 'Do you want to proceed?\\n'; exec sleep 1",
+            &[
+                "print",
+                "\\033]0;✳ idle\\007Do you want to proceed?\\n",
+                "--delay",
+                "0.1",
+                "--sleep",
+                "1",
             ],
-        };
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -8979,10 +9169,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-i".to_string()],
-        };
+        let shell = interactive_prompt_shell();
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
         });
@@ -9047,10 +9234,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-i".to_string()],
-        };
+        let shell = interactive_prompt_shell();
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
         });
@@ -9117,10 +9301,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-i".to_string()],
-        };
+        let shell = interactive_prompt_shell();
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
         });
@@ -9205,10 +9386,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-i".to_string()],
-        };
+        let shell = interactive_prompt_shell();
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn /bin/sh PTY")
         });
@@ -9267,10 +9445,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/cat".to_string(),
-            args: Vec::new(),
-        };
+        let shell = echo_child_shell();
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -9476,13 +9651,16 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 1".to_string(),
+        let shell = pty_fixture_shell(
+            "printf 'pane=%s\\n' \"$SIRIO_PANE_ID\"; exec sleep 1",
+            &[
+                "print",
+                "pane=${SIRIO_PANE_ID}\\n",
+                "--expand",
+                "--sleep",
+                "1",
             ],
-        };
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             let mut view = TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("create lazy terminal");
@@ -9541,13 +9719,10 @@ mod view_tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-restart-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'gen1\\n'; exec sleep 5".to_string(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "printf 'gen1\\n'; exec sleep 5",
+            &["print", "gen1\\n", "--sleep", "5"],
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn first PTY")
         });
@@ -9580,13 +9755,10 @@ mod view_tests {
         );
 
         terminal.update(&mut cx.cx, |terminal, cx| {
-            terminal.spawn.shell = TerminalShell::WithArguments {
-                program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "printf 'gen2\\n'; exec sleep 5".to_string(),
-                ],
-            };
+            terminal.spawn.shell = pty_fixture_shell(
+                "printf 'gen2\\n'; exec sleep 5",
+                &["print", "gen2\\n", "--sleep", "5"],
+            );
             terminal.restart(cx);
         });
         assert_eq!(
@@ -9646,6 +9818,17 @@ mod view_tests {
     /// assertion below has nothing to hold; before the exit hand-off is
     /// respected, a stale `true` could in principle outlive `exit_status`
     /// becoming `Some` -- this test's final assertion catches that.
+    ///
+    /// unix only, and genuinely so: `is_command_running()` is
+    /// `TerminalHandle::foreground_command_running`, whose definition is
+    /// `tcgetpgrp` on the PTY master. Windows has no foreground process
+    /// group, so that method is `#[cfg(not(unix))] { false }` by
+    /// construction and the pill never reports Running there — a known gap,
+    /// documented on the method itself. The central assertion of this test
+    /// ("the pill must report Running") therefore has no Windows behaviour
+    /// to hold on to, and the interactive `/bin/bash` and its `cat
+    /// >/dev/null; exit 7` job control have no equivalent either.
+    #[cfg(unix)]
     #[gpui::test]
     async fn running_pill_state_is_replaced_by_exit_status_when_the_child_exits(
         cx: &mut gpui::TestAppContext,
@@ -9764,13 +9947,10 @@ mod view_tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-link-click-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'https://example.test/docs\\n'; exec sleep 60".to_string(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "printf 'https://example.test/docs\\n'; exec sleep 60",
+            &["print", "https://example.test/docs\\n"],
+        );
         let window = cx.add_window(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
         });
@@ -10007,10 +10187,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec cat".to_string()],
-        };
+        let shell = pty_fixture_shell("exec cat", &["cat"]);
         let window = cx.add_window(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -10086,13 +10263,10 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf '\\033[?2004h'; exec cat".to_string(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "printf '\\033[?2004h'; exec cat",
+            &["cat", "--prologue", "\\033[?2004h"],
+        );
         let window = cx.add_window(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -10148,13 +10322,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf 'COPY-351'; exec sleep 60".to_string(),
-            ],
-        };
+        let shell = pty_fixture_shell("printf 'COPY-351'; exec sleep 60", &["print", "COPY-351"]);
         let window = cx.add_window(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -10235,10 +10403,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec cat".to_string()],
-        };
+        let shell = pty_fixture_shell("exec cat", &["cat"]);
         // A real, narrow window -- not a faked-up bounds value -- so the
         // pane's own `TerminalElement::prepaint` records a genuinely small
         // size the same way it would behind a real cramped split. Height
@@ -10315,10 +10480,7 @@ mod view_tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-diff-drop-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create drop directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let payload = (
             PathBuf::from("src/conflicted file.txt"),
             "@@ -1 +1 @@\n-old\n+new\n".to_string(),
@@ -10411,10 +10573,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create terminal directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let window = cx.add_window(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
         });
@@ -10462,10 +10621,7 @@ mod view_tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-file-drop-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create drop directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let path = PathBuf::from("src/file with spaces.rs");
         let window = cx.add_window(|_, cx| {
             let terminal = cx.new(|cx| {
@@ -10552,10 +10708,7 @@ mod view_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create drop directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let dropped = gpui::ExternalPaths(
             [
                 PathBuf::from("src/one.rs"),
