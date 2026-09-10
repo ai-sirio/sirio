@@ -2133,6 +2133,28 @@ mod tests {
         Diff, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
 
+    /// The startup budget most fixture-agent tests hand to
+    /// [`AcpClient::launch_with_timeout`]/`launch_with_timeouts`. Five seconds
+    /// is generous for a `sh -c` script answering `initialize` and
+    /// `session/new` on an unloaded machine, but under `cargo nextest run`
+    /// every test is its own process and the scheduler runs this crate's
+    /// fixture spawns at the same time as unrelated crates' heavy tests --
+    /// eight of these timed out together on the release runner
+    /// (`ACP Startup timed out after 5s`) while it was also driving four real
+    /// PTYs for `sirio`'s test suite. `SIRIO_ACP_TEST_STARTUP_TIMEOUT_MS`
+    /// overrides the budget the same way `SIRIO_GIT_TIMEOUT_MS` overrides
+    /// `sirio_git`'s: consulted per call, unset in production, and set wide
+    /// only in the release gate's environment.
+    fn test_startup_timeout() -> Duration {
+        match std::env::var("SIRIO_ACP_TEST_STARTUP_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            Some(millis) => Duration::from_millis(millis),
+            None => Duration::from_secs(5),
+        }
+    }
+
     #[test]
     fn maps_text_updates_to_typed_events() {
         let message = SessionNotification::new(
@@ -2720,7 +2742,7 @@ mod tests {
         let command = fixture_agent(
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;;"#,
         );
-        let result = AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5));
+        let result = AcpClient::launch_with_timeout(command, ".", test_startup_timeout());
 
         let error = match result {
             Ok((mut client, _events)) => {
@@ -2762,7 +2784,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", test_startup_timeout())
                 .expect("agent that advertises but does not require auth should still connect");
 
         assert_eq!(
@@ -2788,7 +2810,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;;"#,
         );
         let (mut client, events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", test_startup_timeout())
                 .expect("fixture agent should create a session");
 
         client
@@ -2819,7 +2841,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"plan","name":"Plan","description":"Plan before editing"}]}}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", test_startup_timeout())
                 .expect("fixture agent should create a session");
 
         assert_eq!(
@@ -2856,7 +2878,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", test_startup_timeout())
                 .expect("fixture agent should create a session");
 
         assert_eq!(client.mode_catalog(), None);
@@ -2876,7 +2898,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"plan","name":"Plan"}]}}}' ;; *session/set_mode*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", test_startup_timeout())
                 .expect("fixture agent should create a session");
 
         client
@@ -2933,7 +2955,7 @@ mod tests {
 while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; esac; done"#,
         ]);
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", test_startup_timeout())
                 .expect("fixture agent should create a session despite the stderr line");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -3094,7 +3116,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         let (mut client, events) = AcpClient::launch_with_timeouts(
             command,
             ".",
-            Duration::from_secs(5),
+            test_startup_timeout(),
             Duration::from_millis(500),
         )
         .expect("fixture agent should create a session");
@@ -3132,7 +3154,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         let (mut client, events) = AcpClient::launch_with_timeouts(
             command,
             ".",
-            Duration::from_secs(5),
+            test_startup_timeout(),
             Duration::from_millis(300),
         )
         .expect("fixture agent should create a session");

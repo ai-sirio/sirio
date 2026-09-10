@@ -222,10 +222,18 @@ jobs:
       # fifty tests finish in four seconds unloaded. Raised only in this job:
       # a developer running Scripts/ci.sh keeps the shipped budget, which is
       # the one that has to hold for a real user.
+      #
+      # SIRIO_ACP_TEST_STARTUP_TIMEOUT_MS is the same fix for the same reason,
+      # for `sirio_acp`'s fixture-agent tests: nextest runs every test as its
+      # own process, so their 5s startup budget now shares the machine with
+      # whatever else nextest scheduled at that instant -- eight of them timed
+      # out together (`ACP Startup timed out after 5s`) while `sirio`'s PTY
+      # tests were also live. Raised only here for the same reason as above.
       - name: Run CI gate
         env:
           SIRIO_CI_RELEASE_GATE: "1"
           SIRIO_GIT_TIMEOUT_MS: "60000"
+          SIRIO_ACP_TEST_STARTUP_TIMEOUT_MS: "30000"
         run: Scripts/ci.sh
 
       # Stamped *after* the gate, deliberately. The gate tests the code; the
