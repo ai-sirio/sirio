@@ -8219,7 +8219,13 @@ impl SirioWorkspace {
     ///   Swift original: to colour the loader, never to replace the branch
     ///   glyph, which `App/SidebarView.swift:361` always draws.
     /// * `running_agent_ids`  → the row's trailing running-agents badge,
-    ///   already de-duplicated and in `AgentCatalog` order.
+    ///   already de-duplicated and in `AgentCatalog` order. **Not drawn
+    ///   today**: the Zed redesign dropped that badge, and
+    ///   `Sidebar::set_worktree_activity` takes the running set and ignores
+    ///   it. The set is still resolved and handed over so the seam survives
+    ///   until the badge comes back; `drawn_worktree_row_shows_the_identity_
+    ///   the_model_resolved` asserts its absence, so restoring it fails
+    ///   there first rather than silently.
     ///
     /// The row order is `AttentionSort::urgent_first` over the project's
     /// worktrees **in catalog order**, and catalog order *is* the user's
@@ -18240,6 +18246,18 @@ mod tests {
         panic!("{selector} was not drawn");
     }
 
+    /// Opens the New Worktree prompt through the affordance the Zed redesign
+    /// left in place of the old New Worktree row: a `+` on the project's
+    /// section header, rendered only while that header is hovered.
+    fn click_section_add(cx: &mut VisualTestContext) {
+        let header = wait_for_drawn(cx, "sidebar-section-0");
+        cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let add = wait_for_drawn(cx, "sidebar-section-add-0");
+        cx.simulate_click(add.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
     /// F-CORE-DOM-01: `seed_sidebar_identity_and_worktree_defaults` is the
     /// exact function boot's one-time sidebar construction calls. This test
     /// drives it the same way — build the rows, seed identity and worktree
@@ -18296,9 +18314,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let row_bounds = wait_for_drawn(&mut cx, "new-worktree-row");
-        cx.simulate_click(row_bounds.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
         // Leave the dialog's own Base/Location fields blank.
         cx.simulate_input("cleanbase1");
         cx.simulate_keystrokes("enter");
@@ -18881,15 +18897,19 @@ mod tests {
         }
     }
 
-    /// F-CORE-ACT-17 + F-CORE-ACT-18, drawn end to end through the app:
+    /// F-CORE-ACT-17, drawn end to end through the app:
     /// `AgentActivityModel::agent_id_for_panes` decides which brand mark a
-    /// worktree row draws, and `running_agent_ids` decides its trailing
-    /// badge. Nothing here re-derives either from the pane list — the model
-    /// is asked, and the answer is what appears on screen.
+    /// worktree row draws and which status its indicator carries. Nothing
+    /// here re-derives either from the pane list — the model is asked, and
+    /// the answer is what appears on screen.
+    ///
+    /// F-CORE-ACT-18's other half, the trailing badge of running agents that
+    /// `running_agent_ids` used to feed, is deliberately not drawn since the
+    /// Zed redesign: `Sidebar::set_worktree_activity` still takes the running
+    /// set but ignores it. Its absence is asserted below rather than left
+    /// unsaid, so re-adding the badge lands here first.
     #[gpui::test]
-    async fn drawn_worktree_row_shows_the_identity_and_running_set_the_model_resolved(
-        cx: &mut TestAppContext,
-    ) {
+    async fn drawn_worktree_row_shows_the_identity_the_model_resolved(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let (root, worktrees) = urgency_test_root("identity");
         let root_for_window = root.clone();
@@ -18957,29 +18977,22 @@ mod tests {
             cx.debug_bounds("sidebar-status-running-3").is_some(),
             "agent_id_for_panes tints the running indicator this worktree draws"
         );
-        assert!(
-            cx.debug_bounds("sidebar-running-agent-3-claude-mark")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("sidebar-running-agent-3-openai-mark")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("sidebar-running-agent-3-agent-opencode")
-                .is_none(),
-            "a done agent is not in the running set"
-        );
-        let claude = cx
-            .debug_bounds("sidebar-running-agent-3-claude-mark")
-            .expect("claude badge");
-        let codex = cx
-            .debug_bounds("sidebar-running-agent-3-openai-mark")
-            .expect("codex badge");
-        assert!(
-            claude.origin.x < codex.origin.x,
-            "running_agent_ids emits catalog order (claude before codex), not discovery order"
-        );
+        // Two agents are running on this worktree and a third is done, yet
+        // no per-agent badge is drawn: the redesign dropped the trailing
+        // running set from the row. Asserted for each brand the fixture
+        // actually launched, so this cannot pass by naming a mark nobody
+        // ever draws.
+        for badge in [
+            "sidebar-running-agents-3",
+            "sidebar-running-agent-3-claude-mark",
+            "sidebar-running-agent-3-openai-mark",
+            "sidebar-running-agent-3-agent-opencode",
+        ] {
+            assert!(
+                cx.debug_bounds(badge).is_none(),
+                "the worktree row draws no running-agent badge since the redesign: {badge}"
+            );
+        }
         // A worktree with no agent at all keeps the branch glyph.
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-2-git-branch")
@@ -19664,9 +19677,26 @@ mod tests {
         Box::leak(format!("sidebar-row-{row_id}").into_boxed_str())
     }
 
+    /// A tab is drawn as a pill inside its worktree's own row, addressed by
+    /// that row's id and the pill's position within it. The Zed redesign
+    /// replaced the tab rows `static_row_selector` used to find, so a test
+    /// that asks "does this worktree list that tab" asks for a pill now.
+    fn static_pill_selector(row_id: usize, index: usize) -> &'static str {
+        Box::leak(format!("sidebar-pill-{row_id}-{index}").into_boxed_str())
+    }
+
+    /// A pill's close affordance, which only a *live* tab has: the sidebar
+    /// draws it under `when_some(tab_id, ..)`, and a parked pill carries no
+    /// tab id because its tab does not exist until the switch restores it.
+    /// This is what tells a parked pill from a live one on a drawn frame.
+    fn static_pill_close_selector(row_id: usize, index: usize) -> &'static str {
+        Box::leak(format!("sidebar-pill-close-{row_id}-{index}").into_boxed_str())
+    }
+
     /// A worktree that is not selected keeps listing what it holds: the
-    /// host pushes its persisted strip as parked rows. The selected worktree
-    /// never does — its truth is the live tab list, even when that is empty.
+    /// host pushes its persisted strip as parked pills on its own row. The
+    /// selected worktree never does — its truth is the live tab list, even
+    /// when that is empty.
     #[gpui::test]
     async fn an_unselected_worktree_lists_its_persisted_tabs_as_parked_rows(
         cx: &mut TestAppContext,
@@ -19717,18 +19747,15 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds(static_row_selector(parked_tab_row_id(2, 0)))
-                .is_some(),
-            "the unselected worktree's first persisted tab is drawn as a parked row"
+            cx.debug_bounds(static_pill_selector(2, 0)).is_some(),
+            "the unselected worktree's first persisted tab is drawn as a parked pill"
         );
         assert!(
-            cx.debug_bounds(static_row_selector(parked_tab_row_id(2, 1)))
-                .is_some(),
+            cx.debug_bounds(static_pill_selector(2, 1)).is_some(),
             "and its second"
         );
         assert!(
-            cx.debug_bounds(static_row_selector(parked_tab_row_id(1, 0)))
-                .is_none(),
+            cx.debug_bounds(static_pill_selector(1, 0)).is_none(),
             "the selected worktree shows only live tabs, never its persisted strip"
         );
     }
@@ -19787,13 +19814,14 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let live_row = static_row_selector(TAB_ROW_ID_OFFSET);
-        let parked_row = static_row_selector(parked_tab_row_id(1, 0));
         assert!(
-            cx.debug_bounds(live_row).is_some(),
-            "before the switch the repo's tab is a live row"
+            cx.debug_bounds(static_pill_close_selector(1, 0)).is_some(),
+            "before the switch the repo's tab is a live pill, closable from its own row"
         );
-        assert!(cx.debug_bounds(parked_row).is_none());
+        assert!(
+            cx.debug_bounds(static_pill_selector(2, 0)).is_none(),
+            "and the worktree nobody has visited yet lists nothing"
+        );
 
         workspace.update(&mut cx, |workspace, cx| {
             workspace
@@ -19819,26 +19847,35 @@ mod tests {
                 "the switch was a safe reload: the repo's tab is no longer live"
             );
         });
-        // Tab ids restart from zero per worktree, so `live_row` now names
-        // the restored "Other A" under worktree row 2; the repo's own tab
-        // survives only as the parked row directly under worktree row 1.
+        // Each worktree carries its own tabs as pills on its own row, so
+        // "stayed under it" is now containment rather than stacking: the
+        // repo's tab survives as a parked pill on worktree row 1, and the
+        // restored "Other A" is a live pill on worktree row 2.
         let repo_row = cx.debug_bounds("sidebar-row-1").expect("repo worktree row");
         let other_row = cx
             .debug_bounds("sidebar-row-2")
             .expect("other worktree row");
         let parked = cx
-            .debug_bounds(parked_row)
+            .debug_bounds(static_pill_selector(1, 0))
             .expect("the repo's tab is still listed under the repo, parked");
         let live = cx
-            .debug_bounds(live_row)
-            .expect("the other worktree's restored tab is a live row");
+            .debug_bounds(static_pill_selector(2, 0))
+            .expect("the other worktree's restored tab is a live pill");
         assert!(
-            repo_row.bottom() <= parked.top() && parked.bottom() <= other_row.top(),
-            "the parked row sits under the repo row: repo={repo_row:?} parked={parked:?} other={other_row:?}"
+            cx.debug_bounds(static_pill_close_selector(1, 0)).is_none(),
+            "the repo's tab is parked now: a pill with no live tab behind it cannot be closed"
         );
         assert!(
-            other_row.bottom() <= live.top(),
-            "the only live row sits under the other worktree: other={other_row:?} live={live:?}"
+            cx.debug_bounds(static_pill_close_selector(2, 0)).is_some(),
+            "the restored tab is the live one, so its pill closes"
+        );
+        assert!(
+            repo_row.top() <= parked.top() && parked.bottom() <= repo_row.bottom(),
+            "the parked pill rides on the repo's own row: repo={repo_row:?} parked={parked:?}"
+        );
+        assert!(
+            other_row.top() <= live.top() && live.bottom() <= other_row.bottom(),
+            "and the live pill on the other worktree's row: other={other_row:?} live={live:?}"
         );
     }
 
@@ -22155,7 +22192,7 @@ mod tests {
     /// Claude's own working-title convention — into the workspace's one
     /// activity model.
     #[gpui::test]
-    async fn a_layer_b_identity_after_spawn_reaches_the_sidebar_tab_row(cx: &mut TestAppContext) {
+    async fn a_layer_b_identity_after_spawn_reaches_the_sidebar_pill(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -22177,12 +22214,14 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert_eq!(TAB_ROW_ID_OFFSET, 1_000_000);
-        const GENERIC: &str = "sidebar-tab-mark-1000000-terminal";
-        const CLAUDE: &str = "sidebar-tab-mark-1000000-claude-mark";
+        // The Zed redesign made a tab a pill on its worktree's own row, so
+        // the mark is addressed by that row's id and the pill's position
+        // rather than by a tab row id of its own.
+        const GENERIC: &str = "sidebar-pill-mark-1-0-terminal";
+        const CLAUDE: &str = "sidebar-pill-mark-1-0-claude-mark";
         assert!(
             cx.debug_bounds(GENERIC).is_some(),
-            "a plain shell's tab row draws the generic terminal glyph"
+            "a plain shell's pill draws the generic terminal glyph"
         );
         assert!(cx.debug_bounds(CLAUDE).is_none());
 
@@ -22210,7 +22249,7 @@ mod tests {
 
         assert!(
             cx.debug_bounds(CLAUDE).is_some(),
-            "the tab row shows the brand as soon as a layer identifies the pane"
+            "the pill shows the brand as soon as a layer identifies the pane"
         );
         assert!(cx.debug_bounds(GENERIC).is_none());
 
@@ -22231,7 +22270,7 @@ mod tests {
     /// is the only signal that catches a native agent with no usable title
     /// convention, and it lands after spawn too.
     #[gpui::test]
-    async fn a_layer_d_identity_after_spawn_reaches_the_sidebar_tab_row(cx: &mut TestAppContext) {
+    async fn a_layer_d_identity_after_spawn_reaches_the_sidebar_pill(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -22251,9 +22290,8 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("sidebar-tab-mark-1000000-openai-mark")
-                .is_some(),
-            "a process-owned pane's brand reaches its tab row"
+            cx.debug_bounds("sidebar-pill-mark-1-0-openai-mark").is_some(),
+            "a process-owned pane's brand reaches its pill"
         );
         workspace.update(&mut cx, |workspace, _| {
             assert!(
@@ -28306,8 +28344,11 @@ mod tests {
         let status_bar = cx
             .debug_bounds("sirio-status-bar")
             .expect("status bar remains mounted");
+        // The twentieth worktree is the last row now: New Worktree stopped
+        // being a row of its own when the redesign moved it onto the
+        // project's section header as a hover-revealed `+`.
         let last_row_before = cx
-            .debug_bounds("new-worktree-row")
+            .debug_bounds("sidebar-row-20")
             .expect("the long sidebar renders its final row");
         assert!(
             status_bar.bottom() <= frame.bottom(),
@@ -28336,7 +28377,7 @@ mod tests {
         cx.run_until_parked();
 
         let last_row_after = cx
-            .debug_bounds("new-worktree-row")
+            .debug_bounds("sidebar-row-20")
             .expect("the final sidebar row remains mounted after scrolling");
         assert!(
             last_row_after.top() < last_row_before.top(),
