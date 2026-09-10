@@ -89,10 +89,17 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// The branch of the worktree at `path`, per `git worktree list --porcelain`.
-/// git-for-Windows spells porcelain worktree paths with forward slashes
-/// and no verbatim prefix (`C:/Users/...`), while the fixtures hold
-/// canonicalized `\\?\C:\...` paths — normalize before comparing.
+/// The spelling git uses for `path`: forward slashes, no verbatim prefix
+/// (`C:/Users/...`), while the fixtures hold canonicalized `\\?\C:\...`
+/// paths.
+///
+/// This is both what `git worktree list --porcelain` prints — so
+/// [`porcelain_branch`] normalizes before comparing — and the only spelling
+/// git accepts *as an argument*: handed a verbatim path it refuses with
+/// `could not create leading directories of '//?/C:/...': Invalid
+/// argument`. The production code strips the prefix itself
+/// (`sirio_git::git::path_arg`), so every fixture that shells out to the
+/// bare [`git`] helper with a fixture path must do the same here.
 fn porcelain_spelling(path: &Path) -> String {
     #[cfg(windows)]
     let mut spelling = path.display().to_string();
@@ -381,7 +388,7 @@ fn remove_worktree_keeps_branch_when_deletion_is_refused() {
     // symbolic HEAD at the branch directly so git branch -D has a real
     // linked-worktree checkout to refuse after the target is removed.
     let other = repo.path().with_extension("wt-other");
-    let other_arg = other.to_string_lossy().into_owned();
+    let other_arg = porcelain_spelling(&other);
     git(repo.path(), &["worktree", "add", "--detach", &other_arg]);
     git(&other, &["symbolic-ref", "HEAD", "refs/heads/feature-x"]);
 

@@ -15,10 +15,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use sirio_git::{
-    DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, GitRunner, diff_entry,
+    DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, diff_entry,
     directory_statuses, list_branches, run_streaming, status,
 };
 
@@ -111,6 +110,12 @@ fn make_repo() -> TempDir {
 #[cfg(unix)]
 #[test]
 fn streaming_lines_arrive_incrementally_before_completion() {
+    // Imported here, not at the top of the file: this is the only user of
+    // either name, and top-level imports would be dead on Windows, where
+    // `-D warnings` turns that into a build failure.
+    use sirio_git::GitRunner;
+    use std::time::Instant;
+
     ensure_generous_timeout();
     let dir = TempDir::new();
     // Two LF lines separated by a sleep, then a CR-separated pair: the
