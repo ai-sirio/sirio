@@ -9,3 +9,10 @@ publish.workspace = true
 # the staged artifact; it never downloads or verifies anything itself.
 sirio_update.workspace = true
 thiserror = "2"
+
+# Examples only (`examples/update_probe.rs`): the live end-to-end probe builds
+# the same `AcceptedKeys` the app builds, which is `sirio_release`'s type. It
+# stays a dev-dependency so the crate boundary above -- apply consumes a
+# `VerifiedUpdate` and nothing else -- is unchanged for anything that ships.
+[dev-dependencies]
+sirio_release.workspace = true
