@@ -12917,17 +12917,15 @@ let answer = 42;
     /// process that rejects `session/new` with wire code -32000, same
     /// fixture shape as `sirio_acp`'s own
     /// `session_creation_auth_required_error_becomes_typed_auth_required`.
-    #[cfg(unix)]
     #[gpui::test]
     async fn auth_required_launch_gets_a_dedicated_banner_with_login_guidance(
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let command = AgentCommand::new("/bin/sh").args([
-            "-c",
-            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
-        ]);
+        let command = AgentCommand::new("python3")
+            .arg(CHAT_FIXTURE)
+            .arg("auth-required");
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -12935,7 +12933,17 @@ let answer = 42;
         });
 
         cx.executor().allow_parking();
-        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::AuthRequired,
+                        ..
+                    }
+                )
+            })
+        });
         cx.update(|window, _| window.refresh());
 
         assert!(
@@ -12985,10 +12993,9 @@ let answer = 42;
     ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let command = AgentCommand::new("/bin/sh").args([
-            "-c",
-            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
-        ]);
+        let command = AgentCommand::new("python3")
+            .arg(CHAT_FIXTURE)
+            .arg("auth-required");
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -12999,7 +13006,20 @@ let answer = 42;
         // The app's real captured running size (see wayland-drive.sh's
         // W1xH1) — the exact width the critic reproduced the clip at.
         cx.simulate_resize(gpui::size(px(1715.0), px(972.0)));
-        cx.run_until_parked();
+        // The fixture is a real subprocess, so the rejection lands whenever
+        // the interpreter has started — pump for the typed entry rather
+        // than assuming one parked scheduler pass was enough.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::AuthRequired,
+                        ..
+                    }
+                )
+            })
+        });
         cx.update(|window, _| window.refresh());
 
         let banner = cx
@@ -13028,7 +13048,9 @@ let answer = 42;
         // AuthRequired error entry landing in the transcript.
         let entries_before_retry = chat.read_with(&*cx, |chat, _| chat.entries.len());
         cx.simulate_click(retry.center(), Modifiers::none());
-        cx.run_until_parked();
+        // Retry spawns a second fixture process; wait for its rejection the
+        // same way the first one was waited for.
+        pump_chat_until(cx, &chat, |chat| chat.entries.len() > entries_before_retry);
         chat.read_with(&cx.cx, |chat, _| {
             assert!(
                 chat.entries.len() > entries_before_retry,
@@ -13057,14 +13079,13 @@ let answer = 42;
     async fn a_disconnected_agent_offers_restart_agent_not_retry(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        // Answers initialize and session/new successfully, then on the
-        // first prompt replies with a line the protocol layer cannot parse
-        // as a response to anything, and exits — a transport failure, not
-        // an answerable request failure.
-        let command = AgentCommand::new("/bin/sh").args([
-            "-c",
-            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{}}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf 'not json at all\n'; exit 1 ;; esac; done"#,
-        ]);
+        // `broken-transport` answers initialize and session/new
+        // successfully, then on the first prompt replies with a line the
+        // protocol layer cannot parse as a response to anything, and exits
+        // — a transport failure, not an answerable request failure.
+        let command = AgentCommand::new("python3")
+            .arg(CHAT_FIXTURE)
+            .arg("broken-transport");
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -14375,16 +14396,19 @@ let answer = 42;
         // The only path back online: the transcript error banner's explicit
         // Retry control, not a side effect of a disabled Send.
         chat.update(cx, |chat, cx| {
-            chat.agent_command = Some(AgentCommand::new("/bin/sh").args([
-                "-c",
-                r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;; esac; done"#,
-            ]));
+            chat.agent_command = Some(AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain"));
             chat.retry(cx);
         });
 
-        for _ in 0..20 {
+        // A real interpreter has to start before the client exists, so the
+        // budget is a deadline polled for the condition, not a fixed number
+        // of sleeps: fast where it connects fast, patient on a cold start.
+        for _ in 0..240 {
             std::thread::sleep(std::time::Duration::from_millis(25));
             cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| chat.client.is_some()) {
+                break;
+            }
         }
         chat.read_with(cx, |chat, _| {
             assert!(chat.client.is_some(), "retry should establish a client");
@@ -14410,9 +14434,12 @@ let answer = 42;
             chat.send(cx);
         });
 
-        for _ in 0..20 {
+        for _ in 0..240 {
             std::thread::sleep(std::time::Duration::from_millis(25));
             cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| chat.has_completed_turn) {
+                break;
+            }
         }
         chat.read_with(cx, |chat, _| {
             assert!(
@@ -16118,7 +16145,16 @@ let answer = 42;
         refresh_frame(cx);
 
         focus_and_type(cx, "hello menu");
+        // Select-all is bezel's own binding, and `input::init` registers it
+        // per platform: cmd-a on macOS, ctrl-a everywhere else. The test has
+        // to press the chord this build actually bound — cmd-a on Windows
+        // selects nothing, and bezel's `Copy` writes nothing for an empty
+        // selection, so the menu would be exercised against no selection at
+        // all. Same shape as `file_view.rs`'s Markdown-toolbar test.
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a");
         cx.run_until_parked();
 
         let input = cx
@@ -16213,7 +16249,14 @@ let answer = 42;
         let composer = cx.debug_bounds("composer").expect("the composer is drawn");
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
+        // `PasteComposer` is bound per platform in `Chat::bind_keys` (cmd-v
+        // on macOS, ctrl-v elsewhere, matching bezel's own `Paste`), so press
+        // the chord this build bound: cmd-v resolves to no binding on Windows
+        // and the picture never reaches `paste_clipboard_image`.
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-v");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-v");
         cx.run_until_parked();
         refresh_frame(cx);
 

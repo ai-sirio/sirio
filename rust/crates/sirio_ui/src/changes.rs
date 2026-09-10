@@ -4733,9 +4733,25 @@ mod tests {
             error.contains("failed to spawn git"),
             "the missing binary is named, not hidden: {error}"
         );
+        // The second half of the message is the operating system's own
+        // text, and the operating system localizes it: the very same spawn
+        // reads "No such file or directory (os error 2)" on Linux and
+        // "Nome di directory non valido. (os error 267)" on an Italian
+        // Windows. A hard-coded English fragment therefore asserts the
+        // machine's locale, not the loader's behaviour, so the expected
+        // text is taken from a spawn made to fail the same way here. The
+        // claim is unchanged — the OS error is carried through verbatim,
+        // so the user can act on it — only the way it is recognised is.
+        let os_error = std::process::Command::new("git")
+            .arg("--version")
+            .current_dir(&missing)
+            .output()
+            .expect_err("spawning into the same missing directory must fail here too")
+            .to_string();
         assert!(
-            error.contains("No such file"),
-            "the OS error is included so the user can act: {error}"
+            error.contains(&os_error),
+            "the OS error is included so the user can act: {error} \
+             (it must carry the spawn's own {os_error})"
         );
     }
 

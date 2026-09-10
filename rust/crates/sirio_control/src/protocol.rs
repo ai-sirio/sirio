@@ -121,7 +121,7 @@ pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
 
     #[cfg(target_os = "windows")]
     {
-        return windows_default_socket_path(environment);
+        windows_default_socket_path(environment)
     }
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
