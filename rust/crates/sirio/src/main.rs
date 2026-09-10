@@ -19673,14 +19673,11 @@ mod tests {
         }
     }
 
-    fn static_row_selector(row_id: usize) -> &'static str {
-        Box::leak(format!("sidebar-row-{row_id}").into_boxed_str())
-    }
-
     /// A tab is drawn as a pill inside its worktree's own row, addressed by
     /// that row's id and the pill's position within it. The Zed redesign
-    /// replaced the tab rows `static_row_selector` used to find, so a test
-    /// that asks "does this worktree list that tab" asks for a pill now.
+    /// left no row of a tab's own to look for — a worktree row is a plain
+    /// `sidebar-row-<id>` literal — so a test that asks "does this worktree
+    /// list that tab" asks for a pill now.
     fn static_pill_selector(row_id: usize, index: usize) -> &'static str {
         Box::leak(format!("sidebar-pill-{row_id}-{index}").into_boxed_str())
     }

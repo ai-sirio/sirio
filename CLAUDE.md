@@ -68,7 +68,7 @@ sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_agents, sirio_activity, sirio_markdown, sirio_usage,
 sirio_registry, sirio_release   (leaves — no local deps;
                                  sirio_theme and sirio_ui take the external
-                                 `bezel` crate, pinned `=0.1.3`)
+                                 `bezel` crate, pinned `=0.1.4`)
     ^
 sirio_acp        (-> sirio_persistence)
 sirio_terminal    (-> sirio_project, sirio_theme)
