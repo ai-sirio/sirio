@@ -189,9 +189,19 @@ jobs:
       # `brew install`/`npm i -g` on this Mac would then be able to stop one.
       # Every other test in the workspace still runs, including the two
       # hermetic tests in the same file.
+      #
+      # SIRIO_GIT_TIMEOUT_MS overrides sirio_git's DEFAULT_GIT_TIMEOUT (10s),
+      # which is a budget sized for a user's machine, not for one compiling
+      # and testing thirteen crates at once. Four sirio_ui `changes` tests
+      # drive a real checkout through `git status --porcelain=v2` and were
+      # failing here as "did not finish within 10s and was killed" -- the same
+      # fifty tests finish in four seconds unloaded. Raised only in this job:
+      # a developer running Scripts/ci.sh keeps the shipped budget, which is
+      # the one that has to hold for a real user.
       - name: Run CI gate
         env:
           SIRIO_CI_RELEASE_GATE: "1"
+          SIRIO_GIT_TIMEOUT_MS: "60000"
         run: Scripts/ci.sh
 
       # Stamped *after* the gate, deliberately. The gate tests the code; the

@@ -18989,7 +18989,27 @@ mod tests {
         (root, worktrees)
     }
 
-    fn direct_zsh_child_count() -> usize {
+    /// The PIDs of this process's direct `zsh` children.
+    ///
+    /// Deliberately the *set*, not a count. A count is only meaningful
+    /// process-wide, and these tests run inside a binary where hundreds of
+    /// other tests spawn their own PTY shells concurrently: the old
+    /// `zsh_after <= zsh_before` assertion failed in a release run as
+    /// `3 -> 4` because a sibling test had started a terminal between the two
+    /// samples, not because a reselect had leaked a shell. What a test can
+    /// soundly own is the set of PIDs it started itself, so that is what the
+    /// callers compare.
+    ///
+    /// The residual gap is real and unmeasurable from here: a shell this test
+    /// leaked and a shell a sibling test started are both direct children of
+    /// the same process, and nothing distinguishes them. Reuse is pinned by
+    /// the per-terminal `shell_pid()` equality the callers already assert;
+    /// this adds that the OS still has those exact shells.
+    ///
+    /// Empty off unix, and empty wherever the fixture shell is not `zsh`,
+    /// which makes the callers' assertion vacuous there — the same no-op the
+    /// count-based version degraded to.
+    fn live_zsh_children() -> std::collections::BTreeSet<u32> {
         #[cfg(unix)]
         {
             let pid = std::process::id().to_string();
@@ -18997,14 +19017,38 @@ mod tests {
                 .args(["-P", &pid, "-x", "zsh"])
                 .output()
             else {
-                return 0;
+                return std::collections::BTreeSet::new();
             };
-            return String::from_utf8_lossy(&output.stdout).lines().count();
+            return String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect();
         }
         #[cfg(not(unix))]
         {
-            0
+            std::collections::BTreeSet::new()
         }
+    }
+
+    /// The shared shape of the two worktree-switch tests' shell check: every
+    /// shell this test started that the OS could see before the switch must
+    /// still be there after it. See [`live_zsh_children`] for why the check
+    /// is scoped to owned PIDs rather than to a whole-process count.
+    fn assert_owned_shells_survived(
+        before: &std::collections::BTreeSet<u32>,
+        after: &std::collections::BTreeSet<u32>,
+        owned: &[u32],
+        what: &str,
+    ) {
+        let gone: Vec<u32> = owned
+            .iter()
+            .copied()
+            .filter(|pid| before.contains(pid) && !after.contains(pid))
+            .collect();
+        assert!(
+            gone.is_empty(),
+            "{what} must keep its own shells alive, but {gone:?} are gone (before={before:?}, after={after:?})"
+        );
     }
 
     /// F-CORE-ACT-17, drawn end to end through the app:
@@ -19172,7 +19216,7 @@ mod tests {
         original_terminals[0].update(&mut cx.cx, |terminal, _| {
             terminal.input(b"printf 'MARKER-H\\n'\n".to_vec());
         });
-        let zsh_before_switch = direct_zsh_child_count();
+        let zsh_before_switch = live_zsh_children();
         let mut previous_scrollback = None;
         let (original_pids, original_scrollback) = loop {
             cx.run_until_parked();
@@ -19305,12 +19349,11 @@ mod tests {
                 "reselecting a mounted worktree must preserve terminal scrollback"
             );
         }
-        let zsh_after_switch = direct_zsh_child_count();
-        assert!(
-            zsh_after_switch <= zsh_before_switch,
-            "reselecting a mounted worktree must not grow its zsh child count: {} -> {}",
-            zsh_before_switch,
-            zsh_after_switch
+        assert_owned_shells_survived(
+            &zsh_before_switch,
+            &live_zsh_children(),
+            &original_pids,
+            "reselecting a mounted worktree",
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);
@@ -19382,7 +19425,7 @@ mod tests {
         original_terminals[0].update(&mut cx.cx, |terminal, _| {
             terminal.input(b"printf 'MARKER-H\\n'\n".to_vec());
         });
-        let zsh_before_switch = direct_zsh_child_count();
+        let zsh_before_switch = live_zsh_children();
         let mut previous_scrollback = None;
         let (original_pids, original_scrollback) = loop {
             cx.run_until_parked();
@@ -19512,12 +19555,11 @@ mod tests {
                 "reselecting a mounted worktree must preserve terminal scrollback"
             );
         }
-        let zsh_after_switch = direct_zsh_child_count();
-        assert!(
-            zsh_after_switch <= zsh_before_switch,
-            "reselecting a mounted worktree must not grow its zsh child count: {} -> {}",
-            zsh_before_switch,
-            zsh_after_switch
+        assert_owned_shells_survived(
+            &zsh_before_switch,
+            &live_zsh_children(),
+            &original_pids,
+            "reselecting a mounted worktree",
         );
 
         let database = AppDatabase::open(&database).expect("reopen session database");
@@ -21527,7 +21569,16 @@ mod tests {
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.sync_control_panes(cx);
         });
-        let before = sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst);
+        // This pane's own counter, not a process-wide one: every other test in
+        // this binary runs its own panes concurrently, and reading a global
+        // here made the assertion answer "did *any* pane get asked" instead of
+        // "did this one".
+        macro_rules! captures {
+            () => {
+                terminal.read_with(&cx.cx, |terminal, _| terminal.scrollback_captures())
+            };
+        }
+        let before = captures!();
         for _ in 0..3 {
             workspace.update(&mut cx.cx, |workspace, cx| {
                 workspace.mark_activity_dirty();
@@ -21537,14 +21588,14 @@ mod tests {
             cx.run_until_parked();
         }
         assert_eq!(
-            sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst),
+            captures!(),
             before,
             "render and activity synchronization must never capture scrollback"
         );
 
         panes.read("pane-0").expect("published terminal pane");
         assert!(
-            sirio_terminal::SCROLLBACK_CAPTURES.load(AtomicOrdering::SeqCst) > before,
+            captures!() > before,
             "an explicit registry read must consult the live scrollback source"
         );
 
