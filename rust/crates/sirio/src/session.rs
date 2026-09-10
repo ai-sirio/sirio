@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use sirio_persistence::{
-    AgentRef, AppDatabase, AppSettings, BaseColor, PersistenceError, ProjectRecord, SidebarState, TabRecord,
+    AgentRef, AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord, stable_worktree_id,
 };
 use sirio_project::{DiscoveredProject, discover_project, is_git_repository};
@@ -2079,7 +2079,7 @@ fn flush_if_due(inner: &SessionInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sirio_persistence::{AppearanceMode, ProjectRecord};
+    use sirio_persistence::{AppearanceMode, BaseColor, ProjectRecord};
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     struct TempDir(PathBuf);
