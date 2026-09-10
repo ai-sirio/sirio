@@ -295,6 +295,15 @@ run_root_stage "test-release-workflow.sh"      bash Scripts/Tests/test-release-w
 run_root_stage "test-generate-changelog.sh"    bash Scripts/Tests/test-generate-changelog.sh
 run_root_stage "test-install-sh.sh"            bash Scripts/Tests/test-install-sh.sh
 
+# The one test of the update chain that exercises the *compiled* wiring: the
+# manifest URL, release channel and accepted key set are `option_env!`, so the
+# unit tests -- which inject a fetch and a launcher -- cannot see a build that
+# never received them. It signs a manifest, serves it over loopback and drives
+# the real Updater against it; the silent installer launch is asserted only on
+# Windows, where it exists. Deliberately here and not in the release job: a
+# release must not be gated on a local HTTP port being free.
+run_root_stage "test-update-e2e.sh"            bash Scripts/Tests/test-update-e2e.sh
+
 # The critics' own instrument. Both of these guard leaks that have already cost
 # this machine real resources — 184 orphaned virtual-pointers at once, and before
 # that a disk filled to within hours of full — and both failures are invisible
