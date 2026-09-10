@@ -7822,18 +7822,16 @@ impl SirioWorkspace {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create worktree parent: {error}"))?;
         }
-        let output = Command::new("git")
-            .args(["worktree", "add", "-b", &branch])
-            .arg(&path)
-            .current_dir(&project.root_path)
-            .output()
-            .map_err(|error| format!("cannot run git worktree add: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "git worktree add failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        // Through `sirio_git`, never a second hand-rolled `git worktree
+        // add`. The one that used to live here handed `path` to git as it
+        // stood, and `new_worktree_path` canonicalizes, so on Windows git
+        // was given a verbatim `\\?\C:\...` path it refuses outright with
+        // "could not create leading directories". `create_worktree` puts the
+        // argument through `git::path_arg` itself, and refuses a branch that
+        // already has a worktree before touching git at all — the checks the
+        // sidebar's own New Worktree has always had, and this path had not.
+        sirio_git::create_worktree(&project.root_path, &branch, &path, None)
+            .map_err(|error| format!("git worktree add failed: {error}"))?;
 
         let mut projects = self.project_catalog.projects().to_vec();
         projects[project_index]
@@ -26799,6 +26797,70 @@ mod tests {
                 .map(|workspace| workspace.path.as_str()),
             Some(expected_path.as_str())
         );
+    }
+
+    /// The control socket's own New Workspace really creates a worktree.
+    ///
+    /// `create_workspace` used to build a second, hand-rolled `git worktree
+    /// add` and hand git the path exactly as `new_worktree_path` produced
+    /// it. That one canonicalizes, so on Windows git received a verbatim
+    /// path it refuses outright and `sirioctl new-workspace` could not
+    /// create anything at all. Nothing tested this chain, which is how it
+    /// went unnoticed: `new_worktree_path` has one caller, `create_workspace`
+    /// has one caller, and neither was reached from a test. This drives it
+    /// end to end and asserts a checkout git itself linked.
+    #[gpui::test]
+    async fn control_new_workspace_creates_a_real_worktree(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("control-new-workspace");
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+
+        let rows = workspace.update(cx, |workspace, cx| {
+            workspace
+                .create_workspace("worktree-state-project", Some("control-made"), cx)
+                .expect("the control socket creates a worktree")
+        });
+
+        let created = rows
+            .iter()
+            .find(|(key, _)| key == "path")
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("the answer names the new worktree's path");
+        // A linked worktree carries a `.git` *file* pointing back at the
+        // repository, so this exists only if git really did the work.
+        assert!(
+            created.join(".git").is_file(),
+            "git linked a real checkout at {}",
+            created.display()
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|(key, _)| key == "branch")
+                .map(|(_, value)| value.as_str()),
+            Some("control-made")
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.project_catalog.projects()[0]
+                    .worktrees
+                    .iter()
+                    .any(|worktree| paths_name_the_same_document(&worktree.path, &created)),
+                "and the catalog gained the worktree it just made"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&created);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[gpui::test]
