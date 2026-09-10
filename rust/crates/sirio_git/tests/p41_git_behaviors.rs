@@ -220,6 +220,13 @@ fn remote_parsing_supports_github_ssh_https_and_project_suffixes() {
         GitRemote::project_name("git@github.com:acme/widgets"),
         "widgets"
     );
+    // A local clone source pasted out of Explorer is a native Windows path,
+    // and `git clone` takes it. Cutting only at a slash or a colon left the
+    // whole tail after the drive letter as the "name", which the Clone form
+    // then rejected as not a single folder name.
+    assert_eq!(GitRemote::project_name(r"C:\src\widgets"), "widgets");
+    assert_eq!(GitRemote::project_name(r"C:\src\widgets.git"), "widgets");
+    assert_eq!(GitRemote::project_name(r"C:\src\widgets\"), "widgets");
 
     let repository = repo("remote");
     git(
