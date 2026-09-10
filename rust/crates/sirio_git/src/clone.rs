@@ -51,10 +51,10 @@ impl GitClone {
         #[cfg(not(windows))]
         let url = url.to_string();
         #[cfg(windows)]
-        if let Some(rest) = url.strip_prefix("file://") {
-            if let Some(stripped) = crate::git::strip_verbatim_prefix(rest) {
-                url = format!("file://{stripped}");
-            }
+        if let Some(rest) = url.strip_prefix("file://")
+            && let Some(stripped) = crate::git::strip_verbatim_prefix(rest)
+        {
+            url = format!("file://{stripped}");
         }
         arguments.push(path_arg(Path::new(&url)));
         arguments.push(path_arg(destination));

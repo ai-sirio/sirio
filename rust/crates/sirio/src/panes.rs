@@ -614,7 +614,7 @@ mod tests {
         apply_terminal_activity_event, process_signal_interval, split_disabled_reason,
     };
     use sirio_activity::{AgentActivityModel, AgentStatus};
-    use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalShell, TerminalView};
+    use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
     use std::time::{Duration, Instant};
 
     fn tree() -> PaneNode<&'static str> {
@@ -878,14 +878,22 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-pane-activity-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1"
-                    .to_string(),
+        // The Windows fixture writes the title and the question in one go
+        // rather than with a gap between them: `print` emits once. Nothing
+        // here depends on the gap — the title is parsed the moment it lands
+        // and the content scan runs when output settles, by which point
+        // both are on the grid, in the same order.
+        let shell = crate::pty_fixture_shell(
+            "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1",
+            &[
+                "print",
+                "\\033]0;. working\\007Do you want to proceed?\\n",
+                "--delay",
+                "0.1",
+                "--sleep",
+                "1",
             ],
-        };
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
@@ -959,14 +967,22 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-pane-debounce-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; exec sleep 1"
-                    .to_string(),
+        // Both halves alternate a title with a wait for one typed line, so
+        // the test can assert on each contradictory title before the next
+        // one is allowed out. On unix that is `printf` and `IFS= read -r _`;
+        // the fixture's `titles` mode is the same alternation, one argument
+        // per `printf`.
+        let shell = crate::pty_fixture_shell(
+            "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; exec sleep 1",
+            &[
+                "titles",
+                "\\033]0;. working\\007",
+                "\\033]0;✳ idle\\007",
+                "\\033]0;✳ idle\\007",
+                "--sleep",
+                "1",
             ],
-        };
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });

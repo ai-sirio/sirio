@@ -50,13 +50,19 @@ impl GitRemote {
             .map(ToOwned::to_owned)
     }
 
-    /// Derives the project folder name from an HTTPS or SSH clone URL.
-    /// Trailing slashes and a trailing `.git` suffix are removed before the
-    /// final URL/scp path segment is selected.
+    /// Derives the project folder name from a clone source: an HTTPS or SSH
+    /// URL, or a local path. Trailing separators and a trailing `.git`
+    /// suffix are removed before the final segment is selected.
+    ///
+    /// The backslash counts as a separator so a native Windows path pasted
+    /// into the Clone field — `C:\src\widgets`, which `git clone` accepts —
+    /// yields `widgets` rather than the whole tail after the drive colon.
+    /// It costs nothing elsewhere: a backslash never separates segments in
+    /// an HTTP URL or an scp-style remote.
     pub fn project_name(url: &str) -> String {
         let mut trimmed = url.trim().to_string();
         loop {
-            if trimmed.ends_with('/') {
+            if trimmed.ends_with('/') || trimmed.ends_with('\\') {
                 trimmed.pop();
             } else if trimmed.ends_with(".git") {
                 trimmed.truncate(trimmed.len() - 4);
@@ -65,7 +71,7 @@ impl GitRemote {
             }
         }
         trimmed
-            .rsplit(['/', ':'])
+            .rsplit(['/', ':', '\\'])
             .next()
             .unwrap_or_default()
             .to_string()

@@ -54,7 +54,6 @@ use sirio_ui::{
         SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef, SidebarWorktree,
         TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
-        parked_tab_row_id,
     },
     status_bar::{
         StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
@@ -7822,18 +7821,16 @@ impl SirioWorkspace {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create worktree parent: {error}"))?;
         }
-        let output = Command::new("git")
-            .args(["worktree", "add", "-b", &branch])
-            .arg(&path)
-            .current_dir(&project.root_path)
-            .output()
-            .map_err(|error| format!("cannot run git worktree add: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "git worktree add failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        // Through `sirio_git`, never a second hand-rolled `git worktree
+        // add`. The one that used to live here handed `path` to git as it
+        // stood, and `new_worktree_path` canonicalizes, so on Windows git
+        // was given a verbatim `\\?\C:\...` path it refuses outright with
+        // "could not create leading directories". `create_worktree` puts the
+        // argument through `git::path_arg` itself, and refuses a branch that
+        // already has a worktree before touching git at all — the checks the
+        // sidebar's own New Worktree has always had, and this path had not.
+        sirio_git::create_worktree(&project.root_path, &branch, &path, None)
+            .map_err(|error| format!("git worktree add failed: {error}"))?;
 
         let mut projects = self.project_catalog.projects().to_vec();
         projects[project_index]
@@ -8219,7 +8216,13 @@ impl SirioWorkspace {
     ///   Swift original: to colour the loader, never to replace the branch
     ///   glyph, which `App/SidebarView.swift:361` always draws.
     /// * `running_agent_ids`  → the row's trailing running-agents badge,
-    ///   already de-duplicated and in `AgentCatalog` order.
+    ///   already de-duplicated and in `AgentCatalog` order. **Not drawn
+    ///   today**: the Zed redesign dropped that badge, and
+    ///   `Sidebar::set_worktree_activity` takes the running set and ignores
+    ///   it. The set is still resolved and handed over so the seam survives
+    ///   until the badge comes back; `drawn_worktree_row_shows_the_identity_
+    ///   the_model_resolved` asserts its absence, so restoring it fails
+    ///   there first rather than silently.
     ///
     /// The row order is `AttentionSort::urgent_first` over the project's
     /// worktrees **in catalog order**, and catalog order *is* the user's
@@ -17414,9 +17417,92 @@ fn main() {
     });
 }
 
+/// The deterministic PTY child the Windows arm of these tests runs.
+///
+/// This is `sirio_terminal`'s own fixture, reached through the workspace
+/// rather than copied: both crates' tests spawn the same program, so each
+/// mode's behaviour is described once, in that file's docstring, and stays
+/// described in one place. Its modes are argv-driven and documented there.
+#[cfg(all(test, not(unix)))]
+const PTY_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../sirio_terminal/tests/fixtures/pty_fixture.py"
+);
+
+/// The child a test spawns when it needs a pane with a real process behind
+/// a real PTY — one that stays alive, or emits exact bytes, or both.
+///
+/// On unix this stays the real `/bin/sh -c <script>` it has always been,
+/// byte for byte. That is deliberate: macOS is the reference release
+/// platform, and these tests earn their keep by driving a genuine POSIX
+/// shell through a genuine PTY — swapping the shell out everywhere would
+/// weaken them on exactly the platform that gates a release.
+///
+/// Windows has no `/bin/sh`, no `sleep` and no `printf`, so the same test
+/// drives `pty_fixture.py` under `python3`. The shell scripts here only
+/// ever ask for those same two things, and the fixture's argv modes cover
+/// both. Both halves are named at every call site so the pairing stays
+/// visible and reviewable. Deliberately the same shape, and the same name,
+/// as `sirio_terminal`'s own helper: that one is `#[cfg(test)]` in another
+/// crate and so cannot be reached from here.
+#[cfg(test)]
+fn pty_fixture_shell(unix_script: &str, windows_fixture_args: &[&str]) -> TerminalShell {
+    #[cfg(unix)]
+    {
+        let _ = windows_fixture_args;
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), unix_script.to_string()],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = unix_script;
+        TerminalShell::WithArguments {
+            program: "python3".to_string(),
+            args: std::iter::once(PTY_FIXTURE.to_string())
+                .chain(
+                    windows_fixture_args
+                        .iter()
+                        .map(|argument| (*argument).to_string()),
+                )
+                .collect(),
+        }
+    }
+}
+
+/// A child that exits immediately with `code`, so a test can assert on the
+/// status a pane reports for a finished process.
+///
+/// This is the one child that is not the PTY fixture: every fixture mode
+/// ends by staying alive or by exiting 0, and a nonzero status is exactly
+/// what these tests are about. `/bin/sh -c "exit N"` on unix, unchanged;
+/// `cmd /C exit N` on Windows — the same idea in the same role, the
+/// platform's own shell asked for nothing but a status.
+#[cfg(test)]
+fn exiting_shell(code: i32) -> TerminalShell {
+    #[cfg(unix)]
+    {
+        TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), format!("exit {code}")],
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        TerminalShell::WithArguments {
+            program: "cmd".to_string(),
+            args: vec!["/C".to_string(), "exit".to_string(), code.to_string()],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests address a parked tab by its row id; the app addresses
+    // one by its pill, so this import lives here rather than at the top.
+    use sirio_ui::sidebar::parked_tab_row_id;
 
     #[test]
     fn agent_marks_still_have_their_brand_colours_without_the_picker() {
@@ -18240,6 +18326,18 @@ mod tests {
         panic!("{selector} was not drawn");
     }
 
+    /// Opens the New Worktree prompt through the affordance the Zed redesign
+    /// left in place of the old New Worktree row: a `+` on the project's
+    /// section header, rendered only while that header is hovered.
+    fn click_section_add(cx: &mut VisualTestContext) {
+        let header = wait_for_drawn(cx, "sidebar-section-0");
+        cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let add = wait_for_drawn(cx, "sidebar-section-add-0");
+        cx.simulate_click(add.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
     /// F-CORE-DOM-01: `seed_sidebar_identity_and_worktree_defaults` is the
     /// exact function boot's one-time sidebar construction calls. This test
     /// drives it the same way — build the rows, seed identity and worktree
@@ -18296,9 +18394,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let row_bounds = wait_for_drawn(&mut cx, "new-worktree-row");
-        cx.simulate_click(row_bounds.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
         // Leave the dialog's own Base/Location fields blank.
         cx.simulate_input("cleanbase1");
         cx.simulate_keystrokes("enter");
@@ -18693,10 +18789,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create breadcrumb test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn breadcrumb test terminal")
@@ -18728,10 +18821,30 @@ mod tests {
         worktree_urgency_test_workspace_with_shell(
             cx,
             root,
-            TerminalShell::WithArguments {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), "sleep 60".into()],
-            },
+            pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+        )
+    }
+
+    /// The same fixture, with a child that *reads* what is typed at it.
+    ///
+    /// The default child is `sleep 60`, which never reads its own input. On
+    /// unix that is still enough to see a keystroke come back, because the
+    /// tty line discipline echoes it; a ConPTY echoes only inside a cooked
+    /// read, so on Windows nothing types back at all and a test that waits
+    /// for its own needle waits forever. `cat` is the child that reads:
+    /// through the same real `/bin/sh` and the same real PTY as before on
+    /// unix — where the assertion still rides the line discipline's echo,
+    /// which fires before `cat` has a completed line to write back — and
+    /// through the fixture's `cat` mode on Windows, which switches input to
+    /// raw VT and does the echo itself.
+    fn worktree_echo_test_workspace(
+        cx: &mut Context<SirioWorkspace>,
+        root: &Path,
+    ) -> SirioWorkspace {
+        worktree_urgency_test_workspace_with_shell(
+            cx,
+            root,
+            pty_fixture_shell("exec cat", &["cat"]),
         )
     }
 
@@ -18848,10 +18961,23 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// A fresh worktree-urgency fixture root plus its three worktrees.
+    ///
+    /// The root carries `TEST_WORKSPACE_ID` and not just the tag, because
+    /// the very first thing every caller does with it is `remove_dir_all`:
+    /// two tests that happen to pass the same tag do not merely share a
+    /// directory, they delete each other's worktrees mid-run, and which one
+    /// loses depends on how the harness interleaves them. That is exactly
+    /// how `reselecting_a_worktree_reuses_the_mounted_terminal_handle` and
+    /// `missing_worktree_switch_keeps_live_terminals_and_database_rows_intact`
+    /// (both tagged `reselect-terminal`) turned into load-dependent
+    /// failures. The counter makes the collision unrepresentable rather
+    /// than leaving it to tag discipline.
     fn urgency_test_root(tag: &str) -> (PathBuf, Vec<PathBuf>) {
         let root = std::env::temp_dir().join(format!(
-            "sirio-worktree-urgency-{tag}-{}",
-            std::process::id()
+            "sirio-worktree-urgency-{tag}-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&root);
         let worktrees: Vec<PathBuf> = (0..3)
@@ -18881,15 +19007,19 @@ mod tests {
         }
     }
 
-    /// F-CORE-ACT-17 + F-CORE-ACT-18, drawn end to end through the app:
+    /// F-CORE-ACT-17, drawn end to end through the app:
     /// `AgentActivityModel::agent_id_for_panes` decides which brand mark a
-    /// worktree row draws, and `running_agent_ids` decides its trailing
-    /// badge. Nothing here re-derives either from the pane list — the model
-    /// is asked, and the answer is what appears on screen.
+    /// worktree row draws and which status its indicator carries. Nothing
+    /// here re-derives either from the pane list — the model is asked, and
+    /// the answer is what appears on screen.
+    ///
+    /// F-CORE-ACT-18's other half, the trailing badge of running agents that
+    /// `running_agent_ids` used to feed, is deliberately not drawn since the
+    /// Zed redesign: `Sidebar::set_worktree_activity` still takes the running
+    /// set but ignores it. Its absence is asserted below rather than left
+    /// unsaid, so re-adding the badge lands here first.
     #[gpui::test]
-    async fn drawn_worktree_row_shows_the_identity_and_running_set_the_model_resolved(
-        cx: &mut TestAppContext,
-    ) {
+    async fn drawn_worktree_row_shows_the_identity_the_model_resolved(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let (root, worktrees) = urgency_test_root("identity");
         let root_for_window = root.clone();
@@ -18957,29 +19087,22 @@ mod tests {
             cx.debug_bounds("sidebar-status-running-3").is_some(),
             "agent_id_for_panes tints the running indicator this worktree draws"
         );
-        assert!(
-            cx.debug_bounds("sidebar-running-agent-3-claude-mark")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("sidebar-running-agent-3-openai-mark")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("sidebar-running-agent-3-agent-opencode")
-                .is_none(),
-            "a done agent is not in the running set"
-        );
-        let claude = cx
-            .debug_bounds("sidebar-running-agent-3-claude-mark")
-            .expect("claude badge");
-        let codex = cx
-            .debug_bounds("sidebar-running-agent-3-openai-mark")
-            .expect("codex badge");
-        assert!(
-            claude.origin.x < codex.origin.x,
-            "running_agent_ids emits catalog order (claude before codex), not discovery order"
-        );
+        // Two agents are running on this worktree and a third is done, yet
+        // no per-agent badge is drawn: the redesign dropped the trailing
+        // running set from the row. Asserted for each brand the fixture
+        // actually launched, so this cannot pass by naming a mark nobody
+        // ever draws.
+        for badge in [
+            "sidebar-running-agents-3",
+            "sidebar-running-agent-3-claude-mark",
+            "sidebar-running-agent-3-openai-mark",
+            "sidebar-running-agent-3-agent-opencode",
+        ] {
+            assert!(
+                cx.debug_bounds(badge).is_none(),
+                "the worktree row draws no running-agent badge since the redesign: {badge}"
+            );
+        }
         // A worktree with no agent at all keeps the branch glyph.
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-2-git-branch")
@@ -19660,13 +19783,27 @@ mod tests {
         }
     }
 
-    fn static_row_selector(row_id: usize) -> &'static str {
-        Box::leak(format!("sidebar-row-{row_id}").into_boxed_str())
+    /// A tab is drawn as a pill inside its worktree's own row, addressed by
+    /// that row's id and the pill's position within it. The Zed redesign
+    /// left no row of a tab's own to look for — a worktree row is a plain
+    /// `sidebar-row-<id>` literal — so a test that asks "does this worktree
+    /// list that tab" asks for a pill now.
+    fn static_pill_selector(row_id: usize, index: usize) -> &'static str {
+        Box::leak(format!("sidebar-pill-{row_id}-{index}").into_boxed_str())
+    }
+
+    /// A pill's close affordance, which only a *live* tab has: the sidebar
+    /// draws it under `when_some(tab_id, ..)`, and a parked pill carries no
+    /// tab id because its tab does not exist until the switch restores it.
+    /// This is what tells a parked pill from a live one on a drawn frame.
+    fn static_pill_close_selector(row_id: usize, index: usize) -> &'static str {
+        Box::leak(format!("sidebar-pill-close-{row_id}-{index}").into_boxed_str())
     }
 
     /// A worktree that is not selected keeps listing what it holds: the
-    /// host pushes its persisted strip as parked rows. The selected worktree
-    /// never does — its truth is the live tab list, even when that is empty.
+    /// host pushes its persisted strip as parked pills on its own row. The
+    /// selected worktree never does — its truth is the live tab list, even
+    /// when that is empty.
     #[gpui::test]
     async fn an_unselected_worktree_lists_its_persisted_tabs_as_parked_rows(
         cx: &mut TestAppContext,
@@ -19717,18 +19854,15 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds(static_row_selector(parked_tab_row_id(2, 0)))
-                .is_some(),
-            "the unselected worktree's first persisted tab is drawn as a parked row"
+            cx.debug_bounds(static_pill_selector(2, 0)).is_some(),
+            "the unselected worktree's first persisted tab is drawn as a parked pill"
         );
         assert!(
-            cx.debug_bounds(static_row_selector(parked_tab_row_id(2, 1)))
-                .is_some(),
+            cx.debug_bounds(static_pill_selector(2, 1)).is_some(),
             "and its second"
         );
         assert!(
-            cx.debug_bounds(static_row_selector(parked_tab_row_id(1, 0)))
-                .is_none(),
+            cx.debug_bounds(static_pill_selector(1, 0)).is_none(),
             "the selected worktree shows only live tabs, never its persisted strip"
         );
     }
@@ -19787,13 +19921,14 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let live_row = static_row_selector(TAB_ROW_ID_OFFSET);
-        let parked_row = static_row_selector(parked_tab_row_id(1, 0));
         assert!(
-            cx.debug_bounds(live_row).is_some(),
-            "before the switch the repo's tab is a live row"
+            cx.debug_bounds(static_pill_close_selector(1, 0)).is_some(),
+            "before the switch the repo's tab is a live pill, closable from its own row"
         );
-        assert!(cx.debug_bounds(parked_row).is_none());
+        assert!(
+            cx.debug_bounds(static_pill_selector(2, 0)).is_none(),
+            "and the worktree nobody has visited yet lists nothing"
+        );
 
         workspace.update(&mut cx, |workspace, cx| {
             workspace
@@ -19819,26 +19954,35 @@ mod tests {
                 "the switch was a safe reload: the repo's tab is no longer live"
             );
         });
-        // Tab ids restart from zero per worktree, so `live_row` now names
-        // the restored "Other A" under worktree row 2; the repo's own tab
-        // survives only as the parked row directly under worktree row 1.
+        // Each worktree carries its own tabs as pills on its own row, so
+        // "stayed under it" is now containment rather than stacking: the
+        // repo's tab survives as a parked pill on worktree row 1, and the
+        // restored "Other A" is a live pill on worktree row 2.
         let repo_row = cx.debug_bounds("sidebar-row-1").expect("repo worktree row");
         let other_row = cx
             .debug_bounds("sidebar-row-2")
             .expect("other worktree row");
         let parked = cx
-            .debug_bounds(parked_row)
+            .debug_bounds(static_pill_selector(1, 0))
             .expect("the repo's tab is still listed under the repo, parked");
         let live = cx
-            .debug_bounds(live_row)
-            .expect("the other worktree's restored tab is a live row");
+            .debug_bounds(static_pill_selector(2, 0))
+            .expect("the other worktree's restored tab is a live pill");
         assert!(
-            repo_row.bottom() <= parked.top() && parked.bottom() <= other_row.top(),
-            "the parked row sits under the repo row: repo={repo_row:?} parked={parked:?} other={other_row:?}"
+            cx.debug_bounds(static_pill_close_selector(1, 0)).is_none(),
+            "the repo's tab is parked now: a pill with no live tab behind it cannot be closed"
         );
         assert!(
-            other_row.bottom() <= live.top(),
-            "the only live row sits under the other worktree: other={other_row:?} live={live:?}"
+            cx.debug_bounds(static_pill_close_selector(2, 0)).is_some(),
+            "the restored tab is the live one, so its pill closes"
+        );
+        assert!(
+            repo_row.top() <= parked.top() && parked.bottom() <= repo_row.bottom(),
+            "the parked pill rides on the repo's own row: repo={repo_row:?} parked={parked:?}"
+        );
+        assert!(
+            other_row.top() <= live.top() && live.bottom() <= other_row.bottom(),
+            "and the live pill on the other worktree's row: other={other_row:?} live={live:?}"
         );
     }
 
@@ -20272,10 +20416,7 @@ mod tests {
             // and the later one the question.
             workspace.add_terminal_tab_with_shell(
                 "Terminal 2",
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
                 None,
                 cx,
             );
@@ -20352,10 +20493,7 @@ mod tests {
             let background_pane = workspace.tabs[0].focused_pane;
             workspace.add_terminal_tab_with_shell(
                 "Terminal 2",
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
                 None,
                 cx,
             );
@@ -20636,10 +20774,7 @@ mod tests {
                 .agent_spawned("pane-0", "claude", Instant::now());
             workspace.add_terminal_tab_with_shell(
                 "Terminal 2",
-                TerminalShell::WithArguments {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 60".into()],
-                },
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
                 None,
                 cx,
             );
@@ -20901,7 +21036,7 @@ mod tests {
         let (root, _worktrees) = urgency_test_root("control-no-dialog");
         let root_for_window = root.clone();
         let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+            cx.add_window(|_window, cx| worktree_echo_test_workspace(cx, &root_for_window));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -20973,7 +21108,7 @@ mod tests {
         let (root, _worktrees) = urgency_test_root("leak-ctrl-alt-w");
         let root_for_window = root.clone();
         let window =
-            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+            cx.add_window(|_window, cx| worktree_echo_test_workspace(cx, &root_for_window));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
@@ -21143,10 +21278,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-cached-pane-frames-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create cached-pane test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn cached-pane test terminal")
@@ -21203,8 +21335,15 @@ mod tests {
     }
 
     /// With every sidebar row its own cached view, the spinner lease of a
-    /// running worktree must re-render that row alone: the project row (and
-    /// any other row) is replayed while the running row keeps animating.
+    /// running worktree must re-render that row alone: every other row is
+    /// replayed while the running row keeps animating.
+    ///
+    /// The "other row" is a second worktree, not the project row. Since
+    /// 45d974ba a project is a section header, drawn inline by the sidebar's
+    /// render loop and `continue`d before it can become a cached `RowView`
+    /// — so it is invisible to `row_render_counts`, and a fixture with one
+    /// project and one worktree has no replayable row left to check at all.
+    /// The fixture therefore adds an idle sibling worktree.
     #[gpui::test]
     async fn a_spinner_frame_replays_the_other_sidebar_rows(cx: &mut TestAppContext) {
         use sirio_ui::sidebar::RowKind;
@@ -21213,10 +21352,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-cached-rows-frames-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create cached-rows test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn cached-rows test terminal")
@@ -21224,7 +21360,32 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(|_, cx| {
             activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
         });
+        // The idle row a spinner frame has to replay. `activity_test_workspace`
+        // gives the project a single worktree, which the running pane owns;
+        // a second one is what makes "the other rows" exist at all.
+        let idle_sibling = working_directory.join("idle-sibling");
+        std::fs::create_dir_all(&idle_sibling).expect("create idle sibling worktree");
         workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "activity-project".into(),
+                    name: "Activity Project".into(),
+                    root_path: working_directory.clone(),
+                    is_git: false,
+                    worktrees: vec![
+                        session::CatalogWorktree {
+                            branch: "main".into(),
+                            path: working_directory.clone(),
+                            is_primary: true,
+                        },
+                        session::CatalogWorktree {
+                            branch: "idle-sibling".into(),
+                            path: idle_sibling.clone(),
+                            is_primary: false,
+                        },
+                    ],
+                }]);
+            workspace.refresh_sidebar(cx);
             workspace.cache_child_views = true;
             workspace
                 .sidebar
@@ -21250,27 +21411,41 @@ mod tests {
                 workspace.sidebar.read(app).row_render_counts(app)
             })
         };
+        // `Sidebar::from_projects` numbers rows project-major: the sole
+        // project row is 0 and its worktrees follow in catalog order, so the
+        // running (primary) worktree is row 1 and the idle sibling row 2.
+        const RUNNING_ROW: usize = 1;
         let before = counts(cx);
         assert!(
-            before.iter().any(|(_, kind, _)| *kind == RowKind::Worktree)
-                && before.iter().any(|(_, kind, _)| *kind == RowKind::Project),
-            "the fixture draws a project row and a worktree row: {before:?}"
+            before.iter().all(|(_, kind, _)| *kind == RowKind::Worktree),
+            "only worktree rows become cached row views; a project is a section header: {before:?}"
+        );
+        assert!(
+            before.iter().any(|(id, _, _)| *id == RUNNING_ROW)
+                && before.iter().any(|(id, _, _)| *id != RUNNING_ROW),
+            "the fixture draws the running worktree row and at least one idle row: {before:?}"
         );
 
         for _ in 0..10 {
             tick(cx);
         }
         let after = counts(cx);
+        assert_eq!(
+            before.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            after.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
+            "spinner frames must not add or drop sidebar rows"
+        );
         for ((id, kind, was), (_, _, now)) in before.iter().zip(after.iter()) {
-            match kind {
-                RowKind::Worktree => assert!(
+            if *id == RUNNING_ROW {
+                assert!(
                     *now >= was + 5,
                     "the running worktree row {id} must keep rendering with its spinner ({was} -> {now})"
-                ),
-                _ => assert_eq!(
+                );
+            } else {
+                assert_eq!(
                     now, was,
                     "row {id} ({kind:?}) must be replayed, not re-rendered, by spinner frames"
-                ),
+                );
             }
         }
 
@@ -21288,10 +21463,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-close-tab-activity-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create close-tab test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn close-tab test terminal")
@@ -21341,10 +21513,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create regression test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn regression test terminal")
@@ -21395,10 +21564,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create reconcile test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn reconcile test terminal")
@@ -21458,14 +21624,22 @@ mod tests {
         ));
         std::fs::create_dir_all(&working_directory)
             .expect("create content activity test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1"
-                    .into(),
+        // The Windows fixture writes the title and the question in one go
+        // rather than with a gap between them: `print` emits once. Nothing
+        // here depends on the gap — the content scan runs when output
+        // settles, and both bytes are on the grid by then, in the same
+        // order.
+        let shell = pty_fixture_shell(
+            "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1",
+            &[
+                "print",
+                "\\033]0;. working\\007Do you want to proceed?\\n",
+                "--delay",
+                "0.1",
+                "--sleep",
+                "1",
             ],
-        };
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn content activity test terminal")
@@ -21504,10 +21678,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create terminal notify test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exec sleep 60".into()],
-        };
+        let shell = pty_fixture_shell("exec sleep 60", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn terminal notify test terminal")
@@ -21559,13 +21730,10 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-activity-wiring-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create activity test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf '\\033]0;. working\\007'; exec sleep 1".into(),
-            ],
-        };
+        let shell = pty_fixture_shell(
+            "printf '\\033]0;. working\\007'; exec sleep 1",
+            &["print", "\\033]0;. working\\007", "--sleep", "1"],
+        );
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn activity test terminal")
@@ -22155,7 +22323,7 @@ mod tests {
     /// Claude's own working-title convention — into the workspace's one
     /// activity model.
     #[gpui::test]
-    async fn a_layer_b_identity_after_spawn_reaches_the_sidebar_tab_row(cx: &mut TestAppContext) {
+    async fn a_layer_b_identity_after_spawn_reaches_the_sidebar_pill(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -22177,12 +22345,14 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert_eq!(TAB_ROW_ID_OFFSET, 1_000_000);
-        const GENERIC: &str = "sidebar-tab-mark-1000000-terminal";
-        const CLAUDE: &str = "sidebar-tab-mark-1000000-claude-mark";
+        // The Zed redesign made a tab a pill on its worktree's own row, so
+        // the mark is addressed by that row's id and the pill's position
+        // rather than by a tab row id of its own.
+        const GENERIC: &str = "sidebar-pill-mark-1-0-terminal";
+        const CLAUDE: &str = "sidebar-pill-mark-1-0-claude-mark";
         assert!(
             cx.debug_bounds(GENERIC).is_some(),
-            "a plain shell's tab row draws the generic terminal glyph"
+            "a plain shell's pill draws the generic terminal glyph"
         );
         assert!(cx.debug_bounds(CLAUDE).is_none());
 
@@ -22210,7 +22380,7 @@ mod tests {
 
         assert!(
             cx.debug_bounds(CLAUDE).is_some(),
-            "the tab row shows the brand as soon as a layer identifies the pane"
+            "the pill shows the brand as soon as a layer identifies the pane"
         );
         assert!(cx.debug_bounds(GENERIC).is_none());
 
@@ -22231,7 +22401,7 @@ mod tests {
     /// is the only signal that catches a native agent with no usable title
     /// convention, and it lands after spawn too.
     #[gpui::test]
-    async fn a_layer_d_identity_after_spawn_reaches_the_sidebar_tab_row(cx: &mut TestAppContext) {
+    async fn a_layer_d_identity_after_spawn_reaches_the_sidebar_pill(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -22251,9 +22421,8 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("sidebar-tab-mark-1000000-openai-mark")
-                .is_some(),
-            "a process-owned pane's brand reaches its tab row"
+            cx.debug_bounds("sidebar-pill-mark-1-0-openai-mark").is_some(),
+            "a process-owned pane's brand reaches its pill"
         );
         workspace.update(&mut cx, |workspace, _| {
             assert!(
@@ -23127,10 +23296,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-tab-status-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create status test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "sleep 30".into()],
-        };
+        let shell = pty_fixture_shell("sleep 30", &["sleep", "inf"]);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn status test terminal")
@@ -23179,10 +23345,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-wsp01-kinds-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create wsp01 test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "sleep 30".into()],
-        };
+        let shell = pty_fixture_shell("sleep 30", &["sleep", "inf"]);
         let (terminal_a, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal leaf a")
         });
@@ -23536,10 +23699,7 @@ mod tests {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-tab-exit-status-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create exit test directory");
-        let shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exit 3".into()],
-        };
+        let shell = exiting_shell(3);
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx)
                 .expect("spawn exit status test terminal")
@@ -23596,10 +23756,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&working_directory)
             .expect("create split exit status test directory");
-        let exited_shell = TerminalShell::WithArguments {
-            program: "/bin/sh".into(),
-            args: vec!["-c".into(), "exit 0".into()],
-        };
+        let exited_shell = exiting_shell(0);
         let (exited_terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, exited_shell, cx)
                 .expect("spawn exited split status test terminal")
@@ -23612,10 +23769,7 @@ mod tests {
             let live_terminal = cx.new(|cx| {
                 TerminalView::with_shell(
                     &working_directory,
-                    TerminalShell::WithArguments {
-                        program: "/bin/sh".into(),
-                        args: vec!["-c".into(), "sleep 30".into()],
-                    },
+                    pty_fixture_shell("sleep 30", &["sleep", "inf"]),
                     cx,
                 )
                 .expect("spawn live split status test terminal")
@@ -25955,10 +26109,7 @@ mod tests {
             .expect("sibling sirioctl should be installed");
         assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
         assert!(resolved.is_absolute());
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("installed sirioctl exists"),
-            std::fs::canonicalize(&sirioctl).expect("source sirioctl exists")
-        );
+        assert_installed_from(&resolved, &sirioctl);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -26012,10 +26163,7 @@ mod tests {
             resolved,
             data_home.join("Sirio").join("bin").join("sirioctl.exe")
         );
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("installed sirioctl exists"),
-            std::fs::canonicalize(&sirioctl).expect("source sirioctl exists")
-        );
+        assert_installed_from(&resolved, &sirioctl);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -26034,7 +26182,12 @@ mod tests {
         std::fs::create_dir_all(&executable_dir).expect("create app fixture");
         std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
         let current_exe = executable_dir.join("sirio");
-        let path_sirioctl = path_dir.join("sirioctl");
+        // The PATH entry is named the way the platform ships it, exactly as
+        // in the sibling-directory fixture above: the Windows build emits
+        // `sirioctl.exe` and `find_executable_in_path` deliberately probes
+        // the PATHEXT spellings only, never the bare name (see
+        // `sirioctl_binary_name`).
+        let path_sirioctl = path_dir.join(sirioctl_binary_name());
         std::fs::write(&current_exe, b"sirio").expect("write app fixture");
         std::fs::write(&path_sirioctl, b"sirioctl").expect("write PATH fixture");
         make_executable(&current_exe);
@@ -26050,10 +26203,7 @@ mod tests {
         let resolved = resolve_sirioctl_path(&current_exe, &environment)
             .expect("PATH sirioctl should be installed");
         assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("PATH installation exists"),
-            std::fs::canonicalize(&path_sirioctl).expect("PATH source exists")
-        );
+        assert_installed_from(&resolved, &path_sirioctl);
 
         environment.insert(
             "XDG_DATA_HOME".into(),
@@ -26150,6 +26300,28 @@ mod tests {
 
     #[cfg(not(unix))]
     fn make_executable(_path: &Path) {}
+
+    /// The installed control CLI must be the very artifact the resolver
+    /// picked, and `install_sirioctl` reaches that end state by two
+    /// different transports: a symlink on unix, a byte copy on Windows
+    /// (`std::fs::copy`, because a link is not a primitive a plain user may
+    /// create there). Carrying the source's bytes is the claim both
+    /// transports make and is therefore asserted on every platform; the
+    /// symlink's stronger claim — one file, reachable under two names — is
+    /// asserted where the installer actually makes it.
+    fn assert_installed_from(installed: &Path, source: &Path) {
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::canonicalize(installed).expect("installed sirioctl exists"),
+            std::fs::canonicalize(source).expect("source sirioctl exists"),
+            "a unix install must be a symlink back to the source"
+        );
+        assert_eq!(
+            std::fs::read(installed).expect("read the installed sirioctl"),
+            std::fs::read(source).expect("read the source sirioctl"),
+            "the installed sirioctl must carry the source artifact's bytes"
+        );
+    }
 
     #[test]
     fn restoring_launch_snapshot_adds_missing_tabs_without_replacing_current_tabs() {
@@ -26689,6 +26861,70 @@ mod tests {
         );
     }
 
+    /// The control socket's own New Workspace really creates a worktree.
+    ///
+    /// `create_workspace` used to build a second, hand-rolled `git worktree
+    /// add` and hand git the path exactly as `new_worktree_path` produced
+    /// it. That one canonicalizes, so on Windows git received a verbatim
+    /// path it refuses outright and `sirioctl new-workspace` could not
+    /// create anything at all. Nothing tested this chain, which is how it
+    /// went unnoticed: `new_worktree_path` has one caller, `create_workspace`
+    /// has one caller, and neither was reached from a test. This drives it
+    /// end to end and asserts a checkout git itself linked.
+    #[gpui::test]
+    async fn control_new_workspace_creates_a_real_worktree(cx: &mut TestAppContext) {
+        let repo = committed_test_repo("control-new-workspace");
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            )
+        });
+
+        let rows = workspace.update(cx, |workspace, cx| {
+            workspace
+                .create_workspace("worktree-state-project", Some("control-made"), cx)
+                .expect("the control socket creates a worktree")
+        });
+
+        let created = rows
+            .iter()
+            .find(|(key, _)| key == "path")
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("the answer names the new worktree's path");
+        // A linked worktree carries a `.git` *file* pointing back at the
+        // repository, so this exists only if git really did the work.
+        assert!(
+            created.join(".git").is_file(),
+            "git linked a real checkout at {}",
+            created.display()
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|(key, _)| key == "branch")
+                .map(|(_, value)| value.as_str()),
+            Some("control-made")
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.project_catalog.projects()[0]
+                    .worktrees
+                    .iter()
+                    .any(|worktree| paths_name_the_same_document(&worktree.path, &created)),
+                "and the catalog gained the worktree it just made"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&created);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     #[gpui::test]
     async fn sidebar_create_worktree_refreshes_catalog_and_control_state(
         cx: &mut TestAppContext,
@@ -26745,10 +26981,17 @@ mod tests {
                 .iter()
                 .any(|worktree| worktree.path == created_path));
             let state = workspace.control_state.lock().expect("control state");
+            // The two accessors answer in different spellings on purpose.
+            // `workspace_rows` is what the control commands serve, and they
+            // must hand out a pasteable path -- no verbatim prefix, which
+            // the canonicalized fixture root carries on Windows;
+            // `no_workspace_command_serves_a_verbatim_path` pins that.
+            // `current_workspace` is the stored row, which keeps the path as
+            // the app holds it. Each assertion compares against its own.
             assert!(state
                 .workspace_rows()
                 .iter()
-                .any(|row| row.get("path") == Some(&created_path.to_string_lossy().into_owned())));
+                .any(|row| row.get("path") == Some(&display_absolute_path(&created_path))));
             assert_eq!(workspace.working_directory, created_path);
             assert_eq!(
                 state.current_workspace().map(|workspace| workspace.path.clone()),
@@ -26886,17 +27129,12 @@ mod tests {
             .expect("fixture repo has a parent")
             .join("sirio-sidebar-remove-state-worktree");
         let _ = std::fs::remove_dir_all(&removed_path);
-        git_test(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                branch,
-                removed_path.to_str().expect("fixture path is utf-8"),
-            ],
-        );
+        // Through `sirio_git`, like the sibling create test: the fixture
+        // root is canonicalized, so on Windows the bare `git_test` helper
+        // handed git a verbatim path it refuses ("could not create leading
+        // directories"). `create_worktree` normalizes the argument itself.
+        sirio_git::create_worktree(&repo, branch, &removed_path, None)
+            .expect("create the fixture worktree");
 
         cx.set_global(Theme::light());
         let workspace = cx.new(|cx| {
@@ -27098,7 +27336,6 @@ mod tests {
                 1,
                 "the worktree lists its one open terminal tab: {before:?}"
             );
-            assert!(before.0, "a worktree with tab rows starts expanded");
             before
         });
 
@@ -27198,7 +27435,6 @@ mod tests {
                 ],
                 "the unselected worktree lists its two persisted chats as parked rows: {before:?}"
             );
-            assert!(before.0, "a worktree with parked rows starts expanded");
             before
         });
 
@@ -28308,8 +28544,11 @@ mod tests {
         let status_bar = cx
             .debug_bounds("sirio-status-bar")
             .expect("status bar remains mounted");
+        // The twentieth worktree is the last row now: New Worktree stopped
+        // being a row of its own when the redesign moved it onto the
+        // project's section header as a hover-revealed `+`.
         let last_row_before = cx
-            .debug_bounds("new-worktree-row")
+            .debug_bounds("sidebar-row-20")
             .expect("the long sidebar renders its final row");
         assert!(
             status_bar.bottom() <= frame.bottom(),
@@ -28338,7 +28577,7 @@ mod tests {
         cx.run_until_parked();
 
         let last_row_after = cx
-            .debug_bounds("new-worktree-row")
+            .debug_bounds("sidebar-row-20")
             .expect("the final sidebar row remains mounted after scrolling");
         assert!(
             last_row_after.top() < last_row_before.top(),
@@ -29851,6 +30090,31 @@ mod tests {
         assert_eq!(unknown_worktree.error.as_deref(), Some("unknown worktree"));
     }
 
+    /// Whether a control server is really serving the endpoint, asked the
+    /// only way that means the same thing on every platform: by talking to
+    /// it.
+    ///
+    /// `socket_path.exists()` is a unix-shaped proxy for this. There the
+    /// endpoint *is* a file the listener creates and `stop` unlinks; on
+    /// Windows the transport is a named pipe bound from
+    /// `ControlServer::start`'s `#[cfg(windows)]` arm, so nothing ever
+    /// appears at that path and the file test reports a healthy server as
+    /// absent. A ping round-trip is also the stronger claim on both: it
+    /// fails for a bound endpoint whose accept loop is not running, which
+    /// the file test would happily pass.
+    fn control_endpoint_answers(socket_path: &Path) -> bool {
+        sirio_control::round_trip(
+            socket_path,
+            &ControlRequest {
+                id: "socket-toggle-probe".into(),
+                method: "system.ping".into(),
+                params: BTreeMap::new(),
+            },
+            Duration::from_secs(5),
+        )
+        .is_ok_and(|response| response.ok)
+    }
+
     #[test]
     fn socket_controller_starts_and_stops_the_server_for_the_setting() {
         let socket_path =
@@ -29875,10 +30139,18 @@ mod tests {
 
         controller.set_enabled(true);
         assert!(info.enabled());
-        assert!(socket_path.exists());
+        assert!(
+            control_endpoint_answers(&socket_path),
+            "an enabled controller must leave a server answering on {}",
+            socket_path.display()
+        );
         controller.set_enabled(false);
         assert!(!info.enabled());
-        assert!(!socket_path.exists());
+        assert!(
+            !control_endpoint_answers(&socket_path),
+            "a disabled controller must leave nothing serving {}",
+            socket_path.display()
+        );
     }
 
     fn missing_directory(tag: &str) -> std::path::PathBuf {
@@ -30299,8 +30571,15 @@ mod tests {
         });
 
         wait_for_drawn(&mut cx, "changes-file-row");
+        // `changes-open-file` is the expanded-row marker this test needs:
+        // it is drawn inside the row's `when(expanded, …)` block in both
+        // hosts of `ChangesTab`. The row's `Open diff` control used to serve
+        // the same purpose, but since 57054845 it is drawn only for the
+        // right-panel host (`embedded_in_panel`), where the event can
+        // actually move somewhere — never inside the Changes tab this
+        // fixture opens.
         assert!(
-            cx.debug_bounds("changes-open-diff").is_none(),
+            cx.debug_bounds("changes-open-file").is_none(),
             "the existing Changes tab starts with its file collapsed"
         );
 
@@ -30308,7 +30587,7 @@ mod tests {
             workspace.active_tab = 0;
             workspace.add_changes_tab(Some(PathBuf::from("changed.md")), cx);
         });
-        wait_for_drawn(&mut cx, "changes-open-diff");
+        wait_for_drawn(&mut cx, "changes-open-file");
 
         workspace.read_with(&cx.cx, |workspace, _| {
             assert_eq!(
@@ -30332,6 +30611,17 @@ mod tests {
         });
     }
 
+    /// The per-file `Open diff` control, clicked in the drawn frame, must
+    /// reveal the Diff tab the worktree already has instead of opening a
+    /// second one.
+    ///
+    /// The fixture puts the control where 57054845 left it: `ChangesTab`
+    /// draws it only for the right panel's Diff view (`in_right_panel` sets
+    /// `embedded_in_panel`), because from inside the Changes tab the event
+    /// could only reveal the tab the click already happened in. So the panel
+    /// is switched to Diff and the existing Changes tab is parked in a
+    /// closed Secondary — which also keeps `changes-file-row` unambiguous,
+    /// with exactly one `ChangesTab` drawing rows in the frame.
     #[gpui::test]
     async fn drawn_changes_open_diff_action_reveals_the_existing_diff_tab(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -30347,6 +30637,15 @@ mod tests {
                 .flatten()
                 .expect("workspace root")
         });
+        cx.update(|_, cx| right_panel::PanelView::set(right_panel::PanelView::Diff, cx));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.toggle_secondary_pane(cx);
+            assert!(
+                !workspace.secondary_pane_visible(),
+                "the regression starts with an existing Changes tab in a closed Secondary"
+            );
+        });
+        cx.run_until_parked();
 
         let row = wait_for_drawn(&mut cx, "changes-file-row");
         cx.simulate_click(row.center(), Modifiers::none());
@@ -30364,6 +30663,10 @@ mod tests {
             }),
             1,
             "the host subscriber reveals the existing Diff tab after the drawn action"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.secondary_pane_visible()),
+            "revealing the existing Diff tab must reopen the Secondary it was parked in"
         );
     }
 
@@ -31352,10 +31655,7 @@ browser  profile  "
             cx.new(|cx| {
                 TerminalView::with_shell(
                     &working_directory,
-                    TerminalShell::WithArguments {
-                        program: "/bin/sh".into(),
-                        args: vec!["-c".into(), "exec sleep 1".into()],
-                    },
+                    pty_fixture_shell("exec sleep 1", &["sleep", "1"]),
                     cx,
                 )
                 .expect("create deterministic restore test terminal")

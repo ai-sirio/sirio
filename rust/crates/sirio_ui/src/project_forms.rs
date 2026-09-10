@@ -812,6 +812,25 @@ mod tests {
         assert!(status.success(), "git {args:?} failed in {dir:?}");
     }
 
+    /// The URL spelling for a local fixture repository: forward slashes on
+    /// every platform, which is the form git itself prints and accepts.
+    ///
+    /// A clone URL is parsed as a URL, not as a native path:
+    /// `GitRemote::project_name` cuts the destination folder name at the
+    /// last `/` or `:`, so `Path::display`'s Windows spelling
+    /// (`C:\Users\...\clone-source`) leaves the whole `\Users\...` tail as
+    /// the "name" and the form rejects it before any clone starts. Only the
+    /// spelling handed to the field changes here; `git clone` takes this
+    /// form on Windows exactly as it takes the backslash one, and the
+    /// fixture's own `Path` is untouched. Same normalization, same reason,
+    /// as `porcelain_spelling` in `sirio_git/tests/worktree_integration.rs`.
+    fn clone_url_for(path: &std::path::Path) -> String {
+        let spelling = path.to_string_lossy();
+        #[cfg(windows)]
+        let spelling = spelling.strip_prefix(r"\\?\").unwrap_or(&spelling);
+        spelling.replace('\\', "/")
+    }
+
     /// F-PRJ-06: the "cannot be started twice" guard is proven through the
     /// real drawn Clone button, clicked twice back to back, against a real
     /// local repository -- not only at the pure `CloneFormState` layer.
@@ -887,7 +906,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let form = cx.update(|window, _| window.root::<CloneForm>().flatten().expect("form root"));
         form.update(&mut cx.cx, |form, cx| {
-            form.set_url(source.0.display().to_string(), cx)
+            form.set_url(clone_url_for(&source.0), cx)
         });
         cx.run_until_parked();
 

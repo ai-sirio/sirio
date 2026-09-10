@@ -335,6 +335,23 @@ mod tests {
         sirio_release::AcceptedKeys::from_base64(std::iter::empty::<&str>()).unwrap()
     }
 
+    /// The version this crate is compiled at — the one `check_at` compares
+    /// every manifest against.
+    fn current_version() -> semver::Version {
+        semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("the crate version is semver")
+    }
+
+    /// A version strictly newer than the compiled one, derived rather than
+    /// spelled out. Every commit in this repo bumps the workspace version
+    /// (see CLAUDE.md), so a literal — the `0.7.0` these tests used to carry
+    /// — stops being newer the day the product reaches it, and then five
+    /// tests fail for a reason that has nothing to do with the updater.
+    /// That is exactly what happened when the workspace passed 0.7.0.
+    fn newer_version() -> String {
+        let current = current_version();
+        format!("{}.{}.0", current.major, current.minor + 1)
+    }
+
     fn manifest(channel: &str, version: &str) -> Vec<u8> {
         let artifact = sirio_release::ManifestArtifact {
             url: "https://example.invalid/artifact".into(),
@@ -402,23 +419,28 @@ mod tests {
     #[test]
     fn a_newer_manifest_is_reported_as_available() {
         let dir = temp_dir("available");
+        let offered = newer_version();
+        let served = offered.clone();
         let mut updater =
             Updater::for_test(ReleaseChannel::Nightly, dir, empty_keys(), move |url| {
                 assert_eq!(url, "https://dl.sirioai.app/nightly.json");
-                Ok(manifest("nightly", "0.7.0"))
+                Ok(manifest("nightly", &served))
             });
 
         let result = updater.check_at(SystemTime::UNIX_EPOCH, false).unwrap();
         assert!(matches!(
             result,
-            CheckResult::Available(AvailableUpdate { version, .. }) if version == "0.7.0"
+            CheckResult::Available(AvailableUpdate { ref version, .. }) if *version == offered
         ));
     }
 
     #[test]
     fn an_equal_or_older_manifest_is_not_available() {
-        for version in ["0.6.0", "0.5.9"] {
-            let version = version.to_string();
+        // The compiled version itself, which is the `<=` boundary this test
+        // is named for, and the floor of the version line. Both derived or
+        // permanent: a literal near the current version silently stops
+        // testing the boundary the moment the product moves past it.
+        for version in [current_version().to_string(), "0.0.1".to_string()] {
             let dir = temp_dir("old");
             let mut updater =
                 Updater::for_test(ReleaseChannel::Nightly, dir, empty_keys(), move |_| {
@@ -436,7 +458,8 @@ mod tests {
         let signer = SigningKey::from_bytes(&[7; 32]);
         let bytes = b"signed release".to_vec();
         let artifact_url = "https://example.invalid/artifact";
-        let manifest = signed_manifest("stable", &signer, "0.7.0", artifact_url, &bytes);
+        let offered = newer_version();
+        let manifest = signed_manifest("stable", &signer, &offered, artifact_url, &bytes);
         let keys = sirio_release::AcceptedKeys::from_base64([
             STANDARD.encode(signer.verifying_key().as_bytes())
         ])
@@ -455,7 +478,7 @@ mod tests {
         let CheckResult::Ready(ready) = result else {
             panic!("expected a verified update, got {result:?}");
         };
-        assert_eq!(ready.version, "0.7.0");
+        assert_eq!(ready.version, offered);
         assert_eq!(std::fs::read(&ready.path).unwrap(), b"signed release");
         assert_eq!(ready.path.parent(), Some(dir.as_path()));
         assert!(std::fs::read_dir(dir).unwrap().all(|entry| {
@@ -474,7 +497,7 @@ mod tests {
         let manifest = signed_manifest(
             "stable",
             &signer,
-            "0.7.0",
+            &newer_version(),
             "https://example.invalid/artifact",
             &expected,
         );
@@ -505,10 +528,11 @@ mod tests {
         let artifact_fetches = Arc::new(AtomicUsize::new(0));
         let observed = artifact_fetches.clone();
         let dir = temp_dir("metered");
+        let offered = newer_version();
         let mut updater =
             Updater::for_test(ReleaseChannel::Stable, dir, empty_keys(), move |url| {
                 if url.ends_with("stable.json") {
-                    Ok(manifest("stable", "0.7.0"))
+                    Ok(manifest("stable", &offered))
                 } else {
                     observed.fetch_add(1, Ordering::Relaxed);
                     Ok(Vec::new())
@@ -529,7 +553,7 @@ mod tests {
         let manifest = signed_manifest(
             "nightly",
             &signer,
-            "0.7.0",
+            &newer_version(),
             "https://example.invalid/artifact",
             &bytes,
         );
