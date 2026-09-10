@@ -2828,8 +2828,30 @@ impl Sidebar {
                 .any(|pill| matches(&pill.title) || matches(Self::icon_selector_name(pill.icon)))
     }
 
+    /// How many worktrees a project's header counts.
+    ///
+    /// It used to count the rows that were *visible*, which was the same
+    /// number for as long as a project could not really fold (see
+    /// `visible_rows`). Now that folding works, that spelling would make a
+    /// folded header read "sirio 0" over an empty section — throwing away
+    /// the one number worth having while a project is folded, which is how
+    /// much is hidden under it. The count comes from the model instead,
+    /// narrowed to what the filter matches when there is one, so a search
+    /// still counts its hits.
+    fn worktree_count(&self, project_id: usize) -> usize {
+        let query = self.filter.trim().to_lowercase();
+        self.rows
+            .iter()
+            .skip_while(|row| !(row.id == project_id && row.kind == RowKind::Project))
+            .skip(1)
+            .take_while(|row| row.kind != RowKind::Project)
+            .filter(|row| row.kind == RowKind::Worktree && Self::row_matches(row, &query))
+            .count()
+    }
+
     fn visible_rows(&self) -> Vec<SidebarRow> {
         let query = self.filter.trim().to_lowercase();
+        let searching = !query.is_empty();
         let mut filtered = Vec::new();
         let mut project_index = 0;
         while project_index < self.rows.len() {
@@ -2852,7 +2874,18 @@ impl Sidebar {
                     project_row.agent_status = Self::collapsed_project_status(section);
                 }
                 filtered.push(project_row);
-                if project.expanded || section_matches {
+                // A collapsed project opens itself when the filter reaches
+                // one of its worktrees — but only when there *is* a filter.
+                // `row_matches` answers `true` for an empty query, so
+                // `section_matches` was unconditionally true while the
+                // search field was blank, and this clause then held every
+                // project open no matter what `expanded` said. Collapsing a
+                // project did nothing whatsoever: not from the header
+                // click, not from the context menu, not from the keyboard.
+                // The defect was invisible because nothing on the header
+                // announced that a project could be folded at all; adding
+                // the disclosure chevron is what surfaced it.
+                if project.expanded || (searching && section_matches) {
                     filtered.extend(
                         section
                             .iter()
@@ -3864,6 +3897,11 @@ impl Render for Sidebar {
         }
         let rows = self.visible_rows();
         let sticky_section = self.sticky_section(&rows);
+        // Read off `self` here: the closure that draws the sticky header
+        // runs inside the element builder, where `self` is already borrowed.
+        let sticky_worktree_count = sticky_section
+            .as_ref()
+            .map_or(0, |row| self.worktree_count(row.id));
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
@@ -3948,11 +3986,7 @@ impl Render for Sidebar {
         let mut rendered_rows = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().cloned().enumerate() {
             if row.kind == RowKind::Project {
-                let worktree_count = rows[index + 1..]
-                    .iter()
-                    .take_while(|next| next.kind != RowKind::Project)
-                    .filter(|next| next.kind == RowKind::Worktree)
-                    .count();
+                let worktree_count = self.worktree_count(row.id);
                 rendered_rows.push(
                     section::render_section(row, worktree_count, entity.clone(), theme)
                         .into_any_element(),
@@ -4218,13 +4252,6 @@ impl Render for Sidebar {
                             .children(rendered_rows),
                     )
                     .when_some(sticky_section, |this, row| {
-                        let worktree_count = rows
-                            .iter()
-                            .skip_while(|candidate| candidate.id != row.id)
-                            .skip(1)
-                            .take_while(|candidate| candidate.kind != RowKind::Project)
-                            .filter(|candidate| candidate.kind == RowKind::Worktree)
-                            .count();
                         this.child(
                             div()
                                 .debug_selector(|| "sidebar-sticky-section".to_owned())
@@ -4235,7 +4262,7 @@ impl Render for Sidebar {
                                 .h(px(section::SECTION_HEIGHT))
                                 .child(section::render_section(
                                     row,
-                                    worktree_count,
+                                    sticky_worktree_count,
                                     entity.clone(),
                                     theme,
                                 )),
