@@ -67,12 +67,6 @@ fn line_height_for_font_size(font_size: Pixels) -> Pixels {
 }
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Test-observable count of scrollback extraction commands served by terminal
-/// owner threads. This is intentionally public only for regression tests that
-/// guard the render-loop capture invariant.
-#[doc(hidden)]
-pub static SCROLLBACK_CAPTURES: AtomicU64 = AtomicU64::new(0);
-
 /// What a terminal's PTY runs, mirroring the shape of Zed's own `Shell`
 /// (`util::shell::Shell`): a terminal is constructed with its task already
 /// decided, never mutated into running a command after the fact.
@@ -635,6 +629,18 @@ struct TerminalHandle {
     /// tests' panes rendering in parallel in the same process.
     #[cfg_attr(not(test), allow(dead_code))] // read by the retained-grid view tests
     snapshot_builds: Arc<AtomicU64>,
+    /// Test-observable count of scrollback extractions (`Text`) the owner
+    /// thread served for this pane, read through
+    /// [`TerminalHandle::scrollback_captures`].
+    ///
+    /// Per handle for exactly the reason `snapshot_builds` above is: this
+    /// counter was a process-wide `static` until a nightly run caught it
+    /// reading 28 where the test had left it at 26. Nothing was wrong with
+    /// the pane under test -- a sibling test's pane had captured its own
+    /// scrollback in the window between the two loads, in the same test
+    /// binary. A global counter cannot answer "did *this* pane get asked",
+    /// which is the only question the invariant is about.
+    scrollback_captures: Arc<AtomicU64>,
     /// Test-observable count of grid assemblies `prepaint` rebuilt for this
     /// pane (the assembly-key miss path); per handle for the same reason.
     grid_assemblies: Arc<AtomicU64>,
@@ -812,6 +818,10 @@ struct TerminalThreadInputs {
     /// Shared with the handle's `snapshot_builds`: bumped once per served
     /// `Snapshot` so tests can prove a still pane never asks for one.
     snapshot_builds: Arc<AtomicU64>,
+    /// Shared with the handle's `scrollback_captures`: bumped once per served
+    /// `Text` so tests can prove the render loop never asks this pane's owner
+    /// thread for its scrollback.
+    scrollback_captures: Arc<AtomicU64>,
     kitty_decode_failed: Arc<AtomicBool>,
 }
 
@@ -1316,6 +1326,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             mouse_tracking,
             mutation_stamp,
             snapshot_builds,
+            scrollback_captures,
             kitty_decode_failed,
         } = inputs;
 
@@ -1469,7 +1480,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         let _ = reply.send(collect_kitty_placements(&mut terminal));
                     }
                     TerminalCommand::Text(reply) => {
-                        SCROLLBACK_CAPTURES.fetch_add(1, Ordering::SeqCst);
+                        scrollback_captures.fetch_add(1, Ordering::SeqCst);
                         let _ = reply.send(capture_scrollback_text(&mut terminal));
                     }
                     TerminalCommand::ClickSelect(cell, kind, reply) => {
@@ -1899,6 +1910,7 @@ impl TerminalHandle {
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
         let mutation_stamp = Arc::new(AtomicU64::new(0));
         let snapshot_builds = Arc::new(AtomicU64::new(0));
+        let scrollback_captures = Arc::new(AtomicU64::new(0));
         let kitty_decode_failed = Arc::new(AtomicBool::new(false));
         spawn_terminal_thread(TerminalThreadInputs {
             cols: COLS,
@@ -1912,6 +1924,7 @@ impl TerminalHandle {
             mouse_tracking: mouse_tracking_flag.clone(),
             mutation_stamp: mutation_stamp.clone(),
             snapshot_builds: snapshot_builds.clone(),
+            scrollback_captures: scrollback_captures.clone(),
             kitty_decode_failed: kitty_decode_failed.clone(),
         });
 
@@ -1930,6 +1943,7 @@ impl TerminalHandle {
                 mutation_stamp,
                 grid_render_cache: Arc::new(Mutex::new(GridRenderCache::default())),
                 snapshot_builds,
+                scrollback_captures,
                 grid_assemblies: Arc::new(AtomicU64::new(0)),
                 kitty_decode_failed,
                 mouse_tracking: mouse_tracking_flag,
@@ -2946,6 +2960,20 @@ impl TerminalView {
     /// PTY. Layer D walks descendants of this PID on its periodic refresh.
     pub fn shell_pid(&self) -> Option<u32> {
         self.running_terminal().map(|terminal| terminal.shell_pid)
+    }
+
+    /// How many times **this pane's** owner thread has been asked for its
+    /// scrollback text. The render and activity paths must never move it;
+    /// `sirio`'s `render_never_captures_scrollback` reads it either side of
+    /// a refresh to prove that.
+    ///
+    /// Per pane rather than process-wide on purpose — see the field's own
+    /// comment. A pending or failed pane has no owner thread and so has
+    /// served nothing.
+    pub fn scrollback_captures(&self) -> u64 {
+        self.running_terminal()
+            .map(|terminal| terminal.scrollback_captures.load(Ordering::SeqCst))
+            .unwrap_or(0)
     }
 
     /// Captures the renderer's current plain-text history for persistence or
