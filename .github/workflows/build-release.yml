@@ -155,6 +155,21 @@ jobs:
             exit 1
           fi
 
+      # Scripts/ci.sh runs the workspace's tests through nextest rather than
+      # `cargo test`: cargo runs the 45 test binaries one after another, so the
+      # two slow ones dominate the wall clock while the other 43 wait at idle
+      # cores, and every test in a binary shares one process with its
+      # neighbours. Same shape as the two preflights above -- the runner
+      # supplies the tool, CI only checks it is there, because the failure
+      # without it (`no such subcommand: nextest`) arrives nine minutes into a
+      # build that has already paid for its own compile.
+      - name: Require cargo-nextest on the runner
+        run: |
+          if ! command -v cargo-nextest >/dev/null 2>&1; then
+            echo "error: cargo-nextest is not on PATH on this runner; install it with 'cargo install cargo-nextest --locked' or 'brew install cargo-nextest'" >&2
+            exit 1
+          fi
+
       # There was an `Unlock login keychain` step here, inherited verbatim from
       # the Swift-era pipeline. It is gone on purpose, and should not come back
       # with the next copy-paste from git history.
@@ -180,15 +195,24 @@ jobs:
       # is what arms the spec §3.5 assertion in sirio_control: the compiled
       # channel really is this channel, and updating is enabled.
       #
-      # SIRIO_CI_RELEASE_GATE marks this as the release path, which skips the
-      # two `sirio_agents` conformance tests that probe the agent CLIs
-      # installed on this machine (see the comment above the test stage in
-      # Scripts/ci.sh). They belong in a development run, where settling an
-      # adapter's ACP claim against the real binary is the point; they do not
-      # belong in a gate that decides whether a release exists, because a
-      # `brew install`/`npm i -g` on this Mac would then be able to stop one.
-      # Every other test in the workspace still runs, including the two
-      # hermetic tests in the same file.
+      # SIRIO_CI_RELEASE_GATE marks this as the release path. Scripts/ci.sh
+      # maps it onto the `ci` nextest profile in rust/.config/nextest.toml,
+      # which does two things and is the only place either is configured.
+      #
+      # It skips the two `sirio_agents` conformance tests that probe the agent
+      # CLIs installed on this machine. They belong in a development run, where
+      # settling an adapter's ACP claim against the real binary is the point;
+      # they do not belong in a gate that decides whether a release exists,
+      # because a `brew install`/`npm i -g` on this Mac would then be able to
+      # stop one. Every other test still runs, including the two hermetic ones
+      # in the same file.
+      #
+      # And it retries a failed test twice before calling it a failure. Every
+      # red this gate has produced so far has been a test measuring real time
+      # on a machine simultaneously compiling and running two thousand others:
+      # re-running one identical commit turned 15 failures into 3, sharing a
+      # single name. Retries live in this profile alone -- a developer must
+      # still meet the flake on the first run.
       #
       # SIRIO_GIT_TIMEOUT_MS overrides sirio_git's DEFAULT_GIT_TIMEOUT (10s),
       # which is a budget sized for a user's machine, not for one compiling

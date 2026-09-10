@@ -1,0 +1,69 @@
+# cargo-nextest's configuration. Scripts/ci.sh is the only thing that drives it.
+#
+# Why nextest at all: `cargo test --workspace` runs this workspace's 45 test
+# binaries strictly one after another, so `sirio`'s 234 seconds of tests and
+# `sirio_ui`'s 60 add up instead of overlapping while the other 43 binaries
+# wait at idle cores. nextest puts all 2058 tests into one scheduler and gives
+# each its own process.
+#
+# That process boundary is not just a speed trick. Two whole classes of
+# failure this gate kept producing on the macOS runner come from tests sharing
+# process state inside one binary: an assertion reading a process-global
+# counter that another test is still incrementing, and a fixture keyed on
+# `SystemTime::now()` plus `process::id()` colliding with a sibling that
+# started in the same microsecond and then deleting its directory. Neither is
+# expressible once every test is its own process.
+
+[profile.default]
+# The complete failure set, not the first one. This gate exists to say what is
+# broken; stopping at the first red hides the rest until the next run.
+fail-fast = false
+
+# A hung test must fail loudly rather than hold the gate until the job's own
+# 120-minute timeout fires. Nothing in this workspace legitimately runs for a
+# minute -- the slowest honest test in the last full run took 20 seconds.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+# .github/workflows/build-release.yml selects this profile, by way of
+# Scripts/ci.sh mapping SIRIO_CI_RELEASE_GATE=1 onto it. Nothing else does.
+#
+# Retries, and only here. Every failure this gate has produced on the macOS
+# runner so far has been a test measuring real time on a machine that is
+# simultaneously compiling and running two thousand others: re-running one
+# identical commit turned 15 red into 3, with a single name in common. A
+# developer has to see that flake on the first run, which is why the default
+# profile retries nothing; a release must not die of one.
+retries = 2
+
+# `sirio_agents`'s two conformance tests cross-check an adapter's
+# `builtin_acp()` claim against the CLI actually installed on the machine.
+# That is exactly right as a development check -- it is how those claims get
+# settled at all, and the reason they are trustworthy -- and exactly wrong in
+# a gate that decides whether a release exists, where it would let a `brew
+# install` on one Mac stop one. The other two tests in that file are hermetic
+# and still run here.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers)'
+
+[test-groups]
+# Tests that spawn a real PTY and wait for its output to settle are asserting
+# on wall-clock behaviour. Run a dozen of them at once and they take the
+# budget from each other -- which is what "the /bin/sh prompt output never
+# settled" has meant every single time it appeared. Four at a time keeps them
+# off the critical path without letting them form a crowd.
+pty = { max-threads = 4 }
+
+[[profile.default.overrides]]
+# The four `perf_` tests assert a budget in frames -- a keystroke reaching a
+# repaint inside one 16 ms frame, an idle terminal not burning CPU. Sharing a
+# machine with anything at all is the one condition under which they measure
+# something other than what they claim: `perf_keystroke_echo_latency` fails at
+# 17 ms against a 16 ms budget with three other PTY tests alongside it, and
+# passes with room to spare on its own. Reserving every slot is the honest
+# reading of what they are for.
+filter = 'test(/perf_/)'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'test(/real_pty|view_tests::|settle|scrollback/)'
+test-group = 'pty'
