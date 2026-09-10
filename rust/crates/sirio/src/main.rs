@@ -54,7 +54,6 @@ use sirio_ui::{
         SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef, SidebarWorktree,
         TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
-        parked_tab_row_id,
     },
     status_bar::{
         StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
@@ -17501,6 +17500,9 @@ fn exiting_shell(code: i32) -> TerminalShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests address a parked tab by its row id; the app addresses
+    // one by its pill, so this import lives here rather than at the top.
+    use sirio_ui::sidebar::parked_tab_row_id;
 
     #[test]
     fn agent_marks_still_have_their_brand_colours_without_the_picker() {
