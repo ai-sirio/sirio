@@ -16118,7 +16118,16 @@ let answer = 42;
         refresh_frame(cx);
 
         focus_and_type(cx, "hello menu");
+        // Select-all is bezel's own binding, and `input::init` registers it
+        // per platform: cmd-a on macOS, ctrl-a everywhere else. The test has
+        // to press the chord this build actually bound — cmd-a on Windows
+        // selects nothing, and bezel's `Copy` writes nothing for an empty
+        // selection, so the menu would be exercised against no selection at
+        // all. Same shape as `file_view.rs`'s Markdown-toolbar test.
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a");
         cx.run_until_parked();
 
         let input = cx
@@ -16213,7 +16222,14 @@ let answer = 42;
         let composer = cx.debug_bounds("composer").expect("the composer is drawn");
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
+        // `PasteComposer` is bound per platform in `Chat::bind_keys` (cmd-v
+        // on macOS, ctrl-v elsewhere, matching bezel's own `Paste`), so press
+        // the chord this build bound: cmd-v resolves to no binding on Windows
+        // and the picture never reaches `paste_clipboard_image`.
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-v");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-v");
         cx.run_until_parked();
         refresh_frame(cx);
 
