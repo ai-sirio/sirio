@@ -26979,10 +26979,17 @@ mod tests {
                 .iter()
                 .any(|worktree| worktree.path == created_path));
             let state = workspace.control_state.lock().expect("control state");
+            // The two accessors answer in different spellings on purpose.
+            // `workspace_rows` is what the control commands serve, and they
+            // must hand out a pasteable path -- no verbatim prefix, which
+            // the canonicalized fixture root carries on Windows;
+            // `no_workspace_command_serves_a_verbatim_path` pins that.
+            // `current_workspace` is the stored row, which keeps the path as
+            // the app holds it. Each assertion compares against its own.
             assert!(state
                 .workspace_rows()
                 .iter()
-                .any(|row| row.get("path") == Some(&created_path.to_string_lossy().into_owned())));
+                .any(|row| row.get("path") == Some(&display_absolute_path(&created_path))));
             assert_eq!(workspace.working_directory, created_path);
             assert_eq!(
                 state.current_workspace().map(|workspace| workspace.path.clone()),
@@ -27120,17 +27127,12 @@ mod tests {
             .expect("fixture repo has a parent")
             .join("sirio-sidebar-remove-state-worktree");
         let _ = std::fs::remove_dir_all(&removed_path);
-        git_test(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                branch,
-                removed_path.to_str().expect("fixture path is utf-8"),
-            ],
-        );
+        // Through `sirio_git`, like the sibling create test: the fixture
+        // root is canonicalized, so on Windows the bare `git_test` helper
+        // handed git a verbatim path it refuses ("could not create leading
+        // directories"). `create_worktree` normalizes the argument itself.
+        sirio_git::create_worktree(&repo, branch, &removed_path, None)
+            .expect("create the fixture worktree");
 
         cx.set_global(Theme::light());
         let workspace = cx.new(|cx| {
