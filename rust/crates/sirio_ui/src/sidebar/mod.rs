@@ -4510,15 +4510,22 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// A card's text runs out under a veil rather than stopping at an
-    /// ellipsis, which is the whole point of the Zed treatment: on a narrow
-    /// sidebar a branch name slides under the gradient instead of being cut
-    /// with a glyph. Both lines carry one, and the title no longer asks for
-    /// `text_ellipsis`.
+    /// The veil is gone from both card lines.
+    ///
+    /// It was meant to be invisible — a gradient in the row's own colour,
+    /// so text appeared to run out rather than stop at a glyph. On a
+    /// **highlighted** row it was not invisible at all: `element_active`
+    /// and `element_hover` are translucent tints, so painting one of them
+    /// again over a row already filled with it composited twice and drew a
+    /// lighter bar across the title and another across the second line.
+    /// Both were plainly visible in a capture of the running app, and only
+    /// on the selected row — the resting veil is opaque `surface`, which
+    /// matches what is behind it and hides the same mistake.
+    ///
+    /// The lines are clipped with an ellipsis again, which is the treatment
+    /// the veil replaced.
     #[gpui::test]
-    async fn a_card_fades_its_title_and_second_line_instead_of_clipping_them(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_card_draws_no_veil_over_its_title_or_second_line(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -4540,20 +4547,67 @@ mod tests {
             Box::leak(format!("sidebar-row-title-fade-{row_id}").into_boxed_str());
         let subline_fade: &'static str =
             Box::leak(format!("sidebar-row-subline-fade-{row_id}").into_boxed_str());
+        let title: &'static str =
+            Box::leak(format!("sidebar-row-title-{row_id}").into_boxed_str());
 
         assert!(
-            cx.debug_bounds(title_fade).is_some(),
-            "the branch title carries the right-edge veil"
+            cx.debug_bounds(title).is_some(),
+            "the card still draws its title"
         );
         assert!(
-            cx.debug_bounds(subline_fade).is_some(),
-            "so does the second line"
+            cx.debug_bounds(title_fade).is_none(),
+            "no veil is painted over the branch title"
         );
-        assert_eq!(
-            cx.debug_bounds(title_fade).unwrap().size.width,
-            px(super::fade::FADE_WIDTH),
-            "the veil keeps the width the design took from Zed's sidebar"
+        assert!(
+            cx.debug_bounds(subline_fade).is_none(),
+            "and none over the second line"
         );
+    }
+
+    /// The branch title names its own colour.
+    ///
+    /// It did not, and nothing above it did either — the row, the tree, the
+    /// panel and the window root all leave the text colour alone (the root
+    /// sets only `font_family`) — so the title inherited gpui's default
+    /// `TextStyle`, which is black, and branch names were drawn all but
+    /// invisible on the dark sidebar. The contrast assertion is the part
+    /// worth keeping: it fails for any token that would repeat the defect,
+    /// not just for the one value that caused it.
+    #[test]
+    fn a_branch_title_is_legible_against_the_sidebar_surface() {
+        fn channel(value: f32) -> f32 {
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(color: gpui::Rgba) -> f32 {
+            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+        }
+        fn contrast(one: gpui::Rgba, other: gpui::Rgba) -> f32 {
+            let (a, b) = (luminance(one), luminance(other));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+
+        for theme in [Theme::dark(), Theme::light()] {
+            let title = Sidebar::title_color(false, theme);
+            assert!(
+                contrast(title, theme.surface) >= 4.5,
+                "a branch title must clear WCAG AA against the sidebar surface, got {:.2}",
+                contrast(title, theme.surface)
+            );
+            let parked = Sidebar::title_color(true, theme);
+            assert!(
+                contrast(parked, theme.surface) >= 2.5,
+                "a parked title is quieter but still readable, got {:.2}",
+                contrast(parked, theme.surface)
+            );
+            assert_ne!(
+                title, parked,
+                "a parked tab still reads as a record rather than a live surface"
+            );
+        }
     }
 
     /// The filter saw titles only, so neither the annotation a person left

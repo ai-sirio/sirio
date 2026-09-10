@@ -114,35 +114,24 @@ impl Render for RowView {
 }
 
 impl Sidebar {
-    /// The right-edge veil for one line of a card. A row's background moves
-    /// under the reader — `element_hover` on hover, `element_active` when
-    /// selected — so a veil painted once in the sidebar's own colour would
-    /// sit on a highlighted row as a visible patch. The selected colour is
-    /// known at render time; the hover one is handed to `group_hover` on
-    /// the row's group, which is the same three-colour switch Zed's
-    /// `GradientFade` makes.
-    fn row_fade(
-        row_id: usize,
-        line: &'static str,
-        selected: bool,
-        hover_group: gpui::SharedString,
-        theme: Theme,
-    ) -> gpui::Div {
-        let resting = if selected {
-            theme.element_active
-        } else {
-            theme.surface
-        };
-        let hovered = if selected {
-            theme.element_active
-        } else {
-            theme.element_hover
-        };
-        super::fade::fade_right(resting, super::fade::FADE_WIDTH)
-            .debug_selector(move || format!("sidebar-row-{line}-fade-{row_id}"))
-            .group_hover(hover_group, move |style| {
-                style.bg(super::fade::fade_gradient(hovered))
-            })
+    /// The colour a card's title is drawn in.
+    ///
+    /// It used to have none. The element named a weight, a line height and
+    /// an ellipsis and left the colour to be inherited — but nothing in the
+    /// sidebar's ancestry sets one: not the row, not `sidebar-tree`, not the
+    /// panel, not the window root, which establishes only `font_family`. The
+    /// title therefore fell through to gpui's default `TextStyle`, which is
+    /// black, and a branch name was drawn very nearly invisible on the dark
+    /// surface behind it (measured at peak luma 15 against a 13 background,
+    /// while the sub-line right under it read 115). Every other string in
+    /// the row — the sub-line, the count, the status, the star — names its
+    /// own token, which is exactly why the defect showed up as "only the
+    /// branch names are black".
+    ///
+    /// A parked tab keeps the faint tone it always had: it is a record of
+    /// what the worktree holds, not a live surface.
+    pub(crate) fn title_color(parked: bool, theme: Theme) -> Rgba {
+        if parked { theme.text_faint } else { theme.text }
     }
 
     pub(crate) fn status_text(row: &SidebarRow) -> Option<String> {
@@ -159,17 +148,43 @@ impl Sidebar {
         }
     }
 
+    /// The card's second line.
+    ///
+    /// It used to be the checkout path, which is the one thing on the card
+    /// the reader already knows: every worktree under a project repeats the
+    /// same prefix, and the tail that tells them apart is the branch name
+    /// already spelled on the line above — so the line cost a row of height
+    /// to say nothing, and said it truncated. What earns that line is the
+    /// work: the name of the worktree's most recent task. The host already
+    /// names a tab from the first thing the user typed and then lets the
+    /// summarizer rewrite it (`title_from_prompt` and `apply_auto_title` in
+    /// `sirio`'s `main.rs`), and that name arrives here on the pill, so the
+    /// card reads as "what I was doing in this worktree".
+    ///
+    /// A worktree comment (F-SID-11) still wins — a person put it there on
+    /// purpose. With neither a comment nor a task the line is left empty
+    /// rather than falling back to the path.
     pub(crate) fn sub_line_text(row: &SidebarRow) -> String {
         row.comment
             .as_deref()
             .filter(|comment| !comment.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| {
-                row.path
-                    .as_deref()
-                    .map(sirio_project::display_path)
-                    .unwrap_or_default()
-            })
+            .or_else(|| Self::last_task_title(row))
+            .unwrap_or_default()
+    }
+
+    /// Which task the card names: the selected pill when the worktree has
+    /// one, because that is the tab the user is actually looking at, and
+    /// otherwise the last of the strip, which is where a newly opened tab
+    /// lands. Parked pills count — a worktree nobody has mounted this
+    /// session still remembers what was last open in it.
+    fn last_task_title(row: &SidebarRow) -> Option<String> {
+        row.pills
+            .iter()
+            .find(|pill| pill.selected)
+            .or_else(|| row.pills.last())
+            .map(|pill| pill.title.clone())
+            .filter(|title| !title.trim().is_empty())
     }
 
     /// The minimum row rhythm: a single-line row is 32px (13.5px title at
@@ -623,11 +638,11 @@ impl Sidebar {
                 RowStatusGlyph::None => div().into_any_element(),
             });
         let title_element = div()
-            .relative()
             .min_w_0()
             .flex_1()
             .whitespace_nowrap()
             .overflow_hidden()
+            .text_ellipsis()
             .debug_selector(move || format!("sidebar-row-title-{row_id}"))
             .line_height(px(ROW_TITLE_LINE_HEIGHT))
             .font_weight(if is_project {
@@ -635,17 +650,8 @@ impl Sidebar {
             } else {
                 FontWeight::NORMAL
             })
-            .when(parked_tab.is_some(), |this| {
-                this.text_color(theme.text_faint)
-            })
-            .child(title)
-            .child(Self::row_fade(
-                row_id,
-                "title",
-                selected,
-                hover_group.clone().into(),
-                theme,
-            ));
+            .text_color(Self::title_color(parked_tab.is_some(), theme))
+            .child(title);
         let title_line = div()
             .w_full()
             .flex()
@@ -695,19 +701,12 @@ impl Sidebar {
             .child(
                 div()
                     .debug_selector(move || format!("sidebar-row-subline-{row_id}"))
-                    .relative()
                     .min_w_0()
                     .flex_1()
                     .whitespace_nowrap()
                     .overflow_hidden()
-                    .child(Self::sub_line_text(&row))
-                    .child(Self::row_fade(
-                        row_id,
-                        "subline",
-                        selected,
-                        hover_group.clone().into(),
-                        theme,
-                    )),
+                    .text_ellipsis()
+                    .child(Self::sub_line_text(&row)),
             )
             .child(Self::render_pills(
                 &row,
@@ -865,13 +864,69 @@ mod tests {
         assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
     }
 
+    /// The second line names the worktree's most recent task, not its
+    /// checkout path. The path was the least informative thing the card
+    /// could carry — every sibling repeats the project prefix and the part
+    /// that differs is the branch name already on the line above — and it
+    /// pushed the one fact worth reading, what the user was doing here, off
+    /// the card entirely. A comment still wins, and with neither the line
+    /// is empty rather than falling back to the path.
     #[test]
-    fn the_second_line_is_the_comment_when_there_is_one_and_the_path_otherwise() {
+    fn the_second_line_names_the_last_task_and_never_the_path() {
         let mut row = worktree(4, "feat/x");
         row.path = Some(PathBuf::from("/tmp/projects/sirio-wt/feat-x"));
-        assert!(Sidebar::sub_line_text(&row).contains("feat-x"));
+        assert_eq!(
+            Sidebar::sub_line_text(&row),
+            "",
+            "a worktree with no task and no comment leaves the line empty"
+        );
+
+        let mut first = pill(1);
+        first.title = "wire up the pill row".to_owned();
+        let mut second = pill(2);
+        second.title = "chase the ConPTY title".to_owned();
+        row.pills = vec![first, second];
+        assert_eq!(
+            Sidebar::sub_line_text(&row),
+            "chase the ConPTY title",
+            "with nothing selected the newest tab of the strip names the card"
+        );
+
+        row.pills[0].selected = true;
+        assert_eq!(
+            Sidebar::sub_line_text(&row),
+            "wire up the pill row",
+            "the tab the user is actually on wins over strip order"
+        );
+
         row.comment = Some("redesign the sidebar".to_owned());
-        assert_eq!(Sidebar::sub_line_text(&row), "redesign the sidebar");
+        assert_eq!(
+            Sidebar::sub_line_text(&row),
+            "redesign the sidebar",
+            "a comment a person left on purpose still outranks a derived name"
+        );
+    }
+
+    /// A parked tab is the case that made the old path fallback look
+    /// harmless: an unmounted worktree has no live tabs at all. It does
+    /// still carry its persisted strip, so the card can name what was last
+    /// open in it without mounting anything.
+    #[test]
+    fn a_parked_strip_still_names_the_card() {
+        let mut row = worktree(5, "feat/y");
+        row.pills = vec![SidebarPill {
+            tab_id: None,
+            parked_tab: Some(0),
+            title: "review the release notes".to_owned(),
+            icon: Icon::MessageSquare,
+            brand: None,
+            status: None,
+            selected: false,
+        }];
+        assert_eq!(
+            Sidebar::sub_line_text(&row),
+            "review the release notes"
+        );
     }
 
     #[gpui::test]

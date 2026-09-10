@@ -28,7 +28,7 @@ pub(super) fn render_section(
     div()
         .id(("sidebar-section", row_id))
         .debug_selector(move || format!("sidebar-section-{row_id}"))
-        .group(group.clone())
+        .group(group)
         .relative()
         .h(px(SECTION_HEIGHT))
         .w_full()
@@ -125,8 +125,11 @@ pub(super) fn render_section(
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .invisible()
-                .group_hover(group.clone(), |style| style.visible())
+                // Always drawn, never hover-revealed. "New worktree" is the
+                // one action a project header exists to offer, and hiding it
+                // until the pointer lands made the header look inert: there
+                // was nothing on screen to say a project could be added to.
+                // The same goes for its overflow menu below.
                 .hover(|style| style.bg(theme.element_hover))
                 .child(IconElement::new(Icon::Plus, IconSize::XSmall))
                 .on_click(move |_, window, cx| {
@@ -146,8 +149,6 @@ pub(super) fn render_section(
                 .items_center()
                 .justify_center()
                 .rounded(theme.radii.control)
-                .invisible()
-                .group_hover(group, |style| style.visible())
                 .hover(|style| style.bg(theme.element_hover))
                 .text_color(theme.text_muted)
                 .child("⋯")
@@ -212,6 +213,13 @@ mod tests {
         sidebar
     }
 
+    /// Both controls exist on the header. Note what this cannot see: gpui's
+    /// `.invisible()` sets a style, it does not remove the element, so this
+    /// test stayed green for as long as the two icons were hover-revealed
+    /// and a project header looked like it offered nothing at all. There is
+    /// no seam in the test harness that reads a painted element's
+    /// visibility, so "always visible" is verified against a capture of the
+    /// running app rather than here.
     #[gpui::test]
     async fn a_project_header_offers_add_and_menu_instead_of_a_new_worktree_row(
         cx: &mut TestAppContext,
