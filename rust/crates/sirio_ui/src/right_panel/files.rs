@@ -476,12 +476,20 @@ impl RightPanel {
         // resolved to, so a drawn test can assert that a directory holding a
         // conflict *and* a modification marks conflicted — the precedence is
         // otherwise unobservable from a frame.
+        //
+        // The relative path is spelled with forward slashes on every
+        // platform. `debug_selector` is a no-op outside a test build, so
+        // this string exists only to be looked up by `debug_bounds`, which
+        // takes a `&'static str` and so cannot be formatted per platform at
+        // the call site: taking the separator from `Path::display` would
+        // make every nested selector (`file-status-changed-move/from`) a
+        // different string on Windows and silently unfindable there.
         let marker_selector = git_status.map(|status| {
             let relative = path
                 .strip_prefix(&repo_root)
                 .unwrap_or(&path)
-                .display()
-                .to_string();
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             format!("file-status-{}-{relative}", status.slug())
         });
         let disclosure = if is_dir {
@@ -1261,6 +1269,18 @@ mod tests {
         });
     }
 
+    /// Unix only: the fixture has to make a real directory genuinely
+    /// unreadable, and the only primitive that does it here is the POSIX
+    /// mode bit — `chmod 000` through `PermissionsExt::from_mode`. Windows
+    /// ignores mode bits entirely; its nearest analogue is a deny ACE
+    /// written with `icacls`, which the fixture would then have to unwind
+    /// before `TempDir`'s own cleanup could remove the directory. Without a
+    /// lock the walk simply succeeds and `read_error` stays `None`, so on
+    /// Windows this test would assert nothing at all — it is compiled out
+    /// rather than left to time out in `pump_until`. The behaviour it
+    /// covers (an unreadable directory reports why instead of vanishing) is
+    /// platform-independent; only the way to provoke it is not.
+    #[cfg(unix)]
     #[gpui::test]
     async fn an_unreadable_directory_renders_an_error(cx: &mut TestAppContext) {
         let dir = TempDir::new();
@@ -1276,7 +1296,6 @@ mod tests {
             })
         });
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
@@ -1303,7 +1322,6 @@ mod tests {
             assert_eq!(node.children.len(), 0);
         });
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))

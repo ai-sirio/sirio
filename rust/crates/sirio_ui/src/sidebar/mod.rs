@@ -4883,6 +4883,24 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    /// The spelling `git worktree list --porcelain` uses for `path`:
+    /// forward slashes and no verbatim prefix (`C:/Users/...`), while
+    /// `scratch_repo` canonicalizes and so hands the derived paths around
+    /// as `\\?\C:\Users\...`. Comparing porcelain output against
+    /// `Path::display` therefore fails on Windows over the spelling alone,
+    /// with git and the code under test in complete agreement about the
+    /// worktree. The same normalization, for the same reason, as
+    /// `porcelain_spelling` in `sirio_git/tests/worktree_integration.rs`;
+    /// production strips the prefix itself in `sirio_git::git::path_arg`.
+    /// Only the string compared changes — the path itself, and what is
+    /// asserted about it, do not.
+    fn porcelain_spelling(path: &std::path::Path) -> String {
+        let spelling = path.to_string_lossy();
+        #[cfg(windows)]
+        let spelling = spelling.strip_prefix(r"\\?\").unwrap_or(&spelling);
+        spelling.replace('\\', "/")
+    }
+
     #[gpui::test]
     async fn multi_project_worktree_fixture_preserves_project_root_hierarchy(
         cx: &mut gpui::TestAppContext,
@@ -6088,8 +6106,10 @@ mod tests {
         );
         let porcelain = porcelain(&repo);
         assert!(
-            porcelain.contains(&format!("worktree {}", derived.display())),
-            "porcelain reports the created worktree at the derived path:\n{porcelain}"
+            porcelain.contains(&format!("worktree {}", porcelain_spelling(&derived))),
+            "porcelain reports the created worktree at the derived path \
+             ({}):\n{porcelain}",
+            porcelain_spelling(&derived)
         );
         assert!(
             porcelain.contains("branch refs/heads/feature/login"),
