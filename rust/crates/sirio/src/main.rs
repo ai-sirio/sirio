@@ -21660,6 +21660,31 @@ mod tests {
     /// the sidebar at 30 fps. Every child view of the shell is cached, so
     /// those frames must replay the still terminal pane rather than render
     /// it: the shell frame count moves, the terminal's render count does not.
+    ///
+    /// "Does not move at all" is a unix statement, and the assertion below is
+    /// split because Windows cannot honour it. A pane is only as still as its
+    /// PTY, and ConPTY repaints one whose child writes nothing: roughly every
+    /// 220ms it sends `ESC[?25l`, an `ESC[K` per row, `ESC[H`, `ESC[?25h` --
+    /// erasing rows that are already blank and homing a cursor already at
+    /// home. The grid it produces is identical (this fixture's whole retained
+    /// grid stays 0 bytes throughout), but the bytes are real, so the parser
+    /// runs, the owner thread reports output, and the view repaints. A perf
+    /// trace of the run shows the shape exactly: two `notify.Terminal.output`
+    /// events, each followed 0.1ms later by one `TerminalView.render`, and
+    /// nothing else touching the pane.
+    ///
+    /// Three cheaper ways to suppress that were measured and rejected.
+    /// Deduplicating the bytes is unsafe -- identical bytes legitimately
+    /// change a grid, since the same text printed twice appends two lines.
+    /// libghostty-vt's own damage tracking cannot see it: ghostty marks a row
+    /// dirty on *write*, not on change, so this traffic reads `Full` and
+    /// `Partial`, never `Clean`. Fingerprinting the grid per PTY batch means
+    /// `build_snapshot`'s per-cell FFI walk on every batch instead of once
+    /// per drawn frame. What is left -- having the view pull a snapshot
+    /// before deciding to notify -- is correct but restructures the repaint
+    /// path, and its failure mode is a terminal that stops updating. Not
+    /// worth ~5 idle wakeups a second on one platform without measuring it
+    /// first.
     #[gpui::test]
     async fn a_spinner_frame_replays_the_still_terminal_pane(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -21707,15 +21732,35 @@ mod tests {
             tick(cx);
         }
         let frames = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+        let terminal_after = terminal.read_with(&cx.cx, |terminal, _| terminal.render_count());
+        let frames_drawn = frames - frames_before;
+        let pane_renders = terminal_after - terminal_renders_before;
         assert!(
             frames >= frames_before + 5,
             "the spinner lease must keep the shell drawing ({frames_before} -> {frames})"
         );
-        assert_eq!(
-            terminal.read_with(&cx.cx, |terminal, _| terminal.render_count()),
-            terminal_renders_before,
-            "a still cached pane must be replayed, not re-rendered, by spinner frames"
-        );
+        if cfg!(windows) {
+            // ConPTY repaints a pane whose child writes nothing (see the
+            // note on this test), so "not one single render" is not
+            // available here. What the cache is actually for still is: a
+            // replayed pane must not track the shell's frame rate. Measured
+            // on this fixture, stable across runs: 13 shell frames to 2 pane
+            // renders. A broken cache renders once per frame, so the two
+            // deltas converge -- half the shell's frames is comfortably
+            // above the platform's noise and far below that failure.
+            assert!(
+                pane_renders * 2 < frames_drawn,
+                "a still cached pane must be replayed, not driven by the \
+                 shell's frame rate: {pane_renders} pane renders against \
+                 {frames_drawn} shell frames"
+            );
+        } else {
+            assert_eq!(
+                pane_renders, 0,
+                "a still cached pane must be replayed, not re-rendered, by \
+                 spinner frames"
+            );
+        }
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
