@@ -45,7 +45,8 @@ use sirio_ui::{
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
     right_panel::{
-        self, ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
+        self, ActivityStatus, ActivitySurface, FilesSnapshot, RightPanel, RightPanelActionEvent,
+        RightPanelEvent,
     },
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
@@ -61,7 +62,7 @@ use sirio_ui::{
     tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -4160,6 +4161,12 @@ struct SirioWorkspace {
     /// for both ends of every switch in `select_worktree`, after the
     /// outgoing layout has been saved, so it is rebuilt from that save.
     parked_sidebar_tabs: BTreeMap<PathBuf, Vec<SidebarTab>>,
+    /// The last settled Files tree per worktree, so switching back to a
+    /// worktree draws its tree immediately instead of replaying the walk.
+    /// Written on the way out of `select_worktree`, read on the way in.
+    /// Unbounded: one tree per worktree visited this run -- bound it if a
+    /// session with many large worktrees shows the memory.
+    files_snapshots: HashMap<PathBuf, FilesSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4817,6 +4824,7 @@ impl SirioWorkspace {
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
+            files_snapshots: HashMap::new(),
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -7434,6 +7442,9 @@ impl SirioWorkspace {
             return Err(format!("unknown worktree: {}", requested_path.display()));
         };
         let old_path = self.working_directory.clone();
+        if let Some(snapshot) = self.right_panel.read(cx).files_snapshot() {
+            self.files_snapshots.insert(old_path.clone(), snapshot);
+        }
         let old_sidebar_id = self.sidebar_worktree_id(&old_path);
         let new_sidebar_id = self.sidebar_worktree_id(&selected_path);
         if !self
@@ -7632,7 +7643,14 @@ impl SirioWorkspace {
 
         let activity = self.activity_surfaces(cx);
         let selected_path_for_panel = selected_path.clone();
-        self.right_panel = cx.new(|_| RightPanel::with_activity(selected_path_for_panel, activity));
+        let files_snapshot = self.files_snapshots.get(&selected_path).cloned();
+        self.right_panel = cx.new(|_| {
+            RightPanel::with_activity_and_snapshot(
+                selected_path_for_panel,
+                activity,
+                files_snapshot,
+            )
+        });
         Self::subscribe_right_panel(&self.right_panel, cx);
 
         if old_sidebar_id != new_sidebar_id
