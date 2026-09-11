@@ -20399,9 +20399,16 @@ mod tests {
         });
         cx.run_until_parked();
 
+        // `sidebar-status-settled-<id>`, not the `sidebar-status-dot-<id>`
+        // this used to look for: the leading status column is gone and the
+        // bloom is the row's only status glyph now. `Error` maps to
+        // `RowStatusGlyph::Settled(theme.danger)` — settled because it does
+        // not move, danger because of the tint — so the errored worktree
+        // draws the settled bloom, and the `running` assertion below is what
+        // separates the two.
         assert!(
-            cx.debug_bounds("sidebar-status-dot-3").is_some(),
-            "an errored worktree draws a lifecycle dot"
+            cx.debug_bounds("sidebar-status-settled-3").is_some(),
+            "an errored worktree draws its status bloom"
         );
         assert!(
             row_top(&mut cx, 3) < row_top(&mut cx, 1),
@@ -20417,7 +20424,7 @@ mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("sidebar-status-dot-3").is_some(),
+            cx.debug_bounds("sidebar-status-settled-3").is_some(),
             "the selected worktree keeps the status its own panes report"
         );
         assert!(
