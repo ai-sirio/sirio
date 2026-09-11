@@ -8,6 +8,7 @@ use gpui::{
     div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
+use notify::{Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use sirio_acp::AgentCommand;
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
@@ -44,7 +45,7 @@ use sirio_ui::{
     file_view::{FileView, FileViewEvent},
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
-    right_panel::{
+        right_panel::{
         self, ActivityStatus, ActivitySurface, FilesSnapshot, RightPanel, RightPanelActionEvent,
         RightPanelEvent,
     },
@@ -72,6 +73,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+fn files_watch_path_is_relevant(root: &Path, changed: &Path) -> bool {
+    let Ok(relative) = changed.strip_prefix(root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    if first.as_os_str() != ".git" {
+        return true;
+    }
+    let Some(second) = components.next() else {
+        return false;
+    };
+    second.as_os_str() == "HEAD"
+        || second.as_os_str() == "index"
+        || (second.as_os_str() == "refs" && components.next().is_some())
+}
 
 mod account_login;
 mod command_palette;
@@ -4234,6 +4254,11 @@ struct SirioWorkspace {
     /// Unbounded: one tree per worktree visited this run -- bound it if a
     /// session with many large worktrees shows the memory.
     files_snapshots: HashMap<PathBuf, FilesSnapshot>,
+    /// Worktrees currently being populated by the bounded background cache.
+    files_snapshot_in_flight: HashSet<PathBuf>,
+    files_watchers: HashMap<PathBuf, RecommendedWatcher>,
+    files_watch_events: Arc<Mutex<Vec<PathBuf>>>,
+    files_watch_poll_started: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4898,6 +4923,10 @@ impl SirioWorkspace {
             parked_worktree_tabs: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
+            files_snapshot_in_flight: HashSet::new(),
+            files_watchers: HashMap::new(),
+            files_watch_events: Arc::new(Mutex::new(Vec::new())),
+            files_watch_poll_started: false,
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -5450,6 +5479,129 @@ impl SirioWorkspace {
         );
         paths.retain(|path| !is_excluded(path));
         paths
+    }
+
+    /// Keeps the recently mounted worktrees warm without competing with the
+    /// visible panel: at most two repository walks are in flight.
+    fn precache_files_snapshots(&mut self, cx: &mut Context<Self>) {
+        let mut candidates = self.mounted_worktree_paths(None);
+        candidates.push(self.working_directory.clone());
+        candidates.extend(self.files_snapshots.keys().cloned());
+        candidates.sort();
+        candidates.dedup();
+        self.start_files_watcher_poll(cx);
+        for path in candidates {
+            self.watch_files_root(&path);
+            if self.files_snapshot_in_flight.len() >= 2 {
+                break;
+            }
+            if self.files_snapshot_in_flight.contains(&path)
+                || self
+                    .files_snapshots
+                    .get(&path)
+                    .is_some_and(|snapshot| snapshot.is_fresh(SystemTime::now()))
+            {
+                continue;
+            }
+            self.files_snapshot_in_flight.insert(path.clone());
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn({
+                        let path = path.clone();
+                        async move { right_panel::build_files_snapshot(path) }
+                    })
+                    .await;
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.files_snapshot_in_flight.remove(&path);
+                    if let Ok(snapshot) = result {
+                        workspace.files_snapshots.insert(path.clone(), snapshot);
+                        if paths_name_the_same_document(&workspace.working_directory, &path) {
+                            workspace.right_panel.update(cx, |panel, cx| {
+                                panel.mark_files_dirty(cx);
+                            });
+                        }
+                    }
+                    workspace.precache_files_snapshots(cx);
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn watch_files_root(&mut self, path: &Path) {
+        if self.files_watchers.contains_key(path) || !path.is_dir() {
+            return;
+        }
+        let events = self.files_watch_events.clone();
+        let Ok(mut watcher) = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| {
+                let Ok(event) = result else { return };
+                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
+                    && let Ok(mut pending) = events.lock()
+                {
+                    pending.extend(event.paths);
+                }
+            },
+            NotifyConfig::default(),
+        ) else {
+            return;
+        };
+        if watcher.watch(path, RecursiveMode::Recursive).is_ok() {
+            self.files_watchers.insert(path.to_path_buf(), watcher);
+        }
+    }
+
+    fn start_files_watcher_poll(&mut self, cx: &mut Context<Self>) {
+        if self.files_watch_poll_started {
+            return;
+        }
+        self.files_watch_poll_started = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                if this
+                    .update(cx, |workspace, cx| {
+                        let pending = std::mem::take(
+                            &mut *workspace
+                                .files_watch_events
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        );
+                        for path in pending {
+                            let Some(root) = workspace
+                                .files_watchers
+                                .keys()
+                                .find(|root| path.starts_with(root))
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            if files_watch_path_is_relevant(&root, &path) {
+                                workspace.mark_files_snapshot_dirty(&root, cx);
+                            }
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn mark_files_snapshot_dirty(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.files_snapshots.get_mut(path) {
+            snapshot.mark_dirty();
+        }
+        if paths_name_the_same_document(&self.working_directory, path) {
+            self.right_panel.update(cx, |panel, cx| {
+                panel.mark_files_dirty(cx);
+            });
+        }
+        self.precache_files_snapshots(cx);
     }
 
     fn refresh_catalog_project(
@@ -6101,6 +6253,10 @@ impl SirioWorkspace {
                             | TerminalActivityEvent::LifecycleChanged { .. }
                     )
                 {
+                    if matches!(event, TerminalActivityEvent::ChildExited { .. }) {
+                        let worktree = workspace.working_directory.clone();
+                        workspace.mark_files_snapshot_dirty(&worktree, cx);
+                    }
                     workspace.mark_activity_dirty();
                     sirio_perf::event(
                         "notify.Workspace.terminal_activity",
@@ -7822,6 +7978,7 @@ impl SirioWorkspace {
             )
         });
         Self::subscribe_right_panel(&self.right_panel, cx);
+        self.precache_files_snapshots(cx);
 
         if old_sidebar_id != new_sidebar_id
             && let Some(old_sidebar_id) = old_sidebar_id

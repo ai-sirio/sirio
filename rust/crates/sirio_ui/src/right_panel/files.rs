@@ -12,11 +12,43 @@ use sirio_git::{DirectoryGitStatus, IgnoredPaths, directory_statuses, ignored_pa
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
 
 use crate::editor::fs_actions;
 use crate::loading;
 use crate::sidebar::icons::file_glyph;
+
+pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, String> {
+    let snapshot = status(repo_root).ok();
+    let (files, directories) = snapshot
+        .as_ref()
+        .map(|snapshot| {
+            (
+                snapshot
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.path.clone(), DirectoryGitStatus::for_file(entry)))
+                    .collect(),
+                directory_statuses(&snapshot.entries),
+            )
+        })
+        .unwrap_or_default();
+    let markers = GitMarkers {
+        files,
+        directories,
+        ignored: ignored_paths(repo_root).unwrap_or_default(),
+    };
+    let file_tree = read_tree(repo_root, repo_root, &markers).map_err(|error| error.to_string())?;
+    let mut flattened_file_rows = Vec::new();
+    flatten_files(&file_tree, 0, &mut flattened_file_rows);
+    Ok(super::FilesSnapshot {
+        file_tree,
+        flattened_file_rows,
+        git_markers: markers,
+        expanded: Vec::new(),
+        dirty: false,
+        captured_at: std::time::SystemTime::now(),
+    })
+}
 
 /// File-tree rows: 12.5px text at 26px, the app's single-line row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 26.0;
@@ -129,8 +161,11 @@ impl RightPanel {
             self.refresh_error = Some("worktree is outside the project roots".to_string());
             return;
         }
+        self.refresh_dirty = false;
         self.refresh_started = true;
-        self.updating = true;
+        // A settled tree is already truthful enough to keep drawing while
+        // this refresh runs; only the first load may show progress.
+        self.updating = !self.settled;
         self.refresh_error = None;
         let repo_root = self.repo_root.clone();
         self.refresh_generation += 1;
@@ -214,7 +249,30 @@ impl RightPanel {
                 }
                 panel.updating = false;
                 sirio_perf::event("notify.RightPanel.refresh_complete", cx.entity_id().as_u64());
+                if panel.refresh_dirty {
+                    panel.request_refresh(cx);
+                }
                 cx.notify();
+            });
+        }));
+    }
+
+    /// Requests one silent refresh after a short burst of filesystem events.
+    /// Multiple callers share the same task and therefore produce one walk.
+    pub(super) fn request_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_dirty = true;
+        if self.refresh_debounce_task.is_some() {
+            return;
+        }
+        self.refresh_debounce_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.refresh_debounce_task = None;
+                if panel.refresh_dirty {
+                    panel.refresh(cx);
+                }
             });
         }));
     }
@@ -223,57 +281,14 @@ impl RightPanel {
         self.updating && self.settled
     }
 
-    /// Arms the periodic tree refresh: once immediately, then on a fixed
-    /// interval so external edits show up in the tree.
+    /// Arms the first refresh. Subsequent refreshes are explicitly requested
+    /// by lifecycle events, retries, expands, or filesystem watchers.
     pub(super) fn ensure_tree_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_loop_started {
             return;
         }
         self.refresh_loop_started = true;
-        self.refresh(cx);
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                // F-CHG-03: a failed refresh must self-heal once the
-                // underlying condition (e.g. permissions) clears, without
-                // requiring a manual Retry click. Keep retrying on the same
-                // 1s cadence even while `refresh_error` is set — `refresh`
-                // itself is still single-flight, so this costs nothing
-                // beyond the one background walk it already runs each tick.
-                if this
-                    .update(cx, |panel, cx| {
-                        // #189: no draw since the previous tick means
-                        // nothing is showing this panel -- minimised,
-                        // collapsed, whatever the reason -- so skip both
-                        // repository-sized walks.
-                        if panel.renders == panel.renders_at_last_tick
-                            && panel.suspended_ticks < crate::changes::SUSPENDED_TICK_BUDGET
-                        {
-                            panel.suspended_ticks += 1;
-                            panel.refresh_suspended = true;
-                            return;
-                        }
-                        // #191: the panel can be drawn and still not be
-                        // showing this tree. Measured with the panel on
-                        // History, 12 of 17 git processes in twenty seconds
-                        // were this walk's own
-                        // `status --untracked-files=all` -- a command the
-                        // commit graph has no use for.
-                        if super::PanelView::get(cx) != super::PanelView::Files {
-                            panel.refresh_suspended = true;
-                            return;
-                        }
-                        panel.suspended_ticks = 0;
-                        panel.renders_at_last_tick = panel.renders;
-                        panel.refresh(cx);
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        })
-        .detach();
+        self.request_refresh(cx);
     }
 
     fn toggle_file(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -806,7 +821,7 @@ impl RightPanel {
                     "Retry",
                     "files-retry",
                     theme,
-                    move |cx| retry_entity.update(cx, |panel, cx| panel.refresh(cx)),
+                    move |cx| retry_entity.update(cx, |panel, cx| panel.request_refresh(cx)),
                 ))
                 .into_any_element()
         } else {
@@ -854,7 +869,7 @@ impl RightPanel {
                         "Retry",
                         "files-refresh-retry",
                         theme,
-                        move |cx| retry_entity.update(cx, |panel, cx| panel.refresh(cx)),
+                        move |cx| retry_entity.update(cx, |panel, cx| panel.request_refresh(cx)),
                     ))
                 })
                 .child(list)
@@ -866,19 +881,37 @@ impl RightPanel {
             .flex_1()
             .min_h(px(0.0))
             .when(self.is_files_updating(), |this| {
-                this.child(
-                    div()
-                        .id("files-refresh-progress")
-                        .debug_selector(|| "files-refresh-progress".to_owned())
-                        .h(px(2.0))
-                        .w_full()
-                        .flex_none()
-                        .bg(theme.accent),
-                )
+                this.child(files_refresh_indicator(window, cx))
             })
             .child(body)
             .into_any_element()
     }
+}
+
+fn files_refresh_indicator(window: &mut Window, cx: &mut App) -> AnyElement {
+    div()
+        .id("files-refresh-progress")
+        .debug_selector(|| "files-refresh-progress".to_owned())
+        .h(px(2.0))
+        .w_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .child(
+            div()
+                .id("files-refresh-spinner")
+                .debug_selector(|| "files-refresh-spinner".to_owned())
+                .w(px(2.0))
+                .h(px(2.0))
+                .child(loading::compact(
+                    "files-refresh-spinner-bezel",
+                    window,
+                    cx,
+                )),
+        )
+        .into_any_element()
 }
 
 fn files_action_button(
@@ -1066,6 +1099,27 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    struct RefreshIndicatorFixture;
+
+    impl Render for RefreshIndicatorFixture {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            files_refresh_indicator(window, cx).into_any_element()
+        }
+    }
+
+    #[gpui::test]
+    fn the_refresh_indicator_uses_the_animated_bezel_primitive(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RefreshIndicatorFixture);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("files-refresh-spinner").is_some(),
+            "the refresh slot renders the Bezel-backed animated indicator"
+        );
+    }
 
     struct TempDir(PathBuf);
 
@@ -2689,100 +2743,23 @@ mod tests {
         );
     }
 
-    /// #189: `ensure_tree_refresh`'s 1 s tick runs two walks that both
-    /// scale with the repository -- git's `--untracked-files=all` scan and
-    /// `read_tree`'s recursive descent -- and nothing gated them on the
-    /// panel being drawn at all. Measured against this repo on Windows,
-    /// minimising the window changed nothing: 0.65 git processes a second
-    /// while minimised, against 0.45 while visible. With the gate, a
-    /// minimised window runs **zero** in twenty seconds and returns to
-    /// 0.75/s the moment it is restored.
-    ///
-    /// The signal is a count of real draws, and deliberately not
-    /// `Window::is_window_active()`: that was tried first and reads `true`
-    /// for a minimised window, because `render` stops being called and the
-    /// last polled value simply goes stale. Instrumenting the running app
-    /// showed the draw count freezing (11, 11, 11, …) while the flag stayed
-    /// `true` throughout.
-    ///
-    /// Both halves of the wiring are asserted here: that a draw is counted
-    /// at all, and that a draw clears a suspension. A panel that never
-    /// counted draws leaves the first at zero; a resume path that was never
-    /// wired leaves the second suspended.
-    #[gpui::test]
-    async fn a_drawn_frame_is_counted_and_resumes_a_suspended_walk(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        std::fs::write(dir.0.join("visible.txt"), "x").expect("seed file");
-
-        let (mut cx, panel) = settled_panel(cx, dir.0.clone());
-        assert!(
-            panel.read_with(&cx.cx, |panel, _| panel.renders) > 0,
-            "render must count the frames this panel is drawn in -- that              count is the whole signal, and a panel that never incremented              it would suspend its walks forever"
-        );
-
-        panel.update(&mut cx.cx, |panel, _| {
-            panel.refresh_suspended = true;
-        });
-        // Force a genuinely new frame: `debug_bounds` reports on the last
-        // one drawn, it does not draw another.
-        let before = panel.read_with(&cx.cx, |panel, _| panel.renders);
-        panel.update(&mut cx.cx, |_, cx| cx.notify());
-        cx.cx.run_until_parked();
-        assert!(
-            panel.read_with(&cx.cx, |panel, _| panel.renders) > before,
-            "the harness really did draw another frame"
-        );
-
-        assert!(
-            !panel.read_with(&cx.cx, |panel, _| panel.refresh_suspended),
-            "a drawn frame must clear the suspension and refresh at once,              so a restored window never shows a tree frozen at the moment it              was hidden"
-        );
+    #[test]
+    fn ensure_tree_refresh_has_no_periodic_timer() {
+        let source = include_str!("mod.rs");
+        let one_second_timer = ["timer(Duration::from_secs(", "1))"].concat();
+        assert!(!source.contains(&one_second_timer));
     }
 
-    /// #191: being drawn is not the same as being *shown*. #189 stopped the
-    /// tree walk when nothing was drawing the panel at all; a panel showing
-    /// History is still a panel being drawn, so the walk carried on behind
-    /// the commit graph. Measured on the running app with the panel
-    /// switched to History, 12 of the 17 git processes in twenty seconds
-    /// were this walk's own `status --untracked-files=all` -- a command the
-    /// commit graph has no use for. With the gate: zero.
-    ///
-    /// The resume clause in `render` is the half that is easy to get wrong,
-    /// and it is what this asserts. `render` clears a suspension on any
-    /// drawn frame; without the `PanelView::Files` condition on that clause
-    /// the gate below would be undone on the very next frame, because the
-    /// History panel keeps drawing.
     #[gpui::test]
-    async fn a_panel_showing_another_view_does_not_resume_the_tree_walk(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        std::fs::write(dir.0.join("visible.txt"), "x").expect("seed file");
-
-        let (mut cx, panel) = settled_panel(cx, dir.0.clone());
-
-        cx.update(|_, app| PanelView::set(PanelView::History, app));
-        panel.update(&mut cx.cx, |panel, _| {
-            panel.refresh_suspended = true;
+    fn refresh_requests_are_debounced_and_coalesced(cx: &mut TestAppContext) {
+        let directory = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(directory.0.clone()));
+        panel.update(cx, |panel, cx| {
+            panel.request_refresh(cx);
+            panel.request_refresh(cx);
+            assert!(panel.refresh_dirty);
+            assert!(panel.refresh_debounce_task.is_some());
         });
-        let before = panel.read_with(&cx.cx, |panel, _| panel.renders);
-        panel.update(&mut cx.cx, |_, cx| cx.notify());
-        cx.cx.run_until_parked();
-        assert!(
-            panel.read_with(&cx.cx, |panel, _| panel.renders) > before,
-            "the harness really did draw another frame -- the assertion              below is about a drawn frame declining to resume, not about no              frame happening"
-        );
-        assert!(
-            panel.read_with(&cx.cx, |panel, _| panel.refresh_suspended),
-            "a frame drawn while the panel shows History must leave the walk              suspended"
-        );
-
-        // And switching back to Files does resume it, on the next frame.
-        cx.update(|_, app| PanelView::set(PanelView::Files, app));
-        panel.update(&mut cx.cx, |_, cx| cx.notify());
-        cx.cx.run_until_parked();
-        assert!(
-            !panel.read_with(&cx.cx, |panel, _| panel.refresh_suspended),
-            "returning to Files must resume the walk at once, or the tree              stays frozen at whatever it looked like when the user left it"
-        );
     }
 
     /// The Files panel spent most of its time showing "Loading files…": the
