@@ -18,6 +18,7 @@ use gpui::{
 };
 use sirio_theme::Theme;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
@@ -143,6 +144,58 @@ pub struct FilesSnapshot {
     flattened_file_rows: Vec<files::FileRow>,
     git_markers: files::GitMarkers,
     expanded: Vec<PathBuf>,
+    /// Whether the snapshot was invalidated by a filesystem change.
+    dirty: bool,
+    /// When this snapshot was produced.
+    captured_at: SystemTime,
+}
+
+impl FilesSnapshot {
+    /// A clean snapshot young enough to draw without making the Files panel
+    /// wait for a walk first.
+    ///
+    /// The age bound is about what a *restored* tree may claim on arrival,
+    /// so it belongs to the display decision only. It is deliberately not a
+    /// "needs rewalking" test: it expires on its own, and a caller that
+    /// rewalks whatever is not fresh never reaches a resting state. Use
+    /// `is_dirty` for that -- it moves only on evidence.
+    #[must_use]
+    pub fn is_fresh(&self, now: SystemTime) -> bool {
+        !self.dirty
+            && now.duration_since(self.captured_at).unwrap_or_default() <= Duration::from_secs(2)
+    }
+
+    /// Whether a filesystem change has been seen under this tree since the
+    /// walk that produced it.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Whether the worktree-relative `relative` was excluded by the ignore
+    /// rules when this snapshot was walked.
+    ///
+    /// The walk already pays for `git ls-files --ignored --directory`, so a
+    /// watcher can reuse the answer instead of running git per event. That
+    /// matters because a recursive watch on a checkout sees its build output
+    /// too: without this, one `cargo build` under the tree reports thousands
+    /// of `target/` writes, each of which would mark the tree dirty and buy
+    /// another repository-sized walk.
+    #[must_use]
+    pub fn ignores(&self, relative: &std::path::Path) -> bool {
+        self.git_markers.ignores(relative)
+    }
+
+    /// Marks cached data for a silent background refresh while retaining it
+    /// as the immediately visible tree.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+}
+
+/// Builds a settled Files snapshot without creating a visible panel.
+pub fn build_files_snapshot(repo_root: impl Into<PathBuf>) -> Result<FilesSnapshot, String> {
+    files::build_snapshot(&repo_root.into())
 }
 
 /// App-wide selection. A GPUI global rather than a field, for the same
@@ -241,43 +294,20 @@ pub struct RightPanel {
     /// completes after a newer one was requested must not apply its
     /// result late.
     walk_generation: u64,
-    /// One polling loop per panel, armed on first render.
+    /// Whether the first Files render has requested a refresh.
     refresh_loop_started: bool,
-    /// Counts frames this panel has actually been drawn in (#189).
-    ///
-    /// `ensure_tree_refresh`'s tick does two walks that both scale with the
-    /// repository -- git's `--untracked-files=all` scan and `read_tree`'s
-    /// recursive descent -- and neither is worth doing when nothing is
-    /// drawing the panel. This counter is what "nothing is drawing it"
-    /// means, and it is deliberately not `Window::is_window_active()`:
-    /// measured on Windows, that reads `true` for a *minimised* window,
-    /// because `render` stops being called and the last polled value simply
-    /// goes stale. A count of real draws cannot go stale that way.
-    ///
-    /// It cannot deadlock either, which a naive "have we drawn lately"
-    /// guard would: while minimised, the walk's own `cx.notify()` was
-    /// observed to produce no draw at all, so suspending the walk removes
-    /// no draw that would otherwise have happened. When the window comes
-    /// back, GPUI resumes drawing on its own and the next tick sees the
-    /// count move.
-    renders: u64,
-    /// The `renders` value the previous tick saw. Equal means no draw
-    /// happened in between, so this tick skips both walks.
-    renders_at_last_tick: u64,
-    /// Set when a tick skipped the walks, so the resumed panel refreshes at
-    /// once rather than showing a stale tree for up to a second.
-    refresh_suspended: bool,
-    /// Consecutive ticks skipped because nothing drew this panel (#193).
-    ///
-    /// A gate that can only be released by a draw can suspend *forever*
-    /// when no draw is ever coming -- a panel driven outside a window, or
-    /// any future path that stops drawing without dropping the entity. That
-    /// is a liveness bug, not a saving, and the sibling gate on the Changes
-    /// surface hit exactly it: a test driving that loop with no window at
-    /// all never refreshed again. After `SUSPENDED_TICK_BUDGET` skipped
-    /// ticks one walk runs regardless, bounding staleness for anything
-    /// still live.
-    suspended_ticks: u32,
+    /// Coalesces refresh requests until the 300ms debounce expires.
+    refresh_debounce_task: Option<Task<()>>,
+    refresh_dirty: bool,
+    /// Backs off a refresh that keeps failing (F-CHG-03), and is
+    /// dropped the moment one succeeds.
+    refresh_retry_task: Option<Task<()>>,
+    refresh_failures: u32,
+    /// Detects leaving and re-entering the Files view without polling.
+    files_view_active: bool,
+    /// The panel view the last render drew, so a switch to a lazily built
+    /// surface can schedule the frame that builds it.
+    last_panel_view: Option<PanelView>,
     file_context_menu: Option<files::FileContextMenu>,
     /// Built on first selection of the Diff view, dropped when the checkout
     /// changes. A user who never opens Diff never pays for a git status here.
@@ -317,10 +347,12 @@ impl RightPanel {
             file_focus: None,
             walk_generation: 0,
             refresh_loop_started: false,
-            renders: 0,
-            renders_at_last_tick: 0,
-            refresh_suspended: false,
-            suspended_ticks: 0,
+            refresh_debounce_task: None,
+            refresh_dirty: false,
+            refresh_retry_task: None,
+            refresh_failures: 0,
+            files_view_active: false,
+            last_panel_view: None,
             file_context_menu: None,
             changes: None,
             changes_subscriptions: Vec::new(),
@@ -361,8 +393,8 @@ impl RightPanel {
     /// every switch, so without this the tree replays its walk each time and
     /// the user watches "Loading files..." on a directory they were reading
     /// a second ago. The restored tree is marked stale on arrival: it is
-    /// drawn immediately, and the refresh armed by `ensure_tree_refresh`
-    /// replaces it with what is on disk now.
+    /// drawn immediately, and a silent refresh replaces it with what is on
+    /// disk only when the snapshot is dirty or old.
     pub fn with_activity_and_snapshot(
         repo_root: impl Into<PathBuf>,
         activity: Vec<ActivitySurface>,
@@ -370,23 +402,24 @@ impl RightPanel {
     ) -> Self {
         let mut panel = Self::with_activity(repo_root, activity);
         if let Some(snapshot) = snapshot {
+            let snapshot_is_fresh = snapshot.is_fresh(SystemTime::now());
             panel.file_tree = snapshot.file_tree;
             files::restore_expanded(&mut panel.file_tree, &snapshot.expanded);
             panel.flattened_file_rows = snapshot.flattened_file_rows;
             panel.git_markers = snapshot.git_markers;
             panel.settled = true;
-            panel.is_stale = true;
-            panel.updating = true;
+            panel.is_stale = snapshot.dirty;
+            panel.updating = false;
+            panel.refresh_loop_started = snapshot_is_fresh;
         }
         panel
     }
 
     /// The tree the host caches for this worktree, or `None` when there is
-    /// nothing worth caching yet. A tree that is still loading, already
-    /// restored from an older snapshot, or mid-refresh would cache a reading
-    /// the panel itself does not trust -- only a settled walk is offered.
+    /// nothing worth caching yet. A tree that is still loading is not useful,
+    /// but a settled tree remains the best visible fallback while refreshing.
     pub fn files_snapshot(&self) -> Option<FilesSnapshot> {
-        if !self.settled || self.is_stale || self.updating {
+        if !self.settled || (self.is_stale && self.file_tree.is_empty()) {
             return None;
         }
         Some(FilesSnapshot {
@@ -394,6 +427,8 @@ impl RightPanel {
             flattened_file_rows: self.flattened_file_rows.clone(),
             git_markers: self.git_markers.clone(),
             expanded: files::collect_expanded(&self.file_tree),
+            dirty: self.is_stale,
+            captured_at: SystemTime::now(),
         })
     }
 
@@ -419,6 +454,15 @@ impl RightPanel {
         cx.notify();
     }
 
+    /// Keeps the visible tree and asks for a silent debounced refresh.
+    pub fn mark_files_dirty(&mut self, cx: &mut Context<Self>) {
+        if !self.worktree_selected {
+            return;
+        }
+        self.is_stale = self.settled;
+        self.request_refresh(cx);
+    }
+
     /// Remove the panel's checkout binding after its selected worktree
     /// closes. This clears both already drawn rows and any in-flight result's
     /// visible destination; a later worktree selection replaces the panel
@@ -442,6 +486,11 @@ impl RightPanel {
         self.updating = false;
         self.refresh_started = false;
         self.refresh_task = None;
+        self.refresh_debounce_task = None;
+        self.refresh_dirty = false;
+        self.refresh_retry_task = None;
+        self.refresh_failures = 0;
+        self.files_view_active = false;
         self.refresh_generation += 1;
         self.walk_task = None;
         self.walk_generation += 1;
@@ -488,6 +537,11 @@ impl RightPanel {
         self.updating = false;
         self.refresh_started = false;
         self.refresh_task = None;
+        self.refresh_debounce_task = None;
+        self.refresh_dirty = false;
+        self.refresh_retry_task = None;
+        self.refresh_failures = 0;
+        self.files_view_active = false;
         self.refresh_generation += 1;
         self.walk_task = None;
         self.walk_generation += 1;
@@ -701,19 +755,30 @@ impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("RightPanel.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
-        // #189: incremented here and nowhere else -- being *in* a drawn
-        // frame is the whole signal.
-        self.renders = self.renders.wrapping_add(1);
+        let view = PanelView::get(cx);
+        // The selected view is a global, and nothing here observes it, so
+        // switching surfaces schedules no frame of its own. Each surface
+        // other than Files is built lazily *during* a render in that view
+        // (`ensure_history`, `ensure_diff`), so without this the newly
+        // selected one is never constructed and the panel draws the old
+        // surface until something unrelated happens to notify. It used to
+        // survive on the Files refresh's own `notify` arriving a moment
+        // later, which stopped being true once the refresh became
+        // Files-only. Guarded by the change, so it costs one extra frame
+        // per switch and cannot re-arm itself.
+        if self.last_panel_view != Some(view) {
+            self.last_panel_view = Some(view);
+            cx.notify();
+        }
         if self.worktree_selected {
-            self.ensure_tree_refresh(cx);
-            // #191: resume only into the view the tree is actually for.
-            // Without this clause the gate below would be undone on the
-            // very next frame, because a panel showing History is still a
-            // panel being drawn.
-            if self.refresh_suspended && PanelView::get(cx) == PanelView::Files {
-                self.refresh_suspended = false;
-                self.refresh(cx);
+            let showing_files = view == PanelView::Files;
+            if showing_files {
+                if !self.files_view_active && (self.is_stale || !self.settled) {
+                    self.request_refresh(cx);
+                }
+                self.ensure_tree_refresh(cx);
             }
+            self.files_view_active = showing_files;
         }
         if self.worktree_selected && self.file_focus.is_none() {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
@@ -1095,7 +1160,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cached_files_hit_is_immediate_and_stale_while_refreshing(cx: &mut TestAppContext) {
+    fn cached_files_hit_is_immediate_without_updating(cx: &mut TestAppContext) {
         cx.update(sirio_theme::Theme::init);
         let first = TempDir::new();
         let second = TempDir::new();
@@ -1106,8 +1171,61 @@ mod tests {
         });
         restored.read_with(cx, |panel, _| {
             assert!(panel.settled);
-            assert!(panel.is_stale);
-            assert!(panel.updating);
+            assert!(!panel.is_stale);
+            assert!(!panel.updating);
+            assert!(panel.refresh_loop_started);
+            assert!(panel.refresh_debounce_task.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn switching_away_during_a_refresh_does_not_show_blocking_files_loading(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(sirio_theme::Theme::init);
+        let outgoing = TempDir::new();
+        let incoming = TempDir::new();
+        let source = cx.new(|_| RightPanel::new(outgoing.0.clone()));
+
+        let outgoing_snapshot = source.update(cx, |panel, _| {
+            panel.settled = true;
+            panel.updating = true;
+            panel.files_snapshot()
+        });
+        assert!(
+            outgoing_snapshot.is_some(),
+            "a settled tree remains cacheable while it refreshes"
+        );
+
+        let window = cx.add_window(|_window, _cx| {
+            let mut panel = RightPanel::with_activity_and_snapshot(
+                incoming.0.clone(),
+                Vec::new(),
+                outgoing_snapshot,
+            );
+            panel.refresh_started = true;
+            panel
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("files-loading").is_none(),
+            "switching worktrees must never show the blocking first-load placeholder"
+        );
+    }
+
+    #[gpui::test]
+    fn an_empty_stale_tree_is_not_cached_as_a_visible_files_snapshot(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let directory = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(directory.0.clone()));
+
+        panel.update(cx, |panel, _| {
+            panel.settled = true;
+            panel.is_stale = true;
+            panel.updating = true;
+            assert!(panel.files_snapshot().is_none());
         });
     }
 

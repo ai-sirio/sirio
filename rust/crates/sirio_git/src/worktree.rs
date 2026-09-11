@@ -159,28 +159,76 @@ pub fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), Wor
     Ok(())
 }
 
-/// The fallback behind [`remove_worktree`]: `rm -rf` the checkout, then let
-/// git forget it. Two guards before the recursive delete, since a sidebar
-/// row is the only thing vouching for `path`: it must look like a linked
-/// checkout (a `.git` *file*, which a main repository, `/tmp` or a home
-/// directory never has), and it must not contain the repository itself.
-/// Both sides of that containment check are canonicalized so `/var` and
-/// `/private/var` spellings of one directory cannot slip past it; the raw
-/// `path` is what gets deleted, so a symlinked checkout loses the link, not
-/// its target — `remove_dir_all` never follows symlinks.
-fn delete_checkout_directly(repo: &Path, path: &Path) {
-    if !path.join(".git").is_file() {
-        eprintln!(
-            "[git] refusing to delete {} — it is not a linked checkout",
-            path.display()
-        );
-        return;
+/// Resolves the repository a linked checkout belongs to, from the `gitdir:`
+/// line its `.git` file carries (`gitdir: <repo>/.git/worktrees/<name>`).
+///
+/// `None` for anything that is not a linked checkout: a main repository,
+/// where `.git` is a directory, and any ordinary folder. The recorded path
+/// may be relative, in which case it resolves against the checkout itself,
+/// which is how git reads it too.
+fn checkout_owner_gitdir(path: &Path) -> Option<PathBuf> {
+    let marker = path.join(".git");
+    if !marker.is_file() {
+        return None;
     }
+    let contents = std::fs::read_to_string(&marker).ok()?;
+    let recorded = contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+        .trim();
+    if recorded.is_empty() {
+        return None;
+    }
+    let recorded = Path::new(recorded);
+    let absolute = if recorded.is_absolute() {
+        recorded.to_path_buf()
+    } else {
+        path.join(recorded)
+    };
+    Some(absolute.canonicalize().unwrap_or(absolute))
+}
+
+/// The fallback behind [`remove_worktree`]: `rm -rf` the checkout, then let
+/// git forget it. Three guards before the recursive delete, since a sidebar
+/// row is the only thing vouching for `path`.
+///
+/// It must be a linked checkout (a `.git` *file*, which a main repository,
+/// `/tmp` or a home directory never has) — and specifically one of **this**
+/// repository's. Being a checkout is not enough on its own: this runs only
+/// after git refused, and "that path is not my worktree" is the commonest
+/// reason for the refusal, so the weaker test hands the fallback exactly the
+/// directories it must not touch. Verified: with the ownership check absent,
+/// removing a stale row whose path had come to hold *another* repository's
+/// checkout deleted it, uncommitted work and all. The `.git` file names its
+/// owner, so the answer costs one read.
+///
+/// The third guard is containment: the checkout must not hold the repository
+/// itself. Both sides are canonicalized so `/var` and `/private/var`
+/// spellings of one directory cannot slip past it; the raw `path` is what
+/// gets deleted, so a symlinked checkout loses the link, not its target —
+/// `remove_dir_all` never follows symlinks.
+fn delete_checkout_directly(repo: &Path, path: &Path) {
     let canonical = |candidate: &Path| {
         candidate
             .canonicalize()
             .unwrap_or_else(|_| candidate.to_path_buf())
     };
+    let Some(owner) = checkout_owner_gitdir(path) else {
+        eprintln!(
+            "[git] refusing to delete {} — it is not a linked checkout",
+            path.display()
+        );
+        return;
+    };
+    if !owner.starts_with(canonical(repo)) {
+        eprintln!(
+            "[git] refusing to delete {} — it is a checkout of {}, not of {}",
+            path.display(),
+            owner.display(),
+            repo.display()
+        );
+        return;
+    }
     if canonical(repo).starts_with(canonical(path)) {
         eprintln!(
             "[git] refusing to delete {} — it contains the repository",

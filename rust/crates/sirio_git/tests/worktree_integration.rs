@@ -467,6 +467,67 @@ fn remove_never_deletes_a_directory_that_is_not_a_checkout() {
 }
 
 #[test]
+fn remove_never_deletes_another_repositorys_checkout() {
+    // The disk fallback runs *because* git refused, and the commonest
+    // reason for a refusal is that the path is not this repository's
+    // worktree at all. "Is it a linked checkout" is therefore not enough
+    // on its own: a checkout of a different repository answers yes.
+    let ours = make_repo("foreign-ours");
+    let theirs = make_repo("foreign-theirs");
+    let foreign = theirs.path().with_extension("wt-foreign");
+    create_worktree(theirs.path(), "feature-x", &foreign, None).expect("create");
+    std::fs::write(
+        foreign.join("their-work.txt"),
+        "someone else's work
+",
+    )
+    .expect("write");
+    assert!(
+        foreign.join(".git").is_file(),
+        "the fixture must pass the weaker 'is a linked checkout' test"
+    );
+
+    let error = remove_worktree(ours.path(), &foreign, "feature-x")
+        .expect_err("another repository's checkout is not ours to delete");
+
+    assert!(matches!(error, WorktreeError::Git(_)), "{error}");
+    assert!(
+        foreign.join("their-work.txt").exists(),
+        "the other repository's checkout and its uncommitted work survive"
+    );
+    let _ = std::fs::remove_dir_all(&foreign);
+}
+
+#[test]
+fn remove_never_deletes_a_checkout_that_holds_the_repository() {
+    // A checkout that contains the repository would take the repository
+    // with it. Nothing creates this shape on purpose; the guard is there
+    // because the fallback is the one path that deletes recursively.
+    let repo = make_repo("contains-repo");
+    let parent = repo
+        .path()
+        .parent()
+        .expect("repo has a parent")
+        .to_path_buf();
+    std::fs::write(
+        parent.join(".git"),
+        format!(
+            "gitdir: {}
+",
+            repo.path().join(".git").display()
+        ),
+    )
+    .expect("write a checkout marker above the repository");
+
+    let error = remove_worktree(repo.path(), &parent, "feature-x")
+        .expect_err("a directory holding the repository is never deleted");
+
+    assert!(matches!(error, WorktreeError::Git(_)), "{error}");
+    assert!(repo.path().exists(), "the repository survives");
+    let _ = std::fs::remove_file(parent.join(".git"));
+}
+
+#[test]
 fn non_git_directory_is_refused() {
     let dir = TempDir::new("notgit");
     let path = dir.path().with_extension("wt");
