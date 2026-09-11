@@ -173,12 +173,7 @@ mod tests {
     use std::fs;
 
     fn fixture() -> (std::path::PathBuf, String) {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("sirio-markdown-doc-{}-{nonce}", std::process::id()));
+        let dir = crate::scratch_dir("sirio-markdown-doc");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("note.md");
         fs::write(&path, "before\n").unwrap();

@@ -114,13 +114,103 @@ pub fn create_worktree(
 /// than silently discarding their work. Branch deletion is best-effort after
 /// the worktree has been removed: a refusal there is logged, but does not
 /// turn the already-completed worktree removal into an error.
+///
+/// The worktree's `.git` file names the main repository by absolute path, so
+/// a repository renamed or moved on disk after the worktree was added leaves
+/// that link dangling — and `git worktree remove` validates it before doing
+/// anything, even under `--force` ("is not a .git file, error code 7").
+/// `git worktree repair` rewrites the link from the repository's own record
+/// and is a quiet no-op when nothing is broken, so it runs first. Best-effort
+/// too: the removal that follows is what surfaces the real failure.
 pub fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), WorktreeError> {
     let path = git::path_arg(path);
+    if let Err(error) = git::run_accepting(&["worktree", "repair", path.as_str()], repo, &[0]) {
+        eprintln!("[git] worktree repair before removal failed: {error}");
+    }
     git::run_accepting(&["worktree", "remove", path.as_str()], repo, &[0])?;
     if let Err(error) = git::run_accepting(&["branch", "-D", branch], repo, &[0]) {
         eprintln!("[git] failed to delete branch '{branch}' after removing worktree: {error}");
     }
     Ok(())
+}
+
+/// The remote branch a local branch tracks (its upstream).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamBranch {
+    /// The remote's name (`origin`).
+    pub remote: String,
+    /// The branch name on that remote, without the `refs/heads/` prefix.
+    pub branch: String,
+}
+
+/// The deadline for the one call in this module that talks to a remote:
+/// a push over the network legitimately outlives the local default.
+const REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The upstream `branch` tracks in `repo`, if it has one.
+///
+/// A branch with no upstream — or no branch at all — answers `None`; only a
+/// git failure is an error. Read from `for-each-ref` rather than
+/// `rev-parse @{upstream}` so a missing upstream is a plain empty answer,
+/// not a non-zero exit to disambiguate from a real failure.
+pub fn upstream_of(repo: &Path, branch: &str) -> Result<Option<UpstreamBranch>, GitError> {
+    let refname = format!("refs/heads/{branch}");
+    let output = git::run_accepting(
+        &[
+            "for-each-ref",
+            "--format=%(upstream:remotename)\t%(upstream:remoteref)",
+            &refname,
+        ],
+        repo,
+        &[0],
+    )?;
+    let text = output.stdout_string();
+    let Some((remote, remote_ref)) = text.lines().next().and_then(|line| line.split_once('\t'))
+    else {
+        return Ok(None);
+    };
+    let remote = remote.trim();
+    let remote_ref = remote_ref.trim();
+    if remote.is_empty() || remote_ref.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(UpstreamBranch {
+        remote: remote.to_string(),
+        branch: remote_ref
+            .strip_prefix("refs/heads/")
+            .unwrap_or(remote_ref)
+            .to_string(),
+    }))
+}
+
+/// Deletes `upstream`'s branch on its remote: `git push <remote> --delete
+/// <branch>`. Nothing local changes; git's refusal (offline, no permission,
+/// already gone) is surfaced as the error.
+pub fn delete_remote_branch(repo: &Path, upstream: &UpstreamBranch) -> Result<(), GitError> {
+    git::run_accepting_with_timeout(
+        &["push", &upstream.remote, "--delete", &upstream.branch],
+        repo,
+        &[0],
+        REMOTE_TIMEOUT,
+    )?;
+    Ok(())
+}
+
+/// Deletes the branch on its remote, then removes the worktree and its local
+/// branch like [`remove_worktree`].
+///
+/// Remote first, on purpose: a push that fails (offline, refused) leaves the
+/// checkout untouched, so the user can fall back to a disk-only removal
+/// with nothing lost. A worktree removal refused afterwards — uncommitted
+/// changes — leaves the local branch and its work in place, re-pushable.
+pub fn remove_worktree_and_remote_branch(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    upstream: &UpstreamBranch,
+) -> Result<(), WorktreeError> {
+    delete_remote_branch(repo, upstream)?;
+    remove_worktree(repo, path, branch)
 }
 
 /// Initializes `directory` as a Git repository without creating a commit.
@@ -169,6 +259,157 @@ pub fn derive_worktree_path(parent_dir: &Path, project_name: &str, branch: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_ok(cwd: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+    }
+
+    /// The branch heads `origin` holds, one `<sha>\t<ref>` line each.
+    fn remote_heads(repo: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .args(["ls-remote", "--heads", "origin"])
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "ls-remote fails");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// A fresh repository with one commit on `main`, pushed with `-u` to a
+    /// bare `origin` beside it. Returns `(root, repo)`; the root holds both
+    /// and is the caller's to delete. Uncanonicalized on purpose: git
+    /// refuses `\?\` paths on Windows.
+    fn repo_with_bare_origin(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "sirio-worktree-remote-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let repo = root.join("repo");
+        let origin = root.join("origin.git");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        std::fs::create_dir_all(&origin).expect("create origin");
+        git_ok(&origin, &["init", "-q", "--bare"]);
+        git_ok(&repo, &["init", "-q", "-b", "main"]);
+        git_ok(&repo, &["config", "user.email", "test@sirio.dev"]);
+        git_ok(&repo, &["config", "user.name", "Sirio Test"]);
+        std::fs::write(repo.join("file.txt"), "one\n").expect("write");
+        git_ok(&repo, &["add", "-A"]);
+        git_ok(&repo, &["commit", "-q", "-m", "root"]);
+        git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.to_str().expect("utf-8 path"),
+            ],
+        );
+        git_ok(&repo, &["push", "-q", "-u", "origin", "main"]);
+        (root, repo)
+    }
+
+    #[test]
+    fn upstream_of_reports_the_tracked_remote_branch_or_none() {
+        let (root, repo) = repo_with_bare_origin("upstream");
+        assert_eq!(
+            upstream_of(&repo, "main").expect("git answers"),
+            Some(UpstreamBranch {
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            }),
+            "main was pushed with -u, so it tracks origin/main"
+        );
+        assert_eq!(
+            upstream_of(&repo, "missing").expect("git answers"),
+            None,
+            "a branch that does not exist has no upstream"
+        );
+
+        let worktree = root.join("wt-feature");
+        create_worktree(&repo, "feature", &worktree, None).expect("worktree created");
+        assert_eq!(
+            upstream_of(&repo, "feature").expect("git answers"),
+            None,
+            "a branch never pushed tracks nothing"
+        );
+        git_ok(&worktree, &["push", "-q", "-u", "origin", "feature"]);
+        assert_eq!(
+            upstream_of(&repo, "feature").expect("git answers"),
+            Some(UpstreamBranch {
+                remote: "origin".to_string(),
+                branch: "feature".to_string(),
+            }),
+            "after push -u the branch tracks origin/feature"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_worktree_and_remote_branch_deletes_the_checkout_and_both_branches() {
+        let (root, repo) = repo_with_bare_origin("remove-remote");
+        let worktree = root.join("wt-feature");
+        create_worktree(&repo, "feature", &worktree, None).expect("worktree created");
+        git_ok(&worktree, &["push", "-q", "-u", "origin", "feature"]);
+        assert!(
+            remote_heads(&repo).contains("refs/heads/feature"),
+            "the fixture pushed feature to origin"
+        );
+
+        let upstream = upstream_of(&repo, "feature")
+            .expect("git answers")
+            .expect("feature tracks origin/feature");
+        remove_worktree_and_remote_branch(&repo, &worktree, "feature", &upstream)
+            .expect("both removals succeed");
+
+        assert!(!worktree.exists(), "the checkout is gone from disk");
+        assert!(
+            !remote_heads(&repo).contains("refs/heads/feature"),
+            "the remote branch is gone from origin"
+        );
+        let local = git::run_accepting(&["branch", "--list", "feature"], &repo, &[0])
+            .expect("git answers")
+            .stdout_string();
+        assert!(
+            local.trim().is_empty(),
+            "the local branch is gone too, got {local:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_refused_remote_deletion_leaves_the_worktree_untouched() {
+        let (root, repo) = repo_with_bare_origin("remote-refused");
+        let worktree = root.join("wt-feature");
+        create_worktree(&repo, "feature", &worktree, None).expect("worktree created");
+
+        let bogus = UpstreamBranch {
+            remote: "nowhere".to_string(),
+            branch: "feature".to_string(),
+        };
+        let result = remove_worktree_and_remote_branch(&repo, &worktree, "feature", &bogus);
+        assert!(result.is_err(), "a push to an unknown remote fails");
+
+        assert!(
+            worktree.exists(),
+            "remote first: a failed push must not have touched the checkout"
+        );
+        assert!(
+            worktree_for_branch(&repo, "feature")
+                .expect("git answers")
+                .is_some(),
+            "git still lists the feature worktree"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn derives_paths_like_the_swift_app() {

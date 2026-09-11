@@ -25,13 +25,27 @@ pub enum PrepareError {
     /// user's own hand-authored file of the same name. Mirrors
     /// `SirioSkillProvisioner.Error.unmanagedFile` (F-AGENT-SAFE-01).
     UnmanagedSkillFile(std::path::PathBuf),
+    /// The user's own config file (Settings → Install Hooks) no longer
+    /// parses, so setting one key would mean rewriting it from whatever
+    /// could be salvaged — it is left exactly as found instead.
+    UnparseableUserConfig {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 impl fmt::Display for PrepareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PrepareError::Io(error) => write!(f, "failed to write worktree config: {error}"),
-            PrepareError::Json(error) => write!(f, "failed to serialize worktree config: {error}"),
+            PrepareError::Io(error) => write!(f, "failed to write agent config: {error}"),
+            PrepareError::Json(error) => write!(f, "failed to serialize agent config: {error}"),
+            PrepareError::UnparseableUserConfig { path, reason } => {
+                write!(
+                    f,
+                    "refusing to rewrite unparseable config at {}: {reason}",
+                    path.display()
+                )
+            }
             PrepareError::MissingSkillMarker => {
                 write!(f, "Sirio skill content is missing its managed-file marker")
             }

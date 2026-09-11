@@ -18,7 +18,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signer as _, SigningKey};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
-use sirio_release::{AcceptedKeys, ChannelManifest, ManifestArtifact, MANIFEST_SCHEMA};
+use sirio_release::{
+    AcceptedKeys, ChannelManifest, MANIFEST_SCHEMA, ManifestArtifact, artifact_url,
+};
 
 const USAGE: &str = "\
 usage:
@@ -29,7 +31,8 @@ usage:
   sirio-release verify --manifest <file> --platform <p> --artifact <file>
                        --pub-key <base64> ...
 
-url-template placeholders: {channel} {version} {platform}";
+url-template placeholders: {channel} {version} {platform} {file}
+  ({file} is the artifact's own file name, for hosts that keep it)";
 
 fn main() {
     if let Err(error) = run() {
@@ -126,10 +129,12 @@ fn sign(flags: &Flags) -> Result<(), String> {
         let bytes = std::fs::read(&path).map_err(|e| format!("read {path:?}: {e}"))?;
         let sha256 = hex::encode(Sha256::digest(&bytes));
         let signature = BASE64.encode(signing.sign(&bytes).to_bytes());
-        let url = url_template
-            .replace("{channel}", &channel)
-            .replace("{version}", &version)
-            .replace("{platform}", &platform);
+        let file = PathBuf::from(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("--artifact {platform}={path}: path has no file name"))?;
+        let url = artifact_url(&url_template, &channel, &version, &platform, &file);
         entries.insert(platform, ManifestArtifact { url, sha256, signature });
     }
 

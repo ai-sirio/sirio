@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use sirio_agents::{
-    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, OhMyPiAdapter, OpenCodeAdapter, PiAdapter,
-    PrepareError, SKILL_MANAGED_MARKER, discover_availability, find_executable_in_path,
-    install_skill, json_string_literal, shell_quote,
+    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, GlobalHookInstall, GlobalHookReport,
+    OhMyPiAdapter, OpenCodeAdapter, PiAdapter, PrepareError, SKILL_MANAGED_MARKER,
+    discover_availability, find_executable_in_path, install_global_hooks, install_skill,
+    json_string_literal, shell_quote,
 };
 #[cfg(unix)]
 use sirio_agents::{
@@ -1065,5 +1066,339 @@ fn claude_prepare_refuses_to_run_over_an_unmanaged_skill_file() {
         !worktree.path().join(".claude/settings.local.json").exists(),
         "the skill install runs before hook settings, so a refusal must leave the worktree \
          exactly as it found it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// User-global hooks (Settings → Install Hooks)
+// ---------------------------------------------------------------------------
+
+fn environment(values: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    values
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).expect("read json")).expect("valid json")
+}
+
+const CLAUDE_EVENTS: [&str; 5] = [
+    "Stop",
+    "Notification",
+    "SessionStart",
+    "UserPromptSubmit",
+    "SessionEnd",
+];
+
+/// Settings → Install Hooks writes the five hook arrays into the user's own
+/// `~/.claude/settings.json`. One file serves every pane, so the commands
+/// carry no `--session`: sirioctl resolves the pane from `SIRIO_PANE_ID`.
+#[test]
+fn claude_global_hooks_land_in_the_user_settings_without_a_pane_id() {
+    let home = TempDir::new();
+    let outcome = ClaudeCodeAdapter
+        .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
+        .expect("install");
+    let settings_path = home.path().join(".claude/settings.json");
+    assert_eq!(outcome, GlobalHookInstall::Written(settings_path.clone()));
+
+    let root = read_json(&settings_path);
+    let hooks = root["hooks"].as_object().expect("hooks object");
+    for event in CLAUDE_EVENTS {
+        let command = hooks[event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{event} has a command hook"));
+        assert!(
+            command.starts_with(&format!("{} notify --status ", shell_quote(SIRIOCTL))),
+            "{event}: {command}"
+        );
+        assert!(
+            !command.contains("--session"),
+            "{event} must not pin a pane: {command}"
+        );
+        assert!(command.ends_with("--stdin-json"), "{event}: {command}");
+    }
+    assert_eq!(
+        hooks["UserPromptSubmit"][0]["hooks"][0]["command"],
+        format!(
+            "{} notify --status running --stdin-json",
+            shell_quote(SIRIOCTL)
+        )
+    );
+    assert_eq!(
+        hooks["SessionEnd"][0]["hooks"][0]["command"],
+        format!(
+            "{} notify --status done --stdin-json",
+            shell_quote(SIRIOCTL)
+        )
+    );
+}
+
+/// The user's global settings hold far more than hooks; only the five
+/// Sirio events are replaced, everything else keeps its meaning.
+#[test]
+fn claude_global_hooks_preserve_the_users_other_settings() {
+    let home = TempDir::new();
+    let dir = home.path().join(".claude");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(
+        dir.join("settings.json"),
+        r#"{"model":"opus","permissions":{"allow":["Bash(ls)"]},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[]}]}}"#,
+    )
+    .expect("seed settings");
+
+    ClaudeCodeAdapter
+        .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
+        .expect("install");
+
+    let root = read_json(&dir.join("settings.json"));
+    assert_eq!(root["model"], "opus");
+    assert_eq!(root["permissions"]["allow"][0], "Bash(ls)");
+    assert_eq!(root["hooks"]["PreToolUse"][0]["matcher"], "Bash");
+    for event in CLAUDE_EVENTS {
+        assert!(root["hooks"][event].is_array(), "{event} installed");
+    }
+}
+
+/// `CLAUDE_CONFIG_DIR` relocates Claude's whole config directory; the hooks
+/// must follow it, or they land where Claude never looks.
+#[test]
+fn claude_global_hooks_honour_claude_config_dir() {
+    let home = TempDir::new();
+    let config_dir = TempDir::new();
+    let outcome = ClaudeCodeAdapter
+        .install_global_hooks(
+            home.path(),
+            &environment(&[("CLAUDE_CONFIG_DIR", config_dir.path().to_str().unwrap())]),
+            SIRIOCTL,
+        )
+        .expect("install");
+    assert_eq!(
+        outcome,
+        GlobalHookInstall::Written(config_dir.path().join("settings.json"))
+    );
+    assert!(
+        home.tree().is_empty(),
+        "nothing lands under ~ when the override is set"
+    );
+}
+
+/// Codex has one hook: the `notify` argv in `~/.codex/config.toml`. The
+/// user's config is TOML with comments and tables written by hand —
+/// setting one key must leave the rest, comments included, in place.
+#[test]
+fn codex_global_hooks_set_notify_in_the_user_config_and_keep_the_rest() {
+    let home = TempDir::new();
+    let dir = home.path().join(".codex");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "# my config\nmodel = \"o3\"\n\n[sandbox]\nmode = \"read-only\"\n",
+    )
+    .expect("seed config");
+
+    let outcome = CodexAdapter
+        .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
+        .expect("install");
+    assert_eq!(outcome, GlobalHookInstall::Written(config_path.clone()));
+
+    let text = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(text.contains("# my config"), "comments survive: {text}");
+    let document: toml_edit::DocumentMut = text.parse().expect("still valid TOML");
+    assert_eq!(document["model"].as_str(), Some("o3"));
+    assert_eq!(document["sandbox"]["mode"].as_str(), Some("read-only"));
+    let notify = document
+        .as_table()
+        .get("notify")
+        .and_then(|item| item.as_array())
+        .expect("notify is a top-level array, not a [sandbox] key");
+    let argv = notify
+        .iter()
+        .map(|value| value.as_str().expect("string").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(argv, [SIRIOCTL, "notify", "--status", "needs-input"]);
+}
+
+/// A Windows install path carries backslashes and a space: the TOML must
+/// escape them so Codex reads back the exact path.
+#[test]
+fn codex_global_hooks_survive_a_windows_sirioctl_path() {
+    let home = TempDir::new();
+    let sirioctl = r"C:\Program Files\Sirio\sirioctl.exe";
+    CodexAdapter
+        .install_global_hooks(home.path(), &environment(&[]), sirioctl)
+        .expect("install");
+
+    let text = std::fs::read_to_string(home.path().join(".codex/config.toml")).expect("read");
+    let document: toml_edit::DocumentMut = text.parse().expect("valid TOML");
+    assert_eq!(document["notify"][0].as_str(), Some(sirioctl));
+}
+
+/// `CODEX_HOME` relocates Codex's config the same way `CLAUDE_CONFIG_DIR`
+/// does for Claude — the same precedence `codex` itself applies.
+#[test]
+fn codex_global_hooks_honour_codex_home() {
+    let home = TempDir::new();
+    let codex_home = TempDir::new();
+    let outcome = CodexAdapter
+        .install_global_hooks(
+            home.path(),
+            &environment(&[("CODEX_HOME", codex_home.path().to_str().unwrap())]),
+            SIRIOCTL,
+        )
+        .expect("install");
+    assert_eq!(
+        outcome,
+        GlobalHookInstall::Written(codex_home.path().join("config.toml"))
+    );
+    assert!(home.tree().is_empty());
+}
+
+/// OpenCode loads user-global plugins from `~/.config/opencode/plugins/`;
+/// the session-ref plugin goes there, pane-less like the Claude hooks.
+#[test]
+fn opencode_global_plugin_lands_in_the_user_plugins_dir_without_a_pane_id() {
+    let home = TempDir::new();
+    let outcome = OpenCodeAdapter
+        .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
+        .expect("install");
+    let plugin_path = home
+        .path()
+        .join(".config/opencode/plugins/sirio-session.js");
+    assert_eq!(outcome, GlobalHookInstall::Written(plugin_path.clone()));
+
+    let plugin = std::fs::read_to_string(&plugin_path).expect("read plugin");
+    assert!(plugin.contains(&json_string_literal(SIRIOCTL)), "{plugin}");
+    assert!(plugin.contains("session-ref --ref"), "{plugin}");
+    assert!(
+        !plugin.contains("--session"),
+        "must not pin a pane: {plugin}"
+    );
+    assert!(!plugin.contains("__PANE__"), "{plugin}");
+    assert!(!plugin.contains("__SIRIOCTL__"), "{plugin}");
+}
+
+/// OpenCode's config directory follows `OPENCODE_CONFIG_DIR`, then
+/// `XDG_CONFIG_HOME`, then `~/.config` — in that order.
+#[test]
+fn opencode_global_plugin_honours_the_config_dir_overrides() {
+    let home = TempDir::new();
+    let xdg = TempDir::new();
+    let outcome = OpenCodeAdapter
+        .install_global_hooks(
+            home.path(),
+            &environment(&[("XDG_CONFIG_HOME", xdg.path().to_str().unwrap())]),
+            SIRIOCTL,
+        )
+        .expect("install");
+    assert_eq!(
+        outcome,
+        GlobalHookInstall::Written(xdg.path().join("opencode/plugins/sirio-session.js"))
+    );
+
+    let explicit = TempDir::new();
+    let outcome = OpenCodeAdapter
+        .install_global_hooks(
+            home.path(),
+            &environment(&[
+                ("XDG_CONFIG_HOME", xdg.path().to_str().unwrap()),
+                ("OPENCODE_CONFIG_DIR", explicit.path().to_str().unwrap()),
+            ]),
+            SIRIOCTL,
+        )
+        .expect("install");
+    assert_eq!(
+        outcome,
+        GlobalHookInstall::Written(explicit.path().join("plugins/sirio-session.js"))
+    );
+    assert!(home.tree().is_empty());
+}
+
+/// Pi has no hook mechanism and omp takes hooks only through `--hook
+/// <file>` on its command line: neither has a user-global place to put
+/// one, and the honest answer is to say so — not to write a file nothing
+/// reads.
+#[test]
+fn agents_without_a_global_hook_mechanism_say_so() {
+    let home = TempDir::new();
+    for adapter in [&PiAdapter as &dyn AgentAdapter, &OhMyPiAdapter] {
+        let outcome = adapter
+            .install_global_hooks(home.path(), &environment(&[]), SIRIOCTL)
+            .unwrap_or_else(|error| panic!("{}: {error}", adapter.id()));
+        assert_eq!(outcome, GlobalHookInstall::NotSupported, "{}", adapter.id());
+    }
+    assert!(home.tree().is_empty());
+}
+
+/// The Settings button runs every adapter and reports each one, in display
+/// order, so the screen can say per agent where the hooks went.
+#[test]
+fn install_global_hooks_reports_every_adapter_in_display_order() {
+    let home = TempDir::new();
+    let reports = install_global_hooks(home.path(), &environment(&[]), SIRIOCTL);
+    let names = reports
+        .iter()
+        .map(|report| report.display_name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["Claude Code", "Codex", "OpenCode", "Pi", "Oh-My-Pi"]
+    );
+    assert!(matches!(
+        reports[0].outcome,
+        Ok(GlobalHookInstall::Written(_))
+    ));
+    assert!(matches!(
+        reports[1].outcome,
+        Ok(GlobalHookInstall::Written(_))
+    ));
+    assert!(matches!(
+        reports[2].outcome,
+        Ok(GlobalHookInstall::Written(_))
+    ));
+    assert!(matches!(
+        reports[3].outcome,
+        Ok(GlobalHookInstall::NotSupported)
+    ));
+    assert!(matches!(
+        reports[4].outcome,
+        Ok(GlobalHookInstall::NotSupported)
+    ));
+}
+
+/// One line per agent: the file that was written, the reason nothing was,
+/// or the error — the text the Settings card shows under the button.
+#[test]
+fn global_hook_report_summary_names_the_file_or_the_reason() {
+    let written = GlobalHookReport {
+        display_name: "Claude Code",
+        outcome: Ok(GlobalHookInstall::Written(PathBuf::from(
+            "/home/me/.claude/settings.json",
+        ))),
+    };
+    assert_eq!(
+        written.summary_line(),
+        "Claude Code: /home/me/.claude/settings.json"
+    );
+
+    let unsupported = GlobalHookReport {
+        display_name: "Pi",
+        outcome: Ok(GlobalHookInstall::NotSupported),
+    };
+    assert_eq!(
+        unsupported.summary_line(),
+        "Pi: no user-global hook mechanism"
+    );
+
+    let failed = GlobalHookReport {
+        display_name: "Codex",
+        outcome: Err(PrepareError::UnsupportedSkillAgent("codex".into())),
+    };
+    assert_eq!(
+        failed.summary_line(),
+        "Codex: failed — unsupported Sirio agent: codex"
     );
 }

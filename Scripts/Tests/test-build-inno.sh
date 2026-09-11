@@ -52,6 +52,16 @@ grep -Fq "UninstallDisplayIcon={app}\\sirio.exe" "$ISS" \
 grep -Fq "OutputBaseFilename=SirioSetup-0.6.0" "$ISS" \
   || fail ".iss must name SirioSetup-<version>.exe"
 
+# ...and where it lands, which is the half that was missing. OutputBaseFilename
+# sets only the name; without OutputDir, Inno writes into an `Output`
+# subdirectory of the script's own directory, ISCC still reports a successful
+# compile, and the release workflow's upload step is the first thing to notice
+# -- "No files were found with the provided path", after the whole Windows
+# build and packaging succeeded. Pinned here so the line cannot be dropped
+# again without a test saying so.
+grep -Fq "OutputDir=." "$ISS" \
+  || fail ".iss must set OutputDir=. so the installer lands beside the binaries, not in Output/"
+
 # Acceptance: no WebView2Loader.dll ships -- the MSVC build links the loader
 # statically (webview2-com-sys/WebView2LoaderStatic.lib), so adding the DLL
 # would only ship dead weight. The .iss may mention it in the comment above

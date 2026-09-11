@@ -35,6 +35,20 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   death-then-ok <dir>  On the first invocation (no <dir>/died marker) stream a
                    partial reply and die; later invocations stream normally.
                    Lets the drawn Retry click be followed by a real recovery.
+  auth-required    initialize advertises one login auth method, then every
+                   session/new is rejected with wire code -32000
+                   "Authentication required" — ACP's auth_required shape, so
+                   the client must draw its dedicated auth banner (naming the
+                   advertised method) instead of the generic connection card.
+                   Stateless: a Retry launches a fresh process that rejects
+                   the same way, which is what makes a second attempt
+                   observable.
+  broken-transport initialize and session/new succeed, then the first
+                   session/prompt answers with a line that is not JSON at all
+                   and exits non-zero: the connection itself dies rather than
+                   one request being refused, which is the shape that lands
+                   the "Agent disconnected" banner. Every invocation starts
+                   clean, so a Restart click reconnects and then sits idle.
 
 Wire shapes mirror the sirio_acp integration fixture (acp_fixture.py).
 """
@@ -353,8 +367,22 @@ def main():
             return
         method = request.get("method")
         if method == "initialize":
-            response(request["id"], {"protocolVersion": 1, "agentCapabilities": {}})
+            result = {"protocolVersion": 1, "agentCapabilities": {}}
+            if mode == "auth-required":
+                # The banner must be able to name the method the agent
+                # itself advertised, so the login guidance is the agent's,
+                # not invented by the client.
+                result["authMethods"] = [
+                    {"id": "login", "name": "Login", "description": "agent auth login"}
+                ]
+            response(request["id"], result)
         elif method == "session/new":
+            if mode == "auth-required":
+                # -32000 is the wire code sirio_acp maps to a typed
+                # auth_required failure (see the sirio_acp fixture's own
+                # session_creation_auth_required_error_becomes_typed_auth_required).
+                error(request["id"], "Authentication required")
+                continue
             response(request["id"], {"sessionId": SESSION_ID})
             if mode == "composer":
                 advertise()
@@ -375,6 +403,19 @@ def main():
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "composer":
                 message_chunk("reply ")
+                response(request["id"], {"stopReason": "end_turn"})
+            if mode == "echo-blocks":
+                # Name every content block of the prompt back, so a test
+                # can prove what actually reached the agent: an image block
+                # by its media type, everything else by its type alone.
+                names = []
+                for block in request.get("params", {}).get("prompt", []):
+                    kind = block.get("type", "?")
+                    if kind == "image":
+                        names.append("image(" + block.get("mimeType", "?") + ")")
+                    else:
+                        names.append(kind)
+                message_chunk("blocks: " + ",".join(names))
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "permission":
                 request_permission()
@@ -527,6 +568,17 @@ def main():
                         f.write("1")
                     message_chunk("partial ")
                     os._exit(17)
+            elif mode == "broken-transport":
+                # Deliberately not `error(...)`: a refused request would
+                # leave the agent alive and land a per-request "prompt
+                # failed" message. This writes something the protocol layer
+                # cannot parse as a response to anything and exits non-zero,
+                # so the connection itself dies. `os._exit` skips
+                # interpreter teardown, so nothing else can reach stdout
+                # after the garbage line.
+                sys.stdout.write("not json at all\n")
+                sys.stdout.flush()
+                os._exit(1)
 
 
 if __name__ == "__main__":

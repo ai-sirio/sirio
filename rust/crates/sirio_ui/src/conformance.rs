@@ -250,8 +250,8 @@ fn radii_come_from_the_measured_token_set() {
     );
 }
 
-/// App bars are 48px, the usage strip is 40px (waku's footer), sidebar
-/// rows are 32px single-line and 51px two-line — the latter exactly
+/// App bars are 48px, the usage strip is 40px (waku's footer), compact sidebar
+/// rows are 32px and every worktree card is 51px — the latter exactly
 /// waku's session-card math (7 + 18 + 4 + 15 + 7). Changes rows sit on
 /// the file-tree (30), hunk-header (24) and diff-line (20) heights from
 /// the density scale.

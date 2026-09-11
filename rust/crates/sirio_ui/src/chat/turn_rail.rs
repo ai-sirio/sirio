@@ -1,16 +1,18 @@
 //! The turn rail: one hairline tick per user message, along the left edge of
 //! the transcript. The tick for the turn under the viewport's top edge is
-//! drawn longer and brighter; hovering a tick previews its message in a
-//! bezel `HoverCard`, clicking it scrolls the transcript to that turn.
+//! drawn longer and brighter (the latest turn while following the tail or
+//! scrolled to the end); hovering a tick previews its message in a
+//! [`TurnPreview`] card, clicking it scrolls the transcript to that turn.
 //!
 //! Everything that decides *what* the rail shows is pure and lives up here;
 //! the element itself is built from bezel's tokens in `Chat::render_turn_rail`.
 
-use bezel::theme::ink;
-use bezel::ui::hover_card::HoverCard;
+use bezel::theme::{Theme as BezelTheme, ink};
+use bezel::ui::{popover, surface};
 use chrono::{DateTime, Local};
 use gpui::{
-    AnyElement, Context, Empty, ListOffset, Pixels, SharedString, canvas, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Div, Empty, FontWeight, ListOffset, Pixels, SharedString,
+    Window, canvas, div, prelude::*, px,
 };
 
 use super::{Chat, Entry};
@@ -126,6 +128,70 @@ const ACTIVE_TICK: f32 = 16.0;
 /// Tallest a tick's hit row grows — a hairline alone is nothing to aim at.
 const HIT_ROW: Pixels = px(8.0);
 
+/// The card a tick opens on hover: the message the tick jumps to, and which
+/// turn it is. Sirio's own view over bezel's `popover_card`, at the hover
+/// card's measurements, for two things bezel's `HoverCard` gets wrong here:
+///
+/// - its heading is a flex row, and gpui measures a text's min-content as
+///   the whole unwrapped line, so a message longer than the card runs past
+///   the edge and is clipped instead of wrapping — here the message sits in
+///   the card's own column, where the width is definite and it wraps;
+/// - it mounts through `Surfaced::surface`, which drops the card's fill on
+///   the assumption the surface paints one — off macOS the popover surface is
+///   a translucent tint meant for a blur, so the card came out see-through.
+///   Mounting through `surface::popover` keeps `popover_card`'s opaque fill on
+///   an opaque theme and still lets the lens paint on glass.
+pub(crate) struct TurnPreview {
+    message: SharedString,
+    when: SharedString,
+}
+
+impl TurnPreview {
+    /// The view `hoverable_tooltip` mounts, built fresh on each hover.
+    pub(crate) fn open(
+        message: impl Into<SharedString>,
+        when: impl Into<SharedString>,
+        cx: &mut App,
+    ) -> AnyView {
+        let (message, when) = (message.into(), when.into());
+        cx.new(|_| Self { message, when }).into()
+    }
+
+    /// The card and its contents, before the surface it mounts on.
+    pub(crate) fn card(&self, theme: &BezelTheme) -> Div {
+        // Wider and airier than a tooltip: this holds prose, not a label.
+        popover::popover_card(theme)
+            .debug_selector(|| "turn-preview".into())
+            .w(px(280.0))
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .debug_selector(|| "turn-preview-message".into())
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(self.message.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .line_height(px(18.0))
+                    .text_color(theme.text_muted)
+                    .child(self.when.clone()),
+            )
+    }
+}
+
+impl Render for TurnPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = BezelTheme::of(cx).clone();
+        surface::popover(BezelTheme::surface_radius(), self.card(&theme))
+    }
+}
+
 impl Chat {
     /// The rail, laid over the left margin of `chat-root` (which is
     /// `relative`) and spanning the transcript list's viewport. Empty for a
@@ -156,7 +222,16 @@ impl Chat {
                     .map(|bounds| bounds.top()..bounds.bottom())
             },
         );
-        let active = active_tick(&ticks, top);
+        // The viewport can still start in an older answer at the bottom.
+        // Tail-follow also covers short transcripts and unmeasured rows,
+        // for which `is_scrolled_to_end` returns None.
+        let active = if self.list_state.is_following_tail()
+            || self.list_state.is_scrolled_to_end() == Some(true)
+        {
+            ticks.len().checked_sub(1)
+        } else {
+            active_tick(&ticks, top)
+        };
         let gap = tick_gap(ticks.len(), viewport);
         let row = gap.min(HIT_ROW);
         let count = ticks.len();
@@ -186,6 +261,7 @@ impl Chat {
                 None => format!("Turn {} of {count}", index + 1),
             };
             let line = div()
+                .debug_selector(move || format!("turn-tick-line-{index}"))
                 .h(px(1.0))
                 .w(px(if is_active { ACTIVE_TICK } else { TICK }))
                 .rounded_full()
@@ -205,8 +281,8 @@ impl Chat {
                     .flex()
                     .items_center()
                     .cursor_pointer()
-                    .hoverable_tooltip(move |window, cx| {
-                        HoverCard::summary(title.clone(), when.clone(), window, cx)
+                    .hoverable_tooltip(move |_, cx| {
+                        TurnPreview::open(title.clone(), when.clone(), cx)
                     })
                     .on_click(cx.listener(move |chat, _, _, cx| {
                         chat.list_state.scroll_to(ListOffset {
@@ -349,6 +425,63 @@ mod tests {
         assert_eq!(top_visible_item(3, 10, top, |_| None), 3);
         // Hidden rows all the way to the end: nothing better than the top.
         assert_eq!(top_visible_item(3, 5, top, |_| Some(top..top)), 3);
+    }
+
+    /// A message longer than the card is wide wraps inside it rather than
+    /// running past its edge, where `popover_card`'s clip cuts it off.
+    #[gpui::test]
+    async fn the_preview_wraps_a_long_message_inside_the_card(cx: &mut gpui::TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let message = "Verifica se c'è lo stesso comportamento in tutti gli altri text input";
+        let (_preview, cx) = cx.add_window_view(|_, _| TurnPreview {
+            message: message.into(),
+            when: "Turn 2 · 13:28".into(),
+        });
+        cx.simulate_resize(gpui::size(px(600.0), px(400.0)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        let card = cx.debug_bounds("turn-preview").expect("the card is drawn");
+        let text = cx
+            .debug_bounds("turn-preview-message")
+            .expect("the message is drawn");
+        assert!(
+            text.right() <= card.right(),
+            "the message must stay inside the card: {text:?} vs {card:?}"
+        );
+        assert!(
+            text.size.height >= px(26.0),
+            "a message wider than the card must wrap onto a second line: {text:?}"
+        );
+    }
+
+    /// Off macOS the popover surface is a translucent tint meant to sit over
+    /// a blur, so the card must keep its own opaque fill under it.
+    #[test]
+    fn the_preview_card_paints_its_own_fill_on_an_opaque_theme() {
+        let theme = BezelTheme::dark();
+        let preview = TurnPreview {
+            message: "m".into(),
+            when: "w".into(),
+        };
+        let mut card = preview.card(&theme);
+        let fill = card
+            .style()
+            .background
+            .as_ref()
+            .and_then(|fill| fill.color())
+            .and_then(|background| background.as_solid());
+        if theme.is_glass() {
+            assert!(
+                fill.is_none(),
+                "on glass the lens paints the fill: {fill:?}"
+            );
+        } else {
+            let fill = fill.expect("an opaque theme's card carries a solid fill");
+            assert_eq!(fill.a, 1.0, "the fill must be opaque: {fill:?}");
+        }
     }
 
     #[test]

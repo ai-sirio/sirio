@@ -1,68 +1,83 @@
 #!/bin/bash
-# Single verification gate for the whole repo -- run before considering any task done.
+# The single verification gate for this repo: compile every target in the Rust
+# workspace, then run its tests. Run it before considering any task done.
 #
-# This used to xcodegen/xcodebuild the Swift/Xcode project. That project is gone; the only
-# build target left in this repo is the Rust/gpui workspace under rust/, and this gate now
-# builds and tests it.
-#
-# This is deliberately narrower than Scripts/ci-linux.sh, the fuller Rust gate that already
-# existed alongside the Swift project (see docs/superpowers/plans/2026-08-13-linux-
-# verification-gate.md and Scripts/Tests/test-ci-linux.sh) and additionally checks
-# formatting, lints, macOS/Windows cross-target compilation, and drives a real headless
-# instance of the app. Two of those checks are not clean on this tree right now, for
-# reasons that have nothing to do with removing the Swift project:
-#
-#   - `cargo fmt --check` currently reports pre-existing drift in crates/sirio,
-#     crates/sirio_agents, crates/sirio_git, crates/sirio_terminal, crates/sirio_theme,
-#     crates/sirio_ui, and crates/sirio_usage.
-#   - `cargo clippy` is not clean workspace-wide either -- ci-linux.sh's own
-#     `--exclude sirio --exclude sirio_ui` already documents current warnings in those
-#     two crates, routed to their current owners rather than gated here.
-#
-# Wiring either check into the one gate every task is told to pass before either is
-# actually clean would make "CI OK" permanently unreachable for reasons unrelated to
-# whatever change is under review -- which teaches people to ignore the gate, the same
-# failure mode ci-linux.sh's own sccache-fallback and opt-in-ACP stages exist to avoid. Add
-# fmt/clippy stages here once they are clean workspace-wide; until then, run
-# `Scripts/ci-linux.sh` for the fuller, stricter check (it stays a separate, heavier gate on
-# purpose -- see its own header for what else it covers and why some of its stages are
-# allowed to SKIP or report BLOCKED rather than FAILED).
+# Deliberately narrower than Scripts/ci-linux.sh, the fuller gate, which also
+# checks formatting and lints, cross-compiles for macOS and Windows, and drives
+# a real headless instance of the app. Neither `cargo fmt --check` nor `cargo
+# clippy` is clean workspace-wide today, and wiring a permanently-red check
+# into the one gate every task must pass teaches people to ignore the gate --
+# the same failure mode ci-linux.sh's sccache fallback exists to avoid. Add
+# them here once they are clean.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [[ -n "${HOME:-}" && -f "$HOME/.cargo/env" ]]; then
     source "$HOME/.cargo/env"
 fi
-if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo not found; run source ~/.cargo/env"
-    exit 1
-fi
+
+require() {
+    command -v "$1" >/dev/null 2>&1 || { echo "$2" >&2; exit 1; }
+}
+require cargo         "cargo not found; run source ~/.cargo/env"
+require zig           "zig not found: libghostty-vt-sys needs Zig exactly 0.15.2 on PATH (#63)"
+require cargo-nextest "cargo-nextest not found; install it with: cargo install cargo-nextest --locked"
 
 # libghostty-vt-sys (a sirio_terminal dependency since #27) shells out to
 # `zig build`, and upstream pins Zig at EXACTLY 0.15.2 -- a newer Zig fails
 # too, so the upgrade reflex makes it worse; 0.15.2 must be installed
 # alongside and found first on PATH. Without this preflight the failure
 # surfaces as an inscrutable build-script panic from a crates.io crate (#63).
-ZIG_REQUIRED="0.15.2"
-if ! command -v zig >/dev/null 2>&1; then
-    echo "zig not found: libghostty-vt-sys needs Zig exactly ${ZIG_REQUIRED} on PATH (#63)"
-    exit 1
-fi
-ZIG_VERSION="$(zig version 2>/dev/null || true)"
-if [[ "$ZIG_VERSION" != "$ZIG_REQUIRED" ]]; then
-    echo "zig ${ZIG_VERSION:-unknown} found, but libghostty-vt-sys builds only with exactly ${ZIG_REQUIRED} (newer fails too); install ${ZIG_REQUIRED} alongside and put it first on PATH (#63)"
+ZIG_FOUND="$(zig version 2>/dev/null || true)"
+if [[ "$ZIG_FOUND" != "0.15.2" ]]; then
+    echo "zig ${ZIG_FOUND:-unknown} found, but libghostty-vt-sys builds only with exactly 0.15.2 (newer fails too); install 0.15.2 alongside and put it first on PATH (#63)" >&2
     exit 1
 fi
 
 cd rust
 
-echo "==> cargo build --workspace"
-cargo build --workspace
+# SIRIO_CI_RELEASE_GATE=1 is set by .github/workflows/build-release.yml and by
+# nothing else; every local run leaves it unset. It selects the `ci` nextest
+# profile -- retries, and the skip list for the two tests that probe the agent
+# CLIs installed on the machine -- which lives in .config/nextest.toml, next to
+# the reasoning, rather than as argv here.
+PROFILE=default
+if [[ "${SIRIO_CI_RELEASE_GATE:-}" == "1" ]]; then
+    PROFILE=ci
+    # .cargo/config.toml keeps incremental compilation on because sccache
+    # cannot cache incremental crates and the edit-test loop needs it more
+    # than the cache. The CI machine has no edit-test loop, so there the trade
+    # goes the other way and our own thirteen crates become cacheable too.
+    export CARGO_INCREMENTAL=0
+fi
 
-# Whole-workspace, not per-crate: run every test binary even when one fails, so this
-# gate reports the complete failure set under load. The two formerly timing-sensitive
-# tests are now race-free at their roots; ci-linux.sh retains a short historical note.
-echo "==> cargo test --workspace --no-fail-fast"
-cargo test --workspace --no-fail-fast
+# --all-targets, so the examples are compiled too. nextest builds only what it
+# can run, and Scripts/Tests/test-update-e2e.sh's probe lives in
+# crates/sirio_apply/examples: without this it would stop being checked here
+# and break in the release job instead.
+echo "==> cargo build --workspace --all-targets"
+cargo build --workspace --all-targets
+
+# `resolve_sirioctl_path` looks in three places: the copy installed under the
+# XDG data directory, the directory holding the running executable, and PATH. A
+# test binary lives in `target/debug/deps/`, where cargo writes
+# `sirioctl-<hash>` and never a plain `sirioctl`, so the second can never match
+# from a test -- and the first only matches on a machine where somebody has
+# already run Sirio.
+#
+# So the four tests that create or restore an agent pane were reading a property
+# of the developer's machine rather than of the build. They passed for months on
+# the maintainer's Mac and failed on the first hosted runner that ever ran this
+# gate. The build above has just produced `target/debug/sirioctl`; putting it on
+# PATH makes the third candidate match everywhere.
+export PATH="$PWD/target/debug:$PATH"
+
+# nextest rather than `cargo test`: cargo runs the workspace's 45 test binaries
+# one after another, so the two slow ones dominate the wall clock while the
+# other 43 wait at idle cores. nextest schedules all of them together and gives
+# each test its own process -- see .config/nextest.toml for why that process
+# boundary matters here beyond speed.
+echo "==> cargo nextest run --workspace (profile: $PROFILE)"
+cargo nextest run --workspace --no-fail-fast --profile "$PROFILE"
 
 echo "CI OK"

@@ -14,17 +14,36 @@
 
 use std::time::Duration;
 
+use bezel::motion;
 use bezel::motion::Painter;
 use bezel::ui::loaders;
 use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
-use gpui::{AnyElement, App, Div, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{
+    AnyElement, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba, Styled, Window,
+    div, px,
+};
 use sirio_theme::Theme;
 
 /// The glyph slot in an Activity-derived reasoning header.
 pub const THINKING_GLYPH: f32 = 14.0;
 /// The generic orb for a full-surface first load or empty state.
 pub const GENERIC_ORB: f32 = 44.0;
+/// The status bloom that stands in for a sidebar row's status word.
+pub const BLOOM_GLYPH: f32 = 14.0;
+/// A bloom ring's border as a fraction of the box — Bezel's own figure, from
+/// the `Orb::Bloom` arm of `loaders::orb`.
+pub const BLOOM_BORDER_RATIO: f32 = 0.05;
+/// A settled bloom's ring opacities, outermost first.
+///
+/// A travelling bloom fades each ring out as it leaves the centre
+/// (`orb_bloom_opacity`, `(1 - phase)²`), so the frame where a ring reaches
+/// the edge is exactly the frame where it has become invisible. Freezing one
+/// "at full" therefore means overriding that curve rather than sampling it:
+/// bright at the rim and dimming inward reads as arrived and stopped, which
+/// is the opposite of the travelling shape and the point of the distinction.
+pub const SETTLED_BLOOM_OPACITIES: [f32; 3] = [1.0, 0.55, 0.25];
+const _: () = assert!(SETTLED_BLOOM_OPACITIES.len() == motion::ORB_BLOOM_RINGS);
 /// The cell size of the compact refresh spinner.
 pub const COMPACT_MINI_CELL: f32 = 2.5;
 /// Determinate progress: track thickness and the width the gallery demos.
@@ -120,9 +139,108 @@ pub fn indeterminate(
     .into_any_element()
 }
 
+/// The Bezel bloom — rings leaving the centre — in the caller's tint.
+///
+/// Bezel's loaders paint in one colour, the palette's accent, so a tint that
+/// is not the accent is applied by handing the primitive a palette whose
+/// accent is it. That is the mechanism `bezel_theme` already uses to put
+/// Sirio's coral on every loader, one call deeper.
+pub fn bloom(
+    id: &'static str,
+    size: f32,
+    tint: Rgba,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mut bezel_theme = bezel_theme(theme);
+    bezel_theme.accent = tint.into();
+    loaders::orb(
+        loaders::Orb::Bloom,
+        id,
+        size,
+        &bezel_theme,
+        painter(window),
+        cx,
+    )
+    .into_any_element()
+}
+
+/// A settled bloom's rings as `(diameter, opacity)`, outermost first.
+///
+/// The radii are Bezel's: the span a travelling ring interpolates across
+/// (`ORB_BLOOM_MIN`..`ORB_BLOOM_MAX`), sampled at the even steps
+/// `ORB_BLOOM_RINGS` divides the travel into, with the outermost held at the
+/// far end. `orb_bloom_radius` cannot be asked for that far end — it takes
+/// `phase.rem_euclid(1.0)`, so a phase of exactly 1 wraps back to the centre
+/// and would silently return the *smallest* ring — hence `lerp` against the
+/// two constants directly.
+pub fn settled_bloom_rings(size: f32) -> Vec<(f32, f32)> {
+    (0..motion::ORB_BLOOM_RINGS)
+        .map(|index| {
+            let step = (motion::ORB_BLOOM_RINGS - index) as f32 / motion::ORB_BLOOM_RINGS as f32;
+            let diameter = size
+                * motion::lerp(
+                    motion::phase::ORB_BLOOM_MIN,
+                    motion::phase::ORB_BLOOM_MAX,
+                    step,
+                );
+            (diameter, SETTLED_BLOOM_OPACITIES[index])
+        })
+        .collect()
+}
+
+/// A bloom stopped at its fullest frame: the same concentric rings, no clock
+/// and no lease.
+///
+/// This is the one loader in this module Sirio draws itself, because Bezel
+/// has no static orb — `loaders::orb` always takes the shared clock through
+/// `pulse_delta`. It is built from Bezel's constants and mirrors the geometry
+/// of `loaders::orb`'s `Orb::Bloom` arm (a border, not a fill, centred in the
+/// box) so the moving and settled forms stay the same shape.
+pub fn settled_bloom(id: &'static str, size: f32, tint: Rgba) -> AnyElement {
+    let border = px((size * BLOOM_BORDER_RATIO).max(1.0));
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .relative()
+        .size(px(size))
+        .children(
+            settled_bloom_rings(size)
+                .into_iter()
+                .map(move |(diameter, opacity)| {
+                    div()
+                        .absolute()
+                        .left(px((size - diameter) / 2.0))
+                        .top(px((size - diameter) / 2.0))
+                        .size(px(diameter))
+                        .rounded_full()
+                        .border(border)
+                        .border_color(tint.opacity(opacity))
+                }),
+        )
+        .into_any_element()
+}
+
 /// The compact Bezel mini gradient spinner for refresh/status slots.
+///
+/// The spinner sits in a wrapper that carries `id` as its debug selector:
+/// Bezel hangs no selector on the key it takes (see the module note), so
+/// without the wrapper no test could tell a slot holding a spinner from
+/// an empty one. Every caller puts it in a centered flex slot, so a flex
+/// wrapper sized by its content is layout-neutral.
 pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElement {
-    loaders::mini_gradient_spinner(id, COMPACT_MINI_CELL, painter(window), cx).into_any_element()
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .flex()
+        .child(loaders::mini_gradient_spinner(
+            id,
+            COMPACT_MINI_CELL,
+            painter(window),
+            cx,
+        ))
+        .into_any_element()
 }
 
 /// A determinate progress bar with the gallery's fixed track and width.
@@ -193,6 +311,60 @@ mod tests {
         let dark = bezel_theme(&Theme::dark());
         assert_eq!(dark.bg, bezel::theme::Theme::dark().bg);
         assert_eq!(dark.accent, Theme::dark().brand_coral.into());
+    }
+
+    /// "Stopped at full" is the whole point of the settled shape: the outer
+    /// ring sits on the box, at full strength.
+    #[test]
+    fn a_settled_bloom_holds_its_outer_ring_on_the_box_at_full_strength() {
+        let rings = settled_bloom_rings(BLOOM_GLYPH);
+        assert_eq!(rings.len(), motion::ORB_BLOOM_RINGS);
+        let (diameter, opacity) = rings[0];
+        assert_eq!(diameter, BLOOM_GLYPH * motion::phase::ORB_BLOOM_MAX);
+        assert_eq!(opacity, 1.0);
+    }
+
+    #[test]
+    fn a_settled_blooms_rings_shrink_and_dim_inward() {
+        let rings = settled_bloom_rings(BLOOM_GLYPH);
+        for pair in rings.windows(2) {
+            assert!(
+                pair[0].0 > pair[1].0,
+                "an inner ring is smaller: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+            assert!(
+                pair[0].1 > pair[1].1,
+                "an inner ring is dimmer: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// Running and done are painted the same green, so the settled bloom has
+    /// to stay readable against a running one *even when the running one is
+    /// not moving*. Under reduced motion `pulse_delta` returns a static 0
+    /// (`bezel-motion`'s own documented behavior), which freezes a travelling
+    /// bloom with its widest ring well inside the box — so the two never
+    /// collapse onto the same picture.
+    #[test]
+    fn a_settled_bloom_is_wider_than_a_running_one_frozen_by_reduced_motion() {
+        let widest_travelling = (0..motion::ORB_BLOOM_RINGS)
+            .map(|index| {
+                motion::orb_bloom_radius(motion::staggered_phase(
+                    0.0,
+                    index,
+                    1.0 / motion::ORB_BLOOM_RINGS as f32,
+                ))
+            })
+            .fold(f32::MIN, f32::max);
+        let settled = settled_bloom_rings(1.0)[0].0;
+        assert!(
+            settled > widest_travelling,
+            "a settled bloom ({settled}) outgrows a reduced-motion running one ({widest_travelling})"
+        );
     }
 
     #[test]

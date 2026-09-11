@@ -45,6 +45,7 @@ mod directory_status;
 mod error;
 mod git;
 mod graph;
+mod ignored;
 mod log;
 mod remote;
 mod side_by_side;
@@ -62,7 +63,8 @@ pub use diff::{
 pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, directory_statuses};
 pub use error::{GitActionError, GitError};
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
-pub use graph::{GraphRow, layout};
+pub use graph::{GraphRow, LayoutChunk, LayoutCursor, extend_layout, layout};
+pub use ignored::{IgnoredPaths, ignored_paths, parse_ignored};
 pub use log::{CommitRecord, GitLog, LogFilter, looks_like_hash, parse_log};
 pub use remote::{GitRemote, github_owner, project_name};
 pub use side_by_side::{
@@ -73,6 +75,7 @@ pub use status::{
     StatusEntry, StatusKind, StatusParseError, StatusSnapshot, has_head, parse_status, status,
 };
 pub use worktree::{
-    WorktreeError, create_worktree, derive_worktree_path, init_repository, remove_worktree,
-    resolve_parent_directory,
+    UpstreamBranch, WorktreeError, create_worktree, delete_remote_branch, derive_worktree_path,
+    init_repository, remove_worktree, remove_worktree_and_remote_branch, resolve_parent_directory,
+    upstream_of,
 };

@@ -137,6 +137,29 @@ impl AcceptedKeys {
     }
 }
 
+/// Render one artifact's manifest URL from the release job's template.
+///
+/// Placeholders: `{channel}`, `{version}`, `{platform}` and `{file}` — the
+/// last is the artifact's own file name, needed because GitHub Releases
+/// keep the versioned per-platform names the packaging scripts produce
+/// (`Sirio-<v>.dmg`, `Sirio-<v>-x86_64.AppImage`, `SirioSetup-<v>.exe`),
+/// which no `{platform}` substitution can reconstruct. The URL is re-read on
+/// every check and is not trusted by itself (spec §2.2), so the template is a
+/// publishing convenience, not a security boundary.
+pub fn artifact_url(
+    template: &str,
+    channel: &str,
+    version: &str,
+    platform: &str,
+    file: &str,
+) -> String {
+    template
+        .replace("{channel}", channel)
+        .replace("{version}", version)
+        .replace("{platform}", platform)
+        .replace("{file}", file)
+}
+
 /// Errors from parsing a manifest or verifying an artifact against one.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -163,6 +186,39 @@ mod tests {
     use rand_core::OsRng;
 
     const FIXTURE: &[u8] = b"sirio release artifact bytes";
+
+    /// The release job hosts artifacts in GitHub Releases, whose filenames
+    /// differ in shape per platform (`Sirio-<v>.dmg`, `SirioSetup-<v>.exe`),
+    /// so the template must be able to name the file itself, not just the
+    /// platform key.
+    #[test]
+    fn artifact_url_substitutes_every_placeholder_including_the_file_name() {
+        let url = artifact_url(
+            "https://github.com/ai-sirio/sirio/releases/download/v{version}/{file}?c={channel}&p={platform}",
+            "stable",
+            "0.6.0",
+            "darwin-aarch64",
+            "Sirio-0.6.0.dmg",
+        );
+        assert_eq!(
+            url,
+            "https://github.com/ai-sirio/sirio/releases/download/v0.6.0/Sirio-0.6.0.dmg?c=stable&p=darwin-aarch64"
+        );
+    }
+
+    #[test]
+    fn artifact_url_leaves_a_template_without_placeholders_alone() {
+        assert_eq!(
+            artifact_url(
+                "https://dl.sirioai.app/x",
+                "nightly",
+                "1",
+                "linux-x86_64",
+                "f"
+            ),
+            "https://dl.sirioai.app/x"
+        );
+    }
 
     fn key() -> SigningKey {
         SigningKey::generate(&mut OsRng)

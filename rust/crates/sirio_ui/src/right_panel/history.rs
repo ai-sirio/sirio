@@ -12,7 +12,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Task, Window, canvas, div, fill, point,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use sirio_git::{CommitRecord, GitBranches, GitLog, GraphRow, LogFilter, layout};
+use sirio_git::{
+    CommitRecord, GitBranches, GitLog, GraphRow, LayoutCursor, LogFilter, extend_layout, layout,
+};
 use sirio_theme::Theme;
 
 use super::history_toolbar;
@@ -146,6 +148,7 @@ pub(crate) struct GitHistory {
     bodies_fetching: HashSet<String>,
     pub(crate) commits: Vec<CommitRecord>,
     pub(crate) rows: Vec<GraphRow>,
+    layout_cursor: Option<LayoutCursor>,
     pub(crate) error: Option<String>,
     /// A follow-up chunk that failed. Kept apart from `error` so the commits
     /// already on screen are not thrown away for it.
@@ -183,6 +186,7 @@ impl GitHistory {
             bodies_fetching: HashSet::new(),
             commits: Vec::new(),
             rows: Vec::new(),
+            layout_cursor: None,
             error: None,
             pagination_error: None,
             empty_reason: None,
@@ -247,8 +251,14 @@ impl GitHistory {
                         if commits.len() < CHUNK {
                             this.exhausted = true;
                         }
+                        let chunk = match this.layout_cursor.as_ref() {
+                            Some(cursor) => extend_layout(cursor, &commits),
+                            None => layout(&commits),
+                        };
+                        let cursor = chunk.cursor().clone();
                         this.commits.extend(commits);
-                        this.rows = layout(&this.commits);
+                        this.rows.extend(chunk.rows);
+                        this.layout_cursor = Some(cursor);
                         this.empty_reason = match (this.commits.is_empty(), has_commits) {
                             // Order matters: on a repository with commits *and*
                             // a filter, both arms could fire, and the filter is
@@ -401,6 +411,7 @@ impl GitHistory {
         self.load_task = None;
         self.commits.clear();
         self.rows.clear();
+        self.layout_cursor = None;
         self.exhausted = false;
         self.settled = false;
         self.empty_reason = None;

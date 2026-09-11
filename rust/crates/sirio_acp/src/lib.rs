@@ -22,7 +22,7 @@ use anyhow::{Result, anyhow};
 use async_process::Child;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -39,6 +39,11 @@ pub use mcp_config::discover_mcp_servers;
 // protocol byte exists. Keep that cold-start budget bounded, but long enough
 // that a healthy first launch is not mistaken for a dead agent.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the agent may stay **silent** during a turn before it counts as
+/// hung. This is deliberately an idle window, not a cap on the turn: an
+/// agentic turn that runs for an hour is normal as long as it keeps
+/// reporting, and killing a working agent loses the whole session, not just
+/// the turn. The clock restarts on every notification the agent sends.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -593,6 +598,15 @@ impl AcpClient {
         cwd: impl AsRef<Path>,
         startup_timeout: Duration,
     ) -> Result<(Self, EventStream)> {
+        Self::launch_with_timeouts(command, cwd, startup_timeout, PROMPT_TIMEOUT)
+    }
+
+    fn launch_with_timeouts(
+        command: AgentCommand,
+        cwd: impl AsRef<Path>,
+        startup_timeout: Duration,
+        prompt_timeout: Duration,
+    ) -> Result<(Self, EventStream)> {
         let cwd = cwd.as_ref().to_path_buf();
         let (command_tx, command_rx) = async_channel::unbounded();
         let (event_tx, event_rx) = async_channel::unbounded();
@@ -617,6 +631,7 @@ impl AcpClient {
                     worker_pending,
                     worker_mode_catalog,
                     worker_mcp_warnings,
+                    prompt_timeout,
                 );
             })?;
 
@@ -909,6 +924,7 @@ fn run_connection(
     pending_permissions: PermissionWaiters,
     mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
     mcp_warnings: Arc<Mutex<Vec<String>>>,
+    prompt_timeout: Duration,
 ) {
     let started = Arc::new(AtomicBool::new(false));
     let clean_shutdown = Arc::new(AtomicBool::new(false));
@@ -922,6 +938,12 @@ fn run_connection(
     // REQUIRED error handled below needs the advertised methods on hand.
     let auth_methods: Arc<Mutex<Vec<AuthMethodInfo>>> = Arc::new(Mutex::new(Vec::new()));
     let shutdown_ack: Arc<Mutex<Option<mpsc::SyncSender<()>>>> = Arc::new(Mutex::new(None));
+    // Every stderr line, not just the MCP-shaped ones: when the agent dies the
+    // protocol only reports "incoming transport closed", which names no cause.
+    // Its last words are the only evidence of why it went away.
+    let stderr_tail: StderrTail = Arc::new(Mutex::new(VecDeque::new()));
+    let drain_tail = Arc::clone(&stderr_tail);
+    let activity: ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
     let attempted_program = command.program.clone();
     let command = command_for_process(command);
     let agent = AcpAgent::new(
@@ -1010,7 +1032,7 @@ fn run_connection(
     let _stderr_drain = thread::Builder::new()
         .name("sirio-acp-stderr".into())
         .spawn(move || {
-            block_on(drain_stderr(stderr, mcp_warnings));
+            block_on(drain_stderr(stderr, mcp_warnings, drain_tail));
         });
 
     let connection_event_tx = event_tx.clone();
@@ -1021,7 +1043,11 @@ fn run_connection(
     let worker_for_connection = worker_tx.clone();
     let shutdown_ack_for_connection = Arc::clone(&shutdown_ack);
     let child_for_connection = Arc::clone(&child);
+    let stderr_tail_for_connection = Arc::clone(&stderr_tail);
+    let activity_for_connection = Arc::clone(&activity);
     let connection_result = block_on(async move {
+        let notification_activity = Arc::clone(&activity_for_connection);
+        let permission_activity = Arc::clone(&activity_for_connection);
         let notification_events = connection_event_tx.clone();
         let permission_events = connection_event_tx.clone();
         let connection_events = connection_event_tx.clone();
@@ -1053,6 +1079,9 @@ fn run_connection(
             .name("sirio")
             .on_receive_notification(
                 async move |notification: SessionNotification, _connection| {
+                    // Proof the agent is working, whatever the update says:
+                    // the prompt watchdog measures silence, not turn length.
+                    touch_activity(&notification_activity);
                     // Applied before `notification_to_events` folds the
                     // update into an `AcpEvent`, so `AcpClient::mode_catalog`
                     // is already current by the time a caller reacts to that
@@ -1081,6 +1110,7 @@ fn run_connection(
                 async move |request: RequestPermissionRequest,
                             responder,
                             _connection: ConnectionTo<Agent>| {
+                    touch_activity(&permission_activity);
                     let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
                     let (choice_tx, choice_rx) = async_channel::bounded(1);
                     if let Ok(mut waiters) = permission_waiters.lock() {
@@ -1221,9 +1251,15 @@ fn run_connection(
                             let prompt_id = prompt_counter.fetch_add(1, Ordering::Relaxed);
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
+                            let prompt_stderr_tail = Arc::clone(&stderr_tail_for_connection);
+                            // Dropped when the result arrives (or the connection dies
+                            // with the request pending) so the timeout thread below
+                            // wakes immediately instead of sleeping the full window.
+                            let (prompt_done_tx, prompt_done_rx) = mpsc::channel::<()>();
                             connection
                                 .send_request(PromptRequest::new(session_id, prompt_blocks))
                                 .on_receiving_result(move |result| async move {
+                                    drop(prompt_done_tx);
                                     active_prompt_for_result.store(0, Ordering::Release);
                                     match result {
                                         Ok(response) => {
@@ -1262,9 +1298,10 @@ fn run_connection(
                                                 .await;
                                         }
                                         Err(error) => {
+                                            let report = stderr_tail_report(&prompt_stderr_tail);
                                             let _ = event_tx
                                                 .send(AcpEvent::TransportError(format!(
-                                                    "prompt failed: {error}"
+                                                    "prompt failed: {error}{report}"
                                                 )))
                                                 .await;
                                         }
@@ -1274,10 +1311,27 @@ fn run_connection(
                             let active_prompt = Arc::clone(&active_prompt);
                             let timeout_reason = Arc::clone(&prompt_timeout_reason);
                             let child = Arc::clone(&child_for_prompt);
+                            let prompt_activity = Arc::clone(&activity_for_connection);
+                            touch_activity(&prompt_activity);
                             let _ = thread::Builder::new()
                                 .name("sirio-acp-prompt-timeout".into())
                                 .spawn(move || {
-                                    thread::sleep(PROMPT_TIMEOUT);
+                                    // Wait out the idle window, then wait again
+                                    // for whatever the agent's last report
+                                    // pushed it back to. Only silence for a
+                                    // whole window reaches the kill below.
+                                    loop {
+                                        let remaining = prompt_timeout
+                                            .saturating_sub(idle_for(&prompt_activity));
+                                        if remaining.is_zero() {
+                                            break;
+                                        }
+                                        if prompt_done_rx.recv_timeout(remaining)
+                                            != Err(mpsc::RecvTimeoutError::Timeout)
+                                        {
+                                            return;
+                                        }
+                                    }
                                     if active_prompt
                                         .compare_exchange(
                                             prompt_id,
@@ -1289,7 +1343,7 @@ fn run_connection(
                                     {
                                         let timeout = AcpError::Timeout {
                                             operation: TimeoutOperation::Prompt,
-                                            duration: PROMPT_TIMEOUT,
+                                            duration: prompt_timeout,
                                         };
                                         record_timeout(&timeout_reason, timeout);
                                         terminate_and_reap_blocking(&child);
@@ -1462,14 +1516,15 @@ fn run_connection(
                 operation,
                 duration,
             });
-        } else if let Err(error) = connection_result {
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
-                "ACP transport closed unexpectedly: {error}"
-            )));
         } else {
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(
-                "ACP transport closed unexpectedly".into(),
-            ));
+            let report = stderr_tail_report(&stderr_tail);
+            let detail = match connection_result {
+                Err(error) => format!(": {error}"),
+                Ok(()) => String::new(),
+            };
+            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
+                "ACP transport closed unexpectedly{detail}{report}"
+            )));
         }
     }
 }
@@ -1487,6 +1542,7 @@ type EventStreamSender = async_channel::Sender<AcpEvent>;
 async fn drain_stderr(
     stderr: impl futures::AsyncRead + Unpin,
     mcp_warnings: Arc<Mutex<Vec<String>>>,
+    tail: StderrTail,
 ) {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
@@ -1496,12 +1552,57 @@ async fn drain_stderr(
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim_end();
-                if !trimmed.is_empty() && looks_like_mcp_warning(trimmed) {
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if looks_like_mcp_warning(trimmed) {
                     push_mcp_warning(&mcp_warnings, trimmed.to_string());
                 }
+                push_stderr_tail(&tail, trimmed.to_string());
             }
         }
     }
+}
+
+type ActivityClock = Arc<Mutex<std::time::Instant>>;
+
+fn touch_activity(clock: &ActivityClock) {
+    if let Ok(mut at) = clock.lock() {
+        *at = std::time::Instant::now();
+    }
+}
+
+fn idle_for(clock: &ActivityClock) -> Duration {
+    clock
+        .lock()
+        .map(|at| at.elapsed())
+        .unwrap_or(Duration::ZERO)
+}
+
+type StderrTail = Arc<Mutex<VecDeque<String>>>;
+
+/// How much of the agent's stderr is kept for the death report. Enough for a
+/// stack trace's first frames, small enough to sit inside an error message.
+const MAX_STDERR_TAIL: usize = 20;
+
+fn push_stderr_tail(tail: &StderrTail, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        if tail.len() >= MAX_STDERR_TAIL {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+fn stderr_tail_report(tail: &StderrTail) -> String {
+    let lines = tail
+        .lock()
+        .map(|tail| tail.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("\nagent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
 }
 
 /// The bound on [`AcpClient::mcp_warnings`] — a long session's stderr
@@ -2031,6 +2132,33 @@ mod tests {
     use agent_client_protocol::schema::v1::{
         Diff, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
+
+    /// How long a fixture agent that is *expected to succeed* gets to finish
+    /// the ACP handshake.
+    ///
+    /// Not an assertion about anything: every test using it goes on to assert
+    /// what the agent answered, and none of them claims startup is fast. It
+    /// used to be a bare `Duration::from_secs(5)` repeated at nine call sites,
+    /// which is 24 times tighter than the [`STARTUP_TIMEOUT`] that ships, and
+    /// it started failing the moment the gate began running these tests
+    /// alongside two thousand others instead of alone in their own slot:
+    /// eight of them timed out at 5.0 s on one macOS run, four of those three
+    /// times over. Spawning `/bin/sh` and completing a JSON-RPC round trip is
+    /// not slow, but on a machine already compiling and running everything
+    /// else it is not reliably a five-second operation either.
+    ///
+    /// Generous on purpose, and still a bound: nextest's own slow timeout
+    /// (`rust/.config/nextest.toml`) terminates anything that reaches three
+    /// minutes, so a genuinely hung fixture is caught either way. The tests
+    /// that assert a deadline *fires* keep their own tight budgets --
+    /// `silent_agent_hits_startup_timeout_and_is_terminated` at 100 ms and the
+    /// two prompt-window tests at 300 and 500 ms -- and must not use this.
+    ///
+    /// `#[cfg(unix)]` like every test that uses it: the fixture agent is a
+    /// `/bin/sh` script, so on Windows this would be a dead constant and
+    /// `-D warnings` rejects one.
+    #[cfg(unix)]
+    const FIXTURE_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
     #[test]
     fn maps_text_updates_to_typed_events() {
@@ -2619,7 +2747,7 @@ mod tests {
         let command = fixture_agent(
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;;"#,
         );
-        let result = AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5));
+        let result = AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT);
 
         let error = match result {
             Ok((mut client, _events)) => {
@@ -2661,7 +2789,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT)
                 .expect("agent that advertises but does not require auth should still connect");
 
         assert_eq!(
@@ -2687,7 +2815,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;;"#,
         );
         let (mut client, events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT)
                 .expect("fixture agent should create a session");
 
         client
@@ -2718,7 +2846,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"plan","name":"Plan","description":"Plan before editing"}]}}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT)
                 .expect("fixture agent should create a session");
 
         assert_eq!(
@@ -2755,7 +2883,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT)
                 .expect("fixture agent should create a session");
 
         assert_eq!(client.mode_catalog(), None);
@@ -2775,7 +2903,7 @@ mod tests {
             r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"plan","name":"Plan"}]}}}' ;; *session/set_mode*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{}}' ;;"#,
         );
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT)
                 .expect("fixture agent should create a session");
 
         client
@@ -2832,7 +2960,7 @@ mod tests {
 while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; esac; done"#,
         ]);
         let (mut client, _events) =
-            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+            AcpClient::launch_with_timeout(command, ".", FIXTURE_STARTUP_TIMEOUT)
                 .expect("fixture agent should create a session despite the stderr line");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -2950,5 +3078,126 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
 
         let _ = client.shutdown();
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    fn drain_until_turn_end(events: &EventStream, budget: Duration) -> Vec<AcpEvent> {
+        let deadline = std::time::Instant::now() + budget;
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let receive = events.recv();
+            let timer = async_io::Timer::after(Duration::from_millis(100));
+            futures::pin_mut!(receive, timer);
+            match block_on(futures::future::select(receive, timer)) {
+                futures::future::Either::Left((Ok(event), _)) => {
+                    let done = matches!(
+                        event,
+                        AcpEvent::TurnEnded { .. }
+                            | AcpEvent::Timeout { .. }
+                            | AcpEvent::TransportError(_)
+                    );
+                    seen.push(event);
+                    if done {
+                        break;
+                    }
+                }
+                futures::future::Either::Left((Err(_), _)) => break,
+                futures::future::Either::Right(_) => {}
+            }
+        }
+        seen
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_turn_outlives_the_prompt_window() {
+        // The watchdog used to cap the whole turn: an agent still streaming
+        // after the window was SIGKILLed anyway, which killed the session and
+        // surfaced as a bare "incoming transport closed" on session/prompt.
+        // Fifteen chunks 200ms apart run three seconds, well past this two-
+        // second window, and none of the gaps between them reaches it.
+        //
+        // Two numbers, and only their *ratio* is the assertion. The window
+        // resets on activity, so the test passes exactly when every gap stays
+        // under it -- and the fixture's gap is a `sleep 0.2` in `/bin/sh`
+        // followed by a write the reader has to pick up, which is at the mercy
+        // of the scheduler. At the original 200ms against 500ms the margin was
+        // 2.5x, which held while `sirio_acp`'s binary ran alone in its slot and
+        // stopped holding once the gate began running all 2068 tests at once:
+        // three attempts, three identical `TransportError("incoming transport
+        // closed")`, the turn reaped mid-stream. Ten times the gap leaves the
+        // same property under test with room for a descheduled `sleep`.
+        //
+        // The sibling test is the other direction and keeps its tight 300ms:
+        // `a_silent_turn_still_trips_the_prompt_window` asserts the window
+        // *fires*, and a generous budget there would weaken what it proves.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) i=0; while [ $i -lt 15 ]; do sleep 0.2; printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tick"}}}}'; i=$((i+1)); done; printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;;"#,
+        );
+        let (mut client, events) = AcpClient::launch_with_timeouts(
+            command,
+            ".",
+            FIXTURE_STARTUP_TIMEOUT,
+            Duration::from_secs(2),
+        )
+        .expect("fixture agent should create a session");
+
+        client.prompt("work for a while").expect("prompt accepted");
+        let seen = drain_until_turn_end(&events, Duration::from_secs(30));
+
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, AcpEvent::TurnEnded { .. })),
+            "a turn that kept reporting never finished: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                AcpEvent::Timeout {
+                    operation: TimeoutOperation::Prompt,
+                    ..
+                }
+            )),
+            "a working agent was killed by the idle watchdog: {seen:?}"
+        );
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_turn_still_trips_the_prompt_window() {
+        // The other half of the contract: silence for a whole window is a
+        // hung agent and must still be reaped.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) sleep 30 ;;"#,
+        );
+        let (mut client, events) = AcpClient::launch_with_timeouts(
+            command,
+            ".",
+            FIXTURE_STARTUP_TIMEOUT,
+            Duration::from_millis(300),
+        )
+        .expect("fixture agent should create a session");
+
+        client.prompt("say nothing").expect("prompt accepted");
+        let started = std::time::Instant::now();
+        let seen = drain_until_turn_end(&events, Duration::from_secs(5));
+        let elapsed = started.elapsed();
+
+        // Left alone the fixture sits for 30s, so an error this early is the
+        // watchdog reaping it. The turn's own failure is what the user sees;
+        // the connection-level `Timeout` never races ahead of it.
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, AcpEvent::TransportError(_) | AcpEvent::Timeout { .. })),
+            "a silent agent was never reaped: {seen:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the reap took {elapsed:?}, far past the 300ms window"
+        );
+
+        let _ = client.shutdown();
     }
 }

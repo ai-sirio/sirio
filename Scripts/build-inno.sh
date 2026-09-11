@@ -6,8 +6,18 @@
 # (the release workflow compiles where ISCC lives). The generated file is not
 # committed -- spec §8.4: templates live in the repo, filled artifacts do not.
 # Write the output next to the binaries: ISCC resolves relative Source: paths
-# against the .iss's own directory, and OutputBaseFilename then lands the
-# finished SirioSetup-<version>.exe beside them.
+# against the .iss's own directory, and OutputBaseFilename then names the
+# finished SirioSetup-<version>.exe.
+#
+# `OutputDir=.` is what actually puts it beside them, and it is load-bearing.
+# OutputBaseFilename sets only the *name*; the directory is OutputDir, whose
+# Inno default is an `Output` subdirectory of the script's own. Without the
+# line, ISCC reports a successful compile and writes
+# build/windows/Output/SirioSetup-<version>.exe while the release workflow
+# looks for build/windows/SirioSetup-<version>.exe -- a green packaging step
+# followed by "No files were found with the provided path", which is how the
+# first run that ever reached the windows job failed, after building and
+# packaging everything correctly.
 set -euo pipefail
 
 usage() {
@@ -56,6 +66,7 @@ DisableProgramGroupPage=yes
 DefaultGroupName=${SIRIO_DISPLAY_NAME}
 PrivilegesRequired=lowest
 OutputBaseFilename=SirioSetup-${VERSION}
+OutputDir=.
 UninstallDisplayName=${SIRIO_DISPLAY_NAME}
 UninstallDisplayIcon={app}\sirio.exe
 

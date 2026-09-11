@@ -101,7 +101,9 @@ impl UsageProvider {
     pub fn local_account_state(self) -> LocalAccountState {
         match self {
             UsageProvider::Claude => {
-                if claude_has_credentials_at(&claude_credentials_file()) {
+                if claude_has_credentials_at(&claude_credentials_file())
+                    || claude_has_keychain_credentials()
+                {
                     LocalAccountState::SignedIn
                 } else {
                     LocalAccountState::SignedOut
@@ -122,6 +124,20 @@ impl UsageProvider {
             }
         }
     }
+}
+
+/// Whether macOS's Keychain carries the primary Claude session — see
+/// [`crate::claude::claude_has_keychain_credentials`]. `.credentials.json`
+/// alone is not the full story on macOS: the current `claude` CLI keeps its
+/// OAuth session in the Keychain, not the file.
+#[cfg(target_os = "macos")]
+fn claude_has_keychain_credentials() -> bool {
+    crate::claude::claude_has_keychain_credentials()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn claude_has_keychain_credentials() -> bool {
+    false
 }
 
 /// The Codex auth file: `$CODEX_HOME/auth.json`, else

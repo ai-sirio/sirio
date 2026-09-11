@@ -921,27 +921,46 @@ impl ProjectIconPicker {
                                 query_focus_entity.update(cx, |picker, cx| {
                                     picker.emoji_grid_focus.focus(window, cx);
                                 });
-                            }))
+                            })
                             .on_key_down(move |event, window, cx| {
                                 query_key_entity.update(cx, |picker, cx| {
                                     picker.on_emoji_grid_query_key(event, window, cx);
                                 });
                             })
+                            // The value scrolls so its tail stays under the
+                            // caret; the placeholder keeps its start.
                             .overflow_hidden()
-                            .child(caret::field_value(if self.emoji_grid_query.is_empty() {
-                                "Search emoji…".to_owned()
-                            } else {
-                                self.emoji_grid_query.clone()
-                            })
-                            .child(
-                                div()
+                            .children({
+                                let bar = div()
                                     .debug_selector(|| "project-icon-emoji-grid-caret".into())
                                     .child(caret::bar(
                                         px(14.0),
                                         theme.text,
                                         self.emoji_grid_caret_visible,
-                                    )),
-                            ),
+                                    ))
+                                    .into_any_element();
+                                // An empty query carries the bar at the hint's
+                                // start (bezel's `TextField` convention); a
+                                // value has it after its last character.
+                                let (text, trailing_bar) = if self.emoji_grid_query.is_empty() {
+                                    (
+                                        caret::field_placeholder(
+                                            "Search emoji…".to_owned(),
+                                            Some(bar),
+                                        ),
+                                        None,
+                                    )
+                                } else {
+                                    (caret::field_value(self.emoji_grid_query.clone()), Some(bar))
+                                };
+                                std::iter::once(
+                                    text.debug_selector(|| {
+                                        "project-icon-emoji-grid-query-text".into()
+                                    })
+                                    .into_any_element(),
+                                )
+                                .chain(trailing_bar)
+                            }),
                     )
                     .child(
                         div()
@@ -1083,15 +1102,38 @@ impl ProjectIconPicker {
         let focus_handle = focus.clone();
         let key_entity = entity.clone();
         let commit_entity = entity.clone();
-        let shown = if draft.is_empty() {
-            placeholder.to_string()
-        } else {
-            draft.to_string()
-        };
         let text_color = if draft.is_empty() {
             theme.text_muted
         } else {
             theme.text
+        };
+        let caret_id = format!("project-icon-{id_prefix}-caret");
+        let bar = div()
+            .debug_selector(move || caret_id.clone())
+            .child(caret::bar(px(16.0), theme.text, caret_visible))
+            .into_any_element();
+        // An empty field shows its placeholder with the bar at its start
+        // (bezel's `TextField` convention); a draft has it after its last
+        // character.
+        let (text, trailing_bar) = if draft.is_empty() {
+            (
+                caret::field_placeholder(
+                    text!(
+                        id = format!("project-icon-{id_prefix}-draft"),
+                        placeholder.to_string()
+                    ),
+                    Some(bar),
+                ),
+                None,
+            )
+        } else {
+            (
+                caret::field_value(text!(
+                    id = format!("project-icon-{id_prefix}-draft"),
+                    draft.to_string()
+                )),
+                Some(bar),
+            )
         };
 
         let field = div()
@@ -1118,16 +1160,8 @@ impl ProjectIconPicker {
             // A URL or path easily outgrows 220px: clip from the start so
             // the tail being typed stays in view (`caret::field_value`).
             .overflow_hidden()
-            .child(caret::field_value(text!(
-                id = format!("project-icon-{id_prefix}-draft"),
-                shown
-            )))
-            .child({
-                let caret_id = format!("project-icon-{id_prefix}-caret");
-                div()
-                    .debug_selector(move || caret_id.clone())
-                    .child(caret::bar(px(16.0), theme.text, caret_visible))
-            });
+            .child(text)
+            .children(trailing_bar);
 
         let mut row = div()
             .flex()
@@ -1738,6 +1772,84 @@ mod tests {
         assert!(
             cx.debug_bounds("project-icon-emoji-grid").is_none(),
             "picking a swatch closes the grid"
+        );
+    }
+
+    /// The grid's search field draws its own text and caret *inside* its
+    /// bordered box.
+    ///
+    /// One stray `)` closed the query box's `.child(` right after its
+    /// mouse handler, so the key handler, the clipping, the text run and
+    /// the caret all landed on the row *next to* the box instead: the
+    /// bordered field stayed empty and the query was typed beside it.
+    /// Geometry is the assertion, since that was the defect.
+    #[gpui::test]
+    async fn emoji_grid_query_text_and_caret_sit_inside_the_field(cx: &mut TestAppContext) {
+        let (_picker, _captured, cx) = picker_view_with_capture(cx);
+        cx.update(|window, _| window.refresh());
+
+        let emoji_tab = cx
+            .debug_bounds("project-icon-mode-1")
+            .expect("the Emoji tab is drawn");
+        cx.simulate_click(emoji_tab.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        let open_picker = cx
+            .debug_bounds("project-icon-emoji-open-picker")
+            .expect("the open-picker control is drawn");
+        cx.simulate_click(open_picker.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        let field = cx
+            .debug_bounds("project-icon-emoji-grid-query")
+            .expect("the grid's search field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        fn inside(
+            what: &str,
+            bounds: gpui::Bounds<gpui::Pixels>,
+            field: gpui::Bounds<gpui::Pixels>,
+        ) {
+            assert!(
+                bounds.left() >= field.left()
+                    && bounds.right() <= field.right()
+                    && bounds.top() >= field.top()
+                    && bounds.bottom() <= field.bottom(),
+                "{what} must be drawn inside the search field: {what}={bounds:?} field={field:?}"
+            );
+        }
+
+        // Empty: the placeholder, then the caret, inside the field.
+        let caret = cx
+            .debug_bounds("project-icon-emoji-grid-caret")
+            .expect("the field's caret is drawn");
+        inside("caret", caret, field);
+        let text = cx
+            .debug_bounds("project-icon-emoji-grid-query-text")
+            .expect("the field's text is drawn");
+        inside("placeholder", text, field);
+
+        // Typed: the value takes the placeholder's slot, still inside.
+        cx.simulate_input("rocket");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        let field = cx
+            .debug_bounds("project-icon-emoji-grid-query")
+            .expect("the grid's search field is still drawn");
+        let text = cx
+            .debug_bounds("project-icon-emoji-grid-query-text")
+            .expect("the typed query is drawn");
+        inside("query", text, field);
+        let caret = cx
+            .debug_bounds("project-icon-emoji-grid-caret")
+            .expect("the field's caret is still drawn");
+        inside("caret", caret, field);
+        assert!(
+            caret.left() >= text.right(),
+            "the caret follows the typed text: caret={caret:?} text={text:?}"
         );
     }
 

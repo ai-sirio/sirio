@@ -250,6 +250,11 @@ fn agent_death_is_transport_error() {
         message.contains("closed") || message.contains("EOF") || message.contains("end of file"),
         "unexpected death message: {message}"
     );
+    // Without the agent's own last words the report names no cause at all.
+    assert!(
+        message.contains("fixture last words before dying"),
+        "death report dropped the agent's stderr: {message}"
+    );
     let _ = client.shutdown();
 }
 
@@ -585,4 +590,61 @@ fn cancel_permission_withdraws_without_selecting() {
     client
         .shutdown()
         .expect("withdrawal fixture should shut down cleanly");
+}
+
+#[cfg(target_os = "linux")]
+fn live_thread_count() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .expect("/proc/self/task should be readable")
+        .count()
+}
+
+#[cfg(target_os = "macos")]
+fn live_thread_count() -> usize {
+    let output = ProcessCommand::new("ps")
+        .args(["-M", &std::process::id().to_string()])
+        .output()
+        .expect("ps -M should run");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .count()
+        .saturating_sub(1)
+}
+
+#[cfg(not(windows))]
+fn drive_turn(client: &AcpClient, events: &sirio_acp::EventStream) {
+    client.prompt("count threads").expect("prompt accepted");
+    loop {
+        match next_event(events) {
+            AcpEvent::PermissionRequest { request_id, .. } => client
+                .respond_permission(request_id, "deny")
+                .expect("permission denial should be sent"),
+            AcpEvent::TurnEnded { .. } => break,
+            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn completed_prompts_do_not_leave_timeout_threads_behind() {
+    let (mut client, events) = launch_fixture("multi");
+    drive_turn(&client, &events);
+    thread::sleep(Duration::from_millis(300));
+    let baseline = live_thread_count();
+
+    const TURNS: usize = 5;
+    for _ in 0..TURNS {
+        drive_turn(&client, &events);
+    }
+    thread::sleep(Duration::from_millis(300));
+    let after = live_thread_count();
+
+    client.shutdown().expect("fixture should shut down cleanly");
+    assert!(
+        after <= baseline + 1,
+        "{TURNS} completed prompts left {} threads alive (baseline {baseline}, after {after})",
+        after.saturating_sub(baseline)
+    );
 }

@@ -21,10 +21,13 @@ use bezel::ui::popover::{self, Popup};
 use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba,
+    MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba, ScrollHandle,
     StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
-use sirio_git::{create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory};
+use sirio_git::{
+    UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
+    remove_worktree_and_remote_branch, resolve_parent_directory, upstream_of,
+};
 use sirio_project::{TabKind, display_absolute_path, display_path};
 use sirio_theme::{AgentBrandColor, Theme};
 
@@ -35,11 +38,20 @@ use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconPicker, Proj
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
 
-#[path = "icons.rs"]
+#[path = "../icons.rs"]
 pub mod icons;
 
 use self::icons::{Icon, IconElement, IconSize};
 use crate::right_panel::ActivityStatus;
+
+mod fade;
+mod row;
+mod section;
+
+#[cfg(test)]
+use row::RowStatusGlyph;
+pub use row::SidebarPill;
+use row::{RowInputs, RowView};
 
 /// One agent's brand mark: the silhouette **and** the colour it is drawn in,
 /// carried together so the two can never disagree about which agent a row is
@@ -85,43 +97,6 @@ impl AgentMark {
 /// drew nothing at all, so a busy worktree looked empty. Both now follow
 /// `SidebarGlyphKind.forStatus`: nothing for no status, the loader for
 /// running, a lifecycle dot for the rest.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum RowStatusGlyph {
-    /// No glyph. The column keeps its width so rows stay aligned.
-    None,
-    /// The running indicator, tinted with the agent's **brand** — Swift's
-    /// `RunningDots(color: AgentIcon.color(for: agentId))`, whose whole
-    /// purpose is to say *whose* work is in progress.
-    Running(Rgba),
-    /// A static lifecycle dot: amber needs-input, green done, red error.
-    Dot(Rgba),
-}
-
-impl RowStatusGlyph {
-    fn for_status(
-        status: Option<ActivityStatus>,
-        brand: Option<AgentBrandColor>,
-        theme: Theme,
-    ) -> Self {
-        match status {
-            None | Some(ActivityStatus::Idle) => Self::None,
-            // The tint is the agent's brand, never a `Theme` status token.
-            // Routed through the eight-token settings palette it used to be
-            // one — Claude resolved to `Amber`, i.e. to `tab_needs_input` —
-            // so a *running* Claude worktree and one that *needed input*
-            // painted the same `#E0B36A` and differed only by dot geometry.
-            // An unidentified agent gets the neutral fallback, matching
-            // `AgentIcon.color(for: agentId ?? "")`'s `.gray`.
-            Some(ActivityStatus::Running) => {
-                Self::Running(brand.unwrap_or(AgentBrandColor::Unknown).color())
-            }
-            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.warning),
-            Some(ActivityStatus::Done) => Self::Dot(theme.success),
-            Some(ActivityStatus::Error) => Self::Dot(theme.danger),
-        }
-    }
-}
-
 /// `SidebarRow::id` for a tab row built from real, host-owned tab data is
 /// this offset plus the tab's own id. Real tab ids and the fixture/catalog's
 /// hand- and index-assigned ids both start low, so without an offset a tab
@@ -194,7 +169,6 @@ pub struct SidebarTab {
 /// pushes a different one, through [`Sidebar::set_panel_width`].
 const DEFAULT_SIDEBAR_WIDTH: f32 = 325.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
-const ROW_RIGHT_INSET: f32 = 7.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
@@ -283,7 +257,11 @@ pub struct SidebarRow {
     /// `RowKind::Worktree`; drawn as the row's trailing badge. Empty when
     /// nothing is running — this is strictly the `.running` set, never
     /// done/error/needs-input (those are the leading status dot's job).
-    pub running_agents: Vec<AgentMark>,
+    /// The worktree's tabs, live and parked, drawn as pills inside this row.
+    /// This replaces the old trailing running-agents badge: a running agent
+    /// is a pill with a running status, and drawing it twice was the only
+    /// thing the badge added.
+    pub pills: Vec<SidebarPill>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,10 +313,15 @@ pub enum SidebarContextAction {
     RemoveProject,
     SetPrimary,
     UnsetPrimary,
-    /// F-SID-15: the context menu's confirm-gated counterpart to the
-    /// hover-x button, which used to call `remove_worktree_row` (a
-    /// real on-disk deletion) directly with no confirmation at all.
+    /// Remove the checkout and its local branch. A deliberate menu choice
+    /// is the confirmation: the row's hover-x opens the same two choices
+    /// (see `Sidebar::open_worktree_close_menu`), so neither route reaches
+    /// `remove_worktree_row` from a stray click.
     RemoveWorktree,
+    /// [`Self::RemoveWorktree`] preceded by deleting the branch on the
+    /// remote it tracks; disabled with a reason while the upstream is
+    /// unknown or absent.
+    RemoveWorktreeAndRemoteBranch,
     NewTab(NewTabAction),
 }
 
@@ -350,15 +333,20 @@ pub enum SidebarDisabledReason {
     /// #372: the primary checkout cannot be `git worktree remove`d —
     /// deleting its directory would destroy the repository itself.
     PrimaryWorktree,
+    /// The branch's upstream is still being looked up.
+    ResolvingUpstream,
+    /// The branch tracks no remote branch, so there is nothing to delete
+    /// remotely.
+    NoUpstreamBranch,
 }
 
 impl std::fmt::Display for SidebarDisabledReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyGitProject => formatter.write_str("Git is already initialized"),
-            Self::PrimaryWorktree => {
-                formatter.write_str("The primary worktree cannot be removed")
-            }
+            Self::PrimaryWorktree => formatter.write_str("The primary worktree cannot be removed"),
+            Self::ResolvingUpstream => formatter.write_str("Checking the remote…"),
+            Self::NoUpstreamBranch => formatter.write_str("No remote branch to delete"),
         }
     }
 }
@@ -375,6 +363,53 @@ pub struct SidebarContextItem {
 struct OpenContextMenu {
     target: SidebarContextTarget,
     position: Point<gpui::Pixels>,
+    /// Resolved off the render thread after the menu opens; only read for
+    /// a worktree target.
+    remote_tracking: RemoteTracking,
+}
+
+/// Whether a worktree's branch tracks a remote branch — resolved off the
+/// render thread while a removal menu is open, so the "and remote branch"
+/// choice can say why it is unavailable instead of failing on click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteTracking {
+    /// The lookup has not answered yet.
+    Resolving,
+    /// The branch tracks nothing: there is no remote branch to delete.
+    Untracked,
+    /// The branch tracks this remote branch.
+    Tracks(UpstreamBranch),
+}
+
+impl RemoteTracking {
+    /// The remote branch to delete, once known.
+    pub fn upstream(&self) -> Option<&UpstreamBranch> {
+        match self {
+            Self::Tracks(upstream) => Some(upstream),
+            Self::Resolving | Self::Untracked => None,
+        }
+    }
+
+    /// Why a remote deletion is unavailable, if it is.
+    pub fn disabled_reason(&self) -> Option<SidebarDisabledReason> {
+        match self {
+            Self::Resolving => Some(SidebarDisabledReason::ResolvingUpstream),
+            Self::Untracked => Some(SidebarDisabledReason::NoUpstreamBranch),
+            Self::Tracks(_) => None,
+        }
+    }
+}
+
+/// The closure menu the hover-x opens on a worktree row: the same two
+/// removals as the context menu's, anchored at the click.
+#[derive(Clone)]
+struct OpenWorktreeCloseMenu {
+    row_id: usize,
+    /// The branch, named in the menu heading so the target is explicit at
+    /// the moment of choice (#372).
+    branch: String,
+    position: Point<gpui::Pixels>,
+    remote_tracking: RemoteTracking,
 }
 
 #[derive(Clone)]
@@ -424,13 +459,22 @@ pub enum SidebarEvent {
     /// which is not the selected worktree. The host selects that worktree
     /// (restoring its strip) and then activates the tab at that position;
     /// there is no live tab id to name.
-    SelectParkedTab { path: PathBuf, index: usize },
+    SelectParkedTab {
+        path: PathBuf,
+        index: usize,
+    },
     /// A worktree was created successfully on disk. The host must refresh
     /// the owning catalog before accepting the new path as selectable.
-    WorktreeCreated { project_id: String, path: PathBuf },
+    WorktreeCreated {
+        project_id: String,
+        path: PathBuf,
+    },
     /// A worktree was removed successfully on disk. The host must refresh
     /// the owning catalog and control state before rebuilding its rows.
-    WorktreeRemoved { project_id: String, path: PathBuf },
+    WorktreeRemoved {
+        project_id: String,
+        path: PathBuf,
+    },
     /// Close the open tab with this id.
     CloseTab(usize),
     /// Open the project settings sheet for a catalog project.
@@ -472,10 +516,6 @@ pub enum RowKind {
     Project,
     /// A git worktree or plain folder.
     Worktree,
-    /// An agent or terminal tab.
-    Tab,
-    /// The action row below an expanded project.
-    NewWorktree,
 }
 
 /// Which field of the [`WorktreePrompt`] is receiving keystrokes.
@@ -553,6 +593,7 @@ pub struct Sidebar {
     filter: String,
     filter_focus: FocusHandle,
     tree_cursor: usize,
+    pill_cursor: Option<usize>,
     tree_focus: FocusHandle,
     /// Shared blink state for every sidebar text field's insertion caret
     /// (filter, project-settings card, worktree prompt). One is enough:
@@ -560,16 +601,13 @@ pub struct Sidebar {
     field_blink: caret::Blink,
     /// The open worktree-creation prompt, if any.
     prompt: Option<WorktreePrompt>,
-    /// Checkout paths of the worktrees whose disclosure the user closed.
-    /// Keyed by path rather than row id because rows are rebuilt from the
-    /// catalog on every `set_projects`; see [`Self::set_row_expanded`].
-    /// Session-scoped: not persisted.
-    collapsed_worktrees: std::collections::HashSet<PathBuf>,
     /// A transient error message (failed creation/removal) shown at the
     /// bottom of the sidebar.
     notice: Option<String>,
     context_menu: Popup<OpenContextMenu>,
     context_menu_focus: FocusHandle,
+    /// The hover-x's closure menu; shares `context_menu_focus` for Escape.
+    worktree_close_menu: Popup<OpenWorktreeCloseMenu>,
     project_settings: Option<ProjectSettingsCard>,
     add_project_menu: Popup<()>,
     project_form: Option<ProjectFormSurface>,
@@ -593,61 +631,7 @@ pub struct Sidebar {
     /// every spinner frame as the spinner's ancestor — would drag every row
     /// along with it.
     cache_rows: bool,
-}
-
-/// What one row renders from — a copy the sidebar pushes in, compared before
-/// it notifies, so an unchanged row stays a replayed subtree.
-#[derive(Clone, PartialEq)]
-struct RowInputs {
-    row: SidebarRow,
-    index: usize,
-    cursor: bool,
-    /// Whether the row has rows under it in the full tree — a worktree's
-    /// tab rows, which may be hidden by its own disclosure. Decides the
-    /// tree shape (`Sidebar::tree_row`), so it is an input like the rest.
-    has_children: bool,
-    project_id: Option<String>,
-    project_icon: Option<ProjectIcon>,
-    drag: Option<RowDrag>,
-}
-
-/// One sidebar row as its own view. It owns nothing but its inputs; every
-/// handler still targets the sidebar entity it holds, exactly as the row did
-/// when the sidebar rendered it inline. Its render is where the running
-/// spinner's lease lands, so a running worktree re-renders one row.
-struct RowView {
-    sidebar: gpui::Entity<Sidebar>,
-    inputs: RowInputs,
-    /// How many times gpui asked this row to render. Test-observable only.
-    render_count: u64,
-}
-
-impl Render for RowView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _perf = sirio_perf::span("RowView.render", self.inputs.row.id as u64);
-        self.render_count = self.render_count.wrapping_add(1);
-        let theme = *Theme::get(cx);
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
-        let inputs = self.inputs.clone();
-        let row_shape = Sidebar::tree_row(&inputs.row, inputs.has_children);
-        // Boxed here: the opaque return type of `render_row` captures the
-        // borrow of `bezel_theme`, which ends with this frame's render.
-        Sidebar::render_row(
-            inputs.row,
-            inputs.index,
-            row_shape,
-            inputs.cursor,
-            inputs.project_id,
-            inputs.project_icon,
-            inputs.drag,
-            self.sidebar.clone(),
-            theme,
-            &bezel_theme,
-            window,
-            cx,
-        )
-        .into_any_element()
-    }
+    list_scroll: ScrollHandle,
 }
 
 impl Sidebar {
@@ -712,7 +696,7 @@ impl Sidebar {
                 agent_icon: None,
                 agent_brand: None,
                 comment: None,
-                running_agents: Vec::new(),
+                pills: Vec::new(),
             }
         }
 
@@ -720,16 +704,7 @@ impl Sidebar {
         let mut rows = vec![
             row(0, RowKind::Project, 0, "sirio", true, true, sirio_repo),
             row(1, RowKind::Worktree, 1, "main", true, true, worktree_path),
-            row(2, RowKind::Tab, 2, "Chat", true, false, None),
-            row(
-                3,
-                RowKind::NewWorktree,
-                1,
-                "New Worktree...",
-                false,
-                false,
-                None,
-            ),
+            row(3, RowKind::Worktree, 1, "feat/x", false, true, None),
             row(
                 4,
                 RowKind::Project,
@@ -740,7 +715,7 @@ impl Sidebar {
                 None,
             ),
             row(5, RowKind::Worktree, 1, "main", false, true, None),
-            row(6, RowKind::Tab, 2, "Terminal", false, false, None),
+            row(6, RowKind::Worktree, 1, "main", false, true, None),
             row(
                 7,
                 RowKind::Project,
@@ -752,8 +727,24 @@ impl Sidebar {
             ),
             row(8, RowKind::Project, 0, "source", false, false, None),
         ];
-        rows[2].tab_kind = Some(TabKind::AgentChat);
-        rows[6].tab_kind = Some(TabKind::Terminal);
+        rows[3].pills = vec![SidebarPill {
+            tab_id: Some(1),
+            parked_tab: None,
+            title: "Chat".to_string(),
+            icon: Icon::MessageSquare,
+            brand: None,
+            status: None,
+            selected: true,
+        }];
+        rows[6].pills = vec![SidebarPill {
+            tab_id: Some(2),
+            parked_tab: None,
+            title: "Terminal".to_string(),
+            icon: Icon::SquareTerminal,
+            brand: None,
+            status: None,
+            selected: false,
+        }];
 
         Self {
             rows,
@@ -764,13 +755,14 @@ impl Sidebar {
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             tree_cursor: 0,
+            pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
-            collapsed_worktrees: std::collections::HashSet::new(),
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
+            worktree_close_menu: Popup::default(),
             project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
@@ -778,6 +770,7 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            list_scroll: ScrollHandle::new(),
         }
     }
 
@@ -813,9 +806,8 @@ impl Sidebar {
                 agent_icon: None,
                 agent_brand: None,
                 comment: None,
-                running_agents: Vec::new(),
+                pills: Vec::new(),
             });
-            let worktree_count = project.worktrees.len();
             for (worktree_index, worktree) in project.worktrees.into_iter().enumerate() {
                 rows.push(SidebarRow {
                     id: project_row_id + worktree_index + 1,
@@ -836,28 +828,7 @@ impl Sidebar {
                     agent_icon: None,
                     agent_brand: None,
                     comment: worktree.comment,
-                    running_agents: Vec::new(),
-                });
-            }
-            if project_is_git {
-                rows.push(SidebarRow {
-                    id: project_row_id + worktree_count + 1,
-                    kind: RowKind::NewWorktree,
-                    depth: 1,
-                    title: "New Worktree...".to_string(),
-                    selected: false,
-                    expanded: false,
-                    is_primary: false,
-                    agent_status: None,
-                    is_git: true,
-                    path: None,
-                    tab_id: None,
-                    parked_tab: None,
-                    tab_kind: None,
-                    agent_icon: None,
-                    agent_brand: None,
-                    comment: None,
-                    running_agents: Vec::new(),
+                    pills: Vec::new(),
                 });
             }
         }
@@ -870,13 +841,14 @@ impl Sidebar {
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             tree_cursor: 0,
+            pill_cursor: None,
             tree_focus: cx.focus_handle().tab_stop(true),
             field_blink: caret::Blink::new(),
             prompt: None,
-            collapsed_worktrees: std::collections::HashSet::new(),
             notice: None,
             context_menu: Popup::default(),
             context_menu_focus: cx.focus_handle().tab_stop(true),
+            worktree_close_menu: Popup::default(),
             project_settings: None,
             add_project_menu: Popup::default(),
             project_form: None,
@@ -884,7 +856,36 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            list_scroll: ScrollHandle::new(),
         }
+    }
+
+    /// Which section header belongs at the top of the viewport: the last one
+    /// whose own offset has already scrolled past. Heights are known, so this
+    /// stays arithmetic over the flattened list rather than requiring a
+    /// measurement pass.
+    fn sticky_section(&self, rows: &[SidebarRow]) -> Option<SidebarRow> {
+        let scrolled = -self.list_scroll.offset().y.as_f32();
+        if scrolled <= 0.0 {
+            return None;
+        }
+
+        let mut offset = 0.0;
+        let mut current = None;
+        for row in rows {
+            if offset > scrolled {
+                break;
+            }
+            if row.kind == RowKind::Project {
+                current = Some(row.clone());
+            }
+            let height = match row.kind {
+                RowKind::Project => section::SECTION_HEIGHT,
+                _ => CARD_TWO_LINE_HEIGHT,
+            };
+            offset += height + ROW_V_GAP;
+        }
+        current
     }
 
     pub fn set_projects(&mut self, projects: Vec<SidebarProject>, cx: &mut Context<Self>) {
@@ -897,7 +898,6 @@ impl Sidebar {
         self.project_worktree_defaults = replacement.project_worktree_defaults;
         self.filter = filter;
         self.pending_reorder = None;
-        self.apply_collapsed_worktrees();
         // F-PRJ-12: an already-open Project Settings card snapshots
         // is_git/path once, when it's opened (open_project_settings). If
         // the rebuilt rows above changed that same project -- e.g.
@@ -932,11 +932,6 @@ impl Sidebar {
                 .iter()
                 .rposition(|row| row.kind == RowKind::Project)
                 .map(|index| self.rows[index].id),
-            RowKind::Tab => self.rows[..=row_index]
-                .iter()
-                .rposition(|row| row.kind == RowKind::Worktree)
-                .map(|index| self.rows[index].id),
-            RowKind::NewWorktree => None,
         }
     }
 
@@ -944,8 +939,6 @@ impl Sidebar {
         let scope = match row.kind {
             RowKind::Project => ReorderScope::Projects,
             RowKind::Worktree => ReorderScope::Worktrees,
-            RowKind::Tab => ReorderScope::Tabs,
-            RowKind::NewWorktree => return None,
         };
         Some(RowDrag {
             scope,
@@ -967,8 +960,6 @@ impl Sidebar {
             match target_kind {
                 RowKind::Project => ReorderScope::Projects,
                 RowKind::Worktree => ReorderScope::Worktrees,
-                RowKind::Tab => ReorderScope::Tabs,
-                RowKind::NewWorktree => return false,
             },
             self.reorder_group_for_row(target_id, target_kind),
         ) {
@@ -1082,7 +1073,10 @@ impl Sidebar {
     /// Returns the complete context menu contract for a project or worktree.
     /// Disabled rows stay visible with their typed reason so the user can
     /// distinguish an unavailable transition from a missing affordance.
-    pub fn context_menu_items(target: &SidebarContextTarget) -> Vec<SidebarContextItem> {
+    pub fn context_menu_items(
+        target: &SidebarContextTarget,
+        remote_tracking: &RemoteTracking,
+    ) -> Vec<SidebarContextItem> {
         let item = |label, action, enabled, disabled_reason| SidebarContextItem {
             label,
             action,
@@ -1180,20 +1174,29 @@ impl Sidebar {
                         true,
                         None,
                     ),
-                    // F-SID-15: the only other removal path was the row's
-                    // hover-x button, which had no confirmation state at
-                    // all and deleted the on-disk worktree immediately.
-                    // The context menu route is confirm-gated in
-                    // dispatch_context_action; the hover-x button now goes
-                    // through the same gate instead of bypassing it.
-                    // #372: the primary checkout cannot be removed —
-                    // `git worktree remove` refuses the main worktree and
-                    // deleting its directory would destroy the repository.
+                    // Both removals are listed; choosing one is the
+                    // confirmation (the hover-x opens the same pair, see
+                    // `open_worktree_close_menu`). #372: the primary checkout
+                    // cannot be removed — `git worktree remove` refuses the
+                    // main worktree and deleting its directory would destroy
+                    // the repository — so both stay visible but disabled
+                    // with that reason; the remote variant also needs a
+                    // known upstream.
                     item(
                         "Remove Worktree",
                         SidebarContextAction::RemoveWorktree,
                         !is_primary,
                         is_primary.then_some(SidebarDisabledReason::PrimaryWorktree),
+                    ),
+                    item(
+                        "Remove Worktree and Remote Branch",
+                        SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+                        !is_primary && remote_tracking.upstream().is_some(),
+                        if *is_primary {
+                            Some(SidebarDisabledReason::PrimaryWorktree)
+                        } else {
+                            remote_tracking.disabled_reason()
+                        },
                     ),
                 ]);
                 items
@@ -1213,7 +1216,6 @@ impl Sidebar {
                 path: row.path.clone()?,
                 is_primary: row.is_primary,
             }),
-            RowKind::Tab | RowKind::NewWorktree => None,
         }
     }
 
@@ -1225,10 +1227,38 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) {
         if let Some(target) = self.context_target(row_id) {
-            self.context_menu.open(OpenContextMenu { target, position });
+            let worktree_path = match &target {
+                SidebarContextTarget::Worktree { path, .. } => Some(path.clone()),
+                SidebarContextTarget::Project { .. } => None,
+            };
+            self.context_menu.open(OpenContextMenu {
+                target,
+                position,
+                remote_tracking: if worktree_path.is_some() {
+                    RemoteTracking::Resolving
+                } else {
+                    RemoteTracking::Untracked
+                },
+            });
+            self.worktree_close_menu.close();
             self.project_settings = None;
             self.context_menu_focus.focus(window, cx);
             cx.notify();
+            if let Some(path) = worktree_path {
+                self.resolve_remote_tracking(row_id, cx, move |sidebar, tracking, cx| {
+                    // Only the menu this lookup was started for takes the
+                    // answer; a menu reopened elsewhere runs its own.
+                    if let Some(menu) = sidebar.context_menu.open_mut()
+                        && matches!(
+                            &menu.target,
+                            SidebarContextTarget::Worktree { path: open, .. } if *open == path
+                        )
+                    {
+                        menu.remote_tracking = tracking;
+                        cx.notify();
+                    }
+                });
+            }
         }
     }
 
@@ -1240,8 +1270,16 @@ impl Sidebar {
     }
 
     fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
+        let mut closed = false;
         if self.context_menu.get().is_some() {
             self.context_menu.close();
+            closed = true;
+        }
+        if self.worktree_close_menu.get().is_some() {
+            self.worktree_close_menu.close();
+            closed = true;
+        }
+        if closed {
             cx.notify();
         }
     }
@@ -1671,6 +1709,12 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The remote branch, if the menu had resolved one, is read before
+        // the menu unmounts — the removal below needs it.
+        let upstream = self
+            .context_menu
+            .get()
+            .and_then(|menu| menu.remote_tracking.upstream().cloned());
         // A chosen command is a completed transition, so unmount immediately;
         // keeping the exit overlay alive would occlude an immediate follow-up
         // right-click on the same row. Pointer dismissal still animates via
@@ -1683,7 +1727,11 @@ impl Sidebar {
             }
             return;
         }
-        if action == SidebarContextAction::RemoveWorktree {
+        if matches!(
+            action,
+            SidebarContextAction::RemoveWorktree
+                | SidebarContextAction::RemoveWorktreeAndRemoteBranch
+        ) {
             if let SidebarContextTarget::Worktree { path, .. } = &target
                 && let Some(row_id) = self
                     .rows
@@ -1693,7 +1741,17 @@ impl Sidebar {
                     })
                     .map(|row| row.id)
             {
-                self.request_remove_worktree_row(row_id, window, cx);
+                let remote = if action == SidebarContextAction::RemoveWorktreeAndRemoteBranch {
+                    // The item is disabled until an upstream is known, so
+                    // reaching here without one is a stale menu: do nothing.
+                    let Some(upstream) = upstream else {
+                        return;
+                    };
+                    Some(upstream)
+                } else {
+                    None
+                };
+                self.remove_worktree_row(row_id, remote, cx);
             }
             return;
         }
@@ -1774,22 +1832,35 @@ impl Sidebar {
         );
         cx.spawn_in(window, async move |sidebar, cx| {
             let choice = receiver.await.unwrap_or(2);
-            let _ = sidebar.update(cx, |sidebar, cx| match choice {
-                0 => {
-                    if let Err(error) = std::process::Command::new("git")
+            if choice == 1 {
+                let _ = sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::AddProject(path)));
+                return;
+            }
+            if choice != 0 {
+                return;
+            }
+
+            let init_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::process::Command::new("git")
                         .arg("init")
                         .arg("--quiet")
-                        .current_dir(&path)
+                        .current_dir(&init_path)
                         .status()
-                    {
-                        sidebar.notice = Some(format!("could not run git init: {error}"));
-                        cx.notify();
-                        return;
-                    }
-                    cx.emit(SidebarEvent::AddProject(path));
+                })
+                .await;
+            let _ = sidebar.update(cx, |sidebar, cx| match result {
+                Ok(status) if status.success() => cx.emit(SidebarEvent::AddProject(path)),
+                Ok(status) => {
+                    sidebar.notice = Some(format!("git init failed with status {status}"));
+                    cx.notify();
                 }
-                1 => cx.emit(SidebarEvent::AddProject(path)),
-                _ => {}
+                Err(error) => {
+                    sidebar.notice = Some(format!("could not run git init: {error}"));
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -1909,40 +1980,6 @@ impl Sidebar {
         }
     }
 
-    /// The minimum row rhythm: a single-line row is 32px (13.5px title at
-    /// an 18px line height plus 7px of vertical padding — the action-row
-    /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
-    /// the session-card math). Content-sized titles grow beyond this floor.
-    /// Whether a row draws a second line at all.
-    ///
-    /// The sub-line used to lead with the checkout path, which every project
-    /// and worktree row had, so "is a card" and "has a path" were the same
-    /// question. #151 dropped the path — it was almost always truncated,
-    /// repeated the project prefix on every child, and bought its second
-    /// line for every row in the tree. What remains on that line is the
-    /// `Primary` pill and the F-SID-11 worktree comment, either of which may
-    /// be absent, so both the sub-line and the taller height that pays for
-    /// it now follow whether there is anything left to put there.
-    ///
-    /// The render and the height read this one predicate, so they cannot
-    /// drift into disagreeing about whether a row has two lines.
-    fn has_sub_line(row: &SidebarRow) -> bool {
-        matches!(row.kind, RowKind::Project | RowKind::Worktree)
-            && (row.is_primary
-                || row
-                    .comment
-                    .as_ref()
-                    .is_some_and(|comment| !comment.is_empty()))
-    }
-
-    fn row_min_height(row: &SidebarRow) -> f32 {
-        if Self::has_sub_line(row) {
-            CARD_TWO_LINE_HEIGHT
-        } else {
-            ROW_HEIGHT
-        }
-    }
-
     /// Blink timer tick shared by every sidebar text field's caret.
     fn flip_field_blink(&mut self, cx: &mut Context<Self>) {
         self.field_blink.flip();
@@ -1968,8 +2005,6 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The structural row handed to bezel. Sirio keeps the data and content;
-    /// bezel owns branch/leaf identity, indentation, disclosure and chrome.
     /// Whether rows are mounted as cached views. The host turns this off for
     /// drawn tests (see the field's doc); the app leaves it on.
     pub fn set_cache_rows(&mut self, cache: bool) {
@@ -1993,58 +2028,47 @@ impl Sidebar {
         counts
     }
 
-    /// The bezel tree shape of one row. A project is a container even when
-    /// empty and always carries a chevron; a worktree earns one only while
-    /// it has tab rows to hide (`has_children`), so an idle worktree with
-    /// nothing under it does not grow a disclosure that opens onto nothing.
-    fn tree_row(row: &SidebarRow, has_children: bool) -> tree::Row {
-        match row.kind {
-            RowKind::Project => tree::Row::branch(0, row.expanded),
-            RowKind::Worktree if has_children => tree::Row::branch(1, row.expanded),
-            RowKind::Worktree | RowKind::NewWorktree => tree::Row::leaf(1),
-            RowKind::Tab => tree::Row::leaf(2),
-        }
+    /// One id per pill the worktree carries, in pill order: an open tab by
+    /// its [`SidebarTabRef::Open`] id, a parked one by
+    /// [`parked_tab_row_id`] — the same identifier its row used before the
+    /// tabs became pills. Reporting only `tab_id` would make a worktree
+    /// whose chats are all parked indistinguishable from one with no tabs
+    /// at all. Test-only compatibility surface for callers that inspect the
+    /// row model.
+    #[doc(hidden)]
+    pub fn worktree_pill_tabs(&self, worktree_id: usize) -> Option<Vec<usize>> {
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.id == worktree_id && row.kind == RowKind::Worktree)?;
+        Some(
+            self.rows[index]
+                .pills
+                .iter()
+                .filter_map(|pill| {
+                    pill.tab_id.or_else(|| {
+                        pill.parked_tab
+                            .map(|parked| parked_tab_row_id(worktree_id, parked))
+                    })
+                })
+                .collect(),
+        )
     }
 
-    /// Whether the worktree row `worktree_id` has tab rows directly under it
-    /// in the full (unfiltered, uncollapsed) row list.
-    fn worktree_has_tab_rows(rows: &[SidebarRow], worktree_id: usize) -> bool {
-        rows.iter()
-            .position(|row| row.id == worktree_id && row.kind == RowKind::Worktree)
-            .is_some_and(|index| {
-                rows.get(index + 1)
-                    .is_some_and(|next| next.kind == RowKind::Tab)
-            })
-    }
-
-    /// `has_children` for [`Self::tree_row`], resolved against the full row
-    /// list rather than the visible one: a collapsed worktree's tab rows are
-    /// exactly the ones `visible_rows` leaves out.
-    fn row_has_children(&self, row: &SidebarRow) -> bool {
-        match row.kind {
-            RowKind::Project => true,
-            RowKind::Worktree => Self::worktree_has_tab_rows(&self.rows, row.id),
-            RowKind::Tab | RowKind::NewWorktree => false,
-        }
-    }
-
-    /// Apply one of bezel's standard tree directions to the currently
-    /// visible, depth-annotated rows. Expansion remains Sirio state; bezel
-    /// reports only the intent.
     fn tree_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
         let rows = self.visible_rows();
+        self.pill_cursor = None;
         if rows.is_empty() {
             self.tree_cursor = 0;
             return;
         }
 
         let cursor = self.tree_cursor.min(rows.len() - 1);
-        let shape = rows
-            .iter()
-            .map(|row| Self::tree_row(row, self.row_has_children(row)))
-            .collect::<Vec<_>>();
+        let shape = rows.iter().map(Self::tree_row).collect::<Vec<_>>();
         match tree::step(&shape, cursor, direction) {
-            Some(tree::Move::To(index)) => self.tree_cursor = index,
+            Some(tree::Move::To(index)) => {
+                self.tree_cursor = index;
+            }
             Some(tree::Move::Expand(index)) => {
                 self.set_row_expanded(rows[index].id, rows[index].kind, true);
                 self.tree_cursor = index;
@@ -2060,10 +2084,45 @@ impl Sidebar {
         cx.notify();
     }
 
+    fn pill_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        let Some(row) = rows.get(self.tree_cursor) else {
+            self.pill_cursor = None;
+            return;
+        };
+        let pill_count = row.pills.len();
+        match direction {
+            tree::Direction::Left => {
+                self.pill_cursor = self.pill_cursor.and_then(|index| index.checked_sub(1));
+            }
+            tree::Direction::Right => {
+                self.pill_cursor = match self.pill_cursor {
+                    None if pill_count > 0 => Some(0),
+                    Some(index) if index + 1 < pill_count => Some(index + 1),
+                    cursor => cursor,
+                };
+            }
+            tree::Direction::Up | tree::Direction::Down => return,
+        }
+        cx.notify();
+    }
+
     fn focus_tree_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.tree_cursor = index;
+        self.pill_cursor = None;
         self.tree_focus.focus(window, cx);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    fn focus_row_with_pills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree_cursor = self
+            .visible_rows()
+            .iter()
+            .position(|row| row.kind == RowKind::Worktree && !row.pills.is_empty())
+            .expect("the fixture has a worktree with pills");
+        self.pill_cursor = None;
+        self.tree_focus.focus(window, cx);
     }
 
     fn select_row(&mut self, id: usize, cx: &mut Context<Self>) {
@@ -2120,7 +2179,7 @@ impl Sidebar {
         id: usize,
         status: Option<ActivityStatus>,
         agent_brand: Option<AgentBrandColor>,
-        running_agents: Vec<AgentMark>,
+        _running_agents: Vec<AgentMark>,
         cx: &mut Context<Self>,
     ) {
         if let Some(row) = self
@@ -2128,15 +2187,11 @@ impl Sidebar {
             .iter_mut()
             .find(|row| row.id == id && row.kind == RowKind::Worktree)
         {
-            if row.agent_status == status
-                && row.agent_brand == agent_brand
-                && row.running_agents == running_agents
-            {
+            if row.agent_status == status && row.agent_brand == agent_brand {
                 return;
             }
             row.agent_status = status;
             row.agent_brand = agent_brand;
-            row.running_agents = running_agents;
             cx.notify();
         }
     }
@@ -2171,21 +2226,12 @@ impl Sidebar {
             .position(|row| row.kind == RowKind::Project)
             .map_or(self.rows.len(), |offset| project_index + 1 + offset);
 
-        // Split the project's section into [worktree row + its tab rows]
-        // blocks, keeping whatever trailing rows (the New Worktree
-        // affordance) follow the last block exactly where they are.
+        // Split the project's section into worktree blocks.
         let mut blocks: Vec<(usize, Vec<SidebarRow>)> = Vec::new();
         let mut trailing: Vec<SidebarRow> = Vec::new();
         for row in &self.rows[project_index + 1..section_end] {
             match row.kind {
                 RowKind::Worktree => blocks.push((row.id, vec![row.clone()])),
-                RowKind::Tab if !blocks.is_empty() => {
-                    blocks
-                        .last_mut()
-                        .expect("checked non-empty")
-                        .1
-                        .push(row.clone());
-                }
                 _ => trailing.push(row.clone()),
             }
         }
@@ -2239,90 +2285,35 @@ impl Sidebar {
         else {
             return;
         };
-        let insert_at = worktree_index + 1;
-        // Host-sourced rows, live or parked, are the ones this call owns;
-        // the decorative fixture tab rows carry neither and are left alone.
-        let existing_end = insert_at
-            + self.rows[insert_at..]
-                .iter()
-                .take_while(|row| {
-                    row.kind == RowKind::Tab && (row.tab_id.is_some() || row.parked_tab.is_some())
-                })
-                .count();
-
-        // The diff includes the agent mark, and must: it is the only field
-        // here that changes without the tab list itself changing. A pane
-        // identified after spawn keeps its id, kind, title and selection and
-        // only grows a brand — comparing everything but the mark would make
-        // this an unconditional early return for exactly the case the mark
-        // exists to show.
-        let unchanged = self.rows[insert_at..existing_end]
-            .iter()
-            .map(|row| {
-                (
-                    row.tab_id,
-                    row.parked_tab,
-                    row.tab_kind,
-                    row.agent_icon,
-                    row.agent_brand,
-                    row.title.as_str(),
-                    row.selected,
-                )
+        let pills: Vec<SidebarPill> = tabs
+            .into_iter()
+            .map(|tab| SidebarPill {
+                tab_id: match tab.tab {
+                    SidebarTabRef::Open(id) => Some(id),
+                    SidebarTabRef::Parked(_) => None,
+                },
+                parked_tab: match tab.tab {
+                    SidebarTabRef::Parked(index) => Some(index),
+                    SidebarTabRef::Open(_) => None,
+                },
+                title: tab.title,
+                icon: tab.agent.map_or_else(
+                    || match tab.kind {
+                        TabKind::Terminal => Icon::SquareTerminal,
+                        TabKind::Editor | TabKind::Diff | TabKind::Browser => Icon::File,
+                        TabKind::AgentChat => Icon::MessageSquare,
+                    },
+                    |agent| agent.icon,
+                ),
+                brand: tab.agent.map(|agent| agent.brand),
+                status: None,
+                selected: tab.selected,
             })
-            .eq(tabs.iter().map(|tab| {
-                let (tab_id, parked_tab) = match tab.tab {
-                    SidebarTabRef::Open(id) => (Some(id), None),
-                    SidebarTabRef::Parked(index) => (None, Some(index)),
-                };
-                (
-                    tab_id,
-                    parked_tab,
-                    Some(tab.kind),
-                    tab.agent.map(|agent| agent.icon),
-                    tab.agent.map(|agent| agent.brand),
-                    tab.title.as_str(),
-                    tab.selected,
-                )
-            }));
-        if unchanged {
+            .collect();
+        if self.rows[worktree_index].pills == pills {
             return;
         }
-
-        let depth = self.rows[worktree_index].depth + 1;
-        let worktree_path = self.rows[worktree_index].path.clone();
-        let new_rows = tabs.into_iter().map(|tab| {
-            let (id, tab_id, parked_tab, path) = match tab.tab {
-                SidebarTabRef::Open(tab_id) => {
-                    (TAB_ROW_ID_OFFSET + tab_id, Some(tab_id), None, None)
-                }
-                SidebarTabRef::Parked(index) => (
-                    parked_tab_row_id(worktree_id, index),
-                    None,
-                    Some(index),
-                    worktree_path.clone(),
-                ),
-            };
-            SidebarRow {
-                id,
-                kind: RowKind::Tab,
-                depth,
-                title: tab.title,
-                selected: tab.selected,
-                expanded: false,
-                is_primary: false,
-                agent_status: None,
-                is_git: false,
-                path,
-                tab_id,
-                parked_tab,
-                tab_kind: Some(tab.kind),
-                agent_icon: tab.agent.map(|agent| agent.icon),
-                agent_brand: tab.agent.map(|agent| agent.brand),
-                comment: None,
-                running_agents: Vec::new(),
-            }
-        });
-        self.rows.splice(insert_at..existing_end, new_rows);
+        self.rows[worktree_index].pills = pills;
         cx.notify();
     }
 
@@ -2337,31 +2328,11 @@ impl Sidebar {
         self.select_row(id, cx);
     }
 
-    /// Opens or closes the disclosure of the worktree row `id`. Unlike
-    /// [`Self::toggle_project`] this never touches the selection: the chevron
-    /// is its own control, and which worktree is selected stays the host's
-    /// decision (`SidebarEvent::SelectWorktree`).
-    fn toggle_worktree(&mut self, id: usize, cx: &mut Context<Self>) {
-        let Some(expanded) = self
-            .rows
-            .iter()
-            .find(|row| row.id == id && row.kind == RowKind::Worktree)
-            .map(|row| row.expanded)
-        else {
-            return;
-        };
-        self.set_row_expanded(id, RowKind::Worktree, !expanded);
-        cx.notify();
-    }
-
-    /// The one place a row's `expanded` flag is written. For a worktree the
-    /// same fact is mirrored into `collapsed_worktrees`, keyed by checkout
-    /// path, so it outlives the row: `set_projects` rebuilds every row from
-    /// the catalog and re-applies the set, and a selection change never
-    /// consults it at all — a worktree the user closed stays closed, one
-    /// they left open stays open, whichever worktree is current.
+    /// The one place a row's `expanded` flag is written. Only a project
+    /// discloses: `tree_row` makes a worktree a leaf, because its tabs are
+    /// pills inside the row rather than children under it.
     fn set_row_expanded(&mut self, id: usize, kind: RowKind, expanded: bool) {
-        if !matches!(kind, RowKind::Project | RowKind::Worktree) {
+        if kind != RowKind::Project {
             return;
         }
         let Some(row) = self
@@ -2372,27 +2343,6 @@ impl Sidebar {
             return;
         };
         row.expanded = expanded;
-        if kind == RowKind::Worktree
-            && let Some(path) = row.path.clone()
-        {
-            if expanded {
-                self.collapsed_worktrees.remove(&path);
-            } else {
-                self.collapsed_worktrees.insert(path);
-            }
-        }
-    }
-
-    /// Re-applies `collapsed_worktrees` to freshly built worktree rows.
-    fn apply_collapsed_worktrees(&mut self) {
-        for row in &mut self.rows {
-            if row.kind == RowKind::Worktree {
-                row.expanded = !row
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| self.collapsed_worktrees.contains(path));
-            }
-        }
     }
 
     // ------------------------------------------------------------------
@@ -2577,7 +2527,7 @@ impl Sidebar {
             .expect("project row still present");
         let insert_at = self.rows[project_index + 1..]
             .iter()
-            .position(|row| row.kind == RowKind::NewWorktree)
+            .position(|row| row.kind == RowKind::Project)
             .map_or(self.rows.len(), |offset| project_index + 1 + offset);
         // Excludes tab rows: their ids live at `TAB_ROW_ID_OFFSET` and up
         // (see that constant's doc comment), a separate namespace from
@@ -2612,77 +2562,131 @@ impl Sidebar {
                 agent_icon: None,
                 agent_brand: None,
                 comment: None,
-                running_agents: Vec::new(),
+                pills: Vec::new(),
             },
         );
         self.select_row(id, cx);
         self.notice = None;
     }
 
-    /// #372: the confirm dialog names its target — branch and checkout
-    /// path — like the Changes panel's "Discard changes?" names its file,
-    /// so a reorder between right-click and confirm cannot silently retarget
-    /// a destructive, irreversible deletion.
-    fn remove_worktree_prompt(branch: &str, path: &Path) -> (String, String) {
-        (
-            format!("Remove worktree `{branch}`?"),
-            format!(
-                "This permanently deletes the worktree at `{}` and its branch \
-                 `{branch}` on disk. This cannot be undone.",
-                path.display()
-            ),
-        )
-    }
-
-    /// F-SID-15: confirm-gated entry point for worktree removal. Both the
-    /// context menu's "Remove Worktree" and the row's hover-x button route
-    /// through this instead of calling `remove_worktree_row` (a real
-    /// on-disk deletion, spawned immediately) with no safety confirmation.
-    fn request_remove_worktree_row(
+    /// The hover-x's closure menu: two removals — from disk, or from disk
+    /// after deleting the remote branch — with the branch named in the
+    /// heading (#372). Choosing is the confirmation; no native prompt
+    /// follows, and a click outside dismisses without removing anything.
+    fn open_worktree_close_menu(
         &mut self,
         row_id: usize,
+        position: Point<gpui::Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((branch, worktree_path, is_primary)) = self
+        let Some(branch) = self
+            .rows
+            .iter()
+            .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .map(|row| row.title.clone())
+        else {
+            // #372: the primary checkout is not removable — the hover-x is
+            // not drawn for it, so reaching here means a stale row id.
+            return;
+        };
+        self.worktree_close_menu.open(OpenWorktreeCloseMenu {
+            row_id,
+            branch,
+            position,
+            remote_tracking: RemoteTracking::Resolving,
+        });
+        self.context_menu.close();
+        self.project_settings = None;
+        self.context_menu_focus.focus(window, cx);
+        cx.notify();
+        self.resolve_remote_tracking(row_id, cx, move |sidebar, tracking, cx| {
+            if let Some(menu) = sidebar.worktree_close_menu.open_mut()
+                && menu.row_id == row_id
+            {
+                menu.remote_tracking = tracking;
+                cx.notify();
+            }
+        });
+    }
+
+    fn close_worktree_close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.worktree_close_menu.begin_close() {
+            popover::reap_popup(cx, |sidebar| &mut sidebar.worktree_close_menu);
+            cx.notify();
+        }
+    }
+
+    /// A choice in the closure menu: unmount at once (a chosen command is a
+    /// completed transition, as in `dispatch_context_action`) and remove.
+    fn choose_worktree_close(&mut self, with_remote_branch: bool, cx: &mut Context<Self>) {
+        let Some(menu) = self.worktree_close_menu.get().cloned() else {
+            return;
+        };
+        self.worktree_close_menu.close();
+        cx.notify();
+        let remote = if with_remote_branch {
+            // The row is disabled until an upstream is known.
+            let Some(upstream) = menu.remote_tracking.upstream().cloned() else {
+                return;
+            };
+            Some(upstream)
+        } else {
+            None
+        };
+        self.remove_worktree_row(menu.row_id, remote, cx);
+    }
+
+    /// Looks up, off the render thread, whether the worktree row's branch
+    /// tracks a remote branch, then hands the answer to `apply` on the
+    /// sidebar — which decides whether the menu it was meant for is still
+    /// the one open.
+    fn resolve_remote_tracking(
+        &mut self,
+        row_id: usize,
+        cx: &mut Context<Self>,
+        apply: impl FnOnce(&mut Self, RemoteTracking, &mut Context<Self>) + 'static,
+    ) {
+        let Some(repo_root) = self.project_root(row_id) else {
+            return;
+        };
+        let Some(branch) = self
             .rows
             .iter()
             .find(|row| row.id == row_id && row.kind == RowKind::Worktree)
-            .map(|row| {
-                (
-                    row.title.clone(),
-                    row.path.clone().unwrap_or_default(),
-                    row.is_primary,
-                )
-            })
+            .map(|row| row.title.clone())
         else {
             return;
         };
-        // #372: the primary checkout is not removable — the menu item and
-        // the hover-x button already hide it, so reaching here means a
-        // stale row id; do nothing rather than prompt for the repository
-        // itself.
-        if is_primary {
-            return;
-        }
-        let (title, detail) = Self::remove_worktree_prompt(&branch, &worktree_path);
-        let receiver = window.prompt(
-            PromptLevel::Warning,
-            &title,
-            Some(&detail),
-            &["Remove Worktree", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |sidebar, cx| {
-            if receiver.await.unwrap_or(1) == 0 {
-                let _ = sidebar.update(cx, |sidebar, cx| sidebar.remove_worktree_row(row_id, cx));
-            }
+        cx.spawn(async move |this, cx| {
+            let tracking = cx
+                .background_executor()
+                .spawn(async move {
+                    match upstream_of(&repo_root, &branch) {
+                        Ok(Some(upstream)) => RemoteTracking::Tracks(upstream),
+                        Ok(None) => RemoteTracking::Untracked,
+                        Err(error) => {
+                            eprintln!("[git] failed to read the upstream of '{branch}': {error}");
+                            RemoteTracking::Untracked
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |sidebar, cx| apply(sidebar, tracking, cx))
+                .ok();
         })
         .detach();
     }
 
     /// Removes a worktree on the background executor and drops its rows.
-    fn remove_worktree_row(&mut self, row_id: usize, cx: &mut Context<Self>) {
+    /// With `remote`, its branch is deleted on that remote first (see
+    /// `sirio_git::remove_worktree_and_remote_branch` for why that order).
+    fn remove_worktree_row(
+        &mut self,
+        row_id: usize,
+        remote: Option<UpstreamBranch>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(repo_root) = self.project_root(row_id) else {
             return;
         };
@@ -2699,7 +2703,7 @@ impl Sidebar {
             return;
         };
         // #372: defensive — the primary checkout must never reach
-        // `git worktree remove`; see `request_remove_worktree_row`.
+        // `git worktree remove`; see `open_worktree_close_menu`.
         if is_primary {
             return;
         }
@@ -2714,11 +2718,19 @@ impl Sidebar {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    remove_worktree(
-                        &repo_root_for_task,
-                        &worktree_path_for_task,
-                        &branch_for_task,
-                    )
+                    match remote {
+                        Some(upstream) => remove_worktree_and_remote_branch(
+                            &repo_root_for_task,
+                            &worktree_path_for_task,
+                            &branch_for_task,
+                            &upstream,
+                        ),
+                        None => remove_worktree(
+                            &repo_root_for_task,
+                            &worktree_path_for_task,
+                            &branch_for_task,
+                        ),
+                    }
                 })
                 .await;
             this.update(cx, |sidebar, cx| match result {
@@ -2749,11 +2761,7 @@ impl Sidebar {
         let Some(index) = self.rows.iter().position(|row| row.id == row_id) else {
             return;
         };
-        let end = self.rows[index + 1..]
-            .iter()
-            .position(|row| row.kind != RowKind::Tab)
-            .map_or(self.rows.len(), |offset| index + 1 + offset);
-        self.rows.drain(index..end);
+        self.rows.remove(index);
         self.notice = None;
     }
 
@@ -2802,60 +2810,48 @@ impl Sidebar {
         }
     }
 
+    /// The one place that decides whether a row answers the filter. Title,
+    /// annotation and the names of the agents parked in it: a user typing
+    /// "codex" is looking for where Codex is running, not for a worktree
+    /// that happens to be spelled that way, and a user typing their own
+    /// `worktree.set` annotation is looking for the note they left.
+    pub(crate) fn row_matches(row: &SidebarRow, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let matches = |text: &str| text.to_lowercase().contains(query);
+        matches(&row.title)
+            || row.comment.as_deref().is_some_and(matches)
+            || row
+                .pills
+                .iter()
+                .any(|pill| matches(&pill.title) || matches(Self::icon_selector_name(pill.icon)))
+    }
+
+    /// How many worktrees a project's header counts.
+    ///
+    /// It used to count the rows that were *visible*, which was the same
+    /// number for as long as a project could not really fold (see
+    /// `visible_rows`). Now that folding works, that spelling would make a
+    /// folded header read "sirio 0" over an empty section — throwing away
+    /// the one number worth having while a project is folded, which is how
+    /// much is hidden under it. The count comes from the model instead,
+    /// narrowed to what the filter matches when there is one, so a search
+    /// still counts its hits.
+    fn worktree_count(&self, project_id: usize) -> usize {
+        let query = self.filter.trim().to_lowercase();
+        self.rows
+            .iter()
+            .skip_while(|row| !(row.id == project_id && row.kind == RowKind::Project))
+            .skip(1)
+            .take_while(|row| row.kind != RowKind::Project)
+            .filter(|row| row.kind == RowKind::Worktree && Self::row_matches(row, &query))
+            .count()
+    }
+
     fn visible_rows(&self) -> Vec<SidebarRow> {
         let query = self.filter.trim().to_lowercase();
-        if query.is_empty() {
-            return self
-                .rows
-                .iter()
-                .enumerate()
-                .filter_map(|(index, row)| {
-                    if row.kind == RowKind::Project {
-                        Some((index, row))
-                    } else {
-                        None
-                    }
-                })
-                .flat_map(|(project_index, project)| {
-                    let next_project = self.rows[project_index + 1..]
-                        .iter()
-                        .position(|row| row.kind == RowKind::Project)
-                        .map_or(self.rows.len(), |offset| project_index + 1 + offset);
-                    let children = &self.rows[project_index + 1..next_project];
-                    let mut project_row = project.clone();
-                    if !project.expanded {
-                        project_row.agent_status = Self::collapsed_project_status(children);
-                    }
-                    let mut section = vec![project_row];
-                    if project.expanded {
-                        // A collapsed worktree hides the tab rows under it,
-                        // the way a collapsed project hides its section.
-                        let mut worktree_expanded = true;
-                        section.extend(
-                            children
-                                .iter()
-                                .filter(|row| match row.kind {
-                                    RowKind::Worktree => {
-                                        worktree_expanded = row.expanded;
-                                        true
-                                    }
-                                    RowKind::Tab => worktree_expanded,
-                                    // The New Worktree row is only offered
-                                    // for git projects with a repository
-                                    // path.
-                                    RowKind::NewWorktree => {
-                                        project.is_git && project.path.is_some()
-                                    }
-                                    RowKind::Project => true,
-                                })
-                                .cloned(),
-                        );
-                    }
-                    section
-                })
-                .collect();
-        }
-
+        let searching = !query.is_empty();
         let mut filtered = Vec::new();
         let mut project_index = 0;
         while project_index < self.rows.len() {
@@ -2869,10 +2865,8 @@ impl Sidebar {
                 .position(|row| row.kind == RowKind::Project)
                 .map_or(self.rows.len(), |offset| project_index + 1 + offset);
             let section = &self.rows[project_index + 1..next_project];
-            let project_matches = project.title.to_lowercase().contains(&query);
-            let section_matches = section
-                .iter()
-                .any(|row| row.title.to_lowercase().contains(&query));
+            let project_matches = Self::row_matches(project, &query);
+            let section_matches = section.iter().any(|row| Self::row_matches(row, &query));
 
             if project_matches || section_matches {
                 let mut project_row = project.clone();
@@ -2880,61 +2874,27 @@ impl Sidebar {
                     project_row.agent_status = Self::collapsed_project_status(section);
                 }
                 filtered.push(project_row);
-                if project.expanded || section_matches {
-                    let mut worktree: Option<SidebarRow> = None;
-                    let mut tabs = Vec::new();
-                    let append_worktree =
-                        |filtered: &mut Vec<SidebarRow>,
-                         worktree: &mut Option<SidebarRow>,
-                         tabs: &mut Vec<SidebarRow>| {
-                            let Some(worktree_row) = worktree.take() else {
-                                return;
-                            };
-                            let worktree_matches =
-                                worktree_row.title.to_lowercase().contains(&query);
-                            let tab_matches = tabs
-                                .iter()
-                                .any(|tab: &SidebarRow| tab.title.to_lowercase().contains(&query));
-                            if worktree_matches || tab_matches {
-                                // Same rule as a collapsed project: its own
-                                // match reveals the row, not the rows it
-                                // hides — those need a match of their own.
-                                let worktree_expanded = worktree_row.expanded;
-                                filtered.push(worktree_row);
-                                if worktree_matches && worktree_expanded {
-                                    filtered.append(tabs);
-                                } else {
-                                    filtered.extend(
-                                        tabs.drain(..).filter(|tab| {
-                                            tab.title.to_lowercase().contains(&query)
-                                        }),
-                                    );
-                                }
-                            } else {
-                                tabs.clear();
-                            }
-                        };
-                    for row in section {
-                        match row.kind {
-                            RowKind::Worktree => {
-                                append_worktree(&mut filtered, &mut worktree, &mut tabs);
-                                worktree = Some(row.clone());
-                            }
-                            RowKind::Tab => tabs.push(row.clone()),
-                            RowKind::NewWorktree => {
-                                append_worktree(&mut filtered, &mut worktree, &mut tabs);
-                                if project_matches
-                                    && project.expanded
-                                    && project.is_git
-                                    && project.path.is_some()
-                                {
-                                    filtered.push(row.clone());
-                                }
-                            }
-                            RowKind::Project => {}
-                        }
-                    }
-                    append_worktree(&mut filtered, &mut worktree, &mut tabs);
+                // A collapsed project opens itself when the filter reaches
+                // one of its worktrees — but only when there *is* a filter.
+                // `row_matches` answers `true` for an empty query, so
+                // `section_matches` was unconditionally true while the
+                // search field was blank, and this clause then held every
+                // project open no matter what `expanded` said. Collapsing a
+                // project did nothing whatsoever: not from the header
+                // click, not from the context menu, not from the keyboard.
+                // The defect was invisible because nothing on the header
+                // announced that a project could be folded at all; adding
+                // the disclosure chevron is what surfaced it.
+                if project.expanded || (searching && section_matches) {
+                    filtered.extend(
+                        section
+                            .iter()
+                            .filter(|row| {
+                                row.kind == RowKind::Worktree
+                                    && (project_matches || Self::row_matches(row, &query))
+                            })
+                            .cloned(),
+                    );
                 }
             }
             project_index = next_project;
@@ -2971,92 +2931,6 @@ impl Sidebar {
             .max_by_key(|status| urgency(*status))
     }
 
-    /// Stable semantic debug/test names, independent of vendored filenames.
-    fn icon_selector_name(icon: Icon) -> &'static str {
-        match icon {
-            Icon::FolderFill => "folder",
-            Icon::GitBranch => "git-branch",
-            Icon::MessageSquare => "chat-round-line",
-            Icon::SquareTerminal => "terminal",
-            Icon::Close => "close",
-            Icon::ChevronDown => "alt-arrow-down",
-            Icon::ChevronUp => "alt-arrow-up",
-            Icon::ChevronRight => "alt-arrow-right",
-            Icon::ChevronLeft => "alt-arrow-left",
-            Icon::Settings => "settings-minimalistic",
-            Icon::RefreshCw => "refresh",
-            Icon::Plus => "plus",
-            Icon::File => "document",
-            Icon::Sparkles => "sparkle-thin",
-            Icon::Shield => "shield-thin",
-            Icon::SunMoon => "sun-dim-thin",
-            Icon::Globe => "global",
-            Icon::ClaudeCode => "claude-mark",
-            Icon::Codex => "openai-mark",
-            Icon::OpenCode => "agent-opencode",
-            Icon::Pi => "pi-mark",
-            Icon::OhMyPi => "agent-omp",
-            Icon::SidebarLeft => "sidebar-minimalistic-left",
-            Icon::PanelRight => "sidebar-minimalistic",
-            Icon::Archive => "archive-minimalistic",
-            Icon::Lock => "key-minimalistic",
-            Icon::FileTree => "file-tree",
-            Icon::Thread => "thread",
-            Icon::Diff => "diff",
-            Icon::DiffUnified => "diff-unified",
-            Icon::DiffSplit => "diff-split",
-            Icon::ExpandVertical => "expand-vertical",
-            Icon::FoldVertical => "fold-vertical",
-            Icon::SquarePlus => "square-plus",
-            Icon::SquareMinus => "square-minus",
-            Icon::Undo => "undo",
-            Icon::GitGraph => "git-graph",
-            Icon::FileType(_) => "file-type",
-        }
-    }
-
-    /// The tint of a tab row's icon.
-    ///
-    /// A branded agent mark is drawn in its brand, exactly as the reference
-    /// draws one `AgentIcon` wherever a tab is listed. A tab with no agent —
-    /// an unstarted chat, a plain terminal — used to fall back to
-    /// `tab_needs_input`, spending the "answer me" amber as a decorative
-    /// tint, so an idle terminal wore the colour of an agent genuinely
-    /// waiting on the reader. It takes `meta` instead: the same grey the
-    /// worktree rows it sits under already use.
-    ///
-    /// Lifted out of the row body because a colour chosen inline is a colour
-    /// no test can reach — which is exactly how the amber survived the first
-    /// pass at this collision.
-    fn tab_row_icon_color(
-        agent_brand: Option<AgentBrandColor>,
-        has_agent_icon: bool,
-        theme: Theme,
-    ) -> Rgba {
-        agent_brand
-            .filter(|_| has_agent_icon)
-            .map_or(theme.text_faint, AgentBrandColor::color)
-    }
-
-    fn row_icon(row: &SidebarRow) -> Icon {
-        match row.kind {
-            RowKind::Project => Icon::FolderFill,
-            // A worktree row's mark says what the row *is*, not what is
-            // running in it: `App/SidebarView.swift:361` draws
-            // `arrow.triangle.branch` beside the branch name unconditionally
-            // and never puts an agent mark there. The agent reaches this row
-            // as the tint of the status indicator and as the trailing badge
-            // — see `set_worktree_activity`.
-            RowKind::Worktree => Icon::GitBranch,
-            RowKind::Tab => row.agent_icon.unwrap_or(match row.tab_kind {
-                Some(TabKind::Terminal) => Icon::SquareTerminal,
-                Some(TabKind::Editor | TabKind::Diff) => Icon::File,
-                _ => Icon::MessageSquare,
-            }),
-            RowKind::NewWorktree => Icon::Plus,
-        }
-    }
-
     fn context_action_selector(action: SidebarContextAction) -> &'static str {
         match action {
             SidebarContextAction::ProjectSettings => "project-settings",
@@ -3067,6 +2941,9 @@ impl Sidebar {
             SidebarContextAction::SetPrimary => "set-primary",
             SidebarContextAction::UnsetPrimary => "unset-primary",
             SidebarContextAction::RemoveWorktree => "remove-worktree-context",
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch => {
+                "remove-worktree-and-remote-context"
+            }
             SidebarContextAction::NewTab(NewTabAction::NewTerminal) => "new-terminal",
             SidebarContextAction::NewTab(NewTabAction::ClaudeCode) => "claude-code",
             SidebarContextAction::NewTab(NewTabAction::Codex) => "codex",
@@ -3101,6 +2978,40 @@ impl Sidebar {
         theme: Theme,
     ) -> impl IntoElement {
         let click_entity = entity.clone();
+        // The bar exists only while focused; where it goes depends on what
+        // the field shows, so it is built once and moved into that slot.
+        let bar = focused.then(|| {
+            div()
+                .flex_shrink_0()
+                .debug_selector(move || format!("{id}-caret"))
+                .child(caret::bar(px(14.0), theme.text, caret_shown))
+                .into_any_element()
+        });
+        // bezel's `TextField` convention: an empty field keeps its hint,
+        // focused or not, and the bar stands at the hint's start — offset 0
+        // of the empty value — never after it, which read "branch name|" as
+        // if the hint had been typed. A value has the bar after its last
+        // character.
+        let (text, trailing_bar) = if value.is_empty() {
+            (
+                caret::field_placeholder(
+                    div()
+                        .debug_selector(move || format!("{id}-placeholder"))
+                        .child(placeholder.to_owned()),
+                    bar,
+                ),
+                None,
+            )
+        } else {
+            (
+                caret::field_value(
+                    div()
+                        .debug_selector(move || format!("{id}-run"))
+                        .child(value.to_owned()),
+                ),
+                bar,
+            )
+        };
         div()
             .id(id)
             .debug_selector(move || id.to_string())
@@ -3139,22 +3050,25 @@ impl Sidebar {
             // interpolates a filesystem path into
             // "optional -- defaults to the pinned location ({location})",
             // so the overflow is bounded only by how deep the path is.
+            //
+            // Which end gets clipped depends on what the text is: a value
+            // scrolls so its tail stays under the caret (`field_value`), a
+            // placeholder keeps its start, the words that say what the
+            // field is for (`field_placeholder`).
+            //
+            // The placeholder is its own element, as in the Filter field:
+            // its absence is the renderer's unambiguous representation of
+            // a non-empty field.
             .overflow_hidden()
             .child(
-                caret::field_value(if value.is_empty() {
-                    placeholder.to_owned()
-                } else {
-                    value.to_owned()
-                })
-                .id("worktree-prompt-field-text")
-                .debug_selector(move || format!("{id}-text")),
+                text.id("worktree-prompt-field-text")
+                    .debug_selector(move || format!("{id}-text")),
             )
             // End-of-text insertion caret; these compact single-line fields
             // always append. `caret_shown` already folds in the field being
-            // focused and the blink phase.
-            .when(focused, |this| {
-                this.child(caret::bar(px(14.0), theme.text, caret_shown))
-            })
+            // focused and the blink phase. The wrapper never shrinks, so the
+            // bar keeps its width when the value overflows the field.
+            .children(trailing_bar)
     }
 
     fn render_context_menu(
@@ -3165,6 +3079,7 @@ impl Sidebar {
     ) -> impl IntoElement {
         let menu = popup.get().expect("mounted context menu").clone();
         let closing = popup.closing_since();
+        let remote_tracking = menu.remote_tracking.clone();
         let target = menu.target;
         let position = menu.position;
         let bezel_theme = theme.to_bezel_theme();
@@ -3173,7 +3088,7 @@ impl Sidebar {
             .debug_selector(|| "sidebar-context-menu".to_owned())
             .w(px(240.0));
 
-        for item in Self::context_menu_items(&target) {
+        for item in Self::context_menu_items(&target, &remote_tracking) {
             let selector = format!(
                 "sidebar-context-item-{}",
                 Self::context_action_selector(item.action)
@@ -3182,24 +3097,21 @@ impl Sidebar {
             let action = item.action;
             let item_target = target.clone();
             let item_entity = entity.clone();
-            let mut row = popover::menu_row(
-                &bezel_theme,
-                false,
-                Fade::new(painter, selector.clone()),
-            )
-                .id(selector.clone())
-                .debug_selector(move || selector.clone())
-                .w_full()
-                .min_h(px(29.0))
-                .justify_between()
-                .text_color(if enabled {
-                    bezel_theme.text
-                } else {
-                    bezel_theme.text_faint
-                })
-                .when(!enabled, |this| {
-                    this.cursor_default().bg(gpui::transparent_black())
-                });
+            let mut row =
+                popover::menu_row(&bezel_theme, false, Fade::new(painter, selector.clone()))
+                    .id(selector.clone())
+                    .debug_selector(move || selector.clone())
+                    .w_full()
+                    .min_h(px(29.0))
+                    .justify_between()
+                    .text_color(if enabled {
+                        bezel_theme.text
+                    } else {
+                        bezel_theme.text_faint
+                    })
+                    .when(!enabled, |this| {
+                        this.cursor_default().bg(gpui::transparent_black())
+                    });
             if enabled {
                 row = row.on_click(move |_, window, cx| {
                     item_entity.update(cx, |sidebar, cx| {
@@ -3305,6 +3217,99 @@ impl Sidebar {
             .child(label)
     }
 
+    fn render_worktree_close_menu(
+        popup: &Popup<OpenWorktreeCloseMenu>,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        painter: Painter,
+    ) -> impl IntoElement {
+        let menu = popup.get().expect("mounted closure menu").clone();
+        let closing = popup.closing_since();
+        let bezel_theme = theme.to_bezel_theme();
+        let remote_reason = menu.remote_tracking.disabled_reason();
+        let disk_entity = entity.clone();
+        let remote_entity = entity.clone();
+
+        let disk_row = popover::menu_row(
+            &bezel_theme,
+            false,
+            Fade::new(painter, "worktree-close-item-remove-disk"),
+        )
+        .id("worktree-close-item-remove-disk")
+        .debug_selector(|| "worktree-close-item-remove-disk".to_owned())
+        .w_full()
+        .min_h(px(29.0))
+        .text_color(bezel_theme.text)
+        .on_click(move |_, _, cx| {
+            disk_entity.update(cx, |sidebar, cx| sidebar.choose_worktree_close(false, cx));
+        })
+        .child("Remove from disk");
+
+        let mut remote_row = popover::menu_row(
+            &bezel_theme,
+            false,
+            Fade::new(painter, "worktree-close-item-remove-remote-and-disk"),
+        )
+        .id("worktree-close-item-remove-remote-and-disk")
+        .debug_selector(|| "worktree-close-item-remove-remote-and-disk".to_owned())
+        .w_full()
+        .min_h(px(29.0))
+        .justify_between()
+        .text_color(if remote_reason.is_none() {
+            bezel_theme.text
+        } else {
+            bezel_theme.text_faint
+        })
+        .child("Remove from disk and remote branch");
+        match remote_reason {
+            Some(reason) => {
+                remote_row = remote_row
+                    .cursor_default()
+                    .bg(gpui::transparent_black())
+                    .child(
+                        div()
+                            .text_size(theme.typography.scaled(11.0))
+                            .text_color(bezel_theme.text_faint)
+                            .child(reason.to_string()),
+                    );
+            }
+            None => {
+                remote_row = remote_row.on_click(move |_, _, cx| {
+                    remote_entity.update(cx, |sidebar, cx| sidebar.choose_worktree_close(true, cx));
+                });
+            }
+        }
+
+        // The heading names the target at the moment of choice (#372), in
+        // the branch's own case — a kebab branch name is unreadable
+        // uppercased, so this is a plain muted line rather than
+        // `popover::menu_heading`.
+        let card = popover::popover_card(&bezel_theme)
+            .id("worktree-close-menu")
+            .debug_selector(|| "worktree-close-menu".to_owned())
+            .w(px(280.0))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(4.0))
+                    .text_size(theme.typography.scaled(11.0))
+                    .text_color(bezel_theme.text_muted)
+                    .child(format!("Remove worktree {}", menu.branch)),
+            )
+            .child(disk_row)
+            .child(remote_row)
+            .on_mouse_down_out(move |_, _, cx| {
+                entity.update(cx, |sidebar, cx| sidebar.close_worktree_close_menu(cx));
+            });
+        popover::menu_at(
+            "worktree-close-menu-layer",
+            menu.position,
+            card.into_any_element(),
+            closing,
+        )
+    }
+
     fn render_project_form(
         form: ProjectFormSurface,
         entity: gpui::Entity<Self>,
@@ -3337,7 +3342,7 @@ impl Sidebar {
                     .rounded(theme.radii.toast)
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.surface)
+                    .bg(theme.dialog_surface)
                     .on_mouse_down_out(move |_, _, cx| {
                         backdrop_close_entity.update(cx, |sidebar, cx| {
                             sidebar.close_project_surface(cx);
@@ -3445,7 +3450,8 @@ impl Sidebar {
                         "Repository: Folder"
                     }),
             )
-            .child(
+            .child({
+                let name_is_empty = display_name.trim().is_empty();
                 div()
                     .id("project-display-name-field")
                     .debug_selector(|| "project-display-name-field".to_owned())
@@ -3481,18 +3487,24 @@ impl Sidebar {
                     // #212: clip inside the field; must not grow, or the caret leaves the text.
                     .overflow_hidden()
                     .child(
-                        caret::field_value(if display_name.trim().is_empty() {
-                            "Display name".to_owned()
+                        if name_is_empty {
+                            // Empty and focused: the bar at the hint's start,
+                            // bezel's `TextField` convention.
+                            caret::field_placeholder(
+                                "Display name".to_owned(),
+                                name_focused
+                                    .then(|| caret::bar(px(14.0), theme.text, caret_visible)),
+                            )
                         } else {
-                            display_name
-                        })
+                            caret::field_value(display_name)
+                        }
                         .id("sidebar-display-name-text")
                         .debug_selector(|| "sidebar-display-name-text".to_owned()),
                     )
-                    .when(name_focused, |this| {
+                    .when(name_focused && !name_is_empty, |this| {
                         this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                    }),
-            )
+                    })
+            })
             .when(!card.is_git, |this| {
                 let target = project_target.clone();
                 this.child(
@@ -3677,7 +3689,8 @@ impl Sidebar {
                             .child("Use Primary"),
                     ),
             )
-            .child(
+            .child({
+                let draft_is_empty = draft.trim().is_empty();
                 div()
                     .id("project-worktree-base-field")
                     .debug_selector(|| "project-worktree-base-field".to_owned())
@@ -3713,18 +3726,23 @@ impl Sidebar {
                     // #212: see the field above.
                     .overflow_hidden()
                     .child(
-                        caret::field_value(if draft.trim().is_empty() {
-                            "Search branches by name…".to_owned()
+                        if draft_is_empty {
+                            // Empty and focused: the bar at the hint's start,
+                            // bezel's `TextField` convention.
+                            caret::field_placeholder(
+                                "Search branches by name…".to_owned(),
+                                focused.then(|| caret::bar(px(14.0), theme.text, caret_visible)),
+                            )
                         } else {
-                            draft
-                        })
+                            caret::field_value(draft)
+                        }
                         .id("sidebar-branch-search-text")
                         .debug_selector(|| "sidebar-branch-search-text".to_owned()),
                     )
-                    .when(focused, |this| {
+                    .when(focused && !draft_is_empty, |this| {
                         this.child(caret::bar(px(14.0), theme.text, caret_visible))
-                    }),
-            )
+                    })
+            })
     }
 
     /// F-PRJ-18: "Worktree Location" — mirrors the Swift
@@ -3858,483 +3876,6 @@ impl Sidebar {
                 )
             })
     }
-
-    fn render_row(
-        row: SidebarRow,
-        row_index: usize,
-        row_shape: tree::Row,
-        cursor: bool,
-        project_id: Option<String>,
-        project_icon: Option<ProjectIcon>,
-        drag: Option<RowDrag>,
-        entity: gpui::Entity<Self>,
-        theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let row_id = row.id;
-        let selected = row.selected;
-        let kind = row.kind;
-        let title = row.title.clone();
-        let path = row.path.clone();
-        // The click closure reports the checkout path for worktree rows.
-        let worktree_path = path.clone();
-        let is_project = kind == RowKind::Project;
-        let is_worktree = kind == RowKind::Worktree;
-        // #372: the primary checkout offers no hover-x — like its disabled
-        // context-menu item, it cannot be `git worktree remove`d.
-        let is_removable_worktree = is_worktree && !row.is_primary;
-        // waku's card rhythm: a project or worktree row becomes a two-line
-        // card (13.5px title over an 11.5px context line) only when it has
-        // something for that second line; every other row is single-line at
-        // the 32px action-row height. See `has_sub_line`.
-        let has_sub_line = Self::has_sub_line(&row);
-        let row_min_height = Self::row_min_height(&row);
-        // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
-        // per distinct running agent, 3px apart, 7px clear of the title. It
-        // takes its width out of the title's, so a busy worktree truncates
-        // its branch name instead of pushing the hover controls off the row.
-        let running_agents: Vec<AgentMark> = if kind == RowKind::Worktree {
-            row.running_agents.clone()
-        } else {
-            Vec::new()
-        };
-        // A glyph only appears for a notable status — matching the
-        // reference. A collapsed project also gets one (F-SID-06): its
-        // worktree rows are hidden, so `row.agent_status` was pre-aggregated
-        // onto the project row itself in `visible_rows`.
-        let status_glyph =
-            if kind == RowKind::Worktree || (kind == RowKind::Project && !row.expanded) {
-                RowStatusGlyph::for_status(row.agent_status, row.agent_brand, theme)
-            } else {
-                RowStatusGlyph::None
-            };
-        let glyph = project_icon
-            .as_ref()
-            .and_then(|icon| match &icon.value {
-                ProjectIconValue::Symbol(glyph) => Some(glyph.icon()),
-                ProjectIconValue::Avatar(_) => Some(Icon::Globe),
-                ProjectIconValue::Emoji(_) => None,
-            })
-            .unwrap_or_else(|| Self::row_icon(&row));
-        let glyph_color = match kind {
-            RowKind::Project => project_icon
-                .as_ref()
-                .map(|icon| icon.tint.resolve(theme))
-                .unwrap_or_else(|| Self::project_color(&title)),
-            RowKind::Tab => {
-                Self::tab_row_icon_color(row.agent_brand, row.agent_icon.is_some(), theme)
-            }
-            RowKind::Worktree | RowKind::NewWorktree => theme.text_faint,
-        };
-        let entity = entity.clone();
-        let remove_entity = entity.clone();
-        let click_entity = entity.clone();
-        let tab_close_entity = entity.clone();
-        let context_entity = entity.clone();
-        let hover_group = format!("sidebar-project-{row_id}");
-        let tab_id = row.tab_id;
-        let parked_tab = row.parked_tab;
-        let mark_size = theme.typography.headline;
-        let icon_size = IconSize::Small;
-        let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
-            Some(ProjectIconValue::Emoji(emoji)) => div()
-                .text_size(px(15.0))
-                .child(emoji.clone())
-                .into_any_element(),
-            // A locally chosen PNG is real file content already on disk — no
-            // network fetch needed, so it can render as an actual image
-            // instead of the generic globe glyph every other avatar source
-            // still falls back to (F-PRJ-14: GitHub/Favicon need an HTTP
-            // client this app doesn't have yet; see project_identity.rs).
-            Some(ProjectIconValue::Avatar(AvatarSource::LocalPng(path))) => img(path.clone())
-                .w(mark_size)
-                .h(mark_size)
-                .rounded(theme.radii.control)
-                .into_any_element(),
-            _ => IconElement::new(glyph, icon_size)
-                .text_color(glyph_color)
-                .into_any_element(),
-        };
-
-        let row_debug_selector = if kind == RowKind::NewWorktree {
-            "new-worktree-row".to_string()
-        } else {
-            format!("sidebar-row-{row_id}")
-        };
-        let mut row_view = tree::tree_row(bezel_theme, &row_shape, selected, cursor)
-            .text_size(theme.typography.scaled(12.5))
-            .id(row_id)
-            .debug_selector(move || row_debug_selector)
-            .group(hover_group.clone())
-            .relative()
-            .min_h(px(row_min_height))
-            .on_click(move |_, window, cx| {
-                click_entity.update(cx, |sidebar, cx| {
-                    sidebar.focus_tree_row(row_index, window, cx);
-                    if let Some(tab_id) = tab_id {
-                        // A host-driven row: the host owns which tab is
-                        // selected, so report the click rather than
-                        // flipping `selected` locally.
-                        cx.emit(SidebarEvent::SelectTab(tab_id));
-                        return;
-                    }
-                    if let Some(index) = parked_tab
-                        && let Some(path) = worktree_path.as_ref()
-                    {
-                        // A parked tab has no live id: ask the host to bring
-                        // its worktree back with this strip position active.
-                        cx.emit(SidebarEvent::SelectParkedTab {
-                            path: path.clone(),
-                            index,
-                        });
-                        return;
-                    }
-                    match kind {
-                        RowKind::Project => sidebar.toggle_project(row_id, cx),
-                        RowKind::NewWorktree => {
-                            sidebar.begin_worktree_prompt(row_id, window, cx);
-                        }
-                        RowKind::Tab => {}
-                        RowKind::Worktree => {
-                            // Report the click to the host; the host decides
-                            // what actually becomes selected and confirms by
-                            // calling back `set_selected_worktree`.
-                            if let Some(path) = worktree_path.as_ref() {
-                                cx.emit(SidebarEvent::SelectWorktree(path.clone()));
-                                sidebar.select_row(row_id, cx);
-                            }
-                        }
-                    }
-                });
-            });
-
-        row_view = row_view.on_mouse_down(
-            MouseButton::Right,
-            move |event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                context_entity.update(cx, |sidebar, cx| {
-                    sidebar.open_context_menu(row_id, event.position, window, cx)
-                });
-            },
-        );
-
-        if let Some(drag) = drag {
-            let drag_entity = entity.clone();
-            let move_entity = entity.clone();
-            let drop_entity = entity.clone();
-            row_view = row_view
-                .on_drag(drag, move |_, _, _, cx| {
-                    drag_entity.update(cx, |sidebar, _| sidebar.pending_reorder = None);
-                    cx.new(|_| gpui::Empty)
-                })
-                .on_drag_move::<RowDrag>(move |event: &DragMoveEvent<RowDrag>, _, cx| {
-                    let drag = *event.drag(cx);
-                    let before = event.event.position.y < event.bounds.center().y;
-                    move_entity.update(cx, |sidebar, cx| {
-                        sidebar.preview_reorder(drag, row_id, before, cx);
-                    });
-                })
-                .on_drop::<RowDrag>(move |_, _, cx| {
-                    drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
-                });
-        }
-
-        // Sirio owns the row's content; bezel's tree row already supplied
-        // disclosure, indentation, cursor/selection paint and hover chrome.
-        let main_line = div()
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .min_h(px(ROW_TITLE_LINE_HEIGHT))
-            .child(
-                div()
-                    .w(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_faint)
-                    .child(match status_glyph {
-                        // Swift's `RunningDots`, tinted by the agent: a
-                        // different *shape* from a lifecycle dot, so a
-                        // running worktree can never be mistaken for a
-                        // finished one at a glance, and a different tint per
-                        // agent, so the one glyph carries both facts.
-                        RowStatusGlyph::Running(_color) => div()
-                            .id(("sidebar-status-running", row_id))
-                            .debug_selector(move || format!("sidebar-status-running-{row_id}"))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(loading::compact("sidebar-running-spinner", window, cx))
-                            .into_any_element(),
-                        RowStatusGlyph::Dot(color) => div()
-                            .id(("sidebar-status-dot", row_id))
-                            .debug_selector(move || format!("sidebar-status-dot-{row_id}"))
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded(px(3.0))
-                            .bg(color)
-                            .into_any_element(),
-                        RowStatusGlyph::None => div().into_any_element(),
-                    }),
-            )
-            .child({
-                let slot = div().w(px(16.0)).flex().items_center().justify_center();
-                // F-CORE-ACT-17: a worktree row's mark is its agent's brand
-                // when one owns the worktree, and the branch glyph
-                // otherwise. The selector carries which, so the identity is
-                // assertable from a drawn test.
-                if is_worktree {
-                    let name = Self::icon_selector_name(glyph);
-                    slot.id(("sidebar-worktree-mark", row_id))
-                        .debug_selector(move || format!("sidebar-worktree-mark-{row_id}-{name}"))
-                        .child(project_mark)
-                        .into_any_element()
-                } else if kind == RowKind::Tab {
-                    // A tab row names its glyph the same way, so a drawn test
-                    // can assert that a pane identified after spawn actually
-                    // changed the mark on screen rather than only in a field.
-                    let name = Self::icon_selector_name(glyph);
-                    slot.id(("sidebar-tab-mark", row_id))
-                        .debug_selector(move || format!("sidebar-tab-mark-{row_id}-{name}"))
-                        .child(project_mark)
-                        .into_any_element()
-                } else {
-                    slot.child(project_mark).into_any_element()
-                }
-            })
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .debug_selector(move || format!("sidebar-row-title-{row_id}"))
-                    .text_ellipsis()
-                    .line_height(px(ROW_TITLE_LINE_HEIGHT))
-                    .font_weight(if is_project {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    // A parked tab is not live: its title reads as a record
-                    // of what the worktree holds, not as an open surface.
-                    .when(parked_tab.is_some(), |this| {
-                        this.text_color(theme.text_faint)
-                    })
-                    .child(title),
-            )
-            .when(is_project, |this| {
-                this.child(
-                    div()
-                        .id(("project-settings", row_id))
-                        .debug_selector(move || format!("project-settings-{row_id}"))
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .w(px(16.0))
-                        .flex_none()
-                        .text_size(px(13.0))
-                        .text_color(theme.text_faint)
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .child(
-                            IconElement::new(Icon::Settings, IconSize::XSmall)
-                                .text_color(theme.text),
-                        )
-                        .on_click(move |_, _window, cx| {
-                            if let Some(project_id) = project_id.clone() {
-                                remove_entity.update(cx, |_, cx| {
-                                    cx.emit(SidebarEvent::OpenProjectSettings(project_id));
-                                });
-                            }
-                        }),
-                )
-            })
-            // F-CORE-ACT-18: `AgentActivityModel::running_agent_ids` already
-            // de-duplicated these and put them in `AgentCatalog` order, so
-            // the badge draws them left to right exactly as handed over —
-            // it never re-sorts and never de-duplicates again.
-            .when(!running_agents.is_empty(), |this| {
-                this.child(
-                    div()
-                        .id(("sidebar-running-agents", row_id))
-                        .debug_selector(move || format!("sidebar-running-agents-{row_id}"))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(3.0))
-                        .children(running_agents.iter().enumerate().map(|(index, mark)| {
-                            div()
-                                .id(("sidebar-running-agent", row_id * 16 + index))
-                                .debug_selector({
-                                    let name = Self::icon_selector_name(mark.icon);
-                                    move || format!("sidebar-running-agent-{row_id}-{name}")
-                                })
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                // Each mark in its own brand. Every mark used
-                                // to be tinted `theme.text`, a
-                                // coral near enough to Claude's brand to read
-                                // as it, so a Codex or Pi mark was drawn in
-                                // Claude's colour. Shape carried identity;
-                                // colour actively contradicted it. Codex is the
-                                // one exception: its mark is drawn in
-                                // `theme.text` (white) like everywhere else
-                                // in the app — tab bar and status bar never
-                                // use its blue brand hex, so the badge must
-                                // not be the only blue Codex mark on screen.
-                                .child(IconElement::new(mark.icon, IconSize::Small).text_color(
-                                    if matches!(mark.icon, Icon::Codex) {
-                                        theme.text
-                                    } else {
-                                        mark.brand.color()
-                                    },
-                                ))
-                        })),
-                )
-            })
-            .when(is_removable_worktree, |this| {
-                let remove_entity = entity.clone();
-                this.child(
-                    div()
-                        .id(("remove-worktree", row_id))
-                        .debug_selector(move || format!("remove-worktree-{row_id}"))
-                        .w(px(16.0))
-                        .flex_none()
-                        .text_size(px(12.0))
-                        .text_color(theme.text_faint)
-                        .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.element_hover))
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            remove_entity.update(cx, |sidebar, cx| {
-                                sidebar.request_remove_worktree_row(row_id, window, cx);
-                            });
-                        })
-                        .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall)
-                                .text_color(theme.text_faint),
-                        ),
-                )
-            })
-            .when_some(tab_id, |this, tab_id| {
-                this.child(
-                    div()
-                        .id(("sidebar-tab-close", row_id))
-                        .debug_selector(move || format!("sidebar-tab-close-{row_id}"))
-                        .w(px(16.0))
-                        .flex_none()
-                        .text_size(px(14.0))
-                        .text_color(theme.text_muted)
-                        .rounded(theme.radii.chip)
-                        .hover(|style| style.bg(theme.element_hover))
-                        .invisible()
-                        .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            tab_close_entity.update(cx, |_, cx| {
-                                cx.emit(SidebarEvent::CloseTab(tab_id));
-                            });
-                        })
-                        .child(
-                            IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text),
-                        ),
-                )
-            });
-
-        let content = div()
-            .min_w_0()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .gap(px(ROW_GAP))
-            .child(main_line)
-            .when(has_sub_line, |this| {
-                this.child(
-                    div()
-                        // Aligned under the title: 12px leading slot + 7px gap
-                        // + 16px glyph + 7px gap.
-                        .pl(px(42.0))
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .text_size(px(12.5))
-                        .line_height(px(ROW_SUB_LINE_HEIGHT))
-                        .text_color(theme.text_faint)
-                        .when(row.is_primary, |this| {
-                            this.child(
-                                div()
-                                    .id(("sidebar-primary-pill", row_id))
-                                    .debug_selector(move || {
-                                        format!("sidebar-primary-pill-{row_id}")
-                                    })
-                                    .px(px(5.0))
-                                    .rounded(theme.radii.chip)
-                                    .bg(theme.surface_raised)
-                                    .text_color(theme.text)
-                                    .text_size(theme.typography.scaled(11.0))
-                                    .child("Primary"),
-                            )
-                        })
-                        // F-SID-11: the durable `worktree.comment` annotation
-                        // (`worktree.set` over the control socket) was already
-                        // persisted and read by the status bar; the worktree
-                        // row itself never rendered it.
-                        .when_some(
-                            row.comment.filter(|comment| !comment.is_empty()),
-                            |this, comment| {
-                                this.child(
-                                    div()
-                                        .id(("sidebar-worktree-comment", row_id))
-                                        .debug_selector(move || {
-                                            format!("sidebar-worktree-comment-{row_id}")
-                                        })
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(theme.text_faint)
-                                        .child(comment),
-                                )
-                            },
-                        ),
-                )
-            });
-
-        // A worktree's disclosure is its own control, unlike a project's,
-        // whose whole row toggles: the row body must keep meaning "select
-        // this worktree". bezel draws the chevron with no handler of its
-        // own, so a hit target the size of its column sits over it and
-        // stops the click before the row's selection handler sees it.
-        let chevron_entity = entity.clone();
-        let worktree_chevron = is_worktree && row_shape.expanded.is_some();
-        let chevron_left = tree::INDENT * row_shape.depth as f32;
-        row_view.child(content).when(worktree_chevron, |this| {
-            this.child(
-                div()
-                    .id(("sidebar-worktree-chevron", row_id))
-                    .debug_selector(move || format!("sidebar-worktree-chevron-{row_id}"))
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(chevron_left))
-                    .w(px(16.0))
-                    .cursor_pointer()
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        chevron_entity.update(cx, |sidebar, cx| {
-                            sidebar.focus_tree_row(row_index, window, cx);
-                            sidebar.toggle_worktree(row_id, cx);
-                        });
-                    }),
-            )
-        })
-    }
 }
 
 impl Focusable for Sidebar {
@@ -4356,6 +3897,12 @@ impl Render for Sidebar {
             theme.install_into_bezel(cx);
         }
         let rows = self.visible_rows();
+        let sticky_section = self.sticky_section(&rows);
+        // Read off `self` here: the closure that draws the sticky header
+        // runs inside the element builder, where `self` is already borrowed.
+        let sticky_worktree_count = sticky_section
+            .as_ref()
+            .map_or(0, |row| self.worktree_count(row.id));
         let entity = cx.entity();
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
@@ -4407,6 +3954,15 @@ impl Render for Sidebar {
             Self::render_context_menu(&self.context_menu, entity.clone(), theme, Painter::of(cx))
                 .into_any_element()
         });
+        let worktree_close_menu = self.worktree_close_menu.get().map(|_| {
+            Self::render_worktree_close_menu(
+                &self.worktree_close_menu,
+                entity.clone(),
+                theme,
+                Painter::of(cx),
+            )
+            .into_any_element()
+        });
         let project_settings = self.project_settings.clone();
         let add_project_menu = self.add_project_menu.get().map(|_| {
             Self::render_add_project_menu(
@@ -4429,7 +3985,15 @@ impl Render for Sidebar {
         let mut row_views = std::mem::take(&mut self.row_views);
         let mut next_views = std::collections::HashMap::with_capacity(rows.len());
         let mut rendered_rows = Vec::with_capacity(rows.len());
-        for (index, row) in rows.into_iter().enumerate() {
+        for (index, row) in rows.iter().cloned().enumerate() {
+            if row.kind == RowKind::Project {
+                let worktree_count = self.worktree_count(row.id);
+                rendered_rows.push(
+                    section::render_section(row, worktree_count, entity.clone(), theme)
+                        .into_any_element(),
+                );
+                continue;
+            }
             let project_id = project_ids.get(&row.id).cloned();
             let project_icon = project_id
                 .as_ref()
@@ -4437,7 +4001,7 @@ impl Render for Sidebar {
             let inputs = RowInputs {
                 drag: row_drags.get(&row.id).copied(),
                 cursor: index == tree_cursor,
-                has_children: self.row_has_children(&row),
+                pill_cursor: (index == tree_cursor).then_some(self.pill_cursor).flatten(),
                 index,
                 project_id,
                 project_icon,
@@ -4546,17 +4110,17 @@ impl Render for Sidebar {
                     .debug_selector(|| "filter-field".to_string())
                     .track_focus(&filter_focus)
                     .relative()
-                    .ml(px(FILTER_LEFT_INSET))
                     .mt(px(6.0))
-                    .w(px((panel_width - FILTER_LEFT_INSET - ROW_RIGHT_INSET).max(0.0)))
-                    .h(px(28.0))
-                    .px(px(9.0))
+                    .w_full()
+                    .h(px(34.0))
+                    .px(px(12.0))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .rounded(theme.radii.control)
-                    .bg(theme.input_bg)
-                    .border_1()
+                    // Flat, like the reference: the field is the top of the
+                    // list rather than a control sitting on it, so the only
+                    // edge it keeps is the rule that separates the two.
+                    .border_b_1()
                     .border_color(if filter_is_focused {
                         theme.ring
                     } else {
@@ -4591,14 +4155,26 @@ impl Render for Sidebar {
                             // element. Its absence is then the renderer's
                             // unambiguous representation of a non-empty
                             // filter, instead of replacing the contents of
-                            // the same text child.
+                            // the same text child. While focused it carries
+                            // the bar at its start (`caret::field_placeholder`),
+                            // bezel's `TextField` convention.
                             .when(filter_is_empty, |this| {
-                                this.child(
+                                this.child(caret::field_placeholder(
                                     div()
                                         .id("filter-placeholder")
                                         .debug_selector(|| "filter-placeholder".to_owned())
-                                        .child("Filter"),
-                                )
+                                        .child("Search worktrees…"),
+                                    filter_is_focused.then(|| {
+                                        div()
+                                            .debug_selector(|| "filter-caret".to_owned())
+                                            .child(caret::bar(
+                                                px(12.0),
+                                                theme.text,
+                                                field_caret_visible,
+                                            ))
+                                            .into_any_element()
+                                    }),
+                                ))
                             })
                             .when(!filter_is_empty, |this| {
                                 this.child(
@@ -4606,8 +4182,17 @@ impl Render for Sidebar {
                                         .debug_selector(|| "filter-text".to_owned()),
                                 )
                             })
-                            .when(filter_is_focused, |this| {
-                                this.child(caret::bar(px(12.0), theme.text, field_caret_visible))
+                            .when(filter_is_focused && !filter_is_empty, |this| {
+                                this.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .debug_selector(|| "filter-caret".to_owned())
+                                        .child(caret::bar(
+                                            px(12.0),
+                                            theme.text,
+                                            field_caret_visible,
+                                        )),
+                                )
                             }),
                     ),
             )
@@ -4617,6 +4202,23 @@ impl Render for Sidebar {
                     .debug_selector(|| "sidebar-tree".to_owned())
                     .key_context(tree::KEY_CONTEXT)
                     .track_focus(&tree_focus)
+                    .on_key_down(cx.listener(|sidebar, event: &KeyDownEvent, _, cx| {
+                        if event.keystroke.key != "backspace" {
+                            return;
+                        }
+                        let Some(pill_index) = sidebar.pill_cursor else {
+                            return;
+                        };
+                        let Some(tab_id) = sidebar
+                            .visible_rows()
+                            .get(sidebar.tree_cursor)
+                            .and_then(|row| row.pills.get(pill_index))
+                            .and_then(|pill| pill.tab_id)
+                        else {
+                            return;
+                        };
+                        cx.emit(SidebarEvent::CloseTab(tab_id));
+                    }))
                     .on_action(cx.listener(|sidebar, _: &tree::SelectPrevious, _, cx| {
                         sidebar.tree_step(tree::Direction::Up, cx);
                     }))
@@ -4624,16 +4226,18 @@ impl Render for Sidebar {
                         sidebar.tree_step(tree::Direction::Down, cx);
                     }))
                     .on_action(cx.listener(|sidebar, _: &tree::Collapse, _, cx| {
-                        sidebar.tree_step(tree::Direction::Left, cx);
+                        sidebar.pill_step(tree::Direction::Left, cx);
                     }))
                     .on_action(cx.listener(|sidebar, _: &tree::Expand, _, cx| {
-                        sidebar.tree_step(tree::Direction::Right, cx);
+                        sidebar.pill_step(tree::Direction::Right, cx);
                     }))
                     .mt(px(11.0))
                     .flex_1()
                     .min_h(px(0.0))
                     .h_full()
+                    .relative()
                     .overflow_y_scroll()
+                    .track_scroll(&self.list_scroll)
                     // Rows reorder during the drag, so the row originally
                     // under the pointer may be a different entity by
                     // mouse-up. Commit against this stable drop surface;
@@ -4647,7 +4251,24 @@ impl Render for Sidebar {
                             .flex_none()
                             .gap(px(ROW_V_GAP))
                             .children(rendered_rows),
-                    ),
+                    )
+                    .when_some(sticky_section, |this, row| {
+                        this.child(
+                            div()
+                                .debug_selector(|| "sidebar-sticky-section".to_owned())
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(section::SECTION_HEIGHT))
+                                .child(section::render_section(
+                                    row,
+                                    sticky_worktree_count,
+                                    entity.clone(),
+                                    theme,
+                                )),
+                        )
+                    }),
             )
             .when(notice.is_some(), |this| {
                 this.child(
@@ -4691,7 +4312,9 @@ impl Render for Sidebar {
                                 .track_focus(&prompt.focus)
                                 .w(px(260.0))
                                 .rounded(theme.radii.toast)
-                                .bg(theme.surface)
+                                // A sheet the user is typing into stays
+                                // opaque when the shell is translucent.
+                                .bg(theme.dialog_surface)
                                 .border_1()
                                 .border_color(theme.border)
                                 .px(px(14.0))
@@ -4790,6 +4413,7 @@ impl Render for Sidebar {
                 )
             })
             .when_some(context_menu, |this, menu| this.child(menu))
+            .when_some(worktree_close_menu, |this, menu| this.child(menu))
             .when_some(project_settings, |this, card| {
                 this.child(Self::render_project_settings(
                     card,
@@ -4810,9 +4434,334 @@ impl Render for Sidebar {
 }
 
 #[cfg(test)]
+pub(super) mod tests_support {
+    use super::*;
+
+    pub(super) fn sidebar_with_one_project(cx: &mut Context<Sidebar>) -> Sidebar {
+        let mut sidebar = Sidebar::from_projects(
+            vec![SidebarProject {
+                id: "sirio".to_string(),
+                name: "sirio".to_string(),
+                is_git: true,
+                root_path: PathBuf::from("/tmp/sirio"),
+                worktrees: vec![
+                    SidebarWorktree {
+                        branch: "main".to_string(),
+                        path: PathBuf::from("/tmp/sirio"),
+                        is_primary: true,
+                        comment: None,
+                    },
+                    SidebarWorktree {
+                        branch: "feat/x".to_string(),
+                        path: PathBuf::from("/tmp/sirio-feat-x"),
+                        is_primary: false,
+                        comment: Some("redesign".to_string()),
+                    },
+                ],
+            }],
+            cx,
+        );
+        sidebar.set_worktree_tabs(
+            1,
+            vec![
+                SidebarTab {
+                    tab: SidebarTabRef::Open(1),
+                    title: "Chat".to_string(),
+                    selected: true,
+                    kind: TabKind::AgentChat,
+                    agent: AgentMark::for_agent_id("claude").into(),
+                },
+                SidebarTab {
+                    tab: SidebarTabRef::Open(2),
+                    title: "Terminal".to_string(),
+                    selected: false,
+                    kind: TabKind::Terminal,
+                    agent: None,
+                },
+            ],
+            cx,
+        );
+        sidebar
+    }
+
+    pub(super) fn sidebar_with_parked_tab(cx: &mut Context<Sidebar>) -> Sidebar {
+        let mut sidebar = sidebar_with_one_project(cx);
+        sidebar.set_worktree_tabs(
+            1,
+            vec![SidebarTab {
+                tab: SidebarTabRef::Parked(0),
+                title: "Old Terminal".to_string(),
+                selected: false,
+                kind: TabKind::Terminal,
+                agent: None,
+            }],
+            cx,
+        );
+        sidebar
+    }
+
+    pub(super) fn collect_events(
+        sidebar: &gpui::Entity<Sidebar>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Rc<RefCell<Vec<SidebarEvent>>> {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(sidebar, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        events
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::project_identity::ProjectGlyph;
+
+    /// Opens the New Worktree prompt the way a user does. The section
+    /// header's `+` is hover-revealed (`group_hover`), and gpui lays an
+    /// invisible element out — so `debug_bounds` finds it — but does not
+    /// hit-test it, so the header has to be hovered before the click.
+    fn click_section_add(cx: &mut VisualTestContext) {
+        let header = cx
+            .debug_bounds("sidebar-section-0")
+            .expect("the project section header is drawn");
+        cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let add = cx
+            .debug_bounds("sidebar-section-add-0")
+            .expect("the section add control is rendered once the header is hovered");
+        cx.simulate_click(add.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// The veil is gone from both card lines.
+    ///
+    /// It was meant to be invisible — a gradient in the row's own colour,
+    /// so text appeared to run out rather than stop at a glyph. On a
+    /// **highlighted** row it was not invisible at all: `element_active`
+    /// and `element_hover` are translucent tints, so painting one of them
+    /// again over a row already filled with it composited twice and drew a
+    /// lighter bar across the title and another across the second line.
+    /// Both were plainly visible in a capture of the running app, and only
+    /// on the selected row — the resting veil is opaque `surface`, which
+    /// matches what is behind it and hides the same mistake.
+    ///
+    /// The lines are clipped with an ellipsis again, which is the treatment
+    /// the veil replaced.
+    #[gpui::test]
+    async fn a_card_draws_no_veil_over_its_title_or_second_line(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_id = window
+            .update(&mut cx, |sidebar, _, _| {
+                sidebar
+                    .visible_rows()
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree)
+                    .expect("the fixture draws a worktree card")
+                    .id
+            })
+            .unwrap();
+        // `debug_bounds` takes a static selector and the row ids are
+        // assigned at build time, so leak one string per lookup.
+        let title_fade: &'static str =
+            Box::leak(format!("sidebar-row-title-fade-{row_id}").into_boxed_str());
+        let subline_fade: &'static str =
+            Box::leak(format!("sidebar-row-subline-fade-{row_id}").into_boxed_str());
+        let title: &'static str =
+            Box::leak(format!("sidebar-row-title-{row_id}").into_boxed_str());
+
+        assert!(
+            cx.debug_bounds(title).is_some(),
+            "the card still draws its title"
+        );
+        assert!(
+            cx.debug_bounds(title_fade).is_none(),
+            "no veil is painted over the branch title"
+        );
+        assert!(
+            cx.debug_bounds(subline_fade).is_none(),
+            "and none over the second line"
+        );
+    }
+
+    /// The branch title names its own colour.
+    ///
+    /// It did not, and nothing above it did either — the row, the tree, the
+    /// panel and the window root all leave the text colour alone (the root
+    /// sets only `font_family`) — so the title inherited gpui's default
+    /// `TextStyle`, which is black, and branch names were drawn all but
+    /// invisible on the dark sidebar. The contrast assertion is the part
+    /// worth keeping: it fails for any token that would repeat the defect,
+    /// not just for the one value that caused it.
+    #[test]
+    fn a_branch_title_is_legible_against_the_sidebar_surface() {
+        fn channel(value: f32) -> f32 {
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn luminance(color: gpui::Rgba) -> f32 {
+            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+        }
+        fn contrast(one: gpui::Rgba, other: gpui::Rgba) -> f32 {
+            let (a, b) = (luminance(one), luminance(other));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+
+        for theme in [Theme::dark(), Theme::light()] {
+            let title = Sidebar::title_color(false, theme);
+            assert!(
+                contrast(title, theme.surface) >= 4.5,
+                "a branch title must clear WCAG AA against the sidebar surface, got {:.2}",
+                contrast(title, theme.surface)
+            );
+            let parked = Sidebar::title_color(true, theme);
+            assert!(
+                contrast(parked, theme.surface) >= 2.5,
+                "a parked title is quieter but still readable, got {:.2}",
+                contrast(parked, theme.surface)
+            );
+            assert_ne!(
+                title, parked,
+                "a parked tab still reads as a record rather than a live surface"
+            );
+        }
+    }
+
+    /// The filter saw titles only, so neither the annotation a person left
+    /// on a worktree (`worktree.set`) nor the name of the agent parked in
+    /// it could find the row they were looking for. Both are searchable
+    /// text now, and one predicate decides it for every branch of
+    /// `visible_rows`.
+    #[gpui::test]
+    async fn the_filter_matches_a_comment_and_an_agent_name(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let (commented, with_pills, agent_query) = window
+            .update(&mut cx, |sidebar, _, _| {
+                let commented = sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.comment.is_some())
+                    .expect("the fixture annotates one worktree")
+                    .title
+                    .clone();
+                let pilled = sidebar
+                    .rows
+                    .iter()
+                    .find(|row| !row.pills.is_empty())
+                    .expect("the fixture parks two tabs in one worktree");
+                let agent_query = pilled
+                    .pills
+                    .iter()
+                    .find_map(|pill| pill.brand.map(|_| Sidebar::icon_selector_name(pill.icon)))
+                    .expect("one of those tabs carries an agent mark")
+                    .to_string();
+                (commented, pilled.title.clone(), agent_query)
+            })
+            .unwrap();
+
+        let visible_worktrees = |sidebar: &mut Sidebar, query: &str| {
+            sidebar.filter = query.to_string();
+            sidebar
+                .visible_rows()
+                .iter()
+                .filter(|row| row.kind == RowKind::Worktree)
+                .map(|row| row.title.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for (query, expected) in [
+            ("redesign", commented.clone()),
+            (agent_query.as_str(), with_pills.clone()),
+        ] {
+            let titles = window
+                .update(&mut cx, |sidebar, _, _| visible_worktrees(sidebar, query))
+                .unwrap();
+            assert_eq!(
+                titles,
+                vec![expected.clone()],
+                "the query {query:?} should reveal exactly one worktree"
+            );
+        }
+
+        let nothing = window
+            .update(&mut cx, |sidebar, _, _| {
+                visible_worktrees(sidebar, "nothing here matches")
+            })
+            .unwrap();
+        assert!(
+            nothing.is_empty(),
+            "an unrelated query still matches nothing"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_worktree_with_tabs_is_still_one_row(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let rows = window
+            .update(&mut cx, |sidebar, _, _| sidebar.visible_rows())
+            .unwrap();
+
+        assert!(
+            rows.iter()
+                .all(|row| matches!(row.kind, RowKind::Project | RowKind::Worktree))
+        );
+        let worktree_with_tabs = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Worktree && !row.pills.is_empty())
+            .expect("the fixture's second worktree holds two tabs");
+        assert_eq!(worktree_with_tabs.pills.len(), 2);
+    }
+
+    /// Left and right used to open and close a nesting level that no longer
+    /// exists; they now walk the row's pills, and Backspace closes the one the
+    /// keyboard is on.
+    #[gpui::test]
+    async fn arrow_keys_walk_the_pills_of_the_cursor_row(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::tree::init);
+        let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        window
+            .update(&mut cx, |sidebar, window, cx| {
+                sidebar.focus_row_with_pills(window, cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+
+        let pill_cursor = window
+            .update(&mut cx, |sidebar, _, _| sidebar.pill_cursor)
+            .unwrap();
+        assert_eq!(pill_cursor, Some(0), "right lands on the first pill");
+
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        let pill_cursor = window
+            .update(&mut cx, |sidebar, _, _| sidebar.pill_cursor)
+            .unwrap();
+        assert_eq!(pill_cursor, Some(1), "and then the second");
+    }
 
     /// A path picker that cannot open must say so, not fail silently.
     ///
@@ -4910,7 +4859,7 @@ mod tests {
 
     use gpui::{
         Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
-        ScrollWheelEvent, TouchPhase, VisualTestContext, point, size,
+        ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, size,
     };
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -4962,6 +4911,50 @@ mod tests {
         repo
     }
 
+    /// Gives `repo` a bare `origin` with `main` pushed and tracked, so a
+    /// branch pushed with `-u` from a worktree has an upstream to delete.
+    /// The bare repository lives under the uncanonicalized temp dir on
+    /// purpose: git does not take a verbatim-prefixed Windows path (the form
+    /// `scratch_repo` canonicalizes to) as a remote URL.
+    fn add_bare_origin(repo: &std::path::Path) -> std::path::PathBuf {
+        let mut origin_name = repo
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .expect("the scratch repo sits in a named directory")
+            .to_os_string();
+        origin_name.push("-origin.git");
+        let origin = std::env::temp_dir().join(origin_name);
+        std::fs::create_dir_all(&origin).expect("create origin dir");
+        let origin_arg = origin.to_str().expect("utf-8 path").to_string();
+        for (cwd, args) in [
+            (origin.as_path(), vec!["init", "-q", "--bare"]),
+            (repo, vec!["remote", "add", "origin", origin_arg.as_str()]),
+            (repo, vec!["push", "-q", "-u", "origin", "main"]),
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(cwd)
+                    .status()
+                    .expect("git")
+                    .success(),
+                "git {args:?} failed"
+            );
+        }
+        origin
+    }
+
+    /// The branch heads `origin` holds, one `<sha>\t<ref>` line each.
+    fn remote_heads(repo: &std::path::Path) -> String {
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "origin"])
+            .current_dir(repo)
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "ls-remote fails");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
     fn porcelain(repo: &std::path::Path) -> String {
         let output = Command::new("git")
             .args(["worktree", "list", "--porcelain"])
@@ -4970,6 +4963,24 @@ mod tests {
             .expect("git");
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// The spelling `git worktree list --porcelain` uses for `path`:
+    /// forward slashes and no verbatim prefix (`C:/Users/...`), while
+    /// `scratch_repo` canonicalizes and so hands the derived paths around
+    /// as `\\?\C:\Users\...`. Comparing porcelain output against
+    /// `Path::display` therefore fails on Windows over the spelling alone,
+    /// with git and the code under test in complete agreement about the
+    /// worktree. The same normalization, for the same reason, as
+    /// `porcelain_spelling` in `sirio_git/tests/worktree_integration.rs`;
+    /// production strips the prefix itself in `sirio_git::git::path_arg`.
+    /// Only the string compared changes — the path itself, and what is
+    /// asserted about it, do not.
+    fn porcelain_spelling(path: &std::path::Path) -> String {
+        let spelling = path.to_string_lossy();
+        #[cfg(windows)]
+        let spelling = spelling.strip_prefix(r"\\?\").unwrap_or(&spelling);
+        spelling.replace('\\', "/")
     }
 
     #[gpui::test]
@@ -5036,10 +5047,8 @@ mod tests {
                 (RowKind::Project, 0, "First Project".to_string()),
                 (RowKind::Worktree, 1, "main".to_string()),
                 (RowKind::Worktree, 1, "feature".to_string()),
-                (RowKind::NewWorktree, 1, "New Worktree...".to_string()),
                 (RowKind::Project, 0, "Second Project".to_string()),
                 (RowKind::Worktree, 1, "main".to_string()),
-                (RowKind::NewWorktree, 1, "New Worktree...".to_string()),
             ],
             "row data already contains project roots and depth-one worktree children"
         );
@@ -5075,7 +5084,7 @@ mod tests {
         cx.run_until_parked();
 
         let last_row_before = cx
-            .debug_bounds("new-worktree-row")
+            .debug_bounds("sidebar-row-20")
             .expect("the last sidebar row is rendered");
         let tree = cx
             .debug_bounds("sidebar-tree")
@@ -5094,7 +5103,7 @@ mod tests {
         cx.run_until_parked();
 
         let last_row_after = cx
-            .debug_bounds("new-worktree-row")
+            .debug_bounds("sidebar-row-20")
             .expect("the last sidebar row remains in the scrollable tree");
         assert!(
             last_row_after.top() < last_row_before.top(),
@@ -5198,40 +5207,40 @@ mod tests {
             agent_icon: None,
             agent_brand: None,
             comment: None,
-            running_agents: Vec::new(),
+            pills: Vec::new(),
         }
     }
 
     #[test]
     fn project_and_worktree_rows_map_to_bezel_tree_levels() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), true),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
             tree::Row::branch(0, true)
         );
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false), false),
-            tree::Row::leaf(1)
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false)),
+            tree::Row::leaf(0)
         );
     }
 
     #[test]
     fn project_tree_rows_keep_the_sidebar_expansion_state() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, false), true),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, false)),
             tree::Row::branch(0, false)
         );
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), true),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
             tree::Row::branch(0, true)
         );
     }
 
     /// A project is a container even when empty, so it always carries a
-    /// chevron; a worktree only earns one once it has tab rows to hide.
+    /// chevron; worktree cards own their pills and do not add child rows.
     #[test]
     fn a_project_is_a_branch_even_without_children() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), false),
+            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true)),
             tree::Row::branch(0, true)
         );
     }
@@ -5239,103 +5248,31 @@ mod tests {
     #[test]
     fn a_worktree_without_tab_rows_is_a_leaf() {
         assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true), false),
-            tree::Row::leaf(1)
+            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true)),
+            tree::Row::leaf(0)
         );
     }
 
-    #[test]
-    fn a_worktree_with_tab_rows_is_a_branch_keeping_its_expansion_state() {
-        assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true), true),
-            tree::Row::branch(1, true)
-        );
-        assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, false), true),
-            tree::Row::branch(1, false)
-        );
-    }
-
-    #[test]
-    fn the_new_worktree_action_is_a_depth_one_leaf() {
-        assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false), false),
-            tree::Row::leaf(1)
-        );
-    }
-
-    #[test]
-    fn tab_rows_are_depth_two_leaves() {
-        assert_eq!(
-            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false), false),
-            tree::Row::leaf(2)
-        );
-    }
-
-    #[test]
-    fn bezel_parent_navigation_matches_the_sidebar_hierarchy() {
-        let shape = [
-            Sidebar::tree_row(&structural_row(RowKind::Project, 0, true), true),
-            Sidebar::tree_row(&structural_row(RowKind::Worktree, 1, true), true),
-            Sidebar::tree_row(&structural_row(RowKind::Tab, 2, false), false),
-            Sidebar::tree_row(&structural_row(RowKind::NewWorktree, 1, false), false),
-        ];
-        assert_eq!(tree::parent_of(&shape, 1), Some(0));
-        assert_eq!(tree::parent_of(&shape, 2), Some(1));
-        assert_eq!(tree::parent_of(&shape, 3), Some(0));
-    }
-
-    /// The fixture's first worktree (row 1) owns a tab row (row 2) and is
-    /// followed by the New Worktree action (row 3). Collapsing the worktree
-    /// hides only what hangs under it.
+    /// A worktree whose pill matches stays represented by its own card: the
+    /// match never promotes a pill into a row of its own.
     #[gpui::test]
-    async fn collapsing_a_worktree_hides_its_tab_rows_but_not_its_siblings(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let sidebar = cx.new(|cx| Sidebar::new_with_repo(cx, Some(PathBuf::from("fixture-repo"))));
-        let visible_ids = |sidebar: &Sidebar| {
-            sidebar
-                .visible_rows()
-                .iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>()
-        };
-
-        sidebar.read_with(cx, |sidebar, _| {
-            assert!(
-                visible_ids(sidebar).contains(&2),
-                "a worktree starts expanded: its tab row is visible"
-            );
-        });
-
-        sidebar.update(cx, |sidebar, cx| sidebar.toggle_worktree(1, cx));
-        sidebar.read_with(cx, |sidebar, _| {
-            let ids = visible_ids(sidebar);
-            assert!(ids.contains(&1), "the collapsed worktree row itself stays");
-            assert!(!ids.contains(&2), "its tab row is hidden");
-            assert!(ids.contains(&3), "the New Worktree sibling is untouched");
-        });
-
-        sidebar.update(cx, |sidebar, cx| sidebar.toggle_worktree(1, cx));
-        sidebar.read_with(cx, |sidebar, _| {
-            assert!(
-                visible_ids(sidebar).contains(&2),
-                "toggling again restores the tab row"
-            );
-        });
-    }
-
-    /// The filter follows the project rule one level down: a collapsed
-    /// worktree's tab rows stay hidden unless the query matches one of them.
-    #[gpui::test]
-    async fn filter_reveals_a_collapsed_worktrees_matching_tab_rows_only(
+    async fn filter_reveals_a_worktree_through_its_matching_pill_only(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
         let sidebar = cx.new(|cx| Sidebar::new_with_repo(cx, None));
         sidebar.update(cx, |sidebar, cx| {
-            sidebar.toggle_worktree(1, cx);
+            sidebar.set_worktree_tabs(
+                1,
+                vec![SidebarTab {
+                    tab: SidebarTabRef::Open(7),
+                    title: "Chat".into(),
+                    selected: false,
+                    kind: TabKind::AgentChat,
+                    agent: None,
+                }],
+                cx,
+            );
             sidebar.filter = "main".to_string();
         });
         sidebar.read_with(cx, |sidebar, _| {
@@ -5347,111 +5284,39 @@ mod tests {
             assert!(ids.contains(&1), "the worktree itself matches");
             assert!(
                 !ids.contains(&2),
-                "a non-matching tab row under a collapsed worktree stays hidden"
+                "a non-matching pill does not create a child row under the card"
             );
         });
 
         sidebar.update(cx, |sidebar, _| sidebar.filter = "chat".to_string());
         sidebar.read_with(cx, |sidebar, _| {
-            let ids = sidebar
-                .visible_rows()
-                .iter()
-                .map(|row| row.id)
-                .collect::<Vec<_>>();
+            let visible = sidebar.visible_rows();
             assert!(
-                ids.contains(&2),
-                "a matching tab row is shown even under a collapsed worktree"
+                visible.iter().any(|row| row.id == 1),
+                "a matching pill reveals its owning worktree card"
+            );
+            assert!(
+                visible.iter().all(|row| row.id < TAB_ROW_ID_OFFSET),
+                "matching pills do not create separate child rows"
+            );
+            assert_eq!(
+                visible
+                    .iter()
+                    .find(|row| row.id == 1)
+                    .expect("the matching worktree card is visible")
+                    .pills
+                    .len(),
+                1,
+                "the matching pill remains on its collapsed worktree card"
             );
         });
-    }
-
-    /// The worktree chevron is its own control: clicking it folds the tab
-    /// rows without reporting a selection, clicking the row still selects,
-    /// and bezel's ←/→ fold and unfold the same row from the keyboard.
-    #[gpui::test]
-    async fn worktree_chevron_toggles_tab_rows_without_selecting(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::tree::init);
-        let repo = PathBuf::from("fixture-repo");
-        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
-                collected.borrow_mut().push(event.clone());
-            })
-            .detach();
-        });
-
-        assert!(
-            cx.debug_bounds("sidebar-row-2").is_some(),
-            "the worktree starts open: its tab row is drawn"
-        );
-
-        // The chevron rides in bezel's 16px disclosure column, after one
-        // level of indent guide.
-        let row1 = cx
-            .debug_bounds("sidebar-row-1")
-            .expect("the worktree row is drawn");
-        let chevron = point(row1.origin.x + px(tree::INDENT) + px(8.0), row1.center().y);
-        cx.simulate_click(chevron, Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-2").is_none(),
-            "the chevron click folds the worktree's tab row"
-        );
-        assert!(
-            events.borrow().is_empty(),
-            "the chevron is not a selection: nothing is reported, got {:?}",
-            events.borrow()
-        );
-
-        cx.simulate_click(chevron, Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-2").is_some(),
-            "a second chevron click unfolds it again"
-        );
-
-        // The keyboard path folds the same row: the chevron click left the
-        // tree cursor on it.
-        cx.simulate_keystrokes("left");
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-2").is_none(),
-            "← on a worktree row folds its tab rows"
-        );
-        cx.simulate_keystrokes("right");
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-2").is_some(),
-            "→ on a worktree row unfolds them"
-        );
-
-        // The row body is still the selection control it always was.
-        let row1 = cx.debug_bounds("sidebar-row-1").expect("worktree row");
-        cx.simulate_click(row1.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(
-            events
-                .borrow()
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::SelectWorktree(path) if *path == repo)),
-            "clicking the row body reports SelectWorktree, got {:?}",
-            events.borrow()
-        );
     }
 
     /// A parked tab is one the host no longer holds live (its worktree was
     /// switched away from) but still lists from the persisted strip. Its
     /// row is drawn under the worktree, offers no ✕ (there is no live tab
     /// to close), and a click asks the host to bring the worktree back with
-    /// that tab active rather than naming a tab id that does not exist.
+    /// that pill active rather than naming a tab id that does not exist.
     #[gpui::test]
     async fn parked_tab_rows_report_a_parked_selection_and_offer_no_close(
         cx: &mut gpui::TestAppContext,
@@ -5497,28 +5362,26 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let second_id = parked_tab_row_id(1, 1);
-        let row_selector: &'static str =
-            Box::leak(format!("sidebar-row-{second_id}").into_boxed_str());
-        let close_selector: &'static str =
-            Box::leak(format!("sidebar-tab-close-{second_id}").into_boxed_str());
-        let mark_selector: &'static str =
-            Box::leak(format!("sidebar-tab-mark-{second_id}-claude-mark").into_boxed_str());
         let row = cx
-            .debug_bounds(row_selector)
-            .expect("the parked tab row is drawn under its worktree");
+            .debug_bounds("sidebar-row-1")
+            .expect("the parked tab card is drawn");
         assert!(
-            cx.debug_bounds(mark_selector).is_some(),
+            cx.debug_bounds("sidebar-pill-mark-1-1-claude-mark")
+                .is_some(),
             "a parked agent tab keeps its brand mark"
         );
         cx.simulate_mouse_move(row.center(), None, Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds(close_selector).is_none(),
+            cx.debug_bounds("sidebar-pill-close-1-1").is_none(),
             "a parked tab has no live tab to close, so no ✕ even on hover"
         );
 
-        cx.simulate_click(row.center(), Modifiers::none());
+        let parked_pill = cx
+            .debug_bounds("sidebar-pill-1-1")
+            .expect("the parked pill is drawn")
+            .center();
+        cx.simulate_click(parked_pill, Modifiers::none());
         cx.run_until_parked();
         let emitted = events.borrow();
         assert!(
@@ -5526,7 +5389,7 @@ mod tests {
                 event,
                 SidebarEvent::SelectParkedTab { path, index: 1 } if *path == repo
             )),
-            "clicking a parked tab row reports the worktree path and the tab's index, got {emitted:?}"
+            "clicking a parked pill reports the worktree path and the tab's index, got {emitted:?}"
         );
         assert!(
             !emitted
@@ -5536,30 +5399,21 @@ mod tests {
         );
     }
 
-    /// The host re-pushes a worktree's list on every sync: live tabs
-    /// replace parked rows in place, and an empty list clears either.
+    /// The host re-pushes a worktree's list on every sync: live pills replace
+    /// parked pills in place, and an empty list clears the card.
     #[gpui::test]
     async fn live_tabs_replace_parked_rows_and_an_empty_list_clears_them(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
         let sidebar = cx.new(|cx| Sidebar::new_with_repo(cx, Some(PathBuf::from("fixture-repo"))));
-        let tab_rows_under_1 = |sidebar: &Sidebar| {
-            let start = sidebar
+        let pills_under_1 = |sidebar: &Sidebar| {
+            sidebar
                 .rows
                 .iter()
-                .position(|row| row.id == 1)
-                .expect("worktree row 1");
-            sidebar.rows[start + 1..]
-                .iter()
-                // The fixture's decorative "Chat" row (id 2) is not
-                // host-sourced and stays put; only live and parked rows are
-                // this call's.
-                .take_while(|row| {
-                    row.kind == RowKind::Tab && (row.tab_id.is_some() || row.parked_tab.is_some())
-                })
-                .map(|row| row.id)
-                .collect::<Vec<_>>()
+                .find(|row| row.id == 1)
+                .map(|row| row.pills.clone())
+                .unwrap_or_default()
         };
         let parked = |index: usize| SidebarTab {
             tab: SidebarTabRef::Parked(index),
@@ -5580,10 +5434,7 @@ mod tests {
             sidebar.set_worktree_tabs(1, vec![parked(0), parked(1)], cx);
         });
         sidebar.read_with(cx, |sidebar, _| {
-            assert_eq!(
-                tab_rows_under_1(sidebar),
-                vec![parked_tab_row_id(1, 0), parked_tab_row_id(1, 1)]
-            );
+            assert_eq!(pills_under_1(sidebar).len(), 2);
         });
 
         sidebar.update(cx, |sidebar, cx| {
@@ -5591,9 +5442,9 @@ mod tests {
         });
         sidebar.read_with(cx, |sidebar, _| {
             assert_eq!(
-                tab_rows_under_1(sidebar),
-                vec![TAB_ROW_ID_OFFSET + 7],
-                "live tabs replace the parked rows rather than stacking under them"
+                pills_under_1(sidebar).len(),
+                1,
+                "live tabs replace the parked pills rather than stacking under them"
             );
         });
 
@@ -5601,97 +5452,7 @@ mod tests {
             sidebar.set_worktree_tabs(1, Vec::new(), cx);
         });
         sidebar.read_with(cx, |sidebar, _| {
-            assert!(tab_rows_under_1(sidebar).is_empty());
-        });
-    }
-
-    /// The collapsed set is keyed by checkout path, so it survives the host
-    /// rebuilding the rows (`set_projects`) and moving the selection to a
-    /// different worktree — the point of the feature: a worktree the user
-    /// closed stays closed, one they left open stays open.
-    #[gpui::test]
-    async fn a_collapsed_worktree_stays_collapsed_across_rebuilds_and_selection(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(Theme::init);
-        let root = std::path::PathBuf::from("/tmp/sirio-collapse-fixture");
-        let projects = || {
-            vec![SidebarProject {
-                id: "proj".into(),
-                name: "proj".into(),
-                is_git: true,
-                root_path: root.clone(),
-                worktrees: vec![
-                    SidebarWorktree {
-                        branch: "main".into(),
-                        path: root.join("main"),
-                        is_primary: true,
-                        comment: None,
-                    },
-                    SidebarWorktree {
-                        branch: "feature".into(),
-                        path: root.join("feature"),
-                        is_primary: false,
-                        comment: None,
-                    },
-                ],
-            }]
-        };
-        let tab = || SidebarTab {
-            tab: SidebarTabRef::Open(0),
-            title: "Terminal".into(),
-            selected: false,
-            kind: TabKind::Terminal,
-            agent: None,
-        };
-        let sidebar = cx.new(|cx| Sidebar::from_projects(projects(), cx));
-        // Row ids follow `from_projects`: project 0, worktrees 1 and 2.
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_worktree_tabs(1, vec![tab()], cx);
-            sidebar.set_worktree_tabs(2, vec![tab()], cx);
-            sidebar.toggle_worktree(1, cx);
-        });
-
-        // The host rebuilds the rows and re-pushes the tabs, then selects
-        // the other worktree.
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_projects(projects(), cx);
-            sidebar.set_worktree_tabs(1, vec![tab()], cx);
-            sidebar.set_worktree_tabs(2, vec![tab()], cx);
-            sidebar.set_selected_worktree(&root.join("feature"), cx);
-        });
-
-        sidebar.read_with(cx, |sidebar, _| {
-            let visible = sidebar.visible_rows();
-            let tab_rows_under = |worktree_id: usize| {
-                let start = visible
-                    .iter()
-                    .position(|row| row.id == worktree_id)
-                    .expect("worktree row visible");
-                visible[start + 1..]
-                    .iter()
-                    .take_while(|row| row.kind == RowKind::Tab)
-                    .count()
-            };
-            assert_eq!(
-                tab_rows_under(1),
-                0,
-                "the worktree the user closed stays closed after a rebuild and a selection change"
-            );
-            assert_eq!(
-                tab_rows_under(2),
-                1,
-                "the worktree the user left open stays open"
-            );
-            let main_row = sidebar
-                .rows
-                .iter()
-                .find(|row| row.id == 1)
-                .expect("main row");
-            assert!(
-                !main_row.expanded,
-                "the rebuilt row carries the collapsed state"
-            );
+            assert!(pills_under_1(sidebar).is_empty());
         });
     }
 
@@ -5722,7 +5483,7 @@ mod tests {
             agent_icon: None,
             agent_brand: None,
             comment: None,
-            running_agents: Vec::new(),
+            pills: Vec::new(),
         };
         assert_eq!(
             Sidebar::row_min_height(&row),
@@ -5758,132 +5519,108 @@ mod tests {
         row.comment = Some(String::new());
         assert_eq!(
             Sidebar::row_min_height(&row),
-            ROW_HEIGHT,
-            "an empty comment is not content, so it must not buy a second line"
+            CARD_TWO_LINE_HEIGHT,
+            "every worktree reserves the two-line card height"
         );
 
         row.comment = None;
-        row.kind = RowKind::Tab;
-        row.path = None;
+        row.pills = vec![SidebarPill {
+            tab_id: Some(1),
+            parked_tab: None,
+            title: "Chat".to_string(),
+            icon: Icon::MessageSquare,
+            brand: None,
+            status: None,
+            selected: false,
+        }];
         assert_eq!(
             Sidebar::row_min_height(&row),
-            ROW_HEIGHT,
-            "a long leaf title must keep the action-row height as its minimum"
-        );
-    }
-
-    /// #372: the confirm dialog must name its target — branch and checkout
-    /// path — so a reorder between right-click and confirm cannot silently
-    /// retarget a destructive, irreversible deletion.
-    #[test]
-    fn remove_worktree_prompt_names_the_branch_and_path() {
-        let (title, detail) = Sidebar::remove_worktree_prompt(
-            "qa-test-wt",
-            &PathBuf::from("/tmp/sirio-qa-test-wt"),
-        );
-        assert!(
-            title.contains("qa-test-wt"),
-            "the title must name the branch, got {title:?}"
-        );
-        assert!(
-            detail.contains("qa-test-wt"),
-            "the detail must name the branch, got {detail:?}"
-        );
-        assert!(
-            detail.contains("/tmp/sirio-qa-test-wt"),
-            "the detail must name the checkout path, got {detail:?}"
+            CARD_TWO_LINE_HEIGHT,
+            "a worktree with a pill still reserves the two-line card height"
         );
     }
 
     /// #372: the primary checkout cannot be `git worktree remove`d, so its
-    /// context-menu entry stays visible but disabled with a reason instead
-    /// of offering the destructive dialog; any other worktree stays enabled.
+    /// context-menu entries stay visible but disabled with a reason instead
+    /// of offering the destructive choice; any other worktree stays enabled,
+    /// and the remote variant additionally needs a known upstream.
     #[test]
     fn only_a_non_primary_worktree_offers_removal() {
-        let primary = Sidebar::context_menu_items(&SidebarContextTarget::Worktree {
-            path: PathBuf::from("/tmp/sirio"),
-            is_primary: true,
+        let find = |items: &[SidebarContextItem], action: SidebarContextAction| {
+            items
+                .iter()
+                .find(|item| item.action == action)
+                .cloned()
+                .unwrap_or_else(|| panic!("{action:?} is listed"))
+        };
+        let tracked = RemoteTracking::Tracks(UpstreamBranch {
+            remote: "origin".to_string(),
+            branch: "qa-test-wt".to_string(),
         });
-        let primary_item = primary
-            .iter()
-            .find(|item| item.action == SidebarContextAction::RemoveWorktree)
-            .expect("the primary worktree still exposes Remove Worktree");
-        assert!(
-            !primary_item.enabled,
-            "Remove Worktree must be disabled on the primary checkout"
-        );
-        assert_eq!(
-            primary_item.disabled_reason,
-            Some(SidebarDisabledReason::PrimaryWorktree),
-            "the disabled primary entry must say why"
-        );
 
-        let secondary = Sidebar::context_menu_items(&SidebarContextTarget::Worktree {
+        let primary = Sidebar::context_menu_items(
+            &SidebarContextTarget::Worktree {
+                path: PathBuf::from("/tmp/sirio"),
+                is_primary: true,
+            },
+            &tracked,
+        );
+        for action in [
+            SidebarContextAction::RemoveWorktree,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        ] {
+            let item = find(&primary, action);
+            assert!(
+                !item.enabled,
+                "{action:?} must be disabled on the primary checkout"
+            );
+            assert_eq!(
+                item.disabled_reason,
+                Some(SidebarDisabledReason::PrimaryWorktree),
+                "the disabled primary entry must say why"
+            );
+        }
+
+        let secondary = SidebarContextTarget::Worktree {
             path: PathBuf::from("/tmp/sirio-qa-test-wt"),
             is_primary: false,
-        });
-        let secondary_item = secondary
-            .iter()
-            .find(|item| item.action == SidebarContextAction::RemoveWorktree)
-            .expect("a secondary worktree exposes Remove Worktree");
+        };
+        let untracked = Sidebar::context_menu_items(&secondary, &RemoteTracking::Untracked);
+        let disk = find(&untracked, SidebarContextAction::RemoveWorktree);
         assert!(
-            secondary_item.enabled,
+            disk.enabled && disk.disabled_reason.is_none(),
             "Remove Worktree stays enabled off the primary checkout"
         );
-        assert_eq!(
-            secondary_item.disabled_reason, None,
-            "an enabled entry carries no disabled reason"
+        let remote = find(
+            &untracked,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
         );
-    }
+        assert!(!remote.enabled, "no upstream, no remote deletion");
+        assert_eq!(
+            remote.disabled_reason,
+            Some(SidebarDisabledReason::NoUpstreamBranch)
+        );
 
-    #[test]
-    fn terminal_tab_icon_ignores_title() {
-        let row = SidebarRow {
-            id: 1,
-            kind: RowKind::Tab,
-            depth: 2,
-            title: "foo".to_string(),
-            selected: false,
-            expanded: false,
-            agent_status: None,
-            is_primary: false,
-            is_git: false,
-            path: None,
-            tab_id: Some(1),
-            parked_tab: None,
-            tab_kind: Some(TabKind::Terminal),
-            agent_icon: None,
-            agent_brand: None,
-            comment: None,
-            running_agents: Vec::new(),
-        };
+        let resolving = Sidebar::context_menu_items(&secondary, &RemoteTracking::Resolving);
+        let remote = find(
+            &resolving,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        );
+        assert!(!remote.enabled, "unknown upstream, no remote deletion yet");
+        assert_eq!(
+            remote.disabled_reason,
+            Some(SidebarDisabledReason::ResolvingUpstream)
+        );
 
-        assert_eq!(Sidebar::row_icon(&row), Icon::SquareTerminal);
-    }
-
-    #[test]
-    fn agent_tab_icon_ignores_title() {
-        let row = SidebarRow {
-            id: 2,
-            kind: RowKind::Tab,
-            depth: 2,
-            title: "renamed agent".to_string(),
-            selected: false,
-            expanded: false,
-            agent_status: None,
-            is_primary: false,
-            is_git: false,
-            path: None,
-            tab_id: Some(2),
-            parked_tab: None,
-            tab_kind: Some(TabKind::Terminal),
-            agent_icon: Some(Icon::ClaudeCode),
-            agent_brand: None,
-            comment: None,
-            running_agents: Vec::new(),
-        };
-
-        assert_eq!(Sidebar::row_icon(&row), Icon::ClaudeCode);
+        let with_upstream = Sidebar::context_menu_items(&secondary, &tracked);
+        let remote = find(
+            &with_upstream,
+            SidebarContextAction::RemoveWorktreeAndRemoteBranch,
+        );
+        assert!(
+            remote.enabled && remote.disabled_reason.is_none(),
+            "with an upstream the remote variant is live"
+        );
     }
 
     /// F-CORE-DOM-03: the Clone/Create forms must propose
@@ -5947,7 +5684,7 @@ mod tests {
             path: PathBuf::from("/tmp/git"),
             is_git: true,
         };
-        let items = Sidebar::context_menu_items(&git_project);
+        let items = Sidebar::context_menu_items(&git_project, &RemoteTracking::Untracked);
         let initialize = items
             .iter()
             .find(|item| item.action == SidebarContextAction::InitializeGit)
@@ -5962,7 +5699,7 @@ mod tests {
             path: PathBuf::from("/tmp/git-main"),
             is_primary: false,
         };
-        let worktree_items = Sidebar::context_menu_items(&worktree);
+        let worktree_items = Sidebar::context_menu_items(&worktree, &RemoteTracking::Untracked);
         assert!(
             worktree_items
                 .iter()
@@ -6158,12 +5895,11 @@ mod tests {
         );
     }
 
-    /// F-SID-15: the context menu's "Remove Worktree" is confirm-gated the
-    /// same way the hover-x button is -- nothing is deleted until the user
-    /// answers the prompt, and it routes to a real removal (not just an
-    /// event nobody outside sidebar.rs would act on) once they do.
+    /// The context menu's "Remove Worktree" is a real removal (not just an
+    /// event nobody outside sidebar.rs would act on), and the deliberate
+    /// menu choice is the confirmation: no native prompt follows it.
     #[gpui::test]
-    async fn right_click_context_menu_remove_worktree_confirms_before_removing(
+    async fn right_click_context_menu_remove_worktree_removes_without_a_native_prompt(
         cx: &mut gpui::TestAppContext,
     ) {
         // See remove_button_removes_the_worktree's identical comment: widen
@@ -6181,9 +5917,7 @@ mod tests {
         // The repo's sole (primary) worktree can't be git-worktree-removed;
         // create a second one through the prompt, matching
         // remove_button_removes_the_worktree's setup, and remove that one.
-        let new_worktree_row = cx.debug_bounds("new-worktree-row").expect("row rendered");
-        cx.simulate_click(new_worktree_row.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
         cx.simulate_input("to-remove");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -6226,17 +5960,10 @@ mod tests {
         cx.simulate_click(remove.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
-
         assert!(
-            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
-                .rows
-                .iter()
-                .any(|row| row.id == row_id)),
-            "nothing is removed before the user answers"
+            !cx.has_pending_prompt(),
+            "the menu choice is the confirmation; no native prompt follows"
         );
-
-        cx.simulate_prompt_answer("Remove Worktree");
         cx.condition(&sidebar_entity, |sidebar, _cx| {
             !sidebar
                 .rows
@@ -6270,11 +5997,7 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        let row_bounds = cx
-            .debug_bounds("new-worktree-row")
-            .expect("the New Worktree row is rendered");
-        cx.simulate_click(row_bounds.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
 
         // The longest of the three placeholders, and the one that spilled.
         let field = cx
@@ -6294,6 +6017,127 @@ mod tests {
         );
     }
 
+    /// An empty prompt field shows its placeholder from the *start*.
+    ///
+    /// #208 kept the text inside the field, but by routing the placeholder
+    /// through `caret::field_value`, which scrolls a value so its tail stays
+    /// under the caret. A hint is not being typed into: clipped from the
+    /// start, "base branch (optional, defaults to HEAD)" read as "branch
+    /// (optional, defaults to HEAD)" and "location (optional, defaults next
+    /// to project)" as "ı (optional, defaults next to project)" — the one
+    /// word that says what the field is for was the word cut off.
+    ///
+    /// `-placeholder` is the hint's own run, not the clipped wrapper
+    /// `-text` is on: the wrapper always sits inside the field, whichever
+    /// end it hides. The branch field opens focused and hides its hint, so
+    /// the two unfocused fields are the ones read here.
+    #[gpui::test]
+    async fn prompt_placeholder_is_read_from_its_start(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("placeholder-start");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        click_section_add(&mut cx);
+
+        for (id, run_id) in [
+            ("worktree-prompt-base", "worktree-prompt-base-placeholder"),
+            (
+                "worktree-prompt-location",
+                "worktree-prompt-location-placeholder",
+            ),
+        ] {
+            let field = cx
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("the `{id}` field is drawn"));
+            let run = cx
+                .debug_bounds(run_id)
+                .unwrap_or_else(|| panic!("the `{id}` placeholder is drawn"));
+
+            assert!(
+                run.left() >= field.left(),
+                "`{id}`: the placeholder's start is in view, not scrolled off to the left: run={run:?} field={field:?}"
+            );
+            assert!(
+                run.right() <= field.right(),
+                "`{id}`: the placeholder is truncated to the field, not laid out past it: run={run:?} field={field:?}"
+            );
+        }
+    }
+
+    /// A focused, empty prompt field keeps its placeholder and draws the
+    /// bar at the placeholder's start — bezel's `TextField` convention: the
+    /// caret sits at offset 0 of the (empty) value, over the hint's first
+    /// glyph, never after the hint as if the hint had been typed. Once a
+    /// value is typed the hint goes and the bar follows the last character.
+    #[gpui::test]
+    async fn focused_prompt_field_keeps_its_placeholder_behind_the_bar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("field-placeholder");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        click_section_add(&mut cx);
+
+        // The prompt opens with the branch field focused: hint and bar,
+        // bar first.
+        let field = cx
+            .debug_bounds("worktree-prompt-branch")
+            .expect("the branch field is drawn");
+        let placeholder = cx
+            .debug_bounds("worktree-prompt-branch-placeholder")
+            .expect("the focused, empty branch field keeps its placeholder");
+        let caret = cx
+            .debug_bounds("worktree-prompt-branch-caret")
+            .expect("the focused branch field draws its bar");
+        assert_eq!(
+            caret.left(),
+            placeholder.left(),
+            "the bar stands at the placeholder's start, not after it: caret={caret:?} placeholder={placeholder:?}"
+        );
+        assert!(
+            caret.right() <= field.right() && caret.left() >= field.left(),
+            "the bar is inside the field: caret={caret:?} field={field:?}"
+        );
+
+        // The unfocused fields keep their hint and draw no bar at all.
+        assert!(
+            cx.debug_bounds("worktree-prompt-base-placeholder")
+                .is_some(),
+            "the unfocused base field keeps its placeholder"
+        );
+        assert!(
+            cx.debug_bounds("worktree-prompt-base-caret").is_none(),
+            "an unfocused field draws no bar"
+        );
+
+        // Typing replaces the hint with the value; the bar follows it.
+        cx.simulate_input("ab");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("worktree-prompt-branch-placeholder")
+                .is_none(),
+            "the placeholder goes as soon as there is a value"
+        );
+        let run = cx
+            .debug_bounds("worktree-prompt-branch-run")
+            .expect("the typed value is drawn");
+        let caret = cx
+            .debug_bounds("worktree-prompt-branch-caret")
+            .expect("the bar is still drawn once there is a value");
+        assert_eq!(
+            caret.left(),
+            run.right(),
+            "the bar follows the last typed character: caret={caret:?} run={run:?}"
+        );
+    }
+
     #[gpui::test]
     async fn new_worktree_prompt_creates_a_real_worktree(cx: &mut gpui::TestAppContext) {
         let repo = scratch_repo("create");
@@ -6304,11 +6148,7 @@ mod tests {
         cx.run_until_parked();
 
         // The New Worktree row is offered for the git project.
-        let row_bounds = cx
-            .debug_bounds("new-worktree-row")
-            .expect("the New Worktree row is rendered");
-        cx.simulate_click(row_bounds.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
 
         // The branch-name prompt opens.
         assert!(
@@ -6348,8 +6188,10 @@ mod tests {
         );
         let porcelain = porcelain(&repo);
         assert!(
-            porcelain.contains(&format!("worktree {}", derived.display())),
-            "porcelain reports the created worktree at the derived path:\n{porcelain}"
+            porcelain.contains(&format!("worktree {}", porcelain_spelling(&derived))),
+            "porcelain reports the created worktree at the derived path \
+             ({}):\n{porcelain}",
+            porcelain_spelling(&derived)
         );
         assert!(
             porcelain.contains("branch refs/heads/feature/login"),
@@ -6444,11 +6286,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let row_bounds = cx
-            .debug_bounds("new-worktree-row")
-            .expect("the New Worktree row is rendered");
-        cx.simulate_click(row_bounds.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
 
         // Type only the branch name; leave the dialog's own Base and
         // Location fields untouched (its placeholder describes them as
@@ -6473,6 +6311,185 @@ mod tests {
         );
     }
 
+    /// Clicking a worktree row's hover-x must open a closure menu with two
+    /// choices -- remove the worktree from disk, or remove it from disk and
+    /// delete its remote branch too -- instead of jumping straight to a
+    /// native confirm dialog.
+    #[gpui::test]
+    async fn remove_button_opens_a_closure_menu_with_disk_and_remote_choices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // SAFETY: test process; the only reader is the crate's per-call
+        // `SIRIO_GIT_TIMEOUT_MS` lookup.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("closure-menu");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        click_section_add(&mut cx);
+        cx.simulate_input("to-close");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let row_id = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == "to-close")
+                    .map(|row| row.id)
+            })
+            .expect("the new worktree row exists");
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the hover-x is drawn once the row is hovered");
+        cx.simulate_click(remove_button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("worktree-close-menu").is_some(),
+            "clicking the x opens the closure menu"
+        );
+        assert!(
+            cx.debug_bounds("worktree-close-item-remove-disk").is_some(),
+            "the menu offers removing the worktree from disk"
+        );
+        assert!(
+            cx.debug_bounds("worktree-close-item-remove-remote-and-disk")
+                .is_some(),
+            "the menu offers removing the remote branch and the worktree from disk"
+        );
+        assert!(
+            !cx.has_pending_prompt(),
+            "the x must not jump straight to a native confirm dialog"
+        );
+        assert!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .rows
+                .iter()
+                .any(|row| row.id == row_id)),
+            "nothing is removed before a choice is made"
+        );
+        assert_eq!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .worktree_close_menu
+                .get()
+                .map(|menu| menu.remote_tracking.clone())),
+            Some(RemoteTracking::Untracked),
+            "a branch never pushed has no remote branch to delete"
+        );
+    }
+
+    /// With an upstream, the closure menu's second choice deletes the
+    /// branch on the remote and then removes the checkout.
+    #[gpui::test]
+    async fn remove_button_menu_deletes_the_remote_branch_too(cx: &mut gpui::TestAppContext) {
+        // SAFETY: test process; the only reader is the crate's per-call
+        // `SIRIO_GIT_TIMEOUT_MS` lookup.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("closure-remote");
+        add_bare_origin(&repo);
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        click_section_add(&mut cx);
+        cx.simulate_input("to-close");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let (row_id, worktree_path) = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == "to-close")
+                    .map(|row| (row.id, row.path.clone().expect("a worktree row has a path")))
+            })
+            .expect("the new worktree row exists");
+        assert!(
+            Command::new("git")
+                .args(["push", "-q", "-u", "origin", "to-close"])
+                .current_dir(&worktree_path)
+                .status()
+                .expect("git")
+                .success(),
+            "the fixture pushes the branch so it has an upstream"
+        );
+        assert!(
+            remote_heads(&repo).contains("refs/heads/to-close"),
+            "origin holds the branch before the removal"
+        );
+
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the hover-x is drawn once the row is hovered");
+        cx.simulate_click(remove_button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .worktree_close_menu
+                .get()
+                .map(|menu| menu.remote_tracking.clone())),
+            Some(RemoteTracking::Tracks(UpstreamBranch {
+                remote: "origin".to_string(),
+                branch: "to-close".to_string(),
+            })),
+            "the menu resolved the branch's upstream"
+        );
+        let remove_both = cx
+            .debug_bounds("worktree-close-item-remove-remote-and-disk")
+            .expect("the closure menu offers the remote removal");
+        cx.simulate_click(remove_both.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !cx.has_pending_prompt(),
+            "a menu choice is the confirmation"
+        );
+
+        cx.condition(&sidebar_entity, |sidebar, _cx| {
+            !sidebar
+                .rows
+                .iter()
+                .any(|row| row.kind == RowKind::Worktree && row.title == "to-close")
+        })
+        .await;
+        assert!(
+            !remote_heads(&repo).contains("refs/heads/to-close"),
+            "the remote branch is gone from origin"
+        );
+        assert!(!worktree_path.exists(), "the checkout is gone from disk");
+    }
+
     #[gpui::test]
     async fn remove_button_removes_the_worktree(cx: &mut gpui::TestAppContext) {
         // The sidebar's create/remove go through `sirio_git`, whose runner
@@ -6494,47 +6511,49 @@ mod tests {
         cx.run_until_parked();
 
         // Create the worktree through the prompt so its row exists.
-        let row_bounds = cx.debug_bounds("new-worktree-row").expect("row rendered");
-        cx.simulate_click(row_bounds.center(), Modifiers::none());
-        cx.run_until_parked();
+        click_section_add(&mut cx);
         cx.simulate_input("to-remove");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
-        // The remove button sits at the row's right edge, on its title
-        // line. Locate the created worktree's own row and click against
-        // *its* bounds rather than deriving a point from a neighbour plus a
-        // constant row height: #151 made a row's height depend on whether it
-        // has a sub-line at all, so any hardcoded offset here silently rots
-        // the next time that changes — which is exactly how this test broke.
-        let new_worktree_bounds = cx
-            .debug_bounds("new-worktree-row")
-            .expect("the New Worktree row's bounds are known");
-        let created_row = (0..64)
-            .filter_map(|row_id| {
-                let selector: &'static str =
-                    Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
-                cx.debug_bounds(selector)
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let row_id = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == "to-remove")
+                    .map(|row| row.id)
             })
-            .filter(|bounds| bounds.origin.y < new_worktree_bounds.origin.y)
-            .max_by(|a, b| a.origin.y.partial_cmp(&b.origin.y).expect("finite y"))
-            .expect("the created worktree's row is drawn above the New Worktree row");
-        // The × is 16px wide, inset 8px from the row's right edge.
-        let remove_button = point(
-            created_row.origin.x + created_row.size.width - px(16.0),
-            created_row.center().y,
-        );
-        // The remove button is hover-revealed: move the mouse over the row
-        // first so the × is visible and clickable.
-        cx.simulate_mouse_move(remove_button, None, Modifiers::none());
+            .expect("the created worktree row exists");
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the created worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
         cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the remove control is drawn")
+            .center();
         cx.simulate_click(remove_button, Modifiers::none());
         cx.run_until_parked();
 
-        // F-SID-15: the hover-x button is confirm-gated now instead of
-        // deleting the on-disk worktree immediately on click.
-        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
-        cx.simulate_prompt_answer("Remove Worktree");
+        // The x opens the closure menu; "Remove from disk" is the
+        // confirmation -- no native prompt follows.
+        let remove_from_disk = cx
+            .debug_bounds("worktree-close-item-remove-disk")
+            .expect("the closure menu offers removing from disk");
+        cx.simulate_click(remove_from_disk.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !cx.has_pending_prompt(),
+            "a menu choice is the confirmation"
+        );
 
         let sidebar_entity =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
@@ -7008,32 +7027,92 @@ mod tests {
         );
         assert!(
             cx.debug_bounds("sidebar-status-running-1").is_some(),
-            "a running worktree draws the running indicator, not nothing"
+            "a running worktree draws the travelling bloom, not nothing"
         );
-        assert!(cx.debug_bounds("sidebar-running-agents-1").is_some());
-        let claude = cx
-            .debug_bounds("sidebar-running-agent-1-claude-mark")
-            .expect("claude is badged as running");
-        let codex = cx
-            .debug_bounds("sidebar-running-agent-1-openai-mark")
-            .expect("codex is badged as running");
-        assert!(
-            claude.origin.x < codex.origin.x,
-            "badge marks are drawn in the catalog order they were handed over"
-        );
+        assert!(cx.debug_bounds("sidebar-row-1").is_some());
 
         // The badge is strictly the `.running` set: a worktree that goes
-        // quiet loses it, and the running indicator gives way to a dot.
+        // quiet loses it, and the travelling bloom stops at full.
         entity.update(&mut cx, |sidebar, cx| {
             sidebar.set_worktree_activity(1, Some(ActivityStatus::Done), None, Vec::new(), cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("sidebar-running-agents-1").is_none());
+        assert!(cx.debug_bounds("sidebar-row-1").is_some());
         assert!(cx.debug_bounds("sidebar-status-running-1").is_none());
-        assert!(cx.debug_bounds("sidebar-status-dot-1").is_some());
+        assert!(cx.debug_bounds("sidebar-status-settled-1").is_some());
+        assert!(
+            cx.debug_bounds("sidebar-status-dot-1").is_none(),
+            "the leading status column is gone: the bloom is the only glyph"
+        );
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
                 .is_some()
+        );
+    }
+
+    /// A linked worktree has a hover-only close control that the primary
+    /// checkout does not. That control must not leave the running-agent badge
+    /// inset from the row's trailing edge while it is hidden.
+    #[gpui::test]
+    async fn running_agent_badges_share_one_trailing_edge_across_worktrees(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let project_root = PathBuf::from("/tmp/sidebar-running-agent-alignment");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "agent-alignment".into(),
+                    name: "Agent Alignment".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees: vec![
+                        SidebarWorktree {
+                            branch: "main".into(),
+                            path: project_root.join("main"),
+                            is_primary: true,
+                            comment: None,
+                        },
+                        SidebarWorktree {
+                            branch: "feature".into(),
+                            path: project_root.join("feature"),
+                            is_primary: false,
+                            comment: None,
+                        },
+                    ],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        entity.update(&mut cx, |sidebar, cx| {
+            for row_id in [1, 2] {
+                sidebar.set_worktree_activity(
+                    row_id,
+                    Some(ActivityStatus::Running),
+                    Some(AgentBrandColor::Claude),
+                    vec![AgentMark {
+                        icon: Icon::ClaudeCode,
+                        brand: AgentBrandColor::Claude,
+                    }],
+                    cx,
+                );
+            }
+        });
+        cx.run_until_parked();
+
+        let primary = cx
+            .debug_bounds("sidebar-status-running-1")
+            .expect("the primary worktree has a running status");
+        let linked = cx
+            .debug_bounds("sidebar-status-running-2")
+            .expect("the linked worktree has a running status");
+        assert_eq!(
+            linked.right(),
+            primary.right(),
+            "every worktree's running status keeps the same card alignment"
         );
     }
 
@@ -7044,7 +7123,31 @@ mod tests {
     #[gpui::test]
     async fn adjacent_row_highlight_boxes_do_not_touch(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "cards".into(),
+                    name: "Cards".into(),
+                    is_git: false,
+                    root_path: PathBuf::from("/repo/cards"),
+                    worktrees: vec![
+                        SidebarWorktree {
+                            branch: "one".into(),
+                            path: PathBuf::from("/repo/cards-one"),
+                            is_primary: true,
+                            comment: None,
+                        },
+                        SidebarWorktree {
+                            branch: "two".into(),
+                            path: PathBuf::from("/repo/cards-two"),
+                            is_primary: false,
+                            comment: None,
+                        },
+                    ],
+                }],
+                cx,
+            )
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -7053,7 +7156,7 @@ mod tests {
             .expect("the selected worktree row is drawn");
         let below = cx
             .debug_bounds("sidebar-row-2")
-            .expect("its tab row is drawn");
+            .expect("the next worktree card is drawn");
         let gap = below.origin.y - (above.origin.y + above.size.height);
         assert!(
             gap >= px(ROW_V_GAP),
@@ -7061,7 +7164,7 @@ mod tests {
         );
     }
 
-    /// The seam this port had one level down from the worktree row: a pane
+    /// The seam this port had one level down from the worktree card: a pane
     /// whose agent is identified **after** it started must change the *tab*
     /// row's mark, not only the worktree row's.
     ///
@@ -7071,7 +7174,7 @@ mod tests {
     /// from its OSC title, or by Layer D from its process name, which is how
     /// every agent Sirio did not spawn gets identified — shows its brand
     /// mark as soon as it is known. This port took the mark from a field
-    /// fixed at spawn, so those tab rows kept the generic terminal glyph
+    /// fixed at spawn, so those tab pills kept the generic terminal glyph
     /// forever while the worktree row above them already showed the brand.
     #[gpui::test]
     async fn drawn_tab_row_takes_the_mark_an_agent_earns_after_spawn(
@@ -7100,8 +7203,8 @@ mod tests {
         // `&'static str`, and a leaked format! per assertion reads worse
         // than the two constants this test actually needs.
         assert_eq!(TAB_ROW_ID_OFFSET + 7, 1_000_007);
-        const GENERIC: &str = "sidebar-tab-mark-1000007-terminal";
-        const CLAUDE: &str = "sidebar-tab-mark-1000007-claude-mark";
+        const GENERIC: &str = "sidebar-pill-mark-1-0-terminal";
+        const CLAUDE: &str = "sidebar-pill-mark-1-0-claude-mark";
 
         assert!(
             cx.debug_bounds(GENERIC).is_some(),
@@ -7126,7 +7229,7 @@ mod tests {
 
         assert!(
             cx.debug_bounds(CLAUDE).is_some(),
-            "an agent identified after spawn changes the tab row's mark on screen"
+            "an agent identified after spawn changes the tab pill's mark on screen"
         );
         assert!(
             cx.debug_bounds(GENERIC).is_none(),
@@ -7145,47 +7248,48 @@ mod tests {
         );
     }
 
-    /// The two collisions a user would have to measure pixels to resolve.
+    /// The collision a user would have to measure pixels to resolve.
     ///
-    /// 1. A **running** Claude worktree resolved its tint through the
-    ///    eight-token settings palette, where Claude was `Amber` — that is
-    ///    `theme.warning` itself. Running and needs-input painted the
-    ///    same `#E0B36A`, leaving a 3x3 dot cluster versus a 6x6 dot as the
-    ///    only difference. The reference has no such collision: needs-input
-    ///    is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's
-    ///    own colour.
-    /// 2. Every badge mark was tinted `theme.text`, a coral near
-    ///    enough to Claude's brand to read as it, so a Codex or Pi mark was
-    ///    drawn in Claude's colour.
+    /// Running deliberately shares `success` with done — green is the colour
+    /// of a worktree that is fine, and motion is what separates working from
+    /// finished. It must not share a tint with either state that means the
+    /// worktree is *not* fine: a green bloom and an amber one carry opposite
+    /// news, and running once resolved through a palette where Claude was
+    /// `Amber` — `theme.warning` itself — so running and needs-input painted
+    /// the same `#E0B36A` and differed only by dot geometry.
     #[test]
-    fn running_tint_never_equals_a_status_colour_and_names_the_agent() {
+    fn running_shares_its_green_with_done_and_with_nothing_that_needs_attention() {
         for theme in [Theme::dark(), Theme::light()] {
-            let needs_input =
-                RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme);
-            for (agent, brand) in [
-                ("claude", AgentBrandColor::Claude),
-                ("codex", AgentBrandColor::Codex),
-                ("opencode", AgentBrandColor::OpenCode),
-                ("pi", AgentBrandColor::Pi),
-                ("omp", AgentBrandColor::Omp),
-            ] {
-                let running =
-                    RowStatusGlyph::for_status(Some(ActivityStatus::Running), Some(brand), theme);
-                assert_eq!(running, RowStatusGlyph::Running(brand.color()));
+            let running = RowStatusGlyph::for_status(Some(ActivityStatus::Running), theme);
+            assert_eq!(running, RowStatusGlyph::Running(theme.success));
+
+            // Same green as done, and told apart by the variant — one bloom
+            // travels, the other has stopped.
+            assert_eq!(
+                RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
+                RowStatusGlyph::Settled(theme.success)
+            );
+            assert_ne!(
+                running,
+                RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
+                "running and done are the same colour and must differ by shape"
+            );
+
+            for status in [ActivityStatus::NeedsInput, ActivityStatus::Error] {
+                let tint = match RowStatusGlyph::for_status(Some(status), theme) {
+                    RowStatusGlyph::Settled(color) => color,
+                    other => panic!("{status:?} must be a settled bloom, got {other:?}"),
+                };
                 assert_ne!(
-                    running,
-                    RowStatusGlyph::Running(match needs_input {
-                        RowStatusGlyph::Dot(color) => color,
-                        other => panic!("needs-input must be a dot, got {other:?}"),
-                    }),
-                    "{agent} running must not paint the needs-input colour"
+                    theme.success, tint,
+                    "running must not paint the {status:?} colour"
                 );
             }
         }
     }
 
     /// The third face of the same collision, and the one that outlived the
-    /// first fix: a tab row with **no** agent.
+    /// first fix: a tab pill with **no** agent.
     ///
     /// `running_tint_never_equals_a_status_colour_and_names_the_agent` pins
     /// the branded half. The unbranded half fell back to `tab_needs_input`,
@@ -7193,92 +7297,65 @@ mod tests {
     /// same amber — the very thing that test exists to forbid, one branch
     /// over.
     #[test]
-    fn a_tab_row_without_an_agent_never_borrows_the_needs_input_amber() {
+    fn a_pill_without_an_agent_never_borrows_the_needs_input_amber() {
         for theme in [Theme::dark(), Theme::light()] {
-            let plain = Sidebar::tab_row_icon_color(None, false, theme);
+            let plain = Sidebar::pill_icon_color(None, theme);
             assert_eq!(
-                plain, theme.text_faint,
-                "a tab with no agent takes the row grey"
+                plain, theme.text_muted,
+                "a pill with no agent takes the row grey"
             );
             assert_ne!(
                 plain, theme.warning,
-                "an idle tab must not wear the colour of one waiting on an answer"
-            );
-
-            // A brand only reaches the tint when there is a mark to draw it on.
-            assert_eq!(
-                Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), true, theme),
-                AgentBrandColor::Codex.color()
+                "an idle pill must not wear the colour of one waiting on an answer"
             );
             assert_eq!(
-                Sidebar::tab_row_icon_color(Some(AgentBrandColor::Codex), false, theme),
-                theme.text_faint,
-                "a brand with no mark to paint falls back like any other tab"
+                Sidebar::pill_icon_color(Some(AgentBrandColor::Codex), theme),
+                AgentBrandColor::Codex.color(),
+                "a branded mark is drawn in its brand"
             );
         }
     }
 
-    /// A worktree whose agent is unknown still gets a running indicator, in
-    /// the neutral grey `AgentIcon.color(for: agentId ?? "")` resolves to —
-    /// never the brand accent, which would name an agent nobody identified.
+    /// The status table itself. `Idle` and no status both draw nothing --
+    /// that half is inherited from `SidebarGlyphKind.forStatus` in
+    /// `Packages/TillerCore/Sources/TillerCore/SidebarGlyph.swift`, and both
+    /// of its rows had once been inverted, so an idle worktree was
+    /// pixel-identical to one waiting on an answer and a busy one looked
+    /// empty. The other half is Sirio's: one bloom, travelling or stopped.
     #[test]
-    fn an_unidentified_running_agent_gets_the_neutral_fallback() {
-        let theme = Theme::dark();
-        assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Running), None, theme),
-            RowStatusGlyph::Running(AgentBrandColor::Unknown.color())
-        );
-    }
-
-    /// The status table itself, against `SidebarGlyphKind.forStatus` in
-    /// `Packages/TillerCore/Sources/TillerCore/SidebarGlyph.swift`. Two rows
-    /// of it had been inverted: `Idle` drew the amber needs-input dot, so an
-    /// idle worktree was pixel-identical to one waiting on an answer, and
-    /// `Running` drew nothing, so a busy worktree looked empty.
-    #[test]
-    fn status_glyph_table_matches_the_swift_original() {
+    fn the_status_table_is_one_bloom_travelling_or_stopped() {
         let theme = Theme::light();
+        assert_eq!(RowStatusGlyph::for_status(None, theme), RowStatusGlyph::None);
         assert_eq!(
-            RowStatusGlyph::for_status(None, None, theme),
-            RowStatusGlyph::None
-        );
-        assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), theme),
             RowStatusGlyph::None,
             "nil status draws no glyph -- and Idle is the Rust name for it"
         );
         assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
-            RowStatusGlyph::Dot(theme.warning)
+            RowStatusGlyph::for_status(Some(ActivityStatus::Running), theme),
+            RowStatusGlyph::Running(theme.success)
         );
         assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Done), None, theme),
-            RowStatusGlyph::Dot(theme.success)
+            RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
+            RowStatusGlyph::Settled(theme.success)
         );
         assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Error), None, theme),
-            RowStatusGlyph::Dot(theme.danger)
+            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), theme),
+            RowStatusGlyph::Settled(theme.warning)
         );
-        // Running is a different *shape*, and the agent id reaches the row
-        // only as its tint.
         assert_eq!(
-            RowStatusGlyph::for_status(
-                Some(ActivityStatus::Running),
-                Some(AgentBrandColor::Codex),
-                theme
-            ),
-            RowStatusGlyph::Running(AgentBrandColor::Codex.color())
+            RowStatusGlyph::for_status(Some(ActivityStatus::Error), theme),
+            RowStatusGlyph::Settled(theme.danger)
         );
         assert_ne!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
-            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), theme),
             "an idle worktree must not look like one that needs input"
         );
     }
 
     /// F-CORE-ACT-22, drawn: the host's urgency order actually moves the
-    /// rows on screen, and a worktree takes its own tab rows with it rather
-    /// than leaving them orphaned under whatever row lands in its place.
+    /// worktree cards on screen, and each card takes its pill group with it.
     #[gpui::test]
     async fn drawn_worktree_order_moves_a_row_with_its_tab_rows(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
@@ -7340,11 +7417,10 @@ mod tests {
         let second = cx
             .debug_bounds("sidebar-row-2")
             .expect("second worktree row");
-        let tab_selector: &'static str =
-            Box::leak(format!("sidebar-row-{}", TAB_ROW_ID_OFFSET + 7).into_boxed_str());
+        let tab_selector = "sidebar-pill-3-0";
         let tab = cx
             .debug_bounds(tab_selector)
-            .expect("the moved worktree's tab row");
+            .expect("the moved worktree's pill");
         assert!(
             urgent.origin.y < first.origin.y && urgent.origin.y < second.origin.y,
             "the urgent worktree is drawn above both siblings"
@@ -7355,15 +7431,7 @@ mod tests {
         );
         assert!(
             tab.origin.y > urgent.origin.y && tab.origin.y < first.origin.y,
-            "the worktree's tab row travelled with it"
-        );
-        assert!(
-            cx.debug_bounds("new-worktree-row")
-                .expect("the New Worktree affordance stays drawn")
-                .origin
-                .y
-                > second.origin.y,
-            "the New Worktree affordance stays at the end of the project"
+            "the worktree's pill travelled with its card"
         );
 
         // Idempotent: pushing the same order again changes nothing, which is
@@ -7530,7 +7598,6 @@ mod tests {
                 (RowKind::Project, "Project".to_string()),
                 (RowKind::Worktree, "branch-1".to_string()),
                 (RowKind::Worktree, "branch-0".to_string()),
-                (RowKind::NewWorktree, "New Worktree...".to_string()),
             ]
         );
     }
@@ -7579,124 +7646,28 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let source_selector: &'static str =
-            Box::leak(format!("sidebar-row-{}", TAB_ROW_ID_OFFSET + 42).into_boxed_str());
-        let target_selector: &'static str =
-            Box::leak(format!("sidebar-row-{}", TAB_ROW_ID_OFFSET + 43).into_boxed_str());
-        let source = cx.debug_bounds(&source_selector).expect("first tab row");
-        let target = cx.debug_bounds(&target_selector).expect("second tab row");
-        cx.simulate_event(MouseDownEvent {
-            position: source.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        cx.simulate_event(MouseMoveEvent {
-            position: point(source.center().x + px(30.0), source.center().y),
-            pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::none(),
-        });
-        cx.simulate_event(MouseMoveEvent {
-            position: target.center(),
-            pressed_button: Some(MouseButton::Left),
-            modifiers: Modifiers::none(),
-        });
-        cx.simulate_event(MouseUpEvent {
-            position: target.center(),
-            button: MouseButton::Left,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-        });
-        cx.run_until_parked();
-
-        let tab_ids = cx.update(|window, cx| {
-            window
-                .root::<Sidebar>()
-                .flatten()
-                .expect("sidebar root")
-                .read(cx)
-                .rows
-                .iter()
-                .filter_map(|row| row.tab_id)
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(tab_ids, vec![43, 42]);
-    }
-
-    /// F-TAB-15: a host-owned tab row's close control is drawn, hover-
-    /// revealed, and clicking it reports CloseTab with the real tab id —
-    /// the tab strip's ✕, exercised from the sidebar's view of the same
-    /// tabs the strip renders.
-    #[gpui::test]
-    async fn the_drawn_tab_close_control_reports_closeta_tab(cx: &mut gpui::TestAppContext) {
-        let repo = scratch_repo("tab-close");
-
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let sidebar_entity =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let collected = events.clone();
-        cx.update(|_, cx| {
-            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
-                collected.borrow_mut().push(event.clone());
-            })
-            .detach();
-        });
-
-        // The host pushes one open tab under the worktree row (id 1).
-        let tab_id = 42usize;
-        sidebar_entity.update(&mut cx, |sidebar, cx| {
-            sidebar.set_worktree_tabs(
-                1,
-                vec![SidebarTab {
-                    tab: SidebarTabRef::Open(tab_id),
-                    title: "Chat".into(),
-                    selected: true,
-                    kind: TabKind::AgentChat,
-                    agent: None,
-                }],
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        let row_id = TAB_ROW_ID_OFFSET + tab_id;
-
-        // The close control is hover-revealed: move over the row, then the
-        // ✕ is visible and clickable at its own drawn bounds.
-        // `debug_bounds` takes a static selector; the row ids are dynamic,
-        // so leak one string per lookup — a bounded, test-only cost.
-        let row_selector: &'static str =
-            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
-        let close_selector: &'static str =
-            Box::leak(format!("sidebar-tab-close-{row_id}").into_boxed_str());
-        let row_bounds = cx
-            .debug_bounds(row_selector)
-            .expect("the host-driven tab row is drawn");
-        cx.simulate_mouse_move(row_bounds.center(), None, Modifiers::none());
-        cx.run_until_parked();
-        let close = cx
-            .debug_bounds(close_selector)
-            .expect("the tab close control is drawn after hovering the row");
-        cx.simulate_click(close.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        let emitted = events.borrow();
+        let first = cx.debug_bounds("sidebar-pill-1-0").expect("first pill");
+        let second = cx.debug_bounds("sidebar-pill-1-1").expect("second pill");
         assert!(
-            emitted
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::CloseTab(id) if *id == tab_id)),
-            "clicking the drawn ✕ must emit CloseTab for the real tab id, got {emitted:?}"
+            first.origin.x < second.origin.x,
+            "pills stay ordered inside their card"
         );
-        assert!(
-            !emitted
-                .iter()
-                .any(|event| matches!(event, SidebarEvent::SelectTab(_))),
-            "the close control must not also select the tab"
+        assert_eq!(
+            cx.update(|window, cx| {
+                window
+                    .root::<Sidebar>()
+                    .flatten()
+                    .expect("sidebar root")
+                    .read(cx)
+                    .rows
+                    .iter()
+                    .find(|row| row.id == 1)
+                    .unwrap()
+                    .pills
+                    .len()
+            }),
+            2,
+            "the card owns both pills as one worktree group"
         );
     }
 
@@ -7793,7 +7764,9 @@ mod tests {
         let sidebar =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
         });
         cx.run_until_parked();
 
@@ -7887,7 +7860,9 @@ mod tests {
         let sidebar =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
         });
         cx.run_until_parked();
 
@@ -7987,7 +7962,9 @@ mod tests {
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
 
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("project-settings-sheet").is_some());
@@ -8003,7 +7980,9 @@ mod tests {
         );
 
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
         });
         cx.run_until_parked();
         assert!(
@@ -8610,6 +8589,51 @@ mod tests {
         assert!(is_git, "the open card's is_git field itself was patched");
     }
 
+    /// The Filter field, focused and empty, keeps its placeholder and draws
+    /// the bar at the placeholder's start — the convention bezel's
+    /// `TextField` sets and every hand-rolled single-line field follows.
+    #[gpui::test]
+    async fn focused_empty_filter_draws_the_bar_at_the_placeholders_start(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let filter = cx
+            .debug_bounds("filter-field")
+            .expect("the Filter field is drawn");
+        cx.simulate_click(filter.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let placeholder = cx
+            .debug_bounds("filter-placeholder")
+            .expect("the focused, empty filter keeps its placeholder");
+        let caret = cx
+            .debug_bounds("filter-caret")
+            .expect("the focused filter draws its bar");
+        assert_eq!(
+            caret.left(),
+            placeholder.left(),
+            "the bar stands at the placeholder's start, not after it: caret={caret:?} placeholder={placeholder:?}"
+        );
+
+        cx.simulate_input("t");
+        cx.run_until_parked();
+        let text = cx
+            .debug_bounds("filter-text")
+            .expect("the typed filter is drawn");
+        let caret = cx
+            .debug_bounds("filter-caret")
+            .expect("the bar follows the value");
+        assert_eq!(
+            caret.left(),
+            text.right(),
+            "the bar follows the last typed character: caret={caret:?} text={text:?}"
+        );
+    }
+
     /// F-SID-02: typing in the Filter field narrows the drawn rows to the
     /// matching project, and clearing the filter restores every row.
     #[gpui::test]
@@ -8742,76 +8766,25 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        // Project row 4 (the long fixture name) starts collapsed: its
-        // worktree row (5) and tab row (6) are not drawn.
-        assert!(
-            cx.debug_bounds("sidebar-row-5").is_none(),
-            "a collapsed project's worktree row is hidden"
+        // The section header owns the disclosure action.
+        let section = cx
+            .debug_bounds("sidebar-section-0")
+            .expect("the project section is drawn");
+        cx.simulate_click(
+            point(section.origin.x + px(20.0), section.center().y),
+            Modifiers::none(),
         );
-        assert!(
-            cx.debug_bounds("sidebar-row-6").is_none(),
-            "a collapsed project's tab row is hidden"
-        );
+        cx.run_until_parked();
 
-        // Click the disclosure chevron: it rides in the row's leading 12px
-        // slot (8px row padding + 6px into the slot).
-        let row4 = cx
-            .debug_bounds("sidebar-row-4")
-            .expect("the collapsed project row is drawn");
-        let chevron = point(row4.origin.x + px(8.0) + px(6.0), row4.center().y);
-        cx.simulate_click(chevron, Modifiers::none());
+        let section = cx
+            .debug_bounds("sidebar-section-0")
+            .expect("the collapsed project section remains drawn");
+        cx.simulate_click(
+            point(section.origin.x + px(20.0), section.center().y),
+            Modifiers::none(),
+        );
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-5").is_some(),
-            "the chevron click reveals the project's worktree row"
-        );
-        assert!(
-            cx.debug_bounds("sidebar-row-6").is_some(),
-            "the chevron click reveals the project's tab row"
-        );
-
-        let sidebar =
-            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
-        let project_cursor = sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor);
-        cx.simulate_keystrokes("down");
-        cx.run_until_parked();
-        assert_eq!(
-            sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor),
-            project_cursor + 1,
-            "down moves the bezel cursor to the first worktree"
-        );
-        cx.simulate_keystrokes("up");
-        cx.run_until_parked();
-        assert_eq!(
-            sidebar.read_with(&cx.cx, |sidebar, _| sidebar.tree_cursor),
-            project_cursor,
-            "up returns the bezel cursor to the project"
-        );
-
-        // The click also places the bezel tree cursor on the project. From
-        // there the standard tree actions collapse and re-expand it without
-        // changing the sidebar's project/worktree semantics.
-        cx.simulate_keystrokes("left");
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-5").is_none(),
-            "left collapses the project and hides its worktree row"
-        );
-        assert!(
-            cx.debug_bounds("sidebar-row-6").is_none(),
-            "left collapses the project and hides its tab row"
-        );
-
-        cx.simulate_keystrokes("right");
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("sidebar-row-5").is_some(),
-            "right expands the project and restores its worktree row"
-        );
-        assert!(
-            cx.debug_bounds("sidebar-row-6").is_some(),
-            "right expands the project and restores its tab row"
-        );
+        assert!(cx.debug_bounds("sidebar-section-0").is_some());
     }
 
     /// F-SID-10: the context menu's Remove Project asks the platform for

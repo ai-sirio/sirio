@@ -95,3 +95,18 @@ composition tree, rather than as a child window. On Windows this is WebView2's
 [window hosting](#window-hosting) because a host that composes its own output —
 as GPUI does on Windows — never displays child-window content at all, which is
 what [#144](https://github.com/ai-sirio/sirio/issues/144) turned on.
+
+## Worktree loading
+
+### Snapshot coerente del worktree
+
+Il risultato unico e coerente del caricamento di un worktree: layout tab,
+`tab_states`, session refs degli agenti, tab attivo e secondary pane role.
+Caricato fuori dal render thread dietro adapter blocking, è applicato solo se
+generation e `repo_root` corrispondono ancora.
+
+### Stato di estensione del grafo History
+
+Lo stato append-only in `sirio_git` che estende il layout del grafo commit
+pagina per pagina, con equivalenza stretta al layout completo. Si resetta su
+filtro o ricerca.

@@ -45,7 +45,8 @@ use bezel::{
 };
 use gpui::{
     AnyElement, App, AppContext, Context, EventEmitter, FocusHandle, FontWeight,
-    InteractiveElement, KeyDownEvent, PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
+    InteractiveElement, KeyDownEvent, ListAlignment, ListSizingBehavior, ListState, PromptLevel,
+    Render, Rgba, Task, Window, div, list, prelude::*, px,
 };
 use sirio_git::{
     DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
@@ -53,13 +54,19 @@ use sirio_git::{
     commit_files, diff_entry, discard, discard_all, stage, stage_all, stats, status, unstage,
 };
 use sirio_theme::Theme;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::controls;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
+
+#[cfg(test)]
+mod perf_baseline;
 
 /// Context lines fetched for each change. Generous enough that the
 /// collapsed-context bands carry real counts ("27 hidden lines"), cheap
@@ -121,6 +128,14 @@ const CONTEXT_BAND_MIN: usize = 4;
 /// rather than two halves of each row; that is a different shape of code,
 /// not a constant.
 const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
+/// How far past the viewport the virtualized list lays rows out, so a wheel
+/// tick never scrolls into rows that have not been drawn yet. The same
+/// figure the chat transcript's list uses.
+const LIST_OVERDRAW: f32 = 2048.0;
+
+fn new_list_state() -> ListState {
+    ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW))
+}
 
 /// How an expanded file's diff is drawn.
 ///
@@ -369,6 +384,97 @@ enum ChangeRow {
     },
 }
 
+/// One item of the virtualized list: a section header or a change row.
+/// Flattened from [`SectionRows`] once per frame, because `gpui::list`
+/// asks for items by index.
+enum ListRow {
+    Header {
+        section: ChangeSection,
+        count: usize,
+        collapsed: bool,
+    },
+    Change(ChangeRow),
+}
+
+impl ListRow {
+    /// Hashes what decides this row's identity and height, never its text.
+    /// The list is re-spliced when the fingerprint of the whole stream
+    /// changes; `ListState::splice` keeps the logical scroll top (an item
+    /// index plus an offset inside it), so the reader stays put across an
+    /// expand below the viewport or a refresh that re-reads the same diff.
+    fn hash_identity<H: Hasher>(&self, state: &mut H) {
+        match self {
+            ListRow::Header {
+                section, collapsed, ..
+            } => {
+                0u8.hash(state);
+                section.hash(state);
+                collapsed.hash(state);
+            }
+            ListRow::Change(row) => match row {
+                ChangeRow::File {
+                    section,
+                    entry,
+                    expanded,
+                    ..
+                } => {
+                    1u8.hash(state);
+                    section.hash(state);
+                    entry.path.hash(state);
+                    expanded.hash(state);
+                }
+                ChangeRow::Hunk {
+                    section,
+                    path,
+                    header,
+                } => {
+                    2u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    header.hash(state);
+                }
+                ChangeRow::ContextBand {
+                    section,
+                    path,
+                    key,
+                    expanded,
+                    ..
+                } => {
+                    3u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    key.hash(state);
+                    expanded.hash(state);
+                }
+                ChangeRow::Line {
+                    section,
+                    path,
+                    line,
+                } => {
+                    4u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    line.old_line_number.hash(state);
+                    line.new_line_number.hash(state);
+                }
+                ChangeRow::SplitLine {
+                    section, path, key, ..
+                } => {
+                    5u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                    key.hash(state);
+                }
+                ChangeRow::Unavailable { section, path, .. } => {
+                    6u8.hash(state);
+                    section.hash(state);
+                    path.hash(state);
+                }
+            },
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct GitSnapshot {
     entries: Vec<StatusEntry>,
@@ -476,6 +582,22 @@ pub struct ChangesTab {
     /// Focus for the list, so `on_key_down` reaches it. Built lazily at
     /// first render, the way the Files tree's is.
     list_focus: Option<FocusHandle>,
+    /// The virtualized list's state. `gpui::list` lays out only the rows
+    /// in and just around the viewport, so a frame over a 15 000-line diff
+    /// costs what the viewport costs, not what the file costs -- the old
+    /// `overflow_y_scroll` container built every row of every expanded
+    /// diff on every frame, and one wheel tick over a large diff cost
+    /// seconds. Kept in step with the row stream by `sync_list_rows`.
+    list_state: ListState,
+    /// Fingerprint of the row stream `list_state` was last spliced to
+    /// (kinds, sections, paths, keys -- never text). A refresh that
+    /// re-reads an unchanged diff leaves it alone; an expand, a collapse
+    /// or a file appearing re-splices.
+    list_fingerprint: u64,
+    /// Set by keyboard selection so the next frame scrolls the selected
+    /// file row into view: a virtualized list draws nothing off-screen, so
+    /// a selection that moved there would otherwise be invisible.
+    reveal_selected: bool,
 }
 
 impl ChangesTab {
@@ -526,6 +648,9 @@ impl ChangesTab {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -585,22 +710,39 @@ impl ChangesTab {
         }
     }
 
-    fn apply_snapshot(&mut self, snapshot: GitSnapshot) {
+    fn apply_snapshot(&mut self, snapshot: GitSnapshot, cx: &mut Context<Self>) {
         // A file that leaves the status list forgets its expansion; a file
         // that merely changes section (staged → unstaged) forgets it too —
         // the old (section, path) key no longer exists.
         self.expanded_changes
             .retain(|(_, path)| snapshot.entries.iter().any(|entry| &entry.path == path));
+        // A lazy refresh only re-fetches diffs for expanded rows (see
+        // `load_worktree_snapshot`), so `diffs`/`diff_errors` cannot simply
+        // be replaced wholesale by this snapshot's -- that would evict a
+        // collapsed row's already-cached diff on every tick, for a path
+        // this refresh never even asked git about. A path this refresh did
+        // fetch always takes the fresh result (in whichever of the two maps
+        // it landed); a path it left alone keeps whatever it had; a path
+        // that dropped out of the entry list entirely (staged away,
+        // reverted) is dropped from both.
+        let live_paths: HashSet<&PathBuf> =
+            snapshot.entries.iter().map(|entry| &entry.path).collect();
+        self.diffs.retain(|path, _| live_paths.contains(path));
+        self.diff_errors.retain(|path, _| live_paths.contains(path));
+        for path in snapshot.diffs.keys().chain(snapshot.diff_errors.keys()) {
+            self.diffs.remove(path);
+            self.diff_errors.remove(path);
+        }
+        self.diffs.extend(snapshot.diffs);
+        self.diff_errors.extend(snapshot.diff_errors);
         self.entries = snapshot.entries;
         self.stats = snapshot.stats;
-        self.diffs = snapshot.diffs;
-        self.diff_errors = snapshot.diff_errors;
         // F-CHG-13: replay a focus_path request that raced this snapshot.
         // Applied at most once — if the path still isn't present (e.g. it
         // was reverted before the snapshot came back), there is nothing
         // further to wait for.
         if let Some(path) = self.pending_focus.take() {
-            self.apply_focus(&path);
+            self.apply_focus(&path, cx);
         }
     }
 
@@ -610,16 +752,19 @@ impl ChangesTab {
         }
         let repo_root = self.repo_root.clone();
         let source = self.source.clone();
+        let expanded_paths = self.expanded_paths_for_load();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { load_snapshot(&repo_root, &source) })
+                .background_spawn(async move {
+                    load_snapshot(&repo_root, &source, expanded_paths.as_ref())
+                })
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 tab.git_task = None;
                 tab.has_loaded = true;
                 match result {
                     Ok(snapshot) => {
-                        tab.apply_snapshot(snapshot);
+                        tab.apply_snapshot(snapshot, cx);
                         if !tab.git_error_from_mutation {
                             tab.git_error = None;
                         }
@@ -633,6 +778,18 @@ impl ChangesTab {
                 cx.notify();
             });
         }));
+    }
+
+    /// The diff-fetch scope for the next snapshot load: `None` (fetch every
+    /// entry) before the surface has ever settled, `Some(paths)` (fetch only
+    /// what's expanded) afterward. See `load_worktree_snapshot`.
+    fn expanded_paths_for_load(&self) -> Option<HashSet<PathBuf>> {
+        self.has_loaded.then(|| {
+            self.expanded_changes
+                .iter()
+                .map(|(_, path)| path.clone())
+                .collect()
+        })
     }
 
     /// Arms the periodic refresh loop: once immediately, then on the
@@ -688,6 +845,7 @@ impl ChangesTab {
         }
         let repo_root = self.repo_root.clone();
         let source = self.source.clone();
+        let expanded_paths = self.expanded_paths_for_load();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move {
@@ -695,7 +853,7 @@ impl ChangesTab {
                     let snapshot = result
                         .as_ref()
                         .ok()
-                        .map(|_| load_snapshot(&repo_root, &source));
+                        .map(|_| load_snapshot(&repo_root, &source, expanded_paths.as_ref()));
                     (result, snapshot)
                 })
                 .await;
@@ -705,7 +863,7 @@ impl ChangesTab {
                 let next_operation = tab.pending_operations.pop_front();
                 match outcome {
                     (Ok(()), Some(Ok(snapshot))) => {
-                        tab.apply_snapshot(snapshot);
+                        tab.apply_snapshot(snapshot, cx);
                         tab.git_error = None;
                         tab.git_error_from_mutation = false;
                     }
@@ -872,6 +1030,7 @@ impl ChangesTab {
     fn select_change(&mut self, row: (ChangeSection, PathBuf), cx: &mut Context<Self>) {
         if self.selected_change.as_ref() != Some(&row) {
             self.selected_change = Some(row);
+            self.reveal_selected = true;
             cx.notify();
         }
     }
@@ -880,7 +1039,12 @@ impl ChangesTab {
     /// path to what "Open diff" does with the mouse. Inside the Changes tab
     /// there is nothing to promote *to* (the tab is already the destination),
     /// so Enter expands the row there instead, matching what a click does.
-    fn on_change_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_change_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let rows = self.selectable_rows(DiffViewMode::get(cx));
         if rows.is_empty() {
             return;
@@ -919,8 +1083,52 @@ impl ChangesTab {
             self.expanded_changes.remove(&key);
         } else {
             self.expanded_changes.insert(key);
+            self.fetch_expanded_diff(path.to_path_buf(), cx);
         }
         cx.notify();
+    }
+
+    /// Fetches one file's full diff in the background and merges it into
+    /// `self.diffs` once it lands, rather than leaving a just-expanded row
+    /// waiting on the next periodic tick (up to `CHANGES_REFRESH_INTERVAL`
+    /// away) to show anything.
+    ///
+    /// A no-op when the diff (or its failure) is already cached: the first
+    /// load fetches every entry eagerly, so this only does real work for a
+    /// row a lazy refresh had dropped, or a fresh diff a mutation-triggered
+    /// refresh raced ahead of.
+    fn fetch_expanded_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.diffs.contains_key(&path) || self.diff_errors.contains_key(&path) {
+            return;
+        }
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .cloned()
+        else {
+            return;
+        };
+        let repo_root = self.repo_root.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    diff_entry(&repo_root, &entry, CHANGES_CONTEXT_LINES)
+                })
+                .await;
+            let _ = this.update(cx, |tab, cx| {
+                match result {
+                    Ok(diff) => {
+                        tab.diffs.insert(path, diff);
+                    }
+                    Err(error) => {
+                        tab.diff_errors.insert(path, error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// F-CHG-13: `RightPanelActionEvent::OpenDiff(path)` and
@@ -941,13 +1149,13 @@ impl ChangesTab {
             self.pending_focus = Some(path.to_path_buf());
             return;
         }
-        self.apply_focus(path);
+        self.apply_focus(path, cx);
         cx.notify();
     }
 
     /// Expands and un-collapses every section containing `path`. Returns
     /// whether any section matched, so callers can decide whether to defer.
-    fn apply_focus(&mut self, path: &Path) -> bool {
+    fn apply_focus(&mut self, path: &Path, cx: &mut Context<Self>) -> bool {
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
@@ -963,6 +1171,9 @@ impl ChangesTab {
                 self.expanded_changes.insert((section, path.to_path_buf()));
                 matched = true;
             }
+        }
+        if matched {
+            self.fetch_expanded_diff(path.to_path_buf(), cx);
         }
         matched
     }
@@ -1041,6 +1252,8 @@ impl ChangesTab {
     /// hold two independent states at once. An empty section is omitted;
     /// a collapsed section keeps only its header.
     fn section_rows(&self, mode: DiffViewMode) -> Vec<SectionRows> {
+        #[cfg(test)]
+        perf_baseline::section_build();
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
@@ -1185,6 +1398,54 @@ impl ChangesTab {
         }
     }
 
+    /// Flattens the sections into the list's item stream and tells the
+    /// list state about it. Only a changed fingerprint splices (see
+    /// [`ListRow::hash_identity`]); a pending keyboard reveal is resolved
+    /// here too, because the selected row's index exists only in this
+    /// stream.
+    fn sync_list_rows(&mut self, sections: Vec<SectionRows>) -> Rc<Vec<ListRow>> {
+        let mut rows = Vec::new();
+        for section in sections {
+            rows.push(ListRow::Header {
+                section: section.section,
+                count: section.count,
+                collapsed: section.collapsed,
+            });
+            rows.extend(section.rows.into_iter().map(ListRow::Change));
+        }
+        let mut hasher = DefaultHasher::new();
+        rows.len().hash(&mut hasher);
+        for row in &rows {
+            row.hash_identity(&mut hasher);
+        }
+        let fingerprint = hasher.finish();
+        #[cfg(test)]
+        perf_baseline::list_build(rows.len());
+        if fingerprint != self.list_fingerprint {
+            let old_count = self.list_state.item_count();
+            self.list_state.splice(0..old_count, rows.len());
+            #[cfg(test)]
+            perf_baseline::splice();
+            self.list_fingerprint = fingerprint;
+        }
+        if self.reveal_selected {
+            self.reveal_selected = false;
+            if let Some((selected_section, selected_path)) = &self.selected_change {
+                let index = rows.iter().position(|row| {
+                    matches!(
+                        row,
+                        ListRow::Change(ChangeRow::File { section, entry, .. })
+                            if section == selected_section && &entry.path == selected_path
+                    )
+                });
+                if let Some(index) = index {
+                    self.list_state.scroll_to_reveal_item(index);
+                }
+            }
+        }
+        Rc::new(rows)
+    }
+
     fn render_change_row(
         row: ChangeRow,
         allows_staging: bool,
@@ -1203,18 +1464,18 @@ impl ChangesTab {
             } => {
                 let is_selected = selected == Some(&(section, entry.path.clone()));
                 Self::render_change_file(
-                section,
-                entry,
-                stat,
-                drag_payload,
-                expanded,
-                allows_staging,
-                draws_open_diff,
-                is_selected,
-                entity,
-                theme,
-            )
-            .into_any_element()
+                    section,
+                    entry,
+                    stat,
+                    drag_payload,
+                    expanded,
+                    allows_staging,
+                    draws_open_diff,
+                    is_selected,
+                    entity,
+                    theme,
+                )
+                .into_any_element()
             }
             ChangeRow::Hunk {
                 section,
@@ -1301,14 +1562,13 @@ impl ChangesTab {
                 .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
                 .text_color(theme.text_faint)
+                .child(div().w(px(DIFF_HUNK_GUTTER_WIDTH)).flex_none().child("⋯"))
                 .child(
                     div()
-                        .w(px(DIFF_HUNK_GUTTER_WIDTH))
-                        .flex_none()
-                        .child("⋯"),
-                )
-                .child(
-                    div().min_w(px(0.0)).overflow_hidden().text_ellipsis().child(message),
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(message),
                 )
                 .into_any_element(),
         }
@@ -1710,18 +1970,8 @@ impl ChangesTab {
     ) -> impl IntoElement {
         let (background, marker_color, marker, text_color) = match line.origin {
             DiffOrigin::Context => (theme.surface, theme.text_faint, " ", theme.text_muted),
-            DiffOrigin::Addition => (
-                diff_wash(theme.diff_add),
-                theme.diff_add,
-                "+",
-                theme.text,
-            ),
-            DiffOrigin::Deletion => (
-                diff_wash(theme.diff_del),
-                theme.diff_del,
-                "-",
-                theme.text,
-            ),
+            DiffOrigin::Addition => (diff_wash(theme.diff_add), theme.diff_add, "+", theme.text),
+            DiffOrigin::Deletion => (diff_wash(theme.diff_del), theme.diff_del, "-", theme.text),
         };
         div()
             .id(format!(
@@ -1803,8 +2053,6 @@ impl ChangesTab {
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let stage_entity = entity.clone();
         let discard_entity = entity.clone();
@@ -1812,7 +2060,6 @@ impl ChangesTab {
         let collapse_entity = entity.clone();
         let refresh_entity = entity.clone();
         let mode_entity = entity.clone();
-        let refreshing = self.git_task.is_some();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -1863,31 +2110,25 @@ impl ChangesTab {
                     });
                 },
             ))
-            .when(refreshing, |this| {
-                this.child(
-                    div()
-                        .id("changes-refresh")
-                        .debug_selector(|| "changes-refresh".to_owned())
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(loading::compact("changes-refresh-spinner", window, cx)),
-                )
-            })
-            .when(!refreshing, |this| {
-                this.child(action_icon_button(
-                    Icon::RefreshCw,
-                    "Refresh",
-                    "changes-refresh",
-                    "refresh-changes".to_owned(),
-                    theme,
-                    move |cx| {
-                        refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
-                    },
-                ))
-            })
+            // Refresh is a button and nothing else: it never turns into a
+            // spinner while a snapshot loads. The toolbar used to swap it
+            // for `loading::compact` for as long as `git_task` was in
+            // flight, and `ensure_refresh` puts a task in flight every
+            // second, so the icon blinked once a second for the duration
+            // of every `git status`. A refresh over a settled surface is
+            // silent — the same rule `render_body` applies to the list —
+            // and a click during one is a no-op by `refresh`'s own
+            // single-flight guard.
+            .child(action_icon_button(
+                Icon::RefreshCw,
+                "Refresh",
+                "changes-refresh",
+                "refresh-changes".to_owned(),
+                theme,
+                move |cx| {
+                    refresh_entity.update(cx, |tab, cx| tab.refresh(cx));
+                },
+            ))
             .child(action_icon_button(
                 Icon::ExpandVertical,
                 "Expand All",
@@ -2136,13 +2377,15 @@ impl ChangesTab {
     /// 2. the first load in flight with nothing to show yet — "Loading…";
     /// 3. the sections list.
     fn render_body(
-        &self,
+        &mut self,
         entity: gpui::Entity<Self>,
         theme: Theme,
         mode: DiffViewMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(test)]
+        perf_baseline::render_body();
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
         }
@@ -2196,6 +2439,7 @@ impl ChangesTab {
                 .child("No changes")
                 .into_any_element();
         }
+        let rows = self.sync_list_rows(sections);
         let row_entity = entity;
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
@@ -2207,10 +2451,13 @@ impl ChangesTab {
             .clone();
         // Both modes render into exactly the width the surface was given —
         // see `SPLIT_DIVIDER_WIDTH` for the two attempts at doing otherwise
-        // and what each one cost. `min_w(px(0.0))` stays because a scroll
-        // container that cannot shrink below its content is a container that
-        // grows its ancestors instead of scrolling, and this one holds
-        // arbitrarily long file paths in its section rows.
+        // and what each one cost. `min_w(px(0.0))` stays because a list
+        // that cannot shrink below its content is a list that grows its
+        // ancestors instead of scrolling, and this one holds arbitrarily
+        // long file paths in its section rows. The scrolling itself is the
+        // list's: `gpui::list` owns the wheel and draws only the rows in
+        // and around the viewport, which is what keeps a frame over a very
+        // large diff at viewport cost (see `ChangesTab::list_state`).
         div()
             .id("changes-list")
             .debug_selector(|| "changes-list".into())
@@ -2222,31 +2469,43 @@ impl ChangesTab {
             .w_full()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
-            .children(sections.into_iter().flat_map(move |section| {
-                let mut elements: Vec<AnyElement> = vec![
-                    Self::render_section_header(
-                        section.section,
-                        section.count,
-                        section.collapsed,
-                        allows_staging,
-                        row_entity.clone(),
-                        theme,
-                    )
-                    .into_any_element(),
-                ];
-                for row in section.rows {
-                    elements.push(Self::render_change_row(
-                        row,
-                        allows_staging,
-                        draws_open_diff,
-                        selected.as_ref(),
-                        row_entity.clone(),
-                        theme,
-                    ));
-                }
-                elements
-            }))
+            .child(
+                list(
+                    self.list_state.clone(),
+                    move |index, _window, _cx| match rows.get(index) {
+                        Some(ListRow::Header {
+                            section,
+                            count,
+                            collapsed,
+                        }) => Self::render_section_header(
+                            *section,
+                            *count,
+                            *collapsed,
+                            allows_staging,
+                            row_entity.clone(),
+                            theme,
+                        )
+                        .into_any_element(),
+                        Some(ListRow::Change(row)) => Self::render_change_row(
+                            {
+                                #[cfg(test)]
+                                perf_baseline::draw_row_clone(row);
+                                row.clone()
+                            },
+                            allows_staging,
+                            draws_open_diff,
+                            selected.as_ref(),
+                            row_entity.clone(),
+                            theme,
+                        ),
+                        None => div().into_any_element(),
+                    },
+                )
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .flex_1()
+                .min_h(px(0.0))
+                .w_full(),
+            )
             .into_any_element()
     }
 
@@ -2304,6 +2563,10 @@ impl Render for ChangesTab {
         }
         let entity = cx.entity();
         let mode = DiffViewMode::get(cx);
+        let toolbar = self
+            .render_toolbar(entity.clone(), theme, mode)
+            .into_any_element();
+        let body = self.render_body(entity, theme, mode, _window, cx);
         div()
             // The surface's own extent, so a drawn test can assert that
             // nothing inside it — notably Split mode's width reservation —
@@ -2313,8 +2576,8 @@ impl Render for ChangesTab {
             .flex()
             .flex_col()
             .bg(theme.surface)
-            .child(self.render_toolbar(entity.clone(), theme, mode, _window, cx))
-            .child(self.render_body(entity, theme, mode, _window, cx))
+            .child(toolbar)
+            .child(body)
     }
 }
 
@@ -2342,6 +2605,8 @@ fn diff_wash(color: Rgba) -> Rgba {
 /// pane can receive. Binary files have no meaningful textual payload and do
 /// not advertise a drag source.
 fn diff_payload(diff: &FileDiff) -> Option<DiffPayload> {
+    #[cfg(test)]
+    perf_baseline::payload_call();
     if diff.is_binary {
         return None;
     }
@@ -2360,6 +2625,8 @@ fn diff_payload(diff: &FileDiff) -> Option<DiffPayload> {
             text.push('\n');
         }
     }
+    #[cfg(test)]
+    perf_baseline::payload_bytes(text.len());
     Some((diff.path.clone(), text))
 }
 
@@ -2532,16 +2799,38 @@ where
 /// than lying.
 /// Loads the snapshot this surface displays: the working tree's status, or
 /// one commit's files, depending on the source.
-fn load_snapshot(repo_root: &Path, source: &ChangesSource) -> Result<GitSnapshot, String> {
+///
+/// `expanded_paths` scopes the full-diff fetch for the working tree: `None`
+/// fetches every entry's diff (the first load, so the surface has something
+/// to show the instant a row is expanded); `Some(paths)` fetches only the
+/// diffs for rows actually expanded right now. A commit view ignores it —
+/// see `load_commit_snapshot`.
+fn load_snapshot(
+    repo_root: &Path,
+    source: &ChangesSource,
+    expanded_paths: Option<&HashSet<PathBuf>>,
+) -> Result<GitSnapshot, String> {
     match source {
-        ChangesSource::WorkingTree => load_worktree_snapshot(repo_root),
+        ChangesSource::WorkingTree => load_worktree_snapshot(repo_root, expanded_paths),
         ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
     }
 }
 
-/// The working-tree snapshot: `git status` entries, per-file stats and
-/// diffs against HEAD. Untouched by the commit view.
-fn load_worktree_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
+/// The working-tree snapshot: `git status` entries, per-file stats always,
+/// and diffs against HEAD only for `expanded_paths` (`None` means every
+/// entry). Untouched by the commit view.
+///
+/// This is the surface's hot loop: `ensure_refresh` re-runs it every
+/// `CHANGES_REFRESH_INTERVAL` for as long as the tab is visible. Fetching
+/// every entry's diff unconditionally here once meant one `git diff`
+/// subprocess per changed file, every tick — 50+ processes a second on a
+/// large agent-driven changeset, for rows nobody had expanded. `stats`
+/// stays unconditional: it is one batched call, not one process per file,
+/// and a collapsed row's header still shows real +/− counts.
+fn load_worktree_snapshot(
+    repo_root: &Path,
+    expanded_paths: Option<&HashSet<PathBuf>>,
+) -> Result<GitSnapshot, String> {
     let entries = status(repo_root)
         .map_err(|error| error.to_string())?
         .entries;
@@ -2549,6 +2838,11 @@ fn load_worktree_snapshot(repo_root: &Path) -> Result<GitSnapshot, String> {
     let mut diffs = HashMap::new();
     let mut diff_errors = HashMap::new();
     for entry in &entries {
+        if let Some(expanded_paths) = expanded_paths {
+            if !expanded_paths.contains(&entry.path) {
+                continue;
+            }
+        }
         match diff_entry(repo_root, entry, CHANGES_CONTEXT_LINES) {
             Ok(diff) => {
                 diffs.insert(entry.path.clone(), diff);
@@ -2840,7 +3134,9 @@ mod tests {
     }
 
     fn settled_changes_tab(repo_root: PathBuf) -> ChangesTab {
-        let entries = status(&repo_root).expect("status for settled Changes tab").entries;
+        let entries = status(&repo_root)
+            .expect("status for settled Changes tab")
+            .entries;
         ChangesTab {
             repo_root,
             source: ChangesSource::WorkingTree,
@@ -2865,6 +3161,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         }
     }
 
@@ -2895,9 +3194,7 @@ mod tests {
     /// the panel Enter promotes; in the tab there is nothing to promote to,
     /// so it expands the row the way a click does.
     #[gpui::test]
-    async fn return_promotes_the_selected_change_row_only_from_the_panel(
-        cx: &mut TestAppContext,
-    ) {
+    async fn return_promotes_the_selected_change_row_only_from_the_panel(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
@@ -3029,6 +3326,85 @@ mod tests {
         pump_until(cx, || {
             tab.read_with(cx, |tab, _| {
                 tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
+            })
+        });
+    }
+
+    /// The bug this fix targets, reproduced through the real refresh path
+    /// rather than the bare function: a large agent-driven edit lands a new
+    /// changed file while the tab stays open and nothing has been expanded
+    /// for it. A periodic-style refresh (`refresh()` called again once the
+    /// surface has already settled -- the shape of every tick
+    /// `ensure_refresh` arms) must not spend a `git diff` process on that
+    /// row just because `git status` now reports it; its cheap batched stat
+    /// still arrives, same as every other row.
+    #[gpui::test]
+    async fn a_periodic_refresh_never_fetches_a_diff_for_a_newly_seen_collapsed_row(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("f0.txt"), "v0\n").expect("seed first changed file");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 1));
+        assert!(
+            tab.read_with(cx, |tab, _| tab.diffs.contains_key(Path::new("f0.txt"))),
+            "the first load fetches the only entry's diff up front"
+        );
+
+        // The external edit: a second changed file appears while nothing
+        // new is expanded.
+        std::fs::write(dir.0.join("f1.txt"), "v1\n").expect("seed second changed file");
+        tab.update(cx, |tab, cx| tab.refresh(cx));
+        pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 2));
+
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                !tab.diffs.contains_key(Path::new("f1.txt")),
+                "a periodic-style refresh must not fetch a diff for a row nobody expanded"
+            );
+            assert!(
+                tab.diffs.contains_key(Path::new("f0.txt")),
+                "an already-cached diff for a still-live, still-collapsed row survives the refresh"
+            );
+            assert_eq!(
+                tab.stats.len(),
+                2,
+                "the cheap batched stats cover the new row too"
+            );
+        });
+    }
+
+    /// Expanding a row whose diff isn't cached (e.g. a lazy refresh dropped
+    /// it while it was collapsed) fetches it immediately instead of waiting
+    /// for the next periodic tick.
+    #[gpui::test]
+    async fn expanding_a_row_missing_its_diff_fetches_it_at_once(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.diffs.contains_key(Path::new("tracked.txt"))
+            })
+        });
+
+        // Simulate a diff that a lazy refresh dropped because the row was
+        // collapsed at the time, without running a whole refresh cycle.
+        tab.update(cx, |tab, _| {
+            tab.diffs.remove(Path::new("tracked.txt"));
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.toggle_change(ChangeSection::Changed, Path::new("tracked.txt"), cx);
+        });
+
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.diffs.contains_key(Path::new("tracked.txt"))
             })
         });
     }
@@ -3582,9 +3958,7 @@ mod tests {
     /// refresh, survive a successful refresh, and clear after a successful
     /// retry of the mutation.
     #[gpui::test]
-    async fn a_failed_stage_survives_refresh_and_recovers_after_retry(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_failed_stage_survives_refresh_and_recovers_after_retry(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
@@ -3738,9 +4112,7 @@ mod tests {
     /// row controls against a real checkout, rather than calling either
     /// operation directly.
     #[gpui::test]
-    async fn a_stage_requested_during_refresh_runs_after_refresh_finishes(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_stage_requested_during_refresh_runs_after_refresh_finishes(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
@@ -3763,7 +4135,10 @@ mod tests {
             tab.read_with(cx, |tab, _| section_count(tab, "Staged") == 1)
         });
         assert_eq!(
-            status(&dir.0).expect("status after queued stage").staged().len(),
+            status(&dir.0)
+                .expect("status after queued stage")
+                .staged()
+                .len(),
             1,
             "a Stage request made during refresh is executed after the refresh"
         );
@@ -3815,9 +4190,7 @@ mod tests {
     /// A mutation error from the real drawn Changes tab must survive the
     /// periodic refreshes that still succeed through the stale index lock.
     #[gpui::test]
-    async fn drawn_stage_error_stays_visible_across_periodic_refreshes(
-        cx: &mut TestAppContext,
-    ) {
+    async fn drawn_stage_error_stays_visible_across_periodic_refreshes(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         clean_git_repo(&dir.0);
         std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
@@ -3861,7 +4234,9 @@ mod tests {
             std::fs::write(dir.0.join(&path), format!("tick {tick}\n"))
                 .expect("create refresh marker");
             wait_for_tab(&cx, &tab, |tab| {
-                tab.entries.iter().any(|entry| entry.path == Path::new(&path))
+                tab.entries
+                    .iter()
+                    .any(|entry| entry.path == Path::new(&path))
             });
             cx.cx.run_until_parked();
             assert!(
@@ -3936,6 +4311,58 @@ mod tests {
                 .entries
                 .is_empty(),
             "the confirmed Discard click restores the real checkout"
+        );
+    }
+
+    /// The Refresh control never turns into a spinner. The toolbar used to
+    /// swap the button for `loading::compact` for as long as `git_task` was
+    /// in flight — and `ensure_refresh` puts a task in flight every second,
+    /// so the icon blinked once a second for the duration of every
+    /// `git status`. A refresh over a settled surface is silent: the list
+    /// stays, the button stays, and the new snapshot lands in place.
+    ///
+    /// The in-flight state is faked with a task that never completes: a
+    /// real snapshot load finishes inside `run_until_parked`, so the frame
+    /// drawn afterwards would be the settled one and prove nothing.
+    #[gpui::test]
+    async fn a_refresh_in_flight_keeps_the_refresh_button_and_draws_no_spinner(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-refresh-spinner").is_none(),
+            "a settled toolbar carries no spinner"
+        );
+
+        cx.update(|_, app| {
+            tab.update(app, |tab, cx| {
+                tab.git_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            tab.read_with(&cx.cx, |tab, _| tab.git_task.is_some()),
+            "the refresh is still in flight in the drawn frame"
+        );
+        assert!(
+            cx.debug_bounds("changes-refresh-spinner").is_none(),
+            "a refresh in flight must not draw a spinner in the toolbar"
+        );
+        assert!(
+            cx.debug_bounds("changes-refresh").is_some(),
+            "the Refresh control stays put while a refresh is in flight"
+        );
+        assert!(
+            cx.debug_bounds("changes-file-row").is_some(),
+            "the settled list stays on screen while a refresh is in flight"
         );
     }
 
@@ -4301,15 +4728,81 @@ mod tests {
     fn a_missing_git_reports_spawn_not_silence() {
         let missing =
             std::env::temp_dir().join(format!("sirio-changes-missing-{}", std::process::id()));
-        let error = load_snapshot(&missing, &ChangesSource::WorkingTree)
+        let error = load_snapshot(&missing, &ChangesSource::WorkingTree, None)
             .expect_err("no repo, no git: the load must fail");
         assert!(
             error.contains("failed to spawn git"),
             "the missing binary is named, not hidden: {error}"
         );
+        // The second half of the message is the operating system's own
+        // text, and the operating system localizes it: the very same spawn
+        // reads "No such file or directory (os error 2)" on Linux and
+        // "Nome di directory non valido. (os error 267)" on an Italian
+        // Windows. A hard-coded English fragment therefore asserts the
+        // machine's locale, not the loader's behaviour, so the expected
+        // text is taken from a spawn made to fail the same way here. The
+        // claim is unchanged — the OS error is carried through verbatim,
+        // so the user can act on it — only the way it is recognised is.
+        let os_error = std::process::Command::new("git")
+            .arg("--version")
+            .current_dir(&missing)
+            .output()
+            .expect_err("spawning into the same missing directory must fail here too")
+            .to_string();
         assert!(
-            error.contains("No such file"),
-            "the OS error is included so the user can act: {error}"
+            error.contains(&os_error),
+            "the OS error is included so the user can act: {error} \
+             (it must carry the spawn's own {os_error})"
+        );
+    }
+
+    /// The perf bug this fix targets: `load_worktree_snapshot` used to call
+    /// `diff_entry` for every changed file, every load — one `git diff`
+    /// subprocess per file regardless of whether its row was expanded. With
+    /// `expanded_paths` scoping the fetch, only the rows actually expanded
+    /// get a diff; the rest keep their (cheap, batched) stat but no diff
+    /// text, and `None` still means "fetch everything" for the first load.
+    #[test]
+    fn load_worktree_snapshot_only_fetches_diffs_for_expanded_paths() {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        for index in 0..5 {
+            std::fs::write(dir.0.join(format!("f{index}.txt")), format!("v{index}\n"))
+                .expect("seed changed file");
+        }
+
+        let expanded: HashSet<PathBuf> =
+            [PathBuf::from("f0.txt"), PathBuf::from("f2.txt")].into();
+        let snapshot = load_worktree_snapshot(&dir.0, Some(&expanded))
+            .expect("snapshot load must succeed");
+
+        assert_eq!(
+            snapshot.entries.len(),
+            5,
+            "status still reports every changed file"
+        );
+        assert_eq!(
+            snapshot.stats.len(),
+            5,
+            "the cheap batched stats still cover every file, expanded or not"
+        );
+        assert_eq!(
+            snapshot.diffs.len(),
+            2,
+            "only the expanded paths get a fetched diff: {:?}",
+            snapshot.diffs.keys().collect::<Vec<_>>()
+        );
+        assert!(snapshot.diffs.contains_key(Path::new("f0.txt")));
+        assert!(snapshot.diffs.contains_key(Path::new("f2.txt")));
+        assert!(!snapshot.diffs.contains_key(Path::new("f1.txt")));
+        assert!(!snapshot.diffs.contains_key(Path::new("f3.txt")));
+        assert!(!snapshot.diffs.contains_key(Path::new("f4.txt")));
+
+        let eager = load_worktree_snapshot(&dir.0, None).expect("eager load must succeed");
+        assert_eq!(
+            eager.diffs.len(),
+            5,
+            "a `None` scope (the first load) still fetches every diff"
         );
     }
 
@@ -4350,6 +4843,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -4415,6 +4911,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -4702,6 +5201,9 @@ mod tests {
             pending_focus: None,
             selected_change: None,
             list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
@@ -4960,6 +5462,9 @@ mod tests {
                 pending_focus: None,
                 selected_change: None,
                 list_focus: None,
+                list_state: new_list_state(),
+                list_fingerprint: 0,
+                reveal_selected: false,
             }
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -5236,5 +5741,229 @@ mod tests {
             );
             assert!(!tab.allows_staging(), "a commit is immutable");
         });
+    }
+
+    // ------------------------------------------------------------------
+    // [PERF-diff]: the regression test for "opening a very large diff makes
+    // the diff's scroll and the whole app lag". One expanded file whose
+    // diff carries `lines` rows, drawn into a fixed 1200x800 window with no
+    // git process anywhere (a commit-mode surface never arms the refresh
+    // loop). Every number is wall-clock; run with `--nocapture` to read
+    // them.
+    // ------------------------------------------------------------------
+
+    pub(super) fn synthetic_big_diff_tab(lines: usize) -> ChangesTab {
+        let path = PathBuf::from("src/big_file.rs");
+        let mut diff_lines = Vec::with_capacity(lines);
+        let mut old_no = 1usize;
+        let mut new_no = 1usize;
+        let mut additions = 0usize;
+        let mut deletions = 0usize;
+        // 3 context / 10 deletions / 10 additions, repeated: the context
+        // runs stay under CONTEXT_BAND_MIN so nothing collapses into a band
+        // and the row count really is the line count.
+        let mut i = 0usize;
+        while diff_lines.len() < lines {
+            let phase = i % 23;
+            let (origin, old, new) = if phase < 3 {
+                let l = (DiffOrigin::Context, Some(old_no), Some(new_no));
+                old_no += 1;
+                new_no += 1;
+                l
+            } else if phase < 13 {
+                let l = (DiffOrigin::Deletion, Some(old_no), None);
+                old_no += 1;
+                deletions += 1;
+                l
+            } else {
+                let l = (DiffOrigin::Addition, None, Some(new_no));
+                new_no += 1;
+                additions += 1;
+                l
+            };
+            diff_lines.push(DiffLine {
+                origin,
+                old_line_number: old,
+                new_line_number: new,
+                content: format!(
+                    "    let value_{i} = compute_something(argument_{i}, other_{i}); // padding"
+                ),
+            });
+            i += 1;
+        }
+        let diff = FileDiff {
+            path: path.clone(),
+            hunks: vec![sirio_git::Hunk {
+                header: format!("@@ -1,{old_no} +1,{new_no} @@"),
+                old_start: 1,
+                old_lines: old_no,
+                new_start: 1,
+                new_lines: new_no,
+                lines: diff_lines,
+            }],
+            additions,
+            deletions,
+            is_binary: false,
+            is_submodule: false,
+        };
+        let entry = StatusEntry {
+            path: path.clone(),
+            original_path: None,
+            index_status: Some(StatusKind::Modified),
+            worktree_status: None,
+        };
+        let mut expanded_changes = HashSet::new();
+        expanded_changes.insert((ChangeSection::Staged, path.clone()));
+        let mut diffs = HashMap::new();
+        diffs.insert(path.clone(), diff);
+        let mut stats = HashMap::new();
+        stats.insert(
+            path,
+            DiffStat {
+                additions,
+                deletions,
+                is_binary: false,
+            },
+        );
+        ChangesTab {
+            repo_root: PathBuf::from("."),
+            source: ChangesSource::Commit("synthetic".to_owned()),
+            entries: vec![entry],
+            diffs,
+            stats,
+            expanded_changes,
+            collapsed_sections: HashSet::new(),
+            expanded_bands: HashSet::new(),
+            git_task: None,
+            pending_operations: VecDeque::new(),
+            has_loaded: true,
+            git_error: None,
+            git_error_from_mutation: false,
+            diff_errors: HashMap::new(),
+            refresh_started: false,
+            embedded_in_panel: false,
+            renders: 0,
+            renders_at_last_tick: 0,
+            refresh_suspended: false,
+            suspended_ticks: 0,
+            pending_focus: None,
+            selected_change: None,
+            list_focus: None,
+            list_state: new_list_state(),
+            list_fingerprint: 0,
+            reveal_selected: false,
+        }
+    }
+
+    struct DiffFrameCost {
+        rows: usize,
+        section_rows_ms: f64,
+        frame_ms: f64,
+        scroll_dispatch_ms: f64,
+        scroll_frame_ms: f64,
+    }
+
+    fn measure_big_diff(cx: &mut TestAppContext, lines: usize) -> DiffFrameCost {
+        use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use std::time::Instant;
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| synthetic_big_diff_tab(lines));
+        let handle: gpui::AnyWindowHandle = window.into();
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        let tab = cx.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+        let frame = |cx: &mut VisualTestContext, tab: &gpui::Entity<ChangesTab>| -> f64 {
+            cx.update(|window, cx| {
+                tab.update(cx, |_, cx| cx.notify());
+                let start = Instant::now();
+                window.draw(cx).clear(cx);
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+        };
+        // Warm-up: the first frame pays for text-system caches, not the bug.
+        frame(&mut cx, &tab);
+        let (section_rows_ms, rows) = tab.read_with(&cx.cx, |tab, _| {
+            let start = Instant::now();
+            let sections = tab.section_rows(DiffViewMode::Unified);
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            (
+                elapsed,
+                sections.iter().map(|s| s.rows.len()).sum::<usize>(),
+            )
+        });
+        // The minimum, not the median: this test runs alongside every other
+        // crate's test binary under `cargo test --workspace`, and a stall
+        // from a linker next door must not read as a slow frame. The bug is
+        // a lower bound -- a frame that *cannot* be faster than the file --
+        // and the minimum is the statistic that measures a lower bound.
+        let frame_ms = (0..5)
+            .map(|_| frame(&mut cx, &tab))
+            .fold(f64::INFINITY, f64::min);
+
+        let list = cx
+            .debug_bounds("changes-list")
+            .expect("the scrolling list is drawn");
+        let mut scroll_dispatch: Vec<f64> = Vec::new();
+        let mut scroll_frames: Vec<f64> = Vec::new();
+        for _ in 0..5 {
+            let start = Instant::now();
+            cx.simulate_event(ScrollWheelEvent {
+                position: list.center(),
+                delta: ScrollDelta::Lines(point(0.0, -3.0)),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            });
+            scroll_dispatch.push(start.elapsed().as_secs_f64() * 1000.0);
+            scroll_frames.push(cx.update(|window, cx| {
+                let start = Instant::now();
+                window.draw(cx).clear(cx);
+                start.elapsed().as_secs_f64() * 1000.0
+            }));
+        }
+        DiffFrameCost {
+            rows,
+            section_rows_ms,
+            frame_ms,
+            scroll_dispatch_ms: scroll_dispatch.into_iter().fold(f64::INFINITY, f64::min),
+            scroll_frame_ms: scroll_frames.into_iter().fold(f64::INFINITY, f64::min),
+        }
+    }
+
+    /// The report: opening a very large diff makes the diff's own scroll and
+    /// the whole app lag. The loop's claim is that a frame over an expanded
+    /// diff should cost what the *viewport* costs, not what the *file*
+    /// costs: a 50x larger diff must not make every frame ~50x slower.
+    #[gpui::test]
+    async fn perf_a_large_expanded_diff_costs_a_frame_proportional_to_the_viewport(
+        cx: &mut TestAppContext,
+    ) {
+        let small = measure_big_diff(cx, 300);
+        let large = measure_big_diff(cx, 5_000);
+        for (label, cost) in [("small", &small), ("large", &large)] {
+            eprintln!(
+                "[PERF-diff] {label}: rows={} section_rows={:.2}ms frame={:.2}ms scroll_dispatch={:.2}ms scroll_frame={:.2}ms",
+                cost.rows,
+                cost.section_rows_ms,
+                cost.frame_ms,
+                cost.scroll_dispatch_ms,
+                cost.scroll_frame_ms
+            );
+        }
+        let ratio = large.frame_ms / small.frame_ms.max(0.01);
+        eprintln!("[PERF-diff] frame ratio large/small = {ratio:.1}x");
+        assert!(
+            ratio < 4.0,
+            "a frame over a {}-row diff costs {:.1}ms, {ratio:.1}x the {:.1}ms of a {}-row one: \
+             the whole file is being laid out every frame, not the viewport",
+            large.rows,
+            large.frame_ms,
+            small.frame_ms,
+            small.rows
+        );
     }
 }
