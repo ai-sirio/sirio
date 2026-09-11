@@ -7026,19 +7026,23 @@ mod tests {
         );
         assert!(
             cx.debug_bounds("sidebar-status-running-1").is_some(),
-            "a running worktree draws the running indicator, not nothing"
+            "a running worktree draws the travelling bloom, not nothing"
         );
         assert!(cx.debug_bounds("sidebar-row-1").is_some());
 
         // The badge is strictly the `.running` set: a worktree that goes
-        // quiet loses it, and the running indicator gives way to a dot.
+        // quiet loses it, and the travelling bloom stops at full.
         entity.update(&mut cx, |sidebar, cx| {
             sidebar.set_worktree_activity(1, Some(ActivityStatus::Done), None, Vec::new(), cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-row-1").is_some());
         assert!(cx.debug_bounds("sidebar-status-running-1").is_none());
-        assert!(cx.debug_bounds("sidebar-status-dot-1").is_some());
+        assert!(cx.debug_bounds("sidebar-status-settled-1").is_some());
+        assert!(
+            cx.debug_bounds("sidebar-status-dot-1").is_none(),
+            "the leading status column is gone: the bloom is the only glyph"
+        );
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
                 .is_some()
@@ -7243,40 +7247,41 @@ mod tests {
         );
     }
 
-    /// The two collisions a user would have to measure pixels to resolve.
+    /// The collision a user would have to measure pixels to resolve.
     ///
-    /// 1. A **running** Claude worktree resolved its tint through the
-    ///    eight-token settings palette, where Claude was `Amber` — that is
-    ///    `theme.warning` itself. Running and needs-input painted the
-    ///    same `#E0B36A`, leaving a 3x3 dot cluster versus a 6x6 dot as the
-    ///    only difference. The reference has no such collision: needs-input
-    ///    is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's
-    ///    own colour.
-    /// 2. Every badge mark was tinted `theme.text`, a coral near
-    ///    enough to Claude's brand to read as it, so a Codex or Pi mark was
-    ///    drawn in Claude's colour.
+    /// Running deliberately shares `success` with done — green is the colour
+    /// of a worktree that is fine, and motion is what separates working from
+    /// finished. It must not share a tint with either state that means the
+    /// worktree is *not* fine: a green bloom and an amber one carry opposite
+    /// news, and running once resolved through a palette where Claude was
+    /// `Amber` — `theme.warning` itself — so running and needs-input painted
+    /// the same `#E0B36A` and differed only by dot geometry.
     #[test]
-    fn running_tint_never_equals_a_status_colour_and_names_the_agent() {
+    fn running_shares_its_green_with_done_and_with_nothing_that_needs_attention() {
         for theme in [Theme::dark(), Theme::light()] {
-            let needs_input =
-                RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme);
-            for (agent, brand) in [
-                ("claude", AgentBrandColor::Claude),
-                ("codex", AgentBrandColor::Codex),
-                ("opencode", AgentBrandColor::OpenCode),
-                ("pi", AgentBrandColor::Pi),
-                ("omp", AgentBrandColor::Omp),
-            ] {
-                let running =
-                    RowStatusGlyph::for_status(Some(ActivityStatus::Running), Some(brand), theme);
-                assert_eq!(running, RowStatusGlyph::Running(brand.color()));
+            let running = RowStatusGlyph::for_status(Some(ActivityStatus::Running), theme);
+            assert_eq!(running, RowStatusGlyph::Running(theme.success));
+
+            // Same green as done, and told apart by the variant — one bloom
+            // travels, the other has stopped.
+            assert_eq!(
+                RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
+                RowStatusGlyph::Settled(theme.success)
+            );
+            assert_ne!(
+                running,
+                RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
+                "running and done are the same colour and must differ by shape"
+            );
+
+            for status in [ActivityStatus::NeedsInput, ActivityStatus::Error] {
+                let tint = match RowStatusGlyph::for_status(Some(status), theme) {
+                    RowStatusGlyph::Settled(color) => color,
+                    other => panic!("{status:?} must be a settled bloom, got {other:?}"),
+                };
                 assert_ne!(
-                    running,
-                    RowStatusGlyph::Running(match needs_input {
-                        RowStatusGlyph::Dot(color) => color,
-                        other => panic!("needs-input must be a dot, got {other:?}"),
-                    }),
-                    "{agent} running must not paint the needs-input colour"
+                    theme.success, tint,
+                    "running must not paint the {status:?} colour"
                 );
             }
         }
@@ -7310,60 +7315,40 @@ mod tests {
         }
     }
 
-    /// A worktree whose agent is unknown still gets a running indicator, in
-    /// the neutral grey `AgentIcon.color(for: agentId ?? "")` resolves to —
-    /// never the brand accent, which would name an agent nobody identified.
+    /// The status table itself. `Idle` and no status both draw nothing --
+    /// that half is inherited from `SidebarGlyphKind.forStatus` in
+    /// `Packages/TillerCore/Sources/TillerCore/SidebarGlyph.swift`, and both
+    /// of its rows had once been inverted, so an idle worktree was
+    /// pixel-identical to one waiting on an answer and a busy one looked
+    /// empty. The other half is Sirio's: one bloom, travelling or stopped.
     #[test]
-    fn an_unidentified_running_agent_gets_the_neutral_fallback() {
-        let theme = Theme::dark();
-        assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Running), None, theme),
-            RowStatusGlyph::Running(AgentBrandColor::Unknown.color())
-        );
-    }
-
-    /// The status table itself, against `SidebarGlyphKind.forStatus` in
-    /// `Packages/TillerCore/Sources/TillerCore/SidebarGlyph.swift`. Two rows
-    /// of it had been inverted: `Idle` drew the amber needs-input dot, so an
-    /// idle worktree was pixel-identical to one waiting on an answer, and
-    /// `Running` drew nothing, so a busy worktree looked empty.
-    #[test]
-    fn status_glyph_table_matches_the_swift_original() {
+    fn the_status_table_is_one_bloom_travelling_or_stopped() {
         let theme = Theme::light();
+        assert_eq!(RowStatusGlyph::for_status(None, theme), RowStatusGlyph::None);
         assert_eq!(
-            RowStatusGlyph::for_status(None, None, theme),
-            RowStatusGlyph::None
-        );
-        assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), theme),
             RowStatusGlyph::None,
             "nil status draws no glyph -- and Idle is the Rust name for it"
         );
         assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
-            RowStatusGlyph::Dot(theme.warning)
+            RowStatusGlyph::for_status(Some(ActivityStatus::Running), theme),
+            RowStatusGlyph::Running(theme.success)
         );
         assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Done), None, theme),
-            RowStatusGlyph::Dot(theme.success)
+            RowStatusGlyph::for_status(Some(ActivityStatus::Done), theme),
+            RowStatusGlyph::Settled(theme.success)
         );
         assert_eq!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Error), None, theme),
-            RowStatusGlyph::Dot(theme.danger)
+            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), theme),
+            RowStatusGlyph::Settled(theme.warning)
         );
-        // Running is a different *shape*, and the agent id reaches the row
-        // only as its tint.
         assert_eq!(
-            RowStatusGlyph::for_status(
-                Some(ActivityStatus::Running),
-                Some(AgentBrandColor::Codex),
-                theme
-            ),
-            RowStatusGlyph::Running(AgentBrandColor::Codex.color())
+            RowStatusGlyph::for_status(Some(ActivityStatus::Error), theme),
+            RowStatusGlyph::Settled(theme.danger)
         );
         assert_ne!(
-            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
-            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), theme),
             "an idle worktree must not look like one that needs input"
         );
     }

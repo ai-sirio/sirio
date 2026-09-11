@@ -19,50 +19,40 @@ pub struct SidebarPill {
     pub selected: bool,
 }
 
-/// What the leading status column of a worktree (or collapsed project) row
-/// draws — a port of `TillerCore/SidebarGlyph.swift`'s `SidebarGlyphKind`,
-/// with the extra `Idle` case the Rust `ActivityStatus` carries folded onto
-/// the same `None` the Swift `nil` status maps to.
+/// What a worktree (or collapsed project) row draws in place of a status
+/// word — one Bezel bloom, either travelling or stopped.
 ///
-/// The Swift table is the contract, and two of its rows had been inverted
-/// here: `Idle` drew the amber needs-input dot, so a worktree with nothing
-/// happening was pixel-identical to one waiting on an answer, and `Running`
-/// drew nothing at all, so a busy worktree looked empty. Both now follow
-/// `SidebarGlyphKind.forStatus`: nothing for no status, the loader for
-/// running, a lifecycle dot for the rest.
+/// It used to be two glyphs in two places: a loader in a leading 12px column
+/// and the status spelled out in words at the end of the title line. The
+/// bloom carries both facts on its own — motion says whether work is in
+/// flight, tint says which state it settled into — so the column is gone and
+/// the words with it. `Idle` and the parked-agent count are the exception:
+/// neither is a state a bloom can draw, so they stay text (see
+/// `Sidebar::status_text`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum RowStatusGlyph {
-    /// No glyph. The column keeps its width so rows stay aligned.
+    /// No glyph at all.
     None,
-    /// The running indicator, tinted with the agent's **brand** — Swift's
-    /// `RunningDots(color: AgentIcon.color(for: agentId))`, whose whole
-    /// purpose is to say *whose* work is in progress.
+    /// A bloom still travelling: work is in flight.
     Running(Rgba),
-    /// A static lifecycle dot: amber needs-input, green done, red error.
-    Dot(Rgba),
+    /// A bloom stopped at full, tinted by which state it stopped in: green
+    /// done, amber needs-input, red error.
+    Settled(Rgba),
 }
 
 impl RowStatusGlyph {
-    pub(super) fn for_status(
-        status: Option<ActivityStatus>,
-        brand: Option<AgentBrandColor>,
-        theme: Theme,
-    ) -> Self {
+    pub(super) fn for_status(status: Option<ActivityStatus>, theme: Theme) -> Self {
         match status {
             None | Some(ActivityStatus::Idle) => Self::None,
-            // The tint is the agent's brand, never a `Theme` status token.
-            // Routed through the eight-token settings palette it used to be
-            // one — Claude resolved to `Amber`, i.e. to `tab_needs_input` —
-            // so a *running* Claude worktree and one that *needed input*
-            // painted the same `#E0B36A` and differed only by dot geometry.
-            // An unidentified agent gets the neutral fallback, matching
-            // `AgentIcon.color(for: agentId ?? "")`'s `.gray`.
-            Some(ActivityStatus::Running) => {
-                Self::Running(brand.unwrap_or(AgentBrandColor::Unknown).color())
-            }
-            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.warning),
-            Some(ActivityStatus::Done) => Self::Dot(theme.success),
-            Some(ActivityStatus::Error) => Self::Dot(theme.danger),
+            // Running shares `success` with done deliberately: green is the
+            // colour of a worktree that is fine, and what separates "working"
+            // from "finished" is that one of them moves. They do not collapse
+            // onto each other under reduced motion either — see
+            // `loading::settled_bloom_rings` and the test that pins it.
+            Some(ActivityStatus::Running) => Self::Running(theme.success),
+            Some(ActivityStatus::Done) => Self::Settled(theme.success),
+            Some(ActivityStatus::NeedsInput) => Self::Settled(theme.warning),
+            Some(ActivityStatus::Error) => Self::Settled(theme.danger),
         }
     }
 }
@@ -134,17 +124,20 @@ impl Sidebar {
         if parked { theme.text_faint } else { theme.text }
     }
 
+    /// The words at the end of the title line — now only the states no bloom
+    /// can draw.
+    ///
+    /// Running, done, needs-input and error each have a bloom of their own
+    /// (`RowStatusGlyph`), and writing the word next to it said the same
+    /// thing twice in the row's narrowest space. What is left is the quiet
+    /// half: a worktree sitting idle, and how many agents are parked in one.
     pub(crate) fn status_text(row: &SidebarRow) -> Option<String> {
         match row.agent_status {
-            Some(ActivityStatus::Running) => Some("running".to_owned()),
-            Some(ActivityStatus::NeedsInput) => Some("needs input".to_owned()),
-            Some(ActivityStatus::Done) => Some("done".to_owned()),
-            Some(ActivityStatus::Error) => Some("error".to_owned()),
             Some(ActivityStatus::Idle) | None if row.pills.len() > 1 => {
                 Some(format!("{} agents", row.pills.len()))
             }
             Some(ActivityStatus::Idle) => Some("idle".to_owned()),
-            None => None,
+            _ => None,
         }
     }
 
@@ -470,7 +463,7 @@ impl Sidebar {
         // onto the project row itself in `visible_rows`.
         let status_glyph =
             if kind == RowKind::Worktree || (kind == RowKind::Project && !row.expanded) {
-                RowStatusGlyph::for_status(row.agent_status, row.agent_brand, theme)
+                RowStatusGlyph::for_status(row.agent_status, theme)
             } else {
                 RowStatusGlyph::None
             };
@@ -602,41 +595,41 @@ impl Sidebar {
                 });
         }
 
-        let status_color = match status_glyph {
-            RowStatusGlyph::Running(color) | RowStatusGlyph::Dot(color) => color,
-            RowStatusGlyph::None => theme.text_faint,
-        };
-        let status_dot = div()
-            .w(px(12.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(12.0))
-            .text_color(status_color)
-            .child(match status_glyph {
-                // Swift's `RunningDots`, tinted by the agent: a
-                // different *shape* from a lifecycle dot, so a
-                // running worktree can never be mistaken for a
-                // finished one at a glance, and a different tint per
-                // agent, so the one glyph carries both facts.
-                RowStatusGlyph::Running(_color) => div()
+        // The bloom that stands where the status word used to. Built here
+        // rather than inline in `title_line` because it is the one part of
+        // the row that needs `window` and `cx`: a travelling bloom takes a
+        // lease on Bezel's shared clock, and that lease is what re-renders
+        // this row — and only this row — on every spinner frame.
+        let status_bloom = match status_glyph {
+            RowStatusGlyph::Running(tint) => Some(
+                div()
                     .id(("sidebar-status-running", row_id))
                     .debug_selector(move || format!("sidebar-status-running-{row_id}"))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(loading::compact("sidebar-running-spinner", window, cx))
+                    .flex_none()
+                    .child(loading::bloom(
+                        "sidebar-running-bloom",
+                        loading::BLOOM_GLYPH,
+                        tint,
+                        &theme,
+                        window,
+                        cx,
+                    ))
                     .into_any_element(),
-                RowStatusGlyph::Dot(color) => div()
-                    .id(("sidebar-status-dot", row_id))
-                    .debug_selector(move || format!("sidebar-status-dot-{row_id}"))
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .rounded(px(3.0))
-                    .bg(color)
+            ),
+            RowStatusGlyph::Settled(tint) => Some(
+                div()
+                    .id(("sidebar-status-settled", row_id))
+                    .debug_selector(move || format!("sidebar-status-settled-{row_id}"))
+                    .flex_none()
+                    .child(loading::settled_bloom(
+                        "sidebar-settled-bloom",
+                        loading::BLOOM_GLYPH,
+                        tint,
+                    ))
                     .into_any_element(),
-                RowStatusGlyph::None => div().into_any_element(),
-            });
+            ),
+            RowStatusGlyph::None => None,
+        };
         let title_element = div()
             .min_w_0()
             .flex_1()
@@ -686,7 +679,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-row-status-{row_id}"))
                         .flex_none()
                         .text_size(theme.typography.scaled(11.0))
-                        .text_color(status_color)
+                        .text_color(theme.text_faint)
                         .child(status),
                 )
             });
@@ -794,7 +787,17 @@ impl Sidebar {
                             IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.text),
                         ),
                 )
-            });
+            })
+            // Last, after every hover control on the line. Those controls are
+            // `.invisible()` rather than unmounted, so they hold their 16px
+            // whether or not the pointer is on the row -- but only some rows
+            // have them (a primary checkout cannot be removed, a worktree has
+            // no project settings). Anything placed before them therefore
+            // sits at a different x per row, which is exactly the drift
+            // `running_agent_badges_share_one_trailing_edge_across_worktrees`
+            // exists to catch. Last is the only seat where the bloom lands on
+            // one trailing edge for every row.
+            .when_some(status_bloom, |this, bloom| this.child(bloom));
         let content = div()
             .min_w_0()
             .flex_1()
@@ -805,7 +808,7 @@ impl Sidebar {
             .child(title_line)
             .when(has_sub_line, |this| this.child(sub_line));
 
-        row_view.child(status_dot).child(content)
+        row_view.child(content)
     }
 }
 
@@ -850,18 +853,40 @@ mod tests {
         }
     }
 
+    /// The four notable statuses are drawn as a bloom now, not spelled out,
+    /// so the status line is left to the two things a bloom cannot say: that
+    /// a worktree is idle, and how many agents are parked in it.
     #[test]
-    fn a_running_worktree_says_running_and_a_still_one_counts_its_agents() {
+    fn a_notable_status_is_a_bloom_and_the_words_are_left_to_the_quiet_states() {
         let mut row = worktree(3, "main");
-        row.agent_status = Some(ActivityStatus::Running);
-        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("running"));
-        row.agent_status = Some(ActivityStatus::NeedsInput);
-        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("needs input"));
+        for status in [
+            ActivityStatus::Running,
+            ActivityStatus::NeedsInput,
+            ActivityStatus::Done,
+            ActivityStatus::Error,
+        ] {
+            row.agent_status = Some(status);
+            assert_eq!(
+                Sidebar::status_text(&row),
+                None,
+                "{status:?} is drawn, not written"
+            );
+        }
         row.agent_status = Some(ActivityStatus::Idle);
         row.pills = vec![pill(1), pill(2)];
         assert_eq!(Sidebar::status_text(&row).as_deref(), Some("2 agents"));
         row.pills = vec![pill(1)];
         assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
+    }
+
+    /// A running worktree with several agents parked in it is still running:
+    /// the bloom is the message, and the count would only compete with it.
+    #[test]
+    fn a_running_worktree_does_not_fall_back_to_counting_its_agents() {
+        let mut row = worktree(3, "main");
+        row.agent_status = Some(ActivityStatus::Running);
+        row.pills = vec![pill(1), pill(2)];
+        assert_eq!(Sidebar::status_text(&row), None);
     }
 
     /// The second line names the worktree's most recent task, not its
