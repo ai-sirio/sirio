@@ -3114,20 +3114,36 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         // The watchdog used to cap the whole turn: an agent still streaming
         // after the window was SIGKILLed anyway, which killed the session and
         // surfaced as a bare "incoming transport closed" on session/prompt.
-        // Six chunks 200ms apart run well past this 500ms window.
+        // Fifteen chunks 200ms apart run three seconds, well past this two-
+        // second window, and none of the gaps between them reaches it.
+        //
+        // Two numbers, and only their *ratio* is the assertion. The window
+        // resets on activity, so the test passes exactly when every gap stays
+        // under it -- and the fixture's gap is a `sleep 0.2` in `/bin/sh`
+        // followed by a write the reader has to pick up, which is at the mercy
+        // of the scheduler. At the original 200ms against 500ms the margin was
+        // 2.5x, which held while `sirio_acp`'s binary ran alone in its slot and
+        // stopped holding once the gate began running all 2068 tests at once:
+        // three attempts, three identical `TransportError("incoming transport
+        // closed")`, the turn reaped mid-stream. Ten times the gap leaves the
+        // same property under test with room for a descheduled `sleep`.
+        //
+        // The sibling test is the other direction and keeps its tight 300ms:
+        // `a_silent_turn_still_trips_the_prompt_window` asserts the window
+        // *fires*, and a generous budget there would weaken what it proves.
         let command = fixture_agent(
-            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) i=0; while [ $i -lt 6 ]; do sleep 0.2; printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tick"}}}}'; i=$((i+1)); done; printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;;"#,
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) i=0; while [ $i -lt 15 ]; do sleep 0.2; printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tick"}}}}'; i=$((i+1)); done; printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;;"#,
         );
         let (mut client, events) = AcpClient::launch_with_timeouts(
             command,
             ".",
             FIXTURE_STARTUP_TIMEOUT,
-            Duration::from_millis(500),
+            Duration::from_secs(2),
         )
         .expect("fixture agent should create a session");
 
         client.prompt("work for a while").expect("prompt accepted");
-        let seen = drain_until_turn_end(&events, Duration::from_secs(10));
+        let seen = drain_until_turn_end(&events, Duration::from_secs(30));
 
         assert!(
             seen.iter()
