@@ -55,32 +55,43 @@ if grep -q "ubuntu-latest" "$BUILD"; then
 fi
 
 # libghostty-vt-sys shells out to `zig build`, and upstream pins 0.15.2
-# exactly -- a newer Zig fails too.
-if [ "$(grep -c "version: 0.15.2" "$BUILD")" -lt 2 ]; then
-  fail "both hosted runners must pin Zig 0.15.2"
+# exactly -- a newer Zig fails too. All three runners download it.
+if [ "$(grep -c "version: 0.15.2" "$BUILD")" -lt 3 ]; then
+  fail "all three runners must pin Zig 0.15.2"
+fi
+if [ "$(grep -c "uses: mlugg/setup-zig" "$BUILD")" -ne 3 ]; then
+  fail "all three runners must install Zig through setup-zig"
 fi
 
-# ...but exactly the two hosted ones. The downloaded Zig 0.15.2 links against
-# its own bundled libSystem stub, which is older than macOS 26 and leaves every
-# libc symbol undefined; the macOS runner therefore supplies its own Zig and
-# the workflow only checks the version. Re-adding setup-zig to the macOS job
-# reintroduces a failure whose message names none of this.
-if [ "$(grep -c "uses: mlugg/setup-zig" "$BUILD")" -ne 2 ]; then
-  fail "only the linux and windows jobs may download Zig; macOS uses the one on the runner"
+# The macOS image is pinned, and this is the assertion that keeps it pinned.
+# The downloaded Zig 0.15.2 links against its own bundled libSystem stub, which
+# is older than macOS 26: on a macOS 26 host every libc symbol comes back
+# undefined and `zig build` dies inside libghostty-vt-sys, naming none of this.
+# That is why the job ran on a self-hosted Mac with Homebrew's Zig until
+# 2026-09-11, and it is why `macos-latest` must never appear here -- the day
+# GitHub points it at 26, an unpinned label walks into that failure on its own
+# schedule.
+grep -q "runs-on: macos-15" "$BUILD" \
+  || fail "the macos job must pin macos-15: the bundled Zig libSystem stub predates macOS 26"
+# Targets `runs-on:` rather than the file, because the comments explaining the
+# pin necessarily name the label they are warning against -- the same reason
+# test-build-inno.sh's WebView2 assertion matches install entries and not prose.
+if grep -qE '^\s*runs-on:.*macos-latest' "$BUILD"; then
+  fail "macos-latest must not be used: it can move to macOS 26, where the downloaded Zig cannot link"
 fi
-grep -q "command -v zig" "$BUILD" || fail "the macos job must check that zig is on the runner"
-grep -qF '"$FOUND" != "0.15.2"' "$BUILD" \
-  || fail "the macos job must reject a runner Zig that is not exactly 0.15.2"
 
 # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally, so
-# every hosted job that runs cargo -- linux, windows, and publish, which builds
+# every job that runs cargo -- macos, linux, windows, and publish, which builds
 # the signing CLI -- must install it or fail before compiling (spec §1.5).
-if [ "$(grep -c "mozilla-actions/sccache-action" "$BUILD")" -lt 3 ]; then
-  fail "linux, windows and publish must all install sccache"
+if [ "$(grep -c "mozilla-actions/sccache-action" "$BUILD")" -lt 4 ]; then
+  fail "macos, linux, windows and publish must all install sccache"
 fi
-# The self-hosted macOS runner is not provisioned by the workflow, so it must
-# at least be checked (spec §9.5).
-grep -q "command -v sccache" "$BUILD" || fail "the macos job must check that sccache is on the runner"
+
+# The macOS job is the only one that runs Scripts/ci.sh, and the gate runs the
+# workspace's tests through nextest. Without it the failure is `no such
+# subcommand: nextest`, arriving after the gate has already paid for its own
+# compile.
+grep -q "get.nexte.st" "$BUILD" || fail "the macos job must install cargo-nextest"
 
 # --- spec §3.3 / §3.5: the channel and the accepted keys reach the compiler ---
 # Workflow-level env applies to every step of every job, so the CI gate, the
