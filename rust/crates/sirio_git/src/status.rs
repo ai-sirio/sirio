@@ -151,6 +151,7 @@ impl std::error::Error for StatusParseError {}
 /// NUL-terminated raw bytes, so paths with spaces or non-ASCII characters
 /// need no quoting round-trip.
 pub fn status(repo: &std::path::Path) -> Result<StatusSnapshot, GitError> {
+    let _perf = sirio_perf::span("git.status", 0);
     let output = git::run_accepting(
         &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
         repo,

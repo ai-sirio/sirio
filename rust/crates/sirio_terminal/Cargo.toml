@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+sirio_perf = { path = "../sirio_perf" }
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 sirio_theme.workspace = true

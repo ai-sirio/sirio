@@ -83,6 +83,7 @@ pub(super) struct RowView {
 
 impl Render for RowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("RowView.render", self.inputs.row.id as u64);
         self.render_count = self.render_count.wrapping_add(1);
         let theme = *Theme::get(cx);
         let inputs = self.inputs.clone();

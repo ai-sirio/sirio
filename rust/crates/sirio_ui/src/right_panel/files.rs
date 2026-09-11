@@ -213,6 +213,7 @@ impl RightPanel {
                     }
                 }
                 panel.updating = false;
+                sirio_perf::event("notify.RightPanel.refresh_complete", cx.entity_id().as_u64());
                 cx.notify();
             });
         }));

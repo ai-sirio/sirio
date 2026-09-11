@@ -165,6 +165,13 @@ pub enum TerminalActivityEvent {
     OutputSettled { scrollback: String },
     /// The PTY child exited after its final output was drained.
     ChildExited { status: TerminalExitStatus },
+    /// Facts the surrounding shell renders independently of terminal
+    /// contents. Emitted only when a spawn/restart attempt changes them, so
+    /// the host never needs to observe content-driven repaint notifications.
+    LifecycleChanged {
+        failed: bool,
+        exit_status: Option<TerminalExitStatus>,
+    },
 }
 
 /// The renderer-owned state that persistence and headless verification can
@@ -3038,6 +3045,14 @@ impl TerminalView {
                 self.host.teardown();
             }
         }
+        self.emit_lifecycle_changed(cx);
+    }
+
+    fn emit_lifecycle_changed(&self, cx: &mut gpui::Context<Self>) {
+        cx.emit(TerminalActivityEvent::LifecycleChanged {
+            failed: self.is_failed(),
+            exit_status: self.exit_status,
+        });
     }
 
     /// Re-attempts the spawn after a failure: on success the pane switches
@@ -3062,6 +3077,7 @@ impl TerminalView {
                 self.host.teardown();
             }
         }
+        self.emit_lifecycle_changed(cx);
         cx.notify();
     }
 
@@ -3206,6 +3222,10 @@ impl TerminalView {
                                 cx.emit(TerminalActivityEvent::OscTitle(title));
                             }
                             if repaint {
+                                sirio_perf::event(
+                                    "notify.Terminal.output",
+                                    cx.entity_id().as_u64(),
+                                );
                                 cx.notify();
                             }
                         })
@@ -3230,6 +3250,10 @@ impl TerminalView {
                             if view.host.generation() != generation {
                                 return;
                             }
+                            sirio_perf::event(
+                                "notify.Terminal.deferred_output",
+                                cx.entity_id().as_u64(),
+                            );
                             cx.notify();
                         })
                         .is_err()
@@ -3261,6 +3285,10 @@ impl TerminalView {
                                 // PTY event and therefore after the last
                                 // output-driven repaint. Schedule the frame
                                 // that contains this fresh terminal state.
+                                sirio_perf::event(
+                                    "notify.Terminal.settled_capture",
+                                    cx.entity_id().as_u64(),
+                                );
                                 cx.notify();
                             })
                             .is_err()
@@ -4108,6 +4136,7 @@ impl Element for TerminalElement {
         _: &mut App,
     ) -> Self::PrepaintState {
         let line_height = line_height_for_font_size(self.font_size);
+        let _perf = sirio_perf::span("TerminalElement.prepaint", 0);
         *self.terminal.last_bounds.lock() = Some(bounds);
         let terminal_font = font(sirio_theme::terminal_family());
         let font_id = window.text_system().resolve_font(&terminal_font);
@@ -4475,6 +4504,7 @@ impl TerminalView {
 
 impl gpui::Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("TerminalView.render", cx.entity_id().as_u64());
         self.render_count = self.render_count.wrapping_add(1);
         self.ensure_started(cx);
         let theme = *Theme::get(cx);

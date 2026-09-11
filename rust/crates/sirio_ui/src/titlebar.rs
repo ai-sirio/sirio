@@ -690,6 +690,7 @@ fn caption_button(
 
 impl Render for Titlebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("Titlebar.render", cx.entity_id().as_u64());
         // P102: never draw our own window controls when the platform is
         // already drawing them. `decorations_override` is the test seam
         // (see its field doc); production always takes the `None` arm and

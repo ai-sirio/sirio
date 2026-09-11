@@ -83,6 +83,8 @@ mod command_palette;
 mod display_backend;
 #[cfg(not(windows))]
 mod login_path;
+#[cfg(feature = "perf-native")]
+mod native_perf;
 mod panel_layout;
 mod panes;
 mod session;
@@ -858,6 +860,11 @@ enum ControlAction {
         query: PaneQuery,
         reply: ControlReply,
     },
+    PerfTerminalWrite {
+        id: String,
+        input: String,
+        reply: ControlReply,
+    },
     FocusPane {
         direction: SplitDirection,
         forward: bool,
@@ -896,6 +903,8 @@ enum ControlAction {
 }
 
 enum ChatControlAction {
+    /// Local fixture door, available only in an opt-in performance trace.
+    PerfFixture,
     Open {
         worktree: Option<String>,
     },
@@ -1681,6 +1690,22 @@ impl AppControlHandler {
 impl ControlHandler for AppControlHandler {
     fn handle(&self, request: &ControlRequest) -> ControlResponse {
         match request.method.as_str() {
+            "perf.terminal.write" => {
+                if !sirio_perf::enabled() {
+                    return ControlResponse::failure(&request.id, "performance fixture is disabled");
+                }
+                let (Some(id), Some(input)) =
+                    (request.params.get("id"), request.params.get("input"))
+                else {
+                    return ControlResponse::failure(&request.id, "fixture requires id and input");
+                };
+                let (id, input) = (id.clone(), input.clone());
+                self.queue_action(request, move |reply| ControlAction::PerfTerminalWrite {
+                    id,
+                    input,
+                    reply,
+                })
+            }
             "system.ping" => Self::success(&request.id, [("pong".to_string(), "true".to_string())]),
             "system.capabilities" => {
                 let mut methods = vec![
@@ -1987,6 +2012,12 @@ impl ControlHandler for AppControlHandler {
                 })
             }
             "surface.chat.open" => {
+                if sirio_perf::enabled() && request.params.get("fixture").is_some_and(|v| v == "true") {
+                    return self.queue_action(request, move |reply| ControlAction::Chat {
+                        action: ChatControlAction::PerfFixture,
+                        reply,
+                    });
+                }
                 let worktree = request.params.get("worktree").cloned();
                 self.queue_action(request, move |reply| ControlAction::Chat {
                     action: ChatControlAction::Open { worktree },
@@ -3880,6 +3911,38 @@ fn next_pane_id(tabs: &[OpenTab]) -> usize {
 /// The shell-owned tab model. Content entities live in this vector for the
 /// lifetime of the workspace, so switching tabs only changes which entity is
 /// mounted in the centre column; it never reconstructs a PTY or transcript.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TerminalShellEvidence {
+    failed: bool,
+    exit_status: Option<TerminalExitStatus>,
+}
+
+impl TerminalShellEvidence {
+    fn from_terminal(terminal: &TerminalView) -> Self {
+        Self {
+            failed: terminal.is_failed(),
+            exit_status: terminal.exit_status(),
+        }
+    }
+
+    fn is_live(self) -> bool {
+        !self.failed && self.exit_status.is_none()
+    }
+
+    fn status(&self) -> Option<AgentStatus> {
+        if self.failed {
+            Some(AgentStatus::Error)
+        } else {
+            self.exit_status.map(|exit_status| match exit_status {
+                TerminalExitStatus::Success => AgentStatus::Done,
+                TerminalExitStatus::Code(_)
+                | TerminalExitStatus::Signal(_)
+                | TerminalExitStatus::Unknown => AgentStatus::Error,
+            })
+        }
+    }
+}
+
 struct SirioWorkspace {
     titlebar: Entity<Titlebar>,
     sidebar: Entity<Sidebar>,
@@ -4018,6 +4081,10 @@ struct SirioWorkspace {
     /// through this (or, for a chat pane, through `Chat`'s own state) —
     /// never a second, independently-tracked flag.
     activity: AgentActivityModel,
+    /// Shell-only terminal facts, keyed by the terminal entity rather than
+    /// pane id because pane ids are reused when another worktree is mounted.
+    /// Content repaint notifications must never invalidate this workspace.
+    terminal_shell_evidence: BTreeMap<u64, TerminalShellEvidence>,
     /// Set when a change can affect what the activity reconciliation reads.
     /// Render consumes it at most once per frame.
     activity_dirty: bool,
@@ -4534,6 +4601,10 @@ impl SirioWorkspace {
                                     };
                                     let _ = reply.send(result);
                                 }
+                                ControlAction::PerfTerminalWrite { id, input, reply } => {
+                                    let result = workspace.perf_terminal_write(&id, input, cx);
+                                    let _ = reply.send(result);
+                                }
                                 ControlAction::FocusPane {
                                     direction,
                                     forward,
@@ -4663,6 +4734,7 @@ impl SirioWorkspace {
         Self::bind_terminal_tabs(&tabs, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         Self::bind_file_tabs(&tabs, cx);
+        let terminal_shell_evidence = Self::collect_terminal_shell_evidence(&tabs, cx);
         for tab in &tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::Changes(changes) = content {
@@ -4797,6 +4869,7 @@ impl SirioWorkspace {
             palette_previous_focus: None,
             root_focus: cx.focus_handle(),
             activity,
+            terminal_shell_evidence,
             activity_dirty: true,
             last_seen_has_worktree: None,
             reconciles: 0,
@@ -5941,7 +6014,20 @@ impl SirioWorkspace {
         let activity_pane_id = format!("pane-{pane_id}");
         cx.subscribe(
             terminal,
-            move |workspace, _, event: &TerminalActivityEvent, cx| {
+            move |workspace, terminal, event: &TerminalActivityEvent, cx| {
+                sirio_perf::event(
+                    match event {
+                        TerminalActivityEvent::OscTitle(_) => "activity_event.osc_title",
+                        TerminalActivityEvent::OutputSettled { .. } => {
+                            "activity_event.output_settled"
+                        }
+                        TerminalActivityEvent::ChildExited { .. } => "activity_event.child_exited",
+                        TerminalActivityEvent::LifecycleChanged { .. } => {
+                            "activity_event.lifecycle_changed"
+                        }
+                    },
+                    pane_id as u64,
+                );
                 // Layer C's content scan (`detect_content_status`) strips
                 // ANSI, lowercases and substring-scans the whole scrollback
                 // tail -- real work, unlike the other two arms below. Doing
@@ -5970,22 +6056,56 @@ impl SirioWorkspace {
                     event,
                     Instant::now(),
                 );
+                match event {
+                    TerminalActivityEvent::ChildExited { status } => {
+                        workspace.terminal_shell_evidence.insert(
+                            terminal.entity_id().as_u64(),
+                            TerminalShellEvidence {
+                                failed: false,
+                                exit_status: Some(*status),
+                            },
+                        );
+                    }
+                    TerminalActivityEvent::LifecycleChanged {
+                        failed,
+                        exit_status,
+                    } => {
+                        workspace.terminal_shell_evidence.insert(
+                            terminal.entity_id().as_u64(),
+                            TerminalShellEvidence {
+                                failed: *failed,
+                                exit_status: *exit_status,
+                            },
+                        );
+                    }
+                    TerminalActivityEvent::OscTitle(_)
+                    | TerminalActivityEvent::OutputSettled { .. } => {}
+                }
                 if let Some(transition) = transition.as_ref() {
                     workspace.post_activity_notification(transition);
                     workspace.request_auto_rename(transition, cx);
                 }
-                // ChildExited must repaint even without a model transition:
-                // the exit status lives on TerminalView and the tab status
-                // cell reads it. An OscTitle with no transition (and no
-                // title-owned clear) changes nothing the workspace draws;
-                // the terminal repaints itself through its own notify.
+                // Lifecycle changes must repaint even without a model
+                // transition because the tab's exit/dirty presentation reads
+                // the shell cache. An OscTitle or OutputSettled with no
+                // transition (and no title-owned clear) changes nothing the
+                // workspace draws; the terminal repaints itself through its
+                // own notify.
                 let title_owned_clear = title_owned_before
                     && !workspace.activity.is_title_owned(&activity_pane_id);
                 if transition.is_some()
                     || title_owned_clear
-                    || matches!(event, TerminalActivityEvent::ChildExited { .. })
+                    || matches!(
+                        event,
+                        TerminalActivityEvent::ChildExited { .. }
+                            | TerminalActivityEvent::LifecycleChanged { .. }
+                    )
                 {
                     workspace.mark_activity_dirty();
+                    sirio_perf::event(
+                        "notify.Workspace.terminal_activity",
+                        cx.entity_id().as_u64(),
+                    );
                     cx.notify();
                 }
             },
@@ -6673,15 +6793,19 @@ impl SirioWorkspace {
         }
     }
 
-    /// What a live surface entity claims about itself — the evidence
-    /// `AgentActivityModel`'s four layers cannot see, because it lives in
-    /// the GPUI entity rather than in a hook push, a title, scrollback or
-    /// `/proc`: an ACP chat that is mid-stream or has finished a turn, a
-    /// terminal that failed to spawn or whose child has already been reaped.
+    /// What a live surface claims about itself — the evidence
+    /// `AgentActivityModel`'s four layers cannot see. Chat evidence is still
+    /// read from its entity; terminal lifecycle evidence is pushed into the
+    /// shell cache so content-only terminal notifications cannot invalidate
+    /// the workspace.
     ///
     /// `None` means the surface has no opinion and the layered status
     /// stands.
-    fn surface_evidence(content: &TabContent, cx: &App) -> Option<AgentStatus> {
+    fn surface_evidence(
+        content: &TabContent,
+        terminal_shell_evidence: &BTreeMap<u64, TerminalShellEvidence>,
+        cx: &App,
+    ) -> Option<AgentStatus> {
         match content {
             TabContent::Chat(chat) => {
                 let chat = chat.read(cx);
@@ -6693,19 +6817,9 @@ impl SirioWorkspace {
                     None
                 }
             }
-            TabContent::Terminal { view } => {
-                let terminal = view.read(cx);
-                if terminal.is_failed() {
-                    Some(AgentStatus::Error)
-                } else {
-                    terminal.exit_status().map(|exit_status| match exit_status {
-                        TerminalExitStatus::Success => AgentStatus::Done,
-                        TerminalExitStatus::Code(_)
-                        | TerminalExitStatus::Signal(_)
-                        | TerminalExitStatus::Unknown => AgentStatus::Error,
-                    })
-                }
-            }
+            TabContent::Terminal { view } => terminal_shell_evidence
+                .get(&view.entity_id().as_u64())
+                .and_then(TerminalShellEvidence::status),
             TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
         }
     }
@@ -6732,7 +6846,7 @@ impl SirioWorkspace {
             tab.panes.for_each(&mut |pane_id, content| {
                 evidence.push((
                     format!("pane-{pane_id}"),
-                    Self::surface_evidence(content, cx),
+                    Self::surface_evidence(content, &self.terminal_shell_evidence, cx),
                 ));
             });
         }
@@ -6741,6 +6855,24 @@ impl SirioWorkspace {
             changed |= self.activity.set_entity_status(&pane_id, status);
         }
         changed
+    }
+
+    fn collect_terminal_shell_evidence(
+        tabs: &[OpenTab],
+        cx: &App,
+    ) -> BTreeMap<u64, TerminalShellEvidence> {
+        let mut evidence = BTreeMap::new();
+        for tab in tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    evidence.insert(
+                        view.entity_id().as_u64(),
+                        TerminalShellEvidence::from_terminal(view.read(cx)),
+                    );
+                }
+            });
+        }
+        evidence
     }
 
     /// One tab's real, live status — `None` when the tab has no pane that
@@ -6995,16 +7127,19 @@ impl SirioWorkspace {
         }
     }
 
-    fn terminal_exit_label(tab: &OpenTab, cx: &App) -> Option<String> {
+    fn terminal_exit_label(&self, tab: &OpenTab) -> Option<String> {
         let mut label = None;
         let mut has_live_terminal = false;
         tab.panes.for_each(&mut |_, content| {
             if let TabContent::Terminal { view } = content {
-                let terminal = view.read(cx);
-                let exit_status = terminal.exit_status();
-                if !terminal.is_failed() && exit_status.is_none() {
+                let evidence = self
+                    .terminal_shell_evidence
+                    .get(&view.entity_id().as_u64())
+                    .copied()
+                    .unwrap_or_default();
+                if evidence.is_live() {
                     has_live_terminal = true;
-                } else if let Some(status) = exit_status {
+                } else if let Some(status) = evidence.exit_status {
                     label = Some(match status {
                         TerminalExitStatus::Success => "exit 0".to_string(),
                         TerminalExitStatus::Code(code) => format!("exit {code}"),
@@ -7263,6 +7398,41 @@ impl SirioWorkspace {
     /// explicitly cleared — otherwise a pane that moved (or closed) would
     /// leave a ghost behind. The selected worktree is always published,
     /// even empty, for the same reason.
+    /// Measurement-only input for UI-owned panels, absent from capabilities.
+    /// Normal panel.write retains its existing control-owned routing.
+    fn perf_terminal_write(
+        &self,
+        id: &str,
+        input: String,
+        cx: &App,
+    ) -> Result<Vec<(String, String)>, String> {
+        if !sirio_perf::enabled() {
+            return Err("performance fixture is disabled".into());
+        }
+        let pane_id = id
+            .strip_prefix("pane-")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or("invalid fixture panel id")?;
+        let mut target = None;
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |candidate, content| {
+                if candidate == pane_id
+                    && let TabContent::Terminal { view } = content
+                {
+                    target = Some(view.clone());
+                }
+            });
+        }
+        let target = target.ok_or("fixture terminal not found in mounted tabs")?;
+        let terminal = target.read(cx);
+        if terminal.scrollback_source().is_none() || terminal.exit_status().is_some() {
+            return Err("fixture terminal is not running".into());
+        }
+        let bytes = input.len();
+        terminal.input(input.into_bytes());
+        Ok(vec![("acceptedBytes".into(), bytes.to_string())])
+    }
+
     fn sync_control_panes(&mut self, cx: &App) {
         let mut by_directory:
             BTreeMap<PathBuf, Vec<(PaneInfo, PaneStateSnapshot, Option<ScrollbackSource>)>> =
@@ -10718,6 +10888,15 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         match action {
+            ChatControlAction::PerfFixture => {
+                if !sirio_perf::enabled() || std::env::var_os("SIRIO_ACP_PROGRAM").is_none() {
+                    return Err("performance fixture is disabled".into());
+                }
+                let window = window.ok_or("performance fixture requires a window")?;
+                self.add_chat_tab(window, None, cx);
+                let surface_id = self.tabs[self.active_tab].persistence_id.clone();
+                self.control_chat_read(&surface_id, cx)
+            }
             ChatControlAction::Open { worktree } => {
                 if let Some(worktree) = worktree {
                     self.control_select_worktree(&worktree, window, cx)?;
@@ -12142,9 +12321,12 @@ impl SirioWorkspace {
                 TabContent::File { view } => view.read(cx).is_dirty(),
                 // A live terminal owns a process whose input/output would be
                 // lost on close. Failed and already-exited panes are clean.
-                TabContent::Terminal { view } => {
-                    !view.read(cx).is_failed() && view.read(cx).exit_status().is_none()
-                }
+                TabContent::Terminal { view } => self
+                    .terminal_shell_evidence
+                    .get(&view.entity_id().as_u64())
+                    .copied()
+                    .unwrap_or_default()
+                    .is_live(),
                 TabContent::Chat(chat) => chat.read(cx).is_streaming(),
                 TabContent::Changes(_) | TabContent::Browser(_) => false,
             };
@@ -13083,7 +13265,7 @@ impl SirioWorkspace {
                 active_tab_id == Some(tab.id),
                 pane_focused,
                 self.tab_status(tab, cx),
-                Self::terminal_exit_label(tab, cx),
+                self.terminal_exit_label(tab),
                 self.tab_is_dirty(tab, cx),
                 renaming,
                 rename_draft,
@@ -14856,13 +15038,12 @@ fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
 
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Layer E is polled, not pushed: a chat's streaming flag and a
-        // terminal's exit status live in their own entities and emit no
-        // event this workspace subscribes to. Refreshing here means the
-        // frame about to be drawn reads a model that is already current,
-        // without any view reaching past it to the entities — and it costs
-        // one map comparison per pane. Changed evidence arms the gated
-        // reconciliation below; unchanged evidence does not.
+        let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Layer E chat evidence is polled because streaming state lives in
+        // the chat entity. Terminal lifecycle evidence is push-driven and
+        // read from `terminal_shell_evidence`, avoiding a render dependency
+        // on high-frequency terminal contents. Changed evidence arms the
+        // gated reconciliation below; unchanged evidence does not.
         if self.sync_entity_evidence(cx) {
             self.mark_activity_dirty();
         }
@@ -16881,11 +17062,14 @@ fn main() {
     #[cfg(target_os = "windows")]
     ensure_windows_console();
 
+    sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source
     // gpui finds nothing and paints nothing. Sirio's own icons embed their
     // bytes and never needed this.
     let app = application().with_assets(bezel::ui::icons::Assets);
     app.run(|cx: &mut App| {
+        #[cfg(feature = "perf-native")]
+        native_perf::init(cx);
         // Must land before `Theme::init` — see `register_fonts`'s own doc
         // comment for why the order is load-bearing.
         register_fonts(cx);
@@ -21350,6 +21534,59 @@ mod tests {
         );
     }
 
+    /// The output pump ends at Entity::notify. Exercise that same GPUI
+    /// boundary without a PTY, shell executable, output timing or motion clock.
+    #[gpui::test]
+    async fn hidden_terminal_notification_does_not_redraw_the_still_shell(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let visible = cx.new(TerminalView::empty_prompt);
+        let hidden = cx.new(TerminalView::empty_prompt);
+        let directory = std::env::temp_dir();
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            let mut workspace = activity_test_workspace(visible, directory, cx);
+            workspace.cache_child_views = true;
+            workspace.tabs.push(OpenTab {
+                id: 1,
+                persistence_id: "hidden-terminal-notification".into(),
+                title: "Hidden".into(),
+                kind: TabKind::Terminal,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(1),
+                panes: PaneNode::leaf(
+                    1,
+                    TabContent::Terminal {
+                        view: hidden.clone(),
+                    },
+                ),
+                focused_pane: 1,
+                title_is_auto_named: false,
+            });
+            workspace
+        });
+        cx.run_until_parked();
+        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+        let hidden_before = hidden.read_with(&cx.cx, |terminal, _| terminal.render_count());
+        assert_eq!(
+            hidden_before, 0,
+            "the test must not mount the hidden terminal"
+        );
+        for _ in 0..3 {
+            hidden.update(&mut cx.cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            hidden.read_with(&cx.cx, |terminal, _| terminal.render_count()),
+            hidden_before,
+            "the hidden terminal must remain unrendered"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered),
+            before,
+            "content-only notifications from a hidden terminal must not redraw the shell"
+        );
+    }
+
     /// A running agent mounts the sidebar's spinner, whose lease re-renders
     /// the sidebar at 30 fps. Every child view of the shell is cached, so
     /// those frames must replay the still terminal pane rather than render
@@ -23911,7 +24148,7 @@ mod tests {
         let (status, exit_label) = workspace.read_with(&cx.cx, |workspace, app| {
             (
                 workspace.tab_status(&workspace.tabs[0], app),
-                SirioWorkspace::terminal_exit_label(&workspace.tabs[0], app),
+                workspace.terminal_exit_label(&workspace.tabs[0]),
             )
         });
         assert_eq!(
@@ -29356,6 +29593,76 @@ mod tests {
         assert!(response.ok, "queued compose response: {response:?}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn perf_terminal_input_protocol_is_trace_gated() {
+        // Separate processes keep the trace OnceLock and environment out of
+        // unrelated tests. Removing the gate or the queue route breaks this.
+        let child = std::env::var("SIRIO_PERF_GATE_TEST_CHILD").ok();
+        if let Some(child) = child {
+            let enabled = child == "enabled";
+            assert_eq!(sirio_perf::enabled(), enabled);
+            let actions = Arc::new(Mutex::new(Vec::new()));
+            let handler = AppControlHandler::new(
+                Arc::new(Mutex::new(ControlState {
+                    projects: Vec::new(),
+                    project_settings: BTreeMap::new(),
+                    workspaces: Vec::new(),
+                    current: None,
+                })),
+                actions.clone(),
+                Arc::new(PaneRegistry::new()),
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(BTreeMap::new())),
+                None,
+                ControlSocketInfo::new(PathBuf::from("perf-gate-test.sock")),
+            );
+            let request = request_with_params(
+                "perf.terminal.write",
+                &[("id", "pane-1"), ("input", "fixture\r")],
+            );
+            let response = handle_with_control_action_drain(&handler, actions.clone(), request);
+            assert_eq!(
+                response.ok, enabled,
+                "fixture protocol response: {response:?}"
+            );
+            assert!(actions.lock().unwrap().is_empty());
+            return;
+        }
+        let trace = std::env::temp_dir().join(format!(
+            "sirio-perf-gate-{}-{}.tsv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for mode in ["enabled", "disabled"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::perf_terminal_input_protocol_is_trace_gated",
+                    "--nocapture",
+                ])
+                .env("SIRIO_PERF_GATE_TEST_CHILD", mode)
+                .env_remove("SIRIO_PERF_TRACE");
+            if mode == "enabled" {
+                command.env("SIRIO_PERF_TRACE", &trace);
+            }
+            let result = command.output().expect("run isolated protocol test");
+            if mode == "enabled" {
+                std::fs::remove_file(&trace).expect("remove owned test trace");
+            }
+            assert!(
+                result.status.success(),
+                "{mode}: {} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+
     #[cfg(any())]
     fn app_chat_read(socket_path: &Path, surface_id: &str) -> BTreeMap<String, String> {
         let response = sirio_control::round_trip(
@@ -29771,6 +30078,7 @@ mod tests {
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
+            | ControlAction::PerfTerminalWrite { reply, .. }
             | ControlAction::FocusPane { reply, .. }
             | ControlAction::SplitPane { reply, .. }
             | ControlAction::ClosePane { reply }

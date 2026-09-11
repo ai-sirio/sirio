@@ -17,6 +17,7 @@ use crate::model::{CATALOG_IDS, identify_agent_from_process_names};
 /// order. The returned identity is static because it comes from the fixed
 /// [`CATALOG_IDS`] catalog.
 pub fn inspect_foreground_agent(shell_pid: u32) -> io::Result<Option<&'static str>> {
+    let _perf = sirio_perf::span("activity.inspect_foreground_agent", shell_pid as u64);
     let names = inspect_process_names(shell_pid)?;
     Ok(identify_agent_from_process_names(&names, &CATALOG_IDS))
 }
@@ -50,6 +51,7 @@ pub struct ProcessSnapshot;
 /// Takes the snapshot every pane in this tick will be walked against.
 #[cfg(windows)]
 pub fn take_snapshot() -> io::Result<ProcessSnapshot> {
+    let _perf = sirio_perf::span("activity.take_snapshot", 0);
     let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut name_of: HashMap<u32, String> = HashMap::new();
     for entry in windows_process::entries()? {
@@ -85,6 +87,7 @@ pub fn inspect_foreground_agent_in(
     snapshot: &ProcessSnapshot,
     shell_pid: u32,
 ) -> io::Result<Option<&'static str>> {
+    let _perf = sirio_perf::span("activity.inspect_foreground_agent_in", shell_pid as u64);
     let names = inspect_process_names_in(snapshot, shell_pid)?;
     Ok(identify_agent_from_process_names(&names, &CATALOG_IDS))
 }

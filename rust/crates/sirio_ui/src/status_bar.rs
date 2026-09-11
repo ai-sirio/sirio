@@ -470,6 +470,7 @@ impl StatusBar {
 
 impl Render for StatusBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("StatusBar.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();
