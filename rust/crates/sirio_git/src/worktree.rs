@@ -1,8 +1,8 @@
 //! Git worktree creation and removal, ported from
-//! `SirioGit/GitWorktrees.swift` with one deliberate divergence: removal
-//! does NOT pass `--force`, so git's own refusal to remove a worktree with
-//! uncommitted changes is surfaced to the user instead of silently
-//! discarding their work.
+//! `SirioGit/GitWorktrees.swift`. Removal passes `--force`, as the Swift
+//! original did: the UI asks for confirmation before calling it, naming the
+//! uncommitted work that will be lost, so git's own refusal would only be a
+//! second, less informative gate.
 //!
 //! All calls go through the bounded-timeout runner, and callers are
 //! expected to invoke them off the render thread (the UI wraps them in a
@@ -25,8 +25,8 @@ pub enum WorktreeError {
         path: PathBuf,
     },
     /// The git command failed; stderr carries git's own reason (a branch
-    /// that already exists without a worktree, an unborn HEAD, a worktree
-    /// with uncommitted changes, ...).
+    /// that already exists without a worktree, an unborn HEAD, a checkout
+    /// that could not be deleted, ...).
     Git(GitError),
 }
 
@@ -107,13 +107,20 @@ pub fn create_worktree(
     Ok(())
 }
 
+/// The deadline for removing a checkout from disk. The default budget is
+/// sized for metadata reads; deleting a worktree that carries a build tree
+/// is a long file-system walk, and a removal killed halfway leaves a
+/// half-deleted directory behind.
+const REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Removes a worktree at `path` from `repo`, then deletes its `branch`.
 ///
-/// Deliberately without `--force`: git refuses to remove a worktree with
-/// uncommitted changes, and that refusal is surfaced to the user rather
-/// than silently discarding their work. Branch deletion is best-effort after
-/// the worktree has been removed: a refusal there is logged, but does not
-/// turn the already-completed worktree removal into an error.
+/// `--force` on purpose: the caller has already confirmed the removal with
+/// the user, uncommitted changes included, so a refusal from git here would
+/// only leave a checkout the user asked to drop. Branch deletion is
+/// best-effort after the worktree has been removed: a refusal there is
+/// logged, but does not turn the already-completed worktree removal into an
+/// error.
 ///
 /// The worktree's `.git` file names the main repository by absolute path, so
 /// a repository renamed or moved on disk after the worktree was added leaves
@@ -122,16 +129,73 @@ pub fn create_worktree(
 /// `git worktree repair` rewrites the link from the repository's own record
 /// and is a quiet no-op when nothing is broken, so it runs first. Best-effort
 /// too: the removal that follows is what surfaces the real failure.
+///
+/// When git still refuses (a locked worktree, a link `repair` could not
+/// mend, a removal killed at its deadline), the checkout is deleted directly
+/// and `git worktree prune` drops the stale record: the user's decision was
+/// the directory going away, and git's bookkeeping follows it. Only when the
+/// directory is still there afterwards is git's original error returned.
 pub fn remove_worktree(repo: &Path, path: &Path, branch: &str) -> Result<(), WorktreeError> {
-    let path = git::path_arg(path);
-    if let Err(error) = git::run_accepting(&["worktree", "repair", path.as_str()], repo, &[0]) {
+    let path_arg = git::path_arg(path);
+    if let Err(error) = git::run_accepting(&["worktree", "repair", path_arg.as_str()], repo, &[0]) {
         eprintln!("[git] worktree repair before removal failed: {error}");
     }
-    git::run_accepting(&["worktree", "remove", path.as_str()], repo, &[0])?;
+    let removal = git::run_accepting_with_timeout(
+        &["worktree", "remove", "--force", path_arg.as_str()],
+        repo,
+        &[0],
+        REMOVE_TIMEOUT,
+    );
+    if let Err(error) = removal {
+        eprintln!("[git] worktree remove failed, deleting the checkout directly: {error}");
+        delete_checkout_directly(repo, path);
+        if path.exists() {
+            return Err(error.into());
+        }
+    }
     if let Err(error) = git::run_accepting(&["branch", "-D", branch], repo, &[0]) {
         eprintln!("[git] failed to delete branch '{branch}' after removing worktree: {error}");
     }
     Ok(())
+}
+
+/// The fallback behind [`remove_worktree`]: `rm -rf` the checkout, then let
+/// git forget it. Two guards before the recursive delete, since a sidebar
+/// row is the only thing vouching for `path`: it must look like a linked
+/// checkout (a `.git` *file*, which a main repository, `/tmp` or a home
+/// directory never has), and it must not contain the repository itself.
+/// Both sides of that containment check are canonicalized so `/var` and
+/// `/private/var` spellings of one directory cannot slip past it; the raw
+/// `path` is what gets deleted, so a symlinked checkout loses the link, not
+/// its target — `remove_dir_all` never follows symlinks.
+fn delete_checkout_directly(repo: &Path, path: &Path) {
+    if !path.join(".git").is_file() {
+        eprintln!(
+            "[git] refusing to delete {} — it is not a linked checkout",
+            path.display()
+        );
+        return;
+    }
+    let canonical = |candidate: &Path| {
+        candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.to_path_buf())
+    };
+    if canonical(repo).starts_with(canonical(path)) {
+        eprintln!(
+            "[git] refusing to delete {} — it contains the repository",
+            path.display()
+        );
+        return;
+    }
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!("[git] failed to delete {}: {error}", path.display()),
+    }
+    if let Err(error) = git::run_accepting(&["worktree", "prune"], repo, &[0]) {
+        eprintln!("[git] worktree prune after direct deletion failed: {error}");
+    }
 }
 
 /// The remote branch a local branch tracks (its upstream).
