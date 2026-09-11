@@ -1139,36 +1139,6 @@ impl Sidebar {
                         None,
                     ),
                     item(
-                        "Claude Code",
-                        SidebarContextAction::NewTab(NewTabAction::ClaudeCode),
-                        true,
-                        None,
-                    ),
-                    item(
-                        "Codex",
-                        SidebarContextAction::NewTab(NewTabAction::Codex),
-                        true,
-                        None,
-                    ),
-                    item(
-                        "OpenCode",
-                        SidebarContextAction::NewTab(NewTabAction::OpenCode),
-                        true,
-                        None,
-                    ),
-                    item(
-                        "Pi",
-                        SidebarContextAction::NewTab(NewTabAction::Pi),
-                        true,
-                        None,
-                    ),
-                    item(
-                        "Oh-My-Pi",
-                        SidebarContextAction::NewTab(NewTabAction::OhMyPi),
-                        true,
-                        None,
-                    ),
-                    item(
                         "New Chat",
                         SidebarContextAction::NewTab(NewTabAction::NewChat),
                         true,
@@ -2945,15 +2915,9 @@ impl Sidebar {
                 "remove-worktree-and-remote-context"
             }
             SidebarContextAction::NewTab(NewTabAction::NewTerminal) => "new-terminal",
-            SidebarContextAction::NewTab(NewTabAction::ClaudeCode) => "claude-code",
-            SidebarContextAction::NewTab(NewTabAction::Codex) => "codex",
-            SidebarContextAction::NewTab(NewTabAction::OpenCode) => "opencode",
-            SidebarContextAction::NewTab(NewTabAction::Pi) => "pi",
-            SidebarContextAction::NewTab(NewTabAction::OhMyPi) => "oh-my-pi",
             SidebarContextAction::NewTab(NewTabAction::NewChat) => "new-chat",
             SidebarContextAction::NewTab(NewTabAction::NewChanges)
-            | SidebarContextAction::NewTab(NewTabAction::NewBrowser)
-            | SidebarContextAction::NewTab(NewTabAction::SplitClaudeCode) => "unsupported",
+            | SidebarContextAction::NewTab(NewTabAction::NewBrowser) => "unsupported",
         }
     }
 
@@ -5677,6 +5641,35 @@ mod tests {
         }
     }
 
+    /// Right-clicking a worktree offers surfaces, not agents. The five rows
+    /// pinned here each opened a terminal running one agent's CLI in that
+    /// worktree; New Chat reaches the same agents through `sirio_registry`
+    /// without a shell in between. Asserted by label rather than by variant
+    /// so the test keeps meaning once the variants are gone.
+    #[test]
+    fn worktree_context_menu_offers_no_agent_terminal_items() {
+        let worktree = SidebarContextTarget::Worktree {
+            path: PathBuf::from("/tmp/git-main"),
+            is_primary: false,
+        };
+        let items = Sidebar::context_menu_items(&worktree, &RemoteTracking::Untracked);
+
+        for label in ["Claude Code", "Codex", "OpenCode", "Pi", "Oh-My-Pi"] {
+            assert!(
+                !items.iter().any(|item| item.label == label),
+                "{label} names an agent-specialized terminal the worktree menu \
+                 no longer offers"
+            );
+        }
+
+        for label in ["New Terminal", "New Chat"] {
+            assert!(
+                items.iter().any(|item| item.label == label),
+                "{label} is still offered"
+            );
+        }
+    }
+
     #[test]
     fn sidebar_context_items_explain_git_eligibility_and_list_every_new_surface() {
         let git_project = SidebarContextTarget::Project {
@@ -5705,15 +5698,7 @@ mod tests {
                 .iter()
                 .any(|item| { item.action == SidebarContextAction::SetPrimary && item.enabled })
         );
-        for action in [
-            NewTabAction::NewTerminal,
-            NewTabAction::ClaudeCode,
-            NewTabAction::Codex,
-            NewTabAction::OpenCode,
-            NewTabAction::Pi,
-            NewTabAction::OhMyPi,
-            NewTabAction::NewChat,
-        ] {
+        for action in [NewTabAction::NewTerminal, NewTabAction::NewChat] {
             assert!(
                 worktree_items
                     .iter()

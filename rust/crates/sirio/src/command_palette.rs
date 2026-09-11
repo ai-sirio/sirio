@@ -410,12 +410,6 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         },
         new_tab_entry(NewTabAction::NewTerminal, "New Terminal"),
         new_tab_entry(NewTabAction::NewChanges, "Changes"),
-        new_tab_entry(NewTabAction::ClaudeCode, "Claude Code"),
-        new_tab_entry(NewTabAction::Codex, "Codex"),
-        new_tab_entry(NewTabAction::OpenCode, "OpenCode"),
-        new_tab_entry(NewTabAction::Pi, "Pi"),
-        new_tab_entry(NewTabAction::OhMyPi, "Oh-My-Pi"),
-        new_tab_entry(NewTabAction::SplitClaudeCode, "Split Claude Code"),
         new_tab_entry(NewTabAction::NewChat, "New Chat"),
         new_tab_entry(NewTabAction::NewBrowser, "New Browser"),
         sidebar_entry(
@@ -482,11 +476,6 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
 
     for (action, label) in [
         (NewTabAction::NewTerminal, "New Terminal Here"),
-        (NewTabAction::ClaudeCode, "Claude Code Here"),
-        (NewTabAction::Codex, "Codex Here"),
-        (NewTabAction::OpenCode, "OpenCode Here"),
-        (NewTabAction::Pi, "Pi Here"),
-        (NewTabAction::OhMyPi, "Oh-My-Pi Here"),
         (NewTabAction::NewChat, "New Chat Here"),
     ] {
         entries.push(sidebar_entry(
@@ -533,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_contains_window_tab_sidebar_and_agent_commands() {
+    fn catalog_contains_window_tab_sidebar_and_chat_commands() {
         let commands = entries(&context());
         assert!(commands.iter().any(|entry| {
             entry.label == "Toggle Sidebar"
@@ -545,8 +534,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.label == "Project Settings")
         );
-        assert!(commands.iter().any(|entry| entry.label == "Codex"));
-        assert!(commands.iter().any(|entry| entry.label == "Oh-My-Pi"));
+        assert!(commands.iter().any(|entry| entry.label == "New Chat"));
     }
 
     /// #319: the palette must not offer to move a tab between the two center
@@ -580,6 +568,52 @@ mod tests {
             commands.iter().any(|entry| entry.label == "Move Tab Later"),
             "tab reordering within a pane is still offered"
         );
+    }
+
+    /// The palette mirrors the "+" menu: agents are reached through New Chat,
+    /// never by opening a terminal that runs one agent's CLI. Eleven labels
+    /// are pinned because the family was spelled twice -- six global entries
+    /// and five "Here" variants targeting the selected worktree -- and a
+    /// partial re-addition (one spelling, not the other) is exactly the kind
+    /// of drift a label-level assertion catches and the type system does not.
+    #[test]
+    fn catalog_offers_no_agent_terminal_entries() {
+        let commands = entries(&context());
+
+        for label in [
+            "Claude Code",
+            "Codex",
+            "OpenCode",
+            "Pi",
+            "Oh-My-Pi",
+            "Split Claude Code",
+            "Claude Code Here",
+            "Codex Here",
+            "OpenCode Here",
+            "Pi Here",
+            "Oh-My-Pi Here",
+        ] {
+            assert!(
+                !commands.iter().any(|entry| entry.label == label),
+                "{label} names an agent-specialized terminal the palette no \
+                 longer offers"
+            );
+        }
+
+        // The generic commands they sat among must survive, so this test
+        // fails on a re-addition rather than on the whole family going
+        // missing.
+        for label in [
+            "New Terminal",
+            "New Terminal Here",
+            "New Chat",
+            "New Chat Here",
+        ] {
+            assert!(
+                commands.iter().any(|entry| entry.label == label),
+                "{label} is still offered"
+            );
+        }
     }
 
     #[test]
