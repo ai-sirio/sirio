@@ -23,12 +23,6 @@ actions!(new_tab_menu, [DismissMenu]);
 pub enum NewTabAction {
     NewTerminal,
     NewChanges,
-    ClaudeCode,
-    Codex,
-    OpenCode,
-    Pi,
-    OhMyPi,
-    SplitClaudeCode,
     NewBrowser,
     NewChat,
 }
@@ -366,25 +360,10 @@ impl TabBar {
         bezel_theme: &bezel::theme::Theme,
         painter: Painter,
         chevron: bool,
-        hint: Option<&'static str>,
     ) -> impl IntoElement {
         let (icon, glyph_color) = match label {
             "New Terminal" => (Icon::SquareTerminal, theme.text_faint),
             "Changes" => (Icon::File, theme.text_faint),
-            // Agent marks wear their published brand colour, not a theme
-            // token: Claude its orange, the monochrome trio the foreground
-            // they are authored in. omp's tint is ignored by its
-            // full-colour path.
-            "Claude Code" | "Split Claude Code" => (
-                Icon::ClaudeCode,
-                Icon::ClaudeCode
-                    .agent_mark_color(theme.text)
-                    .unwrap_or(theme.text),
-            ),
-            "Codex" => (Icon::Codex, theme.text),
-            "OpenCode" => (Icon::OpenCode, theme.text),
-            "Pi" => (Icon::Pi, theme.text),
-            "Oh-My-Pi" => (Icon::OhMyPi, theme.text),
             "New Browser" => (Icon::Globe, theme.text_faint),
             "New Chat" => (Icon::MessageSquare, theme.text_faint),
             _ => (Icon::File, theme.text_faint),
@@ -428,41 +407,6 @@ impl TabBar {
                     ),
                 )
             })
-            // #205: annotate, never disable. The row stays clickable because
-            // availability is probed against Sirio's own PATH while the agent
-            // is launched through a login shell that can resolve more -- so a
-            // gate here would grey out working nvm installs of pi and omp.
-            .when_some(hint, |this, hint| {
-                this.child(
-                    div()
-                        .debug_selector(move || format!("new-tab-hint-{}", menu_selector(label)))
-                        .flex_shrink_0()
-                        .ml(px(8.0))
-                        .text_size(theme.typography.caption2)
-                        .text_color(theme.text_faint)
-                        .child(hint),
-                )
-            })
-    }
-
-    /// #205: the menu's "not on PATH" note for an agent row, or `None` when
-    /// the binary resolved or the row is not an agent.
-    ///
-    /// Reuses `AgentAvailability::status_label`, the same text Settings shows
-    /// for the same adapter -- the two surfaces disagreeing about one agent is
-    /// what made this worth fixing. "Split Claude Code" launches the same
-    /// binary as "Claude Code", so it borrows that verdict.
-    fn path_hint(&self, label: &'static str) -> Option<&'static str> {
-        let display = if label == "Split Claude Code" {
-            "Claude Code"
-        } else {
-            label
-        };
-        self.chat_agents
-            .iter()
-            .find(|agent| agent.display_name == display)
-            .filter(|agent| !agent.is_available())
-            .map(|agent| agent.status_label())
     }
 
     fn separator() -> impl IntoElement {
@@ -688,9 +632,9 @@ impl Render for TabBar {
         let menu = popover::popover_card(&bezel_theme)
             .id("new-tab-menu")
             .debug_selector(|| "new-tab-menu".to_owned())
-            // #205: widened from 170px to fit the "Not found on PATH" note an
-            // agent row can carry. Measured, not guessed: the note overran the
-            // old border by 76px.
+            // #205 widened this from 170px for the "Not found on PATH" note the
+            // agent rows carried. Those rows are gone; the width stays because
+            // the chat picker draws inside this card and was laid out for it.
             .w(px(250.0))
             .child(Self::render_menu_item(
                 "New Terminal",
@@ -700,7 +644,6 @@ impl Render for TabBar {
                 &bezel_theme,
                 painter,
                 false,
-                None,
             ))
             .child(Self::render_menu_item(
                 "Changes",
@@ -710,7 +653,6 @@ impl Render for TabBar {
                 &bezel_theme,
                 painter,
                 false,
-                None,
             ))
             .child(Self::render_menu_item(
                 "New Browser",
@@ -720,69 +662,6 @@ impl Render for TabBar {
                 &bezel_theme,
                 painter,
                 false,
-                None,
-            ))
-            .child(Self::separator())
-            .child(Self::render_menu_item(
-                "Claude Code",
-                NewTabAction::ClaudeCode,
-                entity.clone(),
-                theme,
-                &bezel_theme,
-                painter,
-                false,
-                self.path_hint("Claude Code"),
-            ))
-            .child(Self::render_menu_item(
-                "Codex",
-                NewTabAction::Codex,
-                entity.clone(),
-                theme,
-                &bezel_theme,
-                painter,
-                false,
-                self.path_hint("Codex"),
-            ))
-            .child(Self::render_menu_item(
-                "OpenCode",
-                NewTabAction::OpenCode,
-                entity.clone(),
-                theme,
-                &bezel_theme,
-                painter,
-                false,
-                self.path_hint("OpenCode"),
-            ))
-            .child(Self::render_menu_item(
-                "Pi",
-                NewTabAction::Pi,
-                entity.clone(),
-                theme,
-                &bezel_theme,
-                painter,
-                false,
-                self.path_hint("Pi"),
-            ))
-            .child(Self::render_menu_item(
-                "Oh-My-Pi",
-                NewTabAction::OhMyPi,
-                entity.clone(),
-                theme,
-                &bezel_theme,
-                painter,
-                false,
-                self.path_hint("Oh-My-Pi"),
-            ))
-            .child(Self::separator())
-            .child(Self::render_menu_item(
-                "Split Claude Code",
-                NewTabAction::SplitClaudeCode,
-                entity.clone(),
-                theme,
-                &bezel_theme,
-                painter,
-                false,
-                self.path_hint("Split Claude Code"),
             ))
             .child(Self::separator())
             .child(Self::render_new_chat_item(
@@ -896,12 +775,6 @@ fn menu_selector(label: &str) -> &'static str {
     match label {
         "New Terminal" => "new-terminal",
         "Changes" => "changes",
-        "Claude Code" => "claude-code",
-        "Codex" => "codex",
-        "OpenCode" => "opencode",
-        "Pi" => "pi",
-        "Oh-My-Pi" => "oh-my-pi",
-        "Split Claude Code" => "split-claude-code",
         "New Browser" => "new-browser",
         "New Chat" => "new-chat",
         _ => "unknown",
@@ -948,16 +821,6 @@ mod tests {
         let entries = [
             ("New Terminal", "new-terminal", NewTabAction::NewTerminal),
             ("Changes", "changes", NewTabAction::NewChanges),
-            ("Claude Code", "claude-code", NewTabAction::ClaudeCode),
-            ("Codex", "codex", NewTabAction::Codex),
-            ("OpenCode", "opencode", NewTabAction::OpenCode),
-            ("Pi", "pi", NewTabAction::Pi),
-            ("Oh-My-Pi", "oh-my-pi", NewTabAction::OhMyPi),
-            (
-                "Split Claude Code",
-                "split-claude-code",
-                NewTabAction::SplitClaudeCode,
-            ),
             ("New Browser", "new-browser", NewTabAction::NewBrowser),
         ];
 
@@ -981,12 +844,6 @@ mod tests {
             let item_selector = match selector {
                 "new-terminal" => "new-tab-item-new-terminal",
                 "changes" => "new-tab-item-changes",
-                "claude-code" => "new-tab-item-claude-code",
-                "codex" => "new-tab-item-codex",
-                "opencode" => "new-tab-item-opencode",
-                "pi" => "new-tab-item-pi",
-                "oh-my-pi" => "new-tab-item-oh-my-pi",
-                "split-claude-code" => "new-tab-item-split-claude-code",
                 "new-browser" => "new-tab-item-new-browser",
                 "new-chat" => "new-tab-item-new-chat",
                 _ => unreachable!("test selector is covered above"),
@@ -1026,6 +883,59 @@ mod tests {
         assert!(
             cx.debug_bounds("new-tab-item-new-browser").is_some(),
             "the menu offers the mounted browser surface"
+        );
+    }
+
+    /// The "+" menu creates surfaces, not agents: an agent is reached through
+    /// New Chat, which resolves it through `sirio_registry` instead of running
+    /// its CLI in a shell. The six rows this pins were the opposite deal --
+    /// each one opened a *terminal* pre-loaded with one agent's binary, so the
+    /// menu had to carry a per-agent PATH hint and the shell a per-agent
+    /// launch path. Their absence is the contract; a re-addition would compile
+    /// and draw, so only a test catches it.
+    #[gpui::test]
+    async fn drawn_new_tab_menu_offers_no_agent_terminal_items(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| TabBar::new(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is in the drawn frame");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("new-tab-menu").is_some());
+        for selector in [
+            "new-tab-item-claude-code",
+            "new-tab-item-codex",
+            "new-tab-item-opencode",
+            "new-tab-item-pi",
+            "new-tab-item-oh-my-pi",
+            "new-tab-item-split-claude-code",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "{selector} names an agent-specialized terminal the menu no \
+                 longer offers"
+            );
+        }
+
+        // The generic surfaces it sat between must survive, so this test
+        // fails on a re-addition rather than on an empty menu.
+        assert!(
+            cx.debug_bounds("new-tab-item-new-terminal").is_some(),
+            "the generic terminal is still offered"
+        );
+        assert!(
+            cx.debug_bounds("new-tab-item-new-chat").is_some(),
+            "an agent is still reached through New Chat"
         );
     }
 
@@ -1141,76 +1051,6 @@ mod tests {
         );
     }
 
-    /// #205: the `+` menu offered agents the app already knew were missing,
-    /// while Settings said "Not found on PATH" about the same adapter. It is
-    /// annotated rather than disabled, for the reason the issue records: the
-    /// availability probe resolves against Sirio's own PATH, but agents are
-    /// launched through a login shell that can resolve more -- so greying out
-    /// `pi` or `omp` would break working nvm setups. The palette's own comment
-    /// states the same principle: "unavailable operations remain discoverable".
-    #[gpui::test]
-    async fn the_new_tab_menu_marks_agents_that_are_not_on_path(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| {
-            TabBar::new(cx).with_chat_agents(vec![
-                available_agent("codex", "Codex"),
-                AgentAvailability {
-                    id: "omp",
-                    display_name: "Oh-My-Pi",
-                    executable: None,
-                },
-            ])
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
-        cx.simulate_click(plus.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("new-tab-hint-oh-my-pi").is_some(),
-            "an agent that is not on PATH says so in the menu"
-        );
-        assert!(
-            cx.debug_bounds("new-tab-item-oh-my-pi").is_some(),
-            "and stays clickable -- the login shell may still resolve it"
-        );
-        assert!(
-            cx.debug_bounds("new-tab-hint-codex").is_none(),
-            "an agent that is on PATH carries no hint"
-        );
-
-        // #212's lesson applied: the menu is a fixed width, so the note has to
-        // be shown to FIT, not merely to render. The first attempt overflowed
-        // the border and collided with the label.
-        let menu = cx.debug_bounds("new-tab-menu").expect("the menu is drawn");
-        let hint = cx
-            .debug_bounds("new-tab-hint-oh-my-pi")
-            .expect("hint drawn");
-        assert!(
-            hint.right() <= menu.right(),
-            "the note must stay inside the menu: hint right {:?} vs menu right {:?}",
-            hint.right(),
-            menu.right()
-        );
-        assert!(
-            hint.left() >= menu.left(),
-            "and inside its left edge: hint left {:?} vs menu left {:?}",
-            hint.left(),
-            menu.left()
-        );
-    }
-
-    /// #376: the host-visible mirror of the `+` menu. The workspace hides the
-    /// native browser child while this reads open, so it must track the drawn
-    /// menu: closed before the first click, open while the card is up, closed
-    /// again once a row is picked.
     #[gpui::test]
     async fn new_tab_menu_open_state_tracks_the_drawn_menu(cx: &mut TestAppContext) {
         cx.update(Theme::init);

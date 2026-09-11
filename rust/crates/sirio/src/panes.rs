@@ -282,6 +282,10 @@ impl<T> PaneNode<T> {
         }
     }
 
+    /// `split_focused_with_placement`'s default placement, kept for the
+    /// tests that predate the placement argument. Test-only since the agent
+    /// terminals went: every live split now names its placement.
+    #[cfg(test)]
     pub(crate) fn split_focused(
         &mut self,
         focused: usize,
