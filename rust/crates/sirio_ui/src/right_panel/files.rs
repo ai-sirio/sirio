@@ -87,6 +87,11 @@ pub(super) struct GitMarkers {
 }
 
 impl GitMarkers {
+    /// Whether the ignore rules exclude this worktree-relative path.
+    pub(super) fn ignores(&self, relative: &Path) -> bool {
+        self.ignored.is_ignored(relative)
+    }
+
     /// The marker for one worktree-relative path, taken from the half of
     /// the model that owns it.
     fn get(&self, relative: &Path, is_dir: bool) -> Option<DirectoryGitStatus> {
@@ -247,12 +252,48 @@ impl RightPanel {
                         panel.is_stale = !panel.file_tree.is_empty();
                     }
                 }
+                if panel.refresh_error.is_some() {
+                    panel.schedule_failure_retry(cx);
+                } else {
+                    panel.refresh_failures = 0;
+                    panel.refresh_retry_task = None;
+                }
                 panel.updating = false;
                 sirio_perf::event("notify.RightPanel.refresh_complete", cx.entity_id().as_u64());
                 if panel.refresh_dirty {
                     panel.request_refresh(cx);
                 }
                 cx.notify();
+            });
+        }));
+    }
+
+    /// F-CHG-03: a failed refresh must heal itself once whatever blocked it
+    /// clears -- a permission restored, a mount coming back -- without the
+    /// user finding the Retry button.
+    ///
+    /// The periodic tree refresh used to cover this for free by retrying on
+    /// its own 1s cadence. Nothing else does: the watcher cannot report a
+    /// tree it failed to read, and the view-transition trigger only fires if
+    /// the user leaves Files and returns. So failure gets its own retry, and
+    /// because the blocked condition may never clear, the delay doubles per
+    /// consecutive failure up to a minute rather than holding a fixed
+    /// cadence. A success anywhere resets it and drops the task.
+    fn schedule_failure_retry(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_retry_task.is_some() {
+            return;
+        }
+        self.refresh_failures = self.refresh_failures.saturating_add(1);
+        let delay = Duration::from_secs(1u64 << self.refresh_failures.min(6));
+        self.refresh_retry_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.refresh_retry_task = None;
+                // Only still-failing panels retry; anything that fixed the
+                // tree in the meantime has already reset the counter.
+                if panel.refresh_error.is_some() {
+                    panel.refresh(cx);
+                }
             });
         }));
     }
@@ -283,12 +324,19 @@ impl RightPanel {
 
     /// Arms the first refresh. Subsequent refreshes are explicitly requested
     /// by lifecycle events, retries, expands, or filesystem watchers.
+    ///
+    /// This one walks straight away rather than through `request_refresh`.
+    /// The debounce exists to coalesce a *burst* of filesystem events into
+    /// one walk, and there is no burst to coalesce on a panel that has
+    /// nothing to show yet -- routing the first load through it only holds
+    /// an empty tree on screen for the debounce window before the walk even
+    /// starts.
     pub(super) fn ensure_tree_refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_loop_started {
             return;
         }
         self.refresh_loop_started = true;
-        self.request_refresh(cx);
+        self.refresh(cx);
     }
 
     fn toggle_file(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -905,11 +953,7 @@ fn files_refresh_indicator(window: &mut Window, cx: &mut App) -> AnyElement {
                 .debug_selector(|| "files-refresh-spinner".to_owned())
                 .w(px(2.0))
                 .h(px(2.0))
-                .child(loading::compact(
-                    "files-refresh-spinner-bezel",
-                    window,
-                    cx,
-                )),
+                .child(loading::compact("files-refresh-spinner-bezel", window, cx)),
         )
         .into_any_element()
 }
@@ -2760,6 +2804,60 @@ mod tests {
             assert!(panel.refresh_dirty);
             assert!(panel.refresh_debounce_task.is_some());
         });
+    }
+
+    /// F-CHG-03: the retry that used to ride on the 1s tick is now explicit,
+    /// and must back off rather than hold a cadence -- whatever blocks the
+    /// walk may never clear, and a fixed retry over an unreadable checkout is
+    /// the same repeated repository walk forever.
+    #[gpui::test]
+    fn a_failing_refresh_schedules_its_own_retry_and_backs_off(cx: &mut TestAppContext) {
+        let directory = TempDir::new();
+        let panel = cx.new(|_| RightPanel::new(directory.0.clone()));
+        panel.update(cx, |panel, cx| {
+            panel.refresh_error = Some("cannot read the checkout".to_owned());
+
+            panel.schedule_failure_retry(cx);
+            assert_eq!(panel.refresh_failures, 1);
+            assert!(
+                panel.refresh_retry_task.is_some(),
+                "a failed walk must arm its own retry, not wait for a click"
+            );
+
+            // A second failure while one retry is already armed must not
+            // stack a second task.
+            panel.schedule_failure_retry(cx);
+            assert_eq!(
+                panel.refresh_failures, 1,
+                "an armed retry owns the attempt; failures count once per round"
+            );
+
+            // The armed task is what a success drops.
+            panel.refresh_error = None;
+            panel.refresh_failures = 0;
+            panel.refresh_retry_task = None;
+            panel.schedule_failure_retry(cx);
+            assert_eq!(
+                panel.refresh_failures, 1,
+                "the counter restarts once a success has cleared it"
+            );
+        });
+    }
+
+    /// The delay doubles per consecutive failure and then stops growing, so
+    /// a permanently unreadable checkout costs one walk a minute rather than
+    /// one a second.
+    #[test]
+    fn the_failure_backoff_doubles_and_then_holds_at_a_minute() {
+        let delay = |failures: u32| Duration::from_secs(1u64 << failures.min(6));
+        assert_eq!(delay(1), Duration::from_secs(2));
+        assert_eq!(delay(2), Duration::from_secs(4));
+        assert_eq!(delay(6), Duration::from_secs(64));
+        assert_eq!(
+            delay(50),
+            Duration::from_secs(64),
+            "the shift must stay capped -- 1u64 << 64 is undefined behaviour territory"
+        );
     }
 
     /// The Files panel spent most of its time showing "Loading files…": the

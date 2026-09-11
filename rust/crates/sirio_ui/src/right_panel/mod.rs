@@ -151,14 +151,39 @@ pub struct FilesSnapshot {
 }
 
 impl FilesSnapshot {
-    /// A clean snapshot is usable without making the Files panel wait.
+    /// A clean snapshot young enough to draw without making the Files panel
+    /// wait for a walk first.
+    ///
+    /// The age bound is about what a *restored* tree may claim on arrival,
+    /// so it belongs to the display decision only. It is deliberately not a
+    /// "needs rewalking" test: it expires on its own, and a caller that
+    /// rewalks whatever is not fresh never reaches a resting state. Use
+    /// `is_dirty` for that -- it moves only on evidence.
     #[must_use]
     pub fn is_fresh(&self, now: SystemTime) -> bool {
         !self.dirty
-            && now
-                .duration_since(self.captured_at)
-                .unwrap_or_default()
-                <= Duration::from_secs(2)
+            && now.duration_since(self.captured_at).unwrap_or_default() <= Duration::from_secs(2)
+    }
+
+    /// Whether a filesystem change has been seen under this tree since the
+    /// walk that produced it.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Whether the worktree-relative `relative` was excluded by the ignore
+    /// rules when this snapshot was walked.
+    ///
+    /// The walk already pays for `git ls-files --ignored --directory`, so a
+    /// watcher can reuse the answer instead of running git per event. That
+    /// matters because a recursive watch on a checkout sees its build output
+    /// too: without this, one `cargo build` under the tree reports thousands
+    /// of `target/` writes, each of which would mark the tree dirty and buy
+    /// another repository-sized walk.
+    #[must_use]
+    pub fn ignores(&self, relative: &std::path::Path) -> bool {
+        self.git_markers.ignores(relative)
     }
 
     /// Marks cached data for a silent background refresh while retaining it
@@ -274,8 +299,15 @@ pub struct RightPanel {
     /// Coalesces refresh requests until the 300ms debounce expires.
     refresh_debounce_task: Option<Task<()>>,
     refresh_dirty: bool,
+    /// Backs off a refresh that keeps failing (F-CHG-03), and is
+    /// dropped the moment one succeeds.
+    refresh_retry_task: Option<Task<()>>,
+    refresh_failures: u32,
     /// Detects leaving and re-entering the Files view without polling.
     files_view_active: bool,
+    /// The panel view the last render drew, so a switch to a lazily built
+    /// surface can schedule the frame that builds it.
+    last_panel_view: Option<PanelView>,
     file_context_menu: Option<files::FileContextMenu>,
     /// Built on first selection of the Diff view, dropped when the checkout
     /// changes. A user who never opens Diff never pays for a git status here.
@@ -317,7 +349,10 @@ impl RightPanel {
             refresh_loop_started: false,
             refresh_debounce_task: None,
             refresh_dirty: false,
+            refresh_retry_task: None,
+            refresh_failures: 0,
             files_view_active: false,
+            last_panel_view: None,
             file_context_menu: None,
             changes: None,
             changes_subscriptions: Vec::new(),
@@ -453,6 +488,8 @@ impl RightPanel {
         self.refresh_task = None;
         self.refresh_debounce_task = None;
         self.refresh_dirty = false;
+        self.refresh_retry_task = None;
+        self.refresh_failures = 0;
         self.files_view_active = false;
         self.refresh_generation += 1;
         self.walk_task = None;
@@ -502,6 +539,8 @@ impl RightPanel {
         self.refresh_task = None;
         self.refresh_debounce_task = None;
         self.refresh_dirty = false;
+        self.refresh_retry_task = None;
+        self.refresh_failures = 0;
         self.files_view_active = false;
         self.refresh_generation += 1;
         self.walk_task = None;
@@ -716,8 +755,23 @@ impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("RightPanel.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
+        let view = PanelView::get(cx);
+        // The selected view is a global, and nothing here observes it, so
+        // switching surfaces schedules no frame of its own. Each surface
+        // other than Files is built lazily *during* a render in that view
+        // (`ensure_history`, `ensure_diff`), so without this the newly
+        // selected one is never constructed and the panel draws the old
+        // surface until something unrelated happens to notify. It used to
+        // survive on the Files refresh's own `notify` arriving a moment
+        // later, which stopped being true once the refresh became
+        // Files-only. Guarded by the change, so it costs one extra frame
+        // per switch and cannot re-arm itself.
+        if self.last_panel_view != Some(view) {
+            self.last_panel_view = Some(view);
+            cx.notify();
+        }
         if self.worktree_selected {
-            let showing_files = PanelView::get(cx) == PanelView::Files;
+            let showing_files = view == PanelView::Files;
             if showing_files {
                 if !self.files_view_active && (self.is_stale || !self.settled) {
                     self.request_refresh(cx);
