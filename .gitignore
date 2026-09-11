@@ -25,3 +25,9 @@ opencode.json
 # Python bytecode from the Linux verification scripts
 __pycache__/
 *.pyc
+
+# Local tool/IDE/planning artifacts — not shared repo content
+/.codegraph/
+/docs/
+/output/
+/plans/
