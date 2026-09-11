@@ -22,14 +22,14 @@ use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba, ScrollHandle,
-    StyleRefinement, Window, div, img, prelude::*, px, rgb,
+    Pixels, StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{
     UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
     remove_worktree_and_remote_branch, resolve_parent_directory, upstream_of,
 };
 use sirio_project::{TabKind, display_absolute_path, display_path};
-use sirio_theme::{AgentBrandColor, Theme};
+use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
 use crate::loading;
@@ -173,6 +173,11 @@ const FILTER_LEFT_INSET: f32 = 20.0;
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
+/// Single-line row title size, in the same points every other explicit UI
+/// size in this file is written in. It is drawn through
+/// [`Typography::scaled`], never as a bare `px`, so Settings -> Appearance ->
+/// Interface font size carries the worktree names with the rest of the shell.
+pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.5;
 /// Two-line card context line height (11.5px).
 pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
 /// Legacy content rhythm retained for the sidebar conformance inventory.
@@ -3972,7 +3977,7 @@ impl Render for Sidebar {
                 row,
             };
             let row_id = inputs.row.id;
-            let row_height = Self::row_min_height(&inputs.row);
+            let row_height = Self::row_drawn_height(&inputs.row, &theme.typography);
             let view = match row_views.remove(&row_id) {
                 Some(view) => {
                     view.update(cx, |view, cx| {
@@ -5150,6 +5155,68 @@ mod tests {
         assert!(
             first_row.bottom() <= second_row.top(),
             "long labels must not paint into the next row: first={first_row:?}, second={second_row:?}"
+        );
+    }
+
+    /// F-SID: Settings -> Appearance -> Interface font size must carry the
+    /// sidebar's worktree names with it. The title element named a weight, a
+    /// line height and an ellipsis and no size at all, so it fell through to
+    /// gpui's default `TextStyle` -- a fixed 16px -- exactly as its colour
+    /// once did (see `Sidebar::title_color`). Every other string in the shell
+    /// moved with the setting and the branch names stayed where they were.
+    #[gpui::test]
+    async fn worktree_row_titles_follow_the_interface_font_size(cx: &mut gpui::TestAppContext) {
+        let project_root = PathBuf::from("/tmp/sidebar-interface-font");
+        cx.update(Theme::init);
+        let window = cx.open_window(size(px(320.0), px(240.0)), |_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "interface-font".into(),
+                    name: "Project".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees: vec![SidebarWorktree {
+                        branch: "worktree/green-meadow-592b".into(),
+                        path: project_root.join("green-meadow"),
+                        is_primary: false,
+                        comment: None,
+                    }],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let default_title = cx
+            .debug_bounds("sidebar-row-title-1")
+            .expect("the worktree title is drawn at the default interface size");
+        let default_row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn at the default interface size");
+
+        cx.update(|_, cx| {
+            Theme::set_interface_font_size(18, cx);
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+
+        let enlarged_title = cx
+            .debug_bounds("sidebar-row-title-1")
+            .expect("the worktree title is drawn at the enlarged interface size");
+        let enlarged_row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn at the enlarged interface size");
+
+        assert!(
+            enlarged_title.size.height > default_title.size.height,
+            "the worktree name must grow with the interface font size: \
+             default={default_title:?}, enlarged={enlarged_title:?}"
+        );
+        assert!(
+            enlarged_row.size.height > default_row.size.height,
+            "the row must make room for the taller title rather than clip it: \
+             default={default_row:?}, enlarged={enlarged_row:?}"
         );
     }
 
