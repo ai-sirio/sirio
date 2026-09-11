@@ -58,6 +58,20 @@ fi
 echo "==> cargo build --workspace --all-targets"
 cargo build --workspace --all-targets
 
+# `resolve_sirioctl_path` looks in three places: the copy installed under the
+# XDG data directory, the directory holding the running executable, and PATH. A
+# test binary lives in `target/debug/deps/`, where cargo writes
+# `sirioctl-<hash>` and never a plain `sirioctl`, so the second can never match
+# from a test -- and the first only matches on a machine where somebody has
+# already run Sirio.
+#
+# So the four tests that create or restore an agent pane were reading a property
+# of the developer's machine rather than of the build. They passed for months on
+# the maintainer's Mac and failed on the first hosted runner that ever ran this
+# gate. The build above has just produced `target/debug/sirioctl`; putting it on
+# PATH makes the third candidate match everywhere.
+export PATH="$PWD/target/debug:$PATH"
+
 # nextest rather than `cargo test`: cargo runs the workspace's 45 test binaries
 # one after another, so the two slow ones dominate the wall clock while the
 # other 43 wait at idle cores. nextest schedules all of them together and gives
