@@ -12,13 +12,18 @@ name: Build release
 # broken macOS build stops the release rather than producing artifacts nobody
 # will publish. See docs/superpowers/specs/2026-08-29-macos-release-platform-design.md
 #
-# NOT YET VERIFIED: the workspace has never been compiled for macOS. Phase 0 of
-# the spec -- `Scripts/ci.sh` printing `CI OK` on a real Mac -- was deliberately
-# deferred by the maintainer and is not in this branch. Do not push a `v*.*.*`
-# tag until it has passed there: the production path is triggered only by such
-# a tag, so the first thing an unverified macOS build breaks is a release that
-# is already public. Use release.yml's manual trigger to verify a branch with a
-# tag input.
+# VERIFIED 2026-09-10, by this workflow. Phase 0 of the spec -- `Scripts/ci.sh`
+# printing `CI OK` on a real Mac -- is closed, and run 34525529495 took the
+# whole path from there: gate, release compile, codesign, notarize, DMG, the
+# two hosted jobs, and publish, ending with `nightly-202609102018` and a signed
+# manifest served from dl.sirioai.app. A `v*.*.*` tag is no longer blocked.
+#
+# What that run also showed is worth keeping in mind before changing anything
+# downstream of the gate: `build / linux` and `build / windows` had never
+# executed even once, because every earlier nightly died on the gate and left
+# them `skipped`. Both failed on their first real run -- a missing
+# `libxkbcommon-x11-dev`, and Inno writing the installer to its default
+# `Output/` subdirectory. A step that has never run is not a step that works.
 on:
   workflow_call:
     inputs:

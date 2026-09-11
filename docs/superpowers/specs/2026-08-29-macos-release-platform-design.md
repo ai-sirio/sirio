@@ -62,6 +62,16 @@ writing ours.
 **`Scripts/ci.sh` must print `CI OK` on a real Mac before any release tag is
 pushed.** The workspace has never been compiled for macOS.
 
+> **Closed 2026-09-10.** It prints `CI OK` on the self-hosted Mac, and the
+> whole path ran from there: run 34525529495 published
+> `nightly-202609102018` — signed and notarized DMG, AppImage, Inno installer,
+> and a signed manifest served from `dl.sirioai.app`. Getting there needed the
+> gate itself fixed first (it was failing on flaky and on genuinely wrong
+> tests, not on the macOS code), and then three bugs in steps that had never
+> executed anywhere because every earlier nightly died before reaching them.
+> The paragraph above stays as written: it was true when written, and the
+> section below is what it bought.
+
 > **Amended 2026-08-29.** This section originally read "no workflow code is
 > written until" — Phase 0 gated all implementation. The maintainer moved the
 > gate to the first release tag instead, so the scripts and workflow are built
