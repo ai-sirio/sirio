@@ -1,0 +1,350 @@
+{
+  "run": "rust\\target\\perf\\text-phases-v1",
+  "raw_sha256": {
+    "text.tsv": "16b04048938c893afb87f52a723c86e4abd9ca4c216271ca162cb505716adfb2",
+    "native.jsonl": "0f163f7de12ff62b5e8edba799d86f79013270538930cdc3e11be0bfbaf55ccc"
+  },
+  "gap_root_epoch_ns": 1788678143461786900,
+  "native_epoch_ns": 1788678120565352900,
+  "standard_neighborhood": [
+    {
+      "start": 1788678143435234400,
+      "thread": 2,
+      "kind": "event",
+      "name": "Windows.vsync",
+      "entity": 0,
+      "duration": 0
+    },
+    {
+      "start": 1788678143435293400,
+      "thread": 1,
+      "kind": "span",
+      "name": "Windows.draw_window",
+      "entity": 15403946,
+      "duration": 26165600
+    },
+    {
+      "start": 1788678143435355700,
+      "thread": 1,
+      "kind": "span",
+      "name": "SirioWorkspace.render",
+      "entity": 4294967305,
+      "duration": 432600
+    },
+    {
+      "start": 1788678143435837300,
+      "thread": 1,
+      "kind": "span",
+      "name": "Titlebar.render",
+      "entity": 4294967307,
+      "duration": 80800
+    },
+    {
+      "start": 1788678143436372200,
+      "thread": 1,
+      "kind": "span",
+      "name": "Sidebar.render",
+      "entity": 4294967306,
+      "duration": 215100
+    },
+    {
+      "start": 1788678143437658200,
+      "thread": 1,
+      "kind": "span",
+      "name": "StatusBar.render",
+      "entity": 4294967325,
+      "duration": 71400
+    },
+    {
+      "start": 1788678143440130100,
+      "thread": 1,
+      "kind": "span",
+      "name": "RowView.render",
+      "entity": 1,
+      "duration": 119700
+    },
+    {
+      "start": 1788678143443256700,
+      "thread": 1,
+      "kind": "span",
+      "name": "Chat.render",
+      "entity": 4294967309,
+      "duration": 759200
+    },
+    {
+      "start": 1788678143443261200,
+      "thread": 1,
+      "kind": "event",
+      "name": "motion.Chat.woken",
+      "entity": 4294967309,
+      "duration": 0
+    },
+    {
+      "start": 1788678143443272200,
+      "thread": 1,
+      "kind": "event",
+      "name": "Chat.entries",
+      "entity": 502,
+      "duration": 0
+    },
+    {
+      "start": 1788678143443801500,
+      "thread": 1,
+      "kind": "span",
+      "name": "Chat.render_composer",
+      "entity": 4294967309,
+      "duration": 110600
+    },
+    {
+      "start": 1788678143445884600,
+      "thread": 1,
+      "kind": "span",
+      "name": "Chat.render_thought_body",
+      "entity": 501,
+      "duration": 37100
+    },
+    {
+      "start": 1788678143453915100,
+      "thread": 2,
+      "kind": "event",
+      "name": "Windows.vsync",
+      "entity": 0,
+      "duration": 0
+    },
+    {
+      "start": 1788678143460689500,
+      "thread": 1,
+      "kind": "span",
+      "name": "DirectXRenderer.draw",
+      "entity": 0,
+      "duration": 538700
+    },
+    {
+      "start": 1788678143460690100,
+      "thread": 1,
+      "kind": "span",
+      "name": "DirectXRenderer.render",
+      "entity": 0,
+      "duration": 94300
+    },
+    {
+      "start": 1788678143460793500,
+      "thread": 1,
+      "kind": "span",
+      "name": "DirectXRenderer.present",
+      "entity": 0,
+      "duration": 427700
+    },
+    {
+      "start": 1788678143461734400,
+      "thread": 1,
+      "kind": "span",
+      "name": "Windows.draw_window",
+      "entity": 15403946,
+      "duration": 11999200
+    },
+    {
+      "start": 1788678143461786900,
+      "thread": 1,
+      "kind": "span",
+      "name": "SirioWorkspace.render",
+      "entity": 4294967305,
+      "duration": 388200
+    },
+    {
+      "start": 1788678143462216800,
+      "thread": 1,
+      "kind": "span",
+      "name": "Titlebar.render",
+      "entity": 4294967307,
+      "duration": 74500
+    },
+    {
+      "start": 1788678143462664900,
+      "thread": 1,
+      "kind": "span",
+      "name": "Sidebar.render",
+      "entity": 4294967306,
+      "duration": 193600
+    },
+    {
+      "start": 1788678143463575900,
+      "thread": 1,
+      "kind": "span",
+      "name": "StatusBar.render",
+      "entity": 4294967325,
+      "duration": 32500
+    },
+    {
+      "start": 1788678143470873100,
+      "thread": 2,
+      "kind": "event",
+      "name": "Windows.vsync",
+      "entity": 0,
+      "duration": 0
+    },
+    {
+      "start": 1788678143470896000,
+      "thread": 0,
+      "kind": "health",
+      "name": "trace.dropped",
+      "entity": 0,
+      "duration": 0
+    },
+    {
+      "start": 1788678143473132200,
+      "thread": 1,
+      "kind": "span",
+      "name": "DirectXRenderer.draw",
+      "entity": 0,
+      "duration": 447800
+    },
+    {
+      "start": 1788678143473132700,
+      "thread": 1,
+      "kind": "span",
+      "name": "DirectXRenderer.render",
+      "entity": 0,
+      "duration": 89700
+    },
+    {
+      "start": 1788678143473229200,
+      "thread": 1,
+      "kind": "span",
+      "name": "DirectXRenderer.present",
+      "entity": 0,
+      "duration": 345500
+    },
+    {
+      "start": 1788678143473991800,
+      "thread": 1,
+      "kind": "span",
+      "name": "Windows.draw_window",
+      "entity": 15403946,
+      "duration": 19577600
+    },
+    {
+      "start": 1788678143474033200,
+      "thread": 1,
+      "kind": "span",
+      "name": "SirioWorkspace.render",
+      "entity": 4294967305,
+      "duration": 317200
+    },
+    {
+      "start": 1788678143474382600,
+      "thread": 1,
+      "kind": "span",
+      "name": "Titlebar.render",
+      "entity": 4294967307,
+      "duration": 51000
+    },
+    {
+      "start": 1788678143474691300,
+      "thread": 1,
+      "kind": "span",
+      "name": "Sidebar.render",
+      "entity": 4294967306,
+      "duration": 147500
+    },
+    {
+      "start": 1788678143475449200,
+      "thread": 1,
+      "kind": "span",
+      "name": "StatusBar.render",
+      "entity": 4294967325,
+      "duration": 26500
+    }
+  ],
+  "native_neighborhood": [
+    {
+      "start_ns": 22869959600,
+      "end_ns": 22895323200,
+      "kind": "draw",
+      "window": 4294967297,
+      "dirty_ns": 22866592500,
+      "invalidations": 3,
+      "seq": 3318
+    },
+    {
+      "kind": "presented",
+      "window": 4294967297,
+      "dirty_ns": 22866592500,
+      "invalidations": 3,
+      "draw_start_ns": 22869959600,
+      "draw_end_ns": 22895323200,
+      "present_start_ns": 22895333500,
+      "present_end_ns": 22895873700,
+      "seq": 3319
+    },
+    {
+      "kind": "pending",
+      "window": 4294967297,
+      "at_ns": 22896249300,
+      "seq": 3320
+    },
+    {
+      "start_ns": 22896223900,
+      "end_ns": 22896293700,
+      "kind": "small_polls",
+      "count": 1,
+      "total_ns": 69800,
+      "seq": 3321
+    },
+    {
+      "start_ns": 22896399500,
+      "end_ns": 22907765900,
+      "kind": "draw",
+      "window": 4294967297,
+      "dirty_ns": 22896249300,
+      "invalidations": 1,
+      "seq": 3322
+    },
+    {
+      "kind": "presented",
+      "window": 4294967297,
+      "dirty_ns": 22896249300,
+      "invalidations": 1,
+      "draw_start_ns": 22896399500,
+      "draw_end_ns": 22907765900,
+      "present_start_ns": 22907776400,
+      "present_end_ns": 22908225400,
+      "seq": 3323
+    },
+    {
+      "kind": "pending",
+      "window": 4294967297,
+      "at_ns": 22908530900,
+      "seq": 3324
+    },
+    {
+      "start_ns": 22908509700,
+      "end_ns": 22908573900,
+      "kind": "small_polls",
+      "count": 1,
+      "total_ns": 64200,
+      "seq": 3325
+    },
+    {
+      "start_ns": 22908651500,
+      "end_ns": 22927553100,
+      "kind": "draw",
+      "window": 4294967297,
+      "dirty_ns": 22908530900,
+      "invalidations": 3,
+      "seq": 3326
+    },
+    {
+      "kind": "presented",
+      "window": 4294967297,
+      "dirty_ns": 22908530900,
+      "invalidations": 3,
+      "draw_start_ns": 22908651500,
+      "draw_end_ns": 22927553100,
+      "present_start_ns": 22927563300,
+      "present_end_ns": 22928022200,
+      "seq": 3327
+    }
+  ],
+  "conclusion": "One invalidation falls inside one 69.8-us folded foreground task poll. Its source location is absent; causal attribution remains unresolved. Full per-thread timings were not exported before this process exited."
+}

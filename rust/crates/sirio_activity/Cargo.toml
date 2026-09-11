@@ -15,3 +15,4 @@ publish = false
 # Pure std: the crate decides, it never goes looking. Process enumeration
 # and PTY reading belong to the caller.
 [dependencies]
+sirio_perf = { path = "../sirio_perf" }

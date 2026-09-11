@@ -1,0 +1,71 @@
+{
+  "candidate": "shell invalidation from hidden terminal output",
+  "head": "22f0846b",
+  "baseline": {
+    "artifact": "2026-09-05-redraw-attribution.json",
+    "scenario": "attribution-yes-hidden",
+    "elapsed_s": 20.019,
+    "present_fps": 12.688,
+    "root_fps": 12.688,
+    "terminal_render_fps": 0.0,
+    "cpu_pct_machine": 2.127
+  },
+  "after": {
+    "run_dir": "rust/target/perf/fix-hidden-terminal-v2",
+    "scenario": "fix-yes-hidden-final",
+    "elapsed_s": 20.000538300024346,
+    "command_start_epoch_ns": 1788685314323699800,
+    "command_end_epoch_ns": 1788685327274023400,
+    "present_fps": 0.9999729457319533,
+    "root_fps": 0.9999729457319533,
+    "terminal_render_fps": 0.0,
+    "cpu_pct_machine": 1.2239253913799344,
+    "trace_dropped": 0,
+    "executable_sha256": "fa4c768109d2ca4eee86ab2f9fcaa0506c489e6a5c8008c3e017526be773a3a3",
+    "trace_sha256": "6a3c0d89c07207ffbcbd48e9fb5ec9a80151f8fc50fab0130e3e991315a8e5a3"
+  },
+  "delta": {
+    "present_fps": -11.688027054268048,
+    "root_fps": -11.688027054268048,
+    "cpu_pct_machine": -0.9030746086200654,
+    "root_fps_reduction_pct": 92.11875042771159,
+    "cpu_pct_machine_reduction_pct": 42.45766848237261
+  },
+  "test": {
+    "name": "tests::hidden_terminal_notification_does_not_redraw_the_still_shell",
+    "red": {
+      "frames_before": 4,
+      "frames_after": 7
+    },
+    "green": {
+      "result": "passed",
+      "runs": 2
+    },
+    "full_suite": {
+      "head_tests": 362,
+      "head_passed": 326,
+      "head_failed": 36,
+      "fix_tests": 364,
+      "fix_passed": 329,
+      "fix_failed": 35,
+      "new_failures": [],
+      "head_only_failure": [
+        "tests::missing_worktree_switch_keeps_live_terminals_and_database_rows_intact"
+      ],
+      "qualification": "The HEAD-only failure reproduced when rerun alone in the detached HEAD worktree, while the fix checkout passed it. The paths and checkout-local databases differed, so this is not attributed as an improvement. Every fix failure name is present in the HEAD set."
+    }
+  },
+  "commands": [
+    "cargo test -p sirio --bin sirio hidden_terminal_notification_does_not_redraw_the_still_shell -- --nocapture",
+    "cargo build -p sirio --bin sirio",
+    "cargo build -p sirio_control --bin sirioctl",
+    "python Scripts/perf/windows-baseline.py prepare --source-db rust/target/perf/attribution-v1/snapshot.sqlite --run-dir rust/target/perf/fix-hidden-terminal-v2",
+    "python Scripts/perf/windows-baseline.py launch --run-dir rust/target/perf/fix-hidden-terminal-v2 --trace fix-hidden-terminal.tsv --acp Scripts/perf/acp-fixture.cmd",
+    "rust/target/debug/sirioctl.exe --socket <isolated socket> tab select 1",
+    "python Scripts/perf/windows-baseline.py control --run-dir rust/target/perf/fix-hidden-terminal-v2 --method perf.terminal.write --param id=pane-1 --param input=<documented yes command>",
+    "python Scripts/perf/windows-baseline.py cpu --run-dir rust/target/perf/fix-hidden-terminal-v2 --scenario fix-yes-hidden-final --seconds 20",
+    "python Scripts/perf/windows-baseline.py stop --run-dir rust/target/perf/fix-hidden-terminal-v2",
+    "python Scripts/perf/trace-report.py rust/target/perf/fix-hidden-terminal-v2 fix-hidden-terminal.tsv",
+    "cargo test -p sirio --bin sirio -- --format terse"
+  ]
+}

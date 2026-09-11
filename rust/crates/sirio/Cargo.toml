@@ -8,7 +8,13 @@ publish.workspace = true
 name = "sirio"
 path = "src/main.rs"
 
+[features]
+# Measurement build only; runtime export also requires both trace paths.
+perf-native = ["gpui/profiler", "dep:perf_scheduler"]
+
 [dependencies]
+perf_scheduler = { package = "bezel-zed-scheduler", version = "=0.3.8", optional = true }
+sirio_perf = { path = "../sirio_perf" }
 # Only for `bezel::ui::register_fonts`: the Geist faces the theme names.
 bezel.workspace = true
 gpui.workspace = true

@@ -17,6 +17,7 @@ use crate::status::AgentStatus;
 
 /// Detects a status opinion from live pane tail text.
 pub fn detect_content_status(tail_text: &str, agent_id: &str) -> Option<AgentStatus> {
+    let _perf = sirio_perf::span("activity.detect_content_status", tail_text.len() as u64);
     let tail_text = strip_ansi(tail_text);
     if tail_text.is_empty() {
         return None;

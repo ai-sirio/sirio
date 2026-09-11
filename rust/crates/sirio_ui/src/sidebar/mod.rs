@@ -3888,6 +3888,7 @@ impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = sirio_perf::span("Sidebar.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         // Production installs bezel alongside Sirio's theme. Some isolated
         // sidebar fixtures set only the Sirio global, so establish the same

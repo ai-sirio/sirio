@@ -243,6 +243,7 @@ impl DirectXRenderer {
 
     #[inline]
     fn present(&mut self) -> Result<()> {
+        let _perf = sirio_perf::span("DirectXRenderer.present", 0);
         let result = unsafe {
             self.resources
                 .as_ref()
@@ -332,6 +333,7 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        let _perf = sirio_perf::span("DirectXRenderer.draw", 0);
         if self.skip_draws {
             // skip drawing this frame, we just recovered from a device lost event
             // and so likely do not have the textures anymore that are required for drawing
@@ -351,6 +353,7 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        let _perf = sirio_perf::span("DirectXRenderer.render", 0);
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],

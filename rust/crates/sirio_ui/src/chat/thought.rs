@@ -49,6 +49,52 @@ impl ThoughtScroll {
             bar: ScrollbarState::new(painter),
         }
     }
+
+    fn follow_element(&self) -> AnyElement {
+        let follow = scroll::follow(&self.scroll, &self.follow);
+        if !sirio_perf::enabled() {
+            return follow;
+        }
+        // Observe Bezel's actual prepaint correction, not a prediction made
+        // from the previous layout. Bezel 0.1.4 requests an animation frame
+        // in the same branch that changes this offset. Do not add a callback
+        // or a notification of our own to observe it.
+        let before = std::rc::Rc::new(std::cell::Cell::new(None));
+        let capture = before.clone();
+        let before_scroll = self.scroll.clone();
+        let after_scroll = self.scroll.clone();
+        div()
+            .absolute()
+            .size_full()
+            .child(
+                gpui::canvas(
+                    move |_, _, _| capture.set(Some(before_scroll.offset())),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0(),
+            )
+            .child(follow)
+            .child(
+                gpui::canvas(
+                    move |_, window, _| {
+                        if before
+                            .get()
+                            .is_some_and(|offset| offset != after_scroll.offset())
+                        {
+                            sirio_perf::event(
+                                "request_frame.Chat.thought_follow",
+                                window.current_view().as_u64(),
+                            );
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0(),
+            )
+            .into_any_element()
+    }
 }
 
 impl Chat {
@@ -145,6 +191,7 @@ impl Chat {
         theme: &Theme,
         bezel_theme: &bezel::theme::Theme,
     ) -> AnyElement {
+        let _perf = sirio_perf::span("Chat.render_thought_body", entry_index as u64);
         let typography = theme.typography;
         div()
             .id(("thought-body", entry_index))
@@ -190,7 +237,7 @@ impl Chat {
                                 linear_color_stop(bezel_theme.bg.opacity(0.0), 1.0),
                             )),
                     )
-                    .child(scroll::follow(&scroll.scroll, &scroll.follow))
+                    .child(scroll.follow_element())
                     .child(scroll::scrollbar(
                         format!("thought-bar-{entry_index}"),
                         &scroll.scroll,
