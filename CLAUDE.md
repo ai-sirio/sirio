@@ -72,9 +72,14 @@ On Windows, the MSVC toolchain is required; see `docs/prototypes/ghostty-pane-wi
 ### Crate boundaries (`rust/crates/`)
 
 ```
+sirio_perf       (below everything — no deps at all, not even gpui, so any
+                    layer may instrument without inverting the graph. Imported
+                    by sirio_git, sirio_persistence, sirio_terminal,
+                    sirio_activity, sirio_ui and sirio)
+    ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_agents, sirio_activity, sirio_markdown, sirio_usage,
-sirio_registry, sirio_release   (leaves — no local deps;
+sirio_registry, sirio_release   (leaves — no local deps beyond sirio_perf;
                                  sirio_theme and sirio_ui take the external
                                  `bezel` crate, pinned `=0.1.4`)
     ^
@@ -103,6 +108,32 @@ is bezel's `AppearanceMode` re-exported; the only other appearance enum is
 `sirio`'s `main.rs` holds the single conversion between them.
 
 There is no single crate every other crate funnels through the way Swift's `TillerCore` worked — each concern (git, persistence, agent adapters, activity detection, terminal, control socket, UI primitives) lives in its own largely-independent leaf or near-leaf crate, and `sirio`'s `main.rs` is the integration point that wires `PaneRegistry` (`sirio_control`), `AgentActivityModel` (`sirio_activity`), and the ACP/agent/git/persistence layers into the `sirio_ui` components it renders. Run `cargo build -p <crate>` to check one crate compiles in isolation before assuming a change is layered correctly.
+
+### Performance trace (`sirio_perf`, `sirio/src/native_perf.rs`)
+
+`sirio_perf` is off unless `SIRIO_PERF_TRACE` names a file that does not yet
+exist. Unset, `event` and `span` are a `OnceLock` read and a branch, which is
+why they sit directly in hot `render` bodies. Set, one writer thread drains a
+bounded channel (32768) to a TSV; a full channel drops events and reports how
+many in a once-a-second `health` row named `trace.dropped` (the count rides in
+the `entity` column), so **a trace is allowed to lose events and says when it
+did** — read those rows before trusting a count. Instrumentation is
+deliberately shallow: a `span` at the top of a `Render::render`, an `event`
+where something decides to `notify`.
+
+**Every `name` is a content-free `&'static str`** — that is the crate's one
+hard rule, pinned by a test that asserts a fixture's text never reaches the
+trace (`acp_redraw_trace_names_notifications_without_recording_content`, in
+`sirio_ui`'s `chat`). Never interpolate a title, a path, a prompt or scrollback
+into a label; the `entity` u64 is how a row is told apart from its siblings.
+
+Two separate switches, easily confused: the env var above turns the TSV on in
+any build, while `sirio`'s `perf-native` **cargo feature** additionally compiles
+`native_perf.rs`, which exports GPUI's bounded foreground journal (frames,
+input, task polls) as JSON and pulls in `gpui/profiler` plus a pinned
+`bezel-zed-scheduler`. A default build has no journal at all. `Scripts/perf/`
+holds the harness and report scripts; `docs/perf/` holds the captures, each
+recording its own commands, hashes and bounds.
 
 ### Release, update, apply — three crates, one hand-off each
 
