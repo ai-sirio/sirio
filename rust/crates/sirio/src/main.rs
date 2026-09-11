@@ -3585,25 +3585,6 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
     }
 }
 
-fn agent_id_for_action(action: NewTabAction) -> Option<&'static str> {
-    match action {
-        NewTabAction::ClaudeCode => Some("claude"),
-        NewTabAction::Codex => Some("codex"),
-        NewTabAction::OpenCode => Some("opencode"),
-        NewTabAction::Pi => Some("pi"),
-        NewTabAction::OhMyPi => Some("omp"),
-        NewTabAction::SplitClaudeCode => None,
-        NewTabAction::NewTerminal
-        | NewTabAction::NewChanges
-        | NewTabAction::NewBrowser
-        | NewTabAction::NewChat => None,
-    }
-}
-
-fn agent_icon_for_action(action: NewTabAction) -> Option<Icon> {
-    agent_id_for_action(action).and_then(Icon::for_agent_id)
-}
-
 fn activity_status_for_agent(status: AgentStatus) -> ActivityStatus {
     match status {
         AgentStatus::Running => ActivityStatus::Running,
@@ -10494,58 +10475,6 @@ impl SirioWorkspace {
         }
     }
 
-    /// Opens a tab running `adapter`'s agent CLI. Calls `prepare` first —
-    /// that is what writes the worktree-local hook config the agent needs —
-    /// then runs the resolved command through the user's login shell (`-lc`,
-    /// not `-il`: one command and exit, not an interactive session), so the
-    /// PTY's child is the shell running the command rather than the agent
-    /// binary directly, since the command is shell syntax (`sirio_agents`
-    /// embeds quoted `-c key=value` overrides) and must be parsed as such.
-    fn add_agent_tab(
-        &mut self,
-        adapter: &dyn sirio_agents::AgentAdapter,
-        agent_icon: Icon,
-        cx: &mut Context<Self>,
-    ) {
-        let sirioctl_path = match resolve_sirioctl_for_process() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                self.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.set_notice(format!("[agent] {}: {error}", adapter.display_name()), cx)
-                });
-                cx.notify();
-                return;
-            }
-        };
-        let worktree_path = self.working_directory.to_string_lossy().into_owned();
-        let pane_id = format!("pane-{}", self.next_pane_id);
-
-        if let Err(error) = adapter.prepare(&worktree_path, &pane_id, &sirioctl_path) {
-            eprintln!(
-                "failed to prepare {} in {worktree_path}: {error}",
-                adapter.display_name()
-            );
-        }
-
-        let command = adapter.command(&worktree_path, &pane_id, &sirioctl_path);
-        let (program, args) = command_shell_invocation(&command);
-        let shell = TerminalShell::WithArguments { program, args };
-        // Registers with the one AgentActivityModel this workspace owns,
-        // under the same pane key `tab_status` looks up by — this is Layer
-        // A's entry point (a later `sirioctl notify` push updates it).
-        self.activity
-            .agent_spawned(&pane_id, adapter.id(), Instant::now());
-        self.add_terminal_tab_with_shell_and_agent(
-            adapter.display_name(),
-            shell,
-            Some(agent_icon),
-            Some(adapter.id().to_string()),
-            cx,
-        );
-        self.mark_activity_dirty();
-        cx.notify();
-    }
-
     fn open_action(&mut self, action: NewTabAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             NewTabAction::NewChat => {
@@ -10557,26 +10486,6 @@ impl SirioWorkspace {
                 self.focus_active_pane(window, cx);
             }
             NewTabAction::NewChanges => self.add_changes_tab(None, cx),
-            NewTabAction::ClaudeCode
-            | NewTabAction::Codex
-            | NewTabAction::OpenCode
-            | NewTabAction::Pi
-            | NewTabAction::OhMyPi => {
-                let id = agent_id_for_action(action).expect("agent action has an id");
-                let Some(adapter) = AGENT_CATALOG.iter().find(|adapter| adapter.id() == id) else {
-                    eprintln!("[agent] no adapter for action id '{id}'");
-                    return;
-                };
-                let Some(agent_icon) = agent_icon_for_action(action) else {
-                    eprintln!("[agent] no icon for action id '{id}'");
-                    return;
-                };
-                self.add_agent_tab(*adapter, agent_icon, cx);
-                self.focus_active_pane(window, cx);
-            }
-            NewTabAction::SplitClaudeCode => {
-                self.split_focused_agent("claude", SplitDirection::Horizontal, None, cx);
-            }
             NewTabAction::NewBrowser => {
                 self.add_browser_tab("https://example.com", window, cx);
             }
@@ -11170,95 +11079,6 @@ impl SirioWorkspace {
                     direction: split_event_name(direction, placement),
                 });
             }
-            self.next_pane_id += 1;
-            if let Some(window) = window {
-                self.select_pane(pane_id, Some(window), cx);
-            }
-            self.mark_activity_dirty();
-            self.schedule_save(cx);
-            cx.notify();
-        }
-    }
-
-    fn split_focused_agent(
-        &mut self,
-        adapter_id: &str,
-        direction: SplitDirection,
-        window: Option<&mut Window>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(adapter) = AGENT_CATALOG
-            .iter()
-            .find(|adapter| adapter.id() == adapter_id)
-        else {
-            return;
-        };
-        let pane_id = self.next_pane_id;
-        let focused_pane = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.focused_pane)
-            .unwrap_or(pane_id);
-        let sirioctl_path = match resolve_sirioctl_for_process() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                self.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.set_notice(format!("[agent] {}: {error}", adapter.display_name()), cx)
-                });
-                cx.notify();
-                return;
-            }
-        };
-        let worktree_path = self.working_directory.to_string_lossy().into_owned();
-        let pane_name = format!("pane-{pane_id}");
-        if let Err(error) = adapter.prepare(&worktree_path, &pane_name, &sirioctl_path) {
-            eprintln!(
-                "failed to prepare {} in {worktree_path}: {error}",
-                adapter.display_name()
-            );
-        }
-        let (program, args) =
-            command_shell_invocation(&adapter.command(&worktree_path, &pane_name, &sirioctl_path));
-        let shell = TerminalShell::WithArguments { program, args };
-        let terminal = cx.new(|cx| {
-            TerminalView::with_shell(&worktree_path, shell, cx).expect("start split agent")
-        });
-        terminal.update(cx, |terminal, cx| {
-            terminal.set_font_size(self.terminal_font_size, cx)
-        });
-        let tab_id = self
-            .tabs
-            .get(self.active_tab)
-            .map(|tab| tab.id)
-            .unwrap_or_default();
-        let split = {
-            let Some(tab) = self.active_tab_mut() else {
-                return;
-            };
-            let split = tab.panes.split_focused(
-                tab.focused_pane,
-                pane_id,
-                direction,
-                TabContent::Terminal {
-                    view: terminal.clone(),
-                },
-            );
-            if split {
-                tab.focused_pane = pane_id;
-            }
-            split
-        };
-        if split {
-            Self::bind_terminal(&terminal, tab_id, pane_id, cx);
-            if let Some(tab) = self.active_tab_mut() {
-                tab.session_state.pane_events.push(PaneEvent::Split {
-                    focused: focused_pane,
-                    new_id: pane_id,
-                    direction: split_direction_name(direction).to_string(),
-                });
-            }
-            self.activity
-                .agent_spawned(&pane_name, adapter.id(), Instant::now());
             self.next_pane_id += 1;
             if let Some(window) = window {
                 self.select_pane(pane_id, Some(window), cx);
@@ -15632,8 +15452,8 @@ fn resumable_session_refs(
 
 /// Builds the shell an agent-owned restored terminal pane should launch:
 /// resumes a validated native session when `resumable` has one on record for
-/// `pane_key`, otherwise starts fresh — the same `prepare` + `command` path
-/// `add_agent_tab` uses for a brand-new pane. Returns `None` for a tab with
+/// `pane_key`, otherwise starts fresh through the adapter's `prepare` +
+/// `command` path. Returns `None` for a tab with
 /// no agent identity (an ordinary terminal), which callers fall back to a
 /// plain shell for.
 fn restored_agent_shell(
@@ -22760,67 +22580,6 @@ mod tests {
         });
     }
 
-    /// F-TAB-358: splitting a plain terminal launches a Claude pane, but the
-    /// tab itself remains owned by its original pane. The split must not
-    /// overwrite the title, icon, or persisted adapter id that the tab row
-    /// and the next session restore use.
-    #[gpui::test]
-    async fn split_claude_keeps_a_non_claude_tab_identity(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            assert_eq!(workspace.tabs[0].title, "Terminal");
-            assert_eq!(workspace.tabs[0].agent_icon, None);
-            assert_eq!(workspace.tabs[0].agent_id, None);
-
-            workspace.split_focused_agent("claude", SplitDirection::Horizontal, None, cx);
-
-            let tab = &workspace.tabs[0];
-            assert_eq!(tab.title, "Terminal");
-            assert_eq!(tab.agent_icon, None);
-            assert_eq!(tab.agent_id, None);
-            assert_eq!(
-                workspace.tab_agent_mark(tab),
-                None,
-                "the Claude pane must not become the tab's identity"
-            );
-            assert_eq!(
-                workspace.layout(cx).tabs[0].agent_id,
-                None,
-                "the split must persist the original tab identity"
-            );
-            workspace.sync_control_panes(cx);
-            let mut panes = workspace
-                .panes
-                .list_for(&workspace.working_directory)
-                .expect("list the split tab's panes");
-            panes.sort_by(|left, right| left.id.cmp(&right.id));
-            assert_eq!(
-                panes
-                    .iter()
-                    .map(|pane| pane.agent.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["", "claude"],
-                "panel list must report each split pane's own agent"
-            );
-        });
-        cx.run_until_parked();
-
-        shutdown_workspace_terminals(&workspace, &mut cx);
-    }
-
-    /// F-CORE-ACT-17/18, the colours: a *running* Claude worktree must not
-    /// paint the same hex as one that *needs input*, and each badge mark
-    /// must wear its own agent's brand rather than one shared accent.
     #[test]
     fn worktree_activity_colours_name_the_agent_and_never_a_status() {
         let theme = Theme::dark();
@@ -26818,26 +26577,6 @@ mod tests {
                 "a terminal tab created for {agent_id} must retain its brand icon"
             );
         }
-
-        assert_eq!(
-            agent_icon_for_action(NewTabAction::ClaudeCode),
-            Some(Icon::ClaudeCode)
-        );
-        assert_eq!(
-            agent_icon_for_action(NewTabAction::Codex),
-            Some(Icon::Codex)
-        );
-        assert_eq!(
-            agent_icon_for_action(NewTabAction::OpenCode),
-            Some(Icon::OpenCode)
-        );
-        assert_eq!(agent_icon_for_action(NewTabAction::Pi), Some(Icon::Pi));
-        assert_eq!(
-            agent_icon_for_action(NewTabAction::OhMyPi),
-            Some(Icon::OhMyPi)
-        );
-        assert_eq!(agent_icon_for_action(NewTabAction::NewTerminal), None);
-        assert_eq!(agent_icon_for_action(NewTabAction::NewChat), None);
     }
 
     #[test]
@@ -30734,65 +30473,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn add_agent_tab_persists_agent_id_in_its_very_first_save(cx: &mut TestAppContext) {
-        // F-AGENT-OPENCODE-01: add_agent_tab used to set `tab.agent_id` only
-        // *after* add_terminal_tab_with_shell (-> insert_terminal_tab) had
-        // already called schedule_save(cx) with an eagerly-computed
-        // layout(cx) snapshot -- layout() reads tab.agent_id at schedule
-        // time, not at write time, so the very first persisted row for a
-        // freshly-added agent tab always carried agent_id: None. A restart
-        // before any later save happened to fire relaunched the pane as
-        // plain shell instead of `opencode --session <ref>`. This proves the
-        // fix the same way the codex round-trip test below does: schedule,
-        // flush the debounced writer explicitly, then read the row back
-        // through session::restore exactly as a second launch would.
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        let working_directory =
-            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
-        let session_path = working_directory
-            .parent()
-            .expect("palette test workspace scratch root")
-            .join("sirio.sqlite");
-
-        let adapter = AGENT_CATALOG
-            .iter()
-            .find(|adapter| adapter.id() == "opencode")
-            .expect("opencode adapter is registered in the catalog");
-        let icon = Icon::for_agent_id(adapter.id()).expect("opencode has a brand icon");
-        let adapter_display_name = adapter.display_name().to_string();
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.add_agent_tab(*adapter, icon, cx);
-            // Flush the debounced writer now, capturing exactly the snapshot
-            // schedule_save took inside add_terminal_tab_with_shell --
-            // before this test's fix, that snapshot's agent_id was still None.
-            workspace.session.flush_now();
-        });
-        cx.run_until_parked();
-
-        let restored = session::restore(&session_path, &working_directory);
-        let agent_tab = restored
-            .tabs
-            .iter()
-            .find(|tab| tab.title == adapter_display_name)
-            .expect("the persisted layout must include the freshly-added agent tab");
-        assert_eq!(
-            agent_tab.agent_id.as_ref().and_then(AgentRef::adapter_id),
-            Some("opencode"),
-            "the first save after add_agent_tab must already carry the agent id, \
-             or a restart before any later save relaunches the pane as plain shell"
-        );
-    }
-
-    #[gpui::test]
     async fn drawn_restore_round_trips_codex_identity_through_quit_and_relaunch(
         cx: &mut TestAppContext,
     ) {
@@ -32999,7 +32679,7 @@ browser  profile  "
                 &path_a,
             )));
 
-            // Right-click B's row and choose Claude Code -- the exact
+            // Right-click B's row and choose New Terminal -- the exact
             // dispatch site `handle_sidebar_context_action` reaches from a
             // real context-menu click.
             workspace.handle_sidebar_context_action(
@@ -33007,7 +32687,7 @@ browser  profile  "
                     path: path_b.clone(),
                     is_primary: false,
                 },
-                SidebarContextAction::NewTab(NewTabAction::ClaudeCode),
+                SidebarContextAction::NewTab(NewTabAction::NewTerminal),
                 cx,
             );
 
