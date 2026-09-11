@@ -15465,7 +15465,22 @@ fn restored_agent_shell(
     let adapter = AGENT_CATALOG
         .iter()
         .find(|adapter| adapter.id() == agent_id)?;
-    let sirioctl_path = resolve_sirioctl_for_process().ok()?;
+    // `.ok()?` here used to swallow the message. Every other caller of
+    // `resolve_sirioctl_for_process` reports it -- the three interactive ones
+    // put it in the sidebar notice -- and this one returning a bare `None` is
+    // how four tests came back as "claude adapter resolves a shell" with
+    // nothing in the log to say which of the resolver's three candidates had
+    // missed. A restore path cannot raise a notice, so stderr.
+    let sirioctl_path = match resolve_sirioctl_for_process() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!(
+                "cannot restore {}: {error}",
+                adapter.display_name()
+            );
+            return None;
+        }
+    };
     let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
     let worktree_path = worktree_path.to_string_lossy().into_owned();
     if let Err(error) = adapter.prepare(&worktree_path, pane_key, &sirioctl_path) {
