@@ -7,10 +7,12 @@ name: Release
 # rust/Cargo.toml (§3.2), its notes are hand-written (§7.4), and it publishes
 # only on a real tag push.
 #
-# NOT YET VERIFIED on macOS -- see the header of build-release.yml. Do not push
-# a `v*.*.*` tag until `Scripts/ci.sh` prints `CI OK` on a real Mac. Use the
-# manual trigger to validate a branch with a tag input: it builds everything
-# and publishes nothing.
+# The macOS path is verified as of 2026-09-10 -- see the header of
+# build-release.yml -- so a `v*.*.*` tag is no longer blocked. What the nightly
+# has never exercised is what is specific to *this* workflow: the tag-versus-
+# Cargo.toml check and the hand-written notes file. Both refuse cheaply, before
+# the macOS gate spends its minutes, and the manual trigger validates a branch
+# against a tag input while publishing nothing (`publish` is push-only).
 on:
   push:
     tags:
