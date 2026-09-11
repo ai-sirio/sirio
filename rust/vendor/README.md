@@ -1,13 +1,15 @@
-# `rust/vendor/` — local overrides of two published Bezel GPUI platform crates
+# `rust/vendor/` — local overrides of three published crates
 
-This directory holds `[patch.crates-io]` overrides for two packages, `bezel-gpui-linux` and
-`bezel-gpui-windows` (both release `0.3.8`, see `rust/Cargo.toml`), wired in via that same file's
-`[patch.crates-io]` section. Everything else in the Bezel GPUI family (`gpui`, `gpui_platform`,
-and the rest) still comes straight from the published crates.io release, unpatched.
+This directory holds `[patch.crates-io]` overrides for three packages: `bezel-gpui-linux` and
+`bezel-gpui-windows` (both release `0.3.8`) and `libghostty-vt-sys` (release `0.2.1`), all wired
+in via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Bezel GPUI family
+(`gpui`, `gpui_platform`, and the rest) and `libghostty-vt` itself still come straight from the
+published crates.io releases, unpatched.
 
-Each override changes one function of its crate and nothing else; the two are unrelated fixes
+Each override changes one thing about its crate and nothing else; the three are unrelated fixes
 that happen to need the same mechanism. `gpui_linux` is described first and at length because it
-established the arrangement; `gpui_windows` follows it and has its own short section at the end.
+established the arrangement; `gpui_windows` and `libghostty-vt-sys` follow it, each with its own
+short section at the end.
 
 ## Why this exists: F-CORE-FILE-03A
 
@@ -134,3 +136,89 @@ path source is used with no `patch ... was not used` warning.
 Bumping the pinned `bezel-gpui-windows` version means re-applying that one descriptor change by
 hand — or dropping the override, if upstream's no-DirectComposition path has become
 translucency-capable by then (worth checking first, as for `gpui_linux`).
+
+## `libghostty-vt-sys` — a portable CPU floor for the Zig-built VT parser
+
+`libghostty-vt-sys` shells out to `zig build` to compile Ghostty's VT parser and links the result
+statically into every Sirio binary. Its `build.rs` passes `-Dtarget` to Zig **only when
+cross-compiling**; for a native build it passes nothing, and a Zig target with no explicit arch is
+resolved by *detecting the host CPU* rather than falling back to the architecture's baseline. The
+asymmetry is exactly backwards for anyone shipping binaries: the cross build is portable and the
+native build is not.
+
+Every job in `build-release.yml` builds natively — including macOS, whose `--target
+aarch64-apple-darwin` names the runner's own host triple and is therefore not a cross-build. So
+the parser inside each published artifact was compiled for whichever CPU that runner happened to
+have.
+
+That is not a hypothetical. The Windows installer published as **v0.9.6** cannot start on a
+Ryzen 5 5600X:
+
+```
+Exception code: 0xc000001d          (STATUS_ILLEGAL_INSTRUCTION)
+Fault offset:   0x38a615            (.text, i.e. the statically linked parser)
+
+62 f2 7d 28 7a c2    vpbroadcastb ymm0, ecx   <- EVEX prefix, needs AVX512BW+VL
+c4 a1 7e 7f 04 08    vmovdqu [rax+r9], ymm0   <- VEX, plain AVX2
+```
+
+The hosted Windows runner is an Intel Xeon with AVX-512; Zen 3 has AVX2 and no AVX-512. AVX2 and
+AVX-512 sitting in the same routine is the signature of `-mcpu=native` codegen. Nothing downstream
+can recover from this class of bug: a binary that cannot start never reaches the updater that
+would replace it, so every affected user has to reinstall by hand.
+
+### What's patched, and how little
+
+Five lines in `build.rs`, backported verbatim from upstream
+[uzaaft/libghostty-rs#73](https://github.com/uzaaft/libghostty-rs/pull/73) (merged 2026-08-14,
+closing their #66): `-Dcpu` is now always passed, defaulting to `baseline` and overridable through
+`LIBGHOSTTY_VT_SYS_CPU`. Every other file is byte-for-byte the published 0.2.1 source, apart from
+the `[workspace]` table this arrangement needs (and the removed `Cargo.toml.orig`/`Cargo.lock`
+publishing artifacts). `libghostty-vt`, the safe wrapper, is **not** patched: the vendored `-sys`
+keeps 0.2.1's ghostty pin and generated bindings, so the two halves still match.
+
+`baseline` rather than a higher floor because the *Rust* half of the binary already compiles at
+the x86-64 baseline — no `target-cpu` is set anywhere in this repo. Raising the floor (`x86_64_v2`,
+`x86_64_v3`) is a product decision about which machines Sirio supports, and it means raising both
+halves together, deliberately. `build-release.yml` states the value at workflow level next to the
+channel and the signing keys, so it is reviewable rather than inherited;
+`Scripts/Tests/test-release-workflow.sh` pins it there.
+
+### Why this is a backport and not a git dependency
+
+Upstream's fix is merged but **unreleased**: 0.2.1 (2026-07-18) predates it and is still the newest
+version on crates.io. The obvious move — `[patch.crates-io]` at upstream's merge revision — does
+not work here, because every revision carrying the fix also carries a ghostty pin bump to
+`22d1317`, and that tree refuses to build:
+
+```
+src/build/zig.zig:13:9: error: Your Zig version v0.15.2 does not meet the
+                               required build version of v0.16.0
+```
+
+This repo pins Zig at exactly 0.15.2 in `Scripts/ci.sh`, `Scripts/ci-linux.sh`, all three
+`setup-zig` steps and CLAUDE.md. The CPU fix (2026-08-14) landed *after* the ghostty bump
+(2026-08-02), so there is no upstream revision that has one without the other.
+
+[uzaaft/libghostty-rs#97](https://github.com/uzaaft/libghostty-rs/issues/97) asks for a 0.2.2.
+Taking it will mean moving the whole repo to Zig 0.16 in the same change — which is the real work
+this override defers, and the reason to drop the override and bump the version rather than keep
+re-applying a hunk.
+
+### Verifying the override is in effect
+
+`cargo tree -i libghostty-vt-sys` must show the path source with no `patch ... was not used`
+warning. That the flag is not a no-op is harder to see than it looks: on a machine without AVX-512
+(any Zen 3, and every Intel consumer part since Alder Lake) a `native` build and a `baseline` build
+both start, so "the app runs" proves nothing. The check that does discriminate is an A/B of the
+produced archive —
+
+```
+cargo build -p sirio_terminal                                  # baseline
+sha256sum target/debug/build/libghostty-vt-sys-*/out/ghostty-install/lib/ghostty-vt-static.lib
+LIBGHOSTTY_VT_SYS_CPU=native cargo build -p sirio_terminal     # native
+sha256sum target/debug/build/libghostty-vt-sys-*/out/ghostty-install/lib/ghostty-vt-static.lib
+```
+
+— which must differ. If the two hashes match, `-Dcpu` is not reaching Zig and the override is
+doing nothing.
