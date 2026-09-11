@@ -37,7 +37,7 @@ Scripts/ci.sh                              # whole-repo gate → prints "CI OK"
 Scripts/ci-linux.sh                        # stricter tier: fmt, clippy, cross-target, headless smoke test
 ```
 
-Run `cargo test --workspace` per crate if a workspace-wide run flakes: two tests are timing-sensitive when every crate's test binary runs at once (see the comment above the `WORKSPACE_CRATES` loop in `Scripts/ci-linux.sh`).
+`Scripts/ci.sh` needs [cargo-nextest](https://nexte.st) on PATH (`cargo install cargo-nextest --locked`, or `brew install cargo-nextest`) and says so if it is missing. It runs the tests through nextest rather than `cargo test` because cargo runs the workspace's 45 test binaries one after another, and because a test that owns its own process cannot be tripped by a neighbour sharing one. `rust/.config/nextest.toml` holds the profiles and the test groups.
 
 ## Repository layout
 

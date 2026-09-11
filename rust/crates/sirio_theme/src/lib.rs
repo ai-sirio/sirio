@@ -185,6 +185,18 @@ pub struct ThemeColors {
     /// Recessed wells — filter fields, code and diff insets: a step *below*
     /// the surface. Code sits *in* the card, the inverse of a raised move.
     pub input_bg: Rgba,
+    /// A sheet an event opens over the shell and that reads like a panel of
+    /// its own: the New Worktree prompt and the Clone/Create project forms.
+    /// The same value as [`ThemeColors::surface`], but **never faded** by
+    /// [`Theme::with_translucency_at`] — translucency belongs to the main
+    /// window's background, and a sheet the desktop shows through is
+    /// unreadable exactly when it is asking for input.
+    pub dialog_surface: Rgba,
+    /// A card floating over the frame that an event puts up: the modal
+    /// sheet (Set Title, Close confirm) and the toasts. The same value as
+    /// [`ThemeColors::surface_raised`], never faded, for the reason
+    /// [`ThemeColors::dialog_surface`] gives.
+    pub floating_surface: Rgba,
     /// Generic hover wash — 5% neutral. Also the transcript row hover: a step
     /// lighter than [`ThemeColors::element_hover`], because transcript rows
     /// are wider and a 6% wash over that area reads as a block.
@@ -240,7 +252,7 @@ pub struct ThemeColors {
 }
 
 fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::theme::Theme {
-    bezel::theme::Theme::branded(
+    let mut theme = bezel::theme::Theme::branded(
         &bezel::theme::Brand {
             tint: base_color.tint(),
             ..Default::default()
@@ -249,7 +261,44 @@ fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::them
             Appearance::Dark => bezel::theme::Appearance::Dark,
             Appearance::Light => bezel::theme::Appearance::Light,
         },
-    )
+    );
+    if base_color == BaseColor::Notte && appearance == Appearance::Dark {
+        paint_notte_ladder(&mut theme);
+    }
+    theme
+}
+
+/// The one place lightness moves.
+///
+/// bezel's `Brand::apply` rotates hue and never lightness, and the Notte
+/// preset was given four surfaces that are *lighter* than bezel's dark page
+/// (`#202127` is above bezel's raised card), so no tint reaches them. They
+/// are painted here, after `branded`, onto the seven surface tokens and
+/// nothing else: the veils (`element_hover`, `border`, `input_bg`, …) are
+/// white-alpha washes that compose over whatever is beneath them, and the
+/// text ladder and semantic hues stay bezel's. Done in this builder, not in
+/// `ThemeColors::for_appearance`, because `to_bezel_theme` calls the same
+/// function and hands the result to `install_custom` — so bezel's own widgets
+/// and Sirio's tokens see one ladder by construction.
+///
+/// Mutation of the local, in bezel's own `Brand::apply` style; struct-update
+/// syntax would need every one of bezel's 72 fields restated.
+fn paint_notte_ladder(theme: &mut bezel::theme::Theme) {
+    let ladder = base_color::NOTTE_LADDER;
+    theme.bg = opaque_hsla(ladder.page);
+    theme.surface = opaque_hsla(ladder.surface);
+    // A card sits on the page, as it does in bezel's own dark
+    // (`surface_card` #0E0E0E beside `surface` #0D0D0D).
+    theme.surface_card = opaque_hsla(ladder.surface);
+    theme.surface_raised = opaque_hsla(ladder.raised);
+    theme.surface_dialog = opaque_hsla(ladder.raised);
+    theme.surface_overlay = opaque_hsla(ladder.raised);
+    theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
+}
+
+/// Opaque `0xRRGGBB` as the `Hsla` bezel's tokens are stored in.
+fn opaque_hsla(hex: u32) -> gpui::Hsla {
+    gpui::Hsla::from(rgb_hex(hex))
 }
 
 impl ThemeColors {
@@ -329,8 +378,8 @@ impl ThemeColors {
         let favorite = warning;
         let frame_fallback = Rgba::from(bezel.bg);
         let frame_surface = match appearance {
-            Appearance::Dark => softened(frame_fallback, 0.35),
-            Appearance::Light => softened(frame_fallback, 0.30),
+            Appearance::Dark => softened(frame_fallback, 0.85),
+            Appearance::Light => softened(frame_fallback, 0.80),
         };
         let panel_surface = Rgba::from(bezel.surface);
         let selected_fill = Rgba::from(bezel.element_active);
@@ -426,6 +475,10 @@ impl ThemeColors {
             file_link: accent,
             surface_raised: raised,
             input_bg: inset,
+            // The opaque twins: same values, but `with_translucency_at` leaves
+            // them alone. See the field docs for which surfaces paint them.
+            dialog_surface: panel_surface,
+            floating_surface: raised,
             overlay,
             overlay_strong,
             border_strong,
@@ -1439,17 +1492,21 @@ impl Theme {
 
     /// Returns the surface opacity used when translucency is enabled.
     ///
-    /// The fade is 0.45. The earlier steps (0.96 → 0.85 → 0.70) all read as
-    /// opaque in practice because the layers *stack*: a terminal pane paints
-    /// terminal_surface over the panel's surface over the frame material, so
-    /// at 0.70 the composite still covered ~97% of the backdrop — grey, not
-    /// glass. At 0.45 over the 0.35/0.30 frame the composite lets roughly a
-    /// third of the blurred desktop through in panel areas (a fifth where a
-    /// third layer stacks), which finally reads as glass. Legibility holds
-    /// because the backdrop is blurred: text sits on an averaged tone rather
-    /// than raw desktop pixels.
+    /// The fade is 0.70 over a 0.85 (dark) / 0.80 (light) frame. The layers
+    /// *stack*: a terminal pane paints terminal_surface over the panel's
+    /// surface over the frame material, so the composite in panel areas
+    /// covers ~96% of the backdrop (~99% where a third layer stacks), and
+    /// the frame strips — title strip, status bar, the gaps between panels —
+    /// let 15–20% of the blurred desktop through. The frame is the number
+    /// that matters: the strips are the only place text sits directly on
+    /// it, and over a white desktop (blur averages the backdrop to one tone)
+    /// a 0.35 frame washed the dark shell's strips out to light grey and a
+    /// 0.70 one left `text_muted` at 3.1:1 there (2026-09-07); 0.85 clears
+    /// WCAG AA with room. The panel fade barely moves that contrast (≥6:1
+    /// across 0.70–0.90), so it stays where the glass still reads. Held by
+    /// `translucent_shell_keeps_wcag_aa_over_an_opposing_desktop`.
     pub fn surface_opacity(translucency_enabled: bool) -> f32 {
-        if translucency_enabled { 0.45 } else { 1.0 }
+        if translucency_enabled { 0.70 } else { 1.0 }
     }
 
     /// Returns the theme resolved for this theme's `mode` and `appearance`,
@@ -1464,6 +1521,11 @@ impl Theme {
     /// translucent panel keeps its contrast. A surface that already carries an
     /// alpha is *scaled*, not overwritten — see
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
+    /// The surfaces an event opens over the shell
+    /// ([`ThemeColors::dialog_surface`], [`ThemeColors::floating_surface`])
+    /// are not faded either: translucency is the main window's background,
+    /// never a dialog's — see
+    /// `event_opened_surfaces_stay_opaque_when_the_panels_fade`.
     pub fn with_translucency(self, enabled: bool) -> Self {
         self.with_translucency_at(enabled, Self::surface_opacity(true))
     }
@@ -1494,6 +1556,8 @@ impl Theme {
         theme.colors.surface_raised = fade(theme.colors.surface_raised);
         theme.colors.input_bg = fade(theme.colors.input_bg);
         theme.colors.terminal_surface = fade(theme.colors.terminal_surface);
+        // `dialog_surface` and `floating_surface` are deliberately absent:
+        // a sheet or toast an event puts up stays opaque over the blur.
         theme
     }
 
@@ -1837,6 +1901,14 @@ mod tests {
             ("surface", sirio.surface, bezel.surface),
             ("surface_raised", sirio.surface_raised, bezel.surface_raised),
             ("input_bg", sirio.input_bg, bezel.input_bg),
+            // The two opaque twins carry bezel's values too; what makes them
+            // separate tokens is that the translucency fade skips them.
+            ("dialog_surface", sirio.dialog_surface, bezel.surface),
+            (
+                "floating_surface",
+                sirio.floating_surface,
+                bezel.surface_raised,
+            ),
             ("element_active", sirio.element_active, bezel.element_active),
             ("element_hover", sirio.element_hover, bezel.element_hover),
             // `text` is deliberately absent: it is bezel's, pulled one step
@@ -1963,6 +2035,170 @@ mod tests {
             theme.colors.border,
             "a non-faded token keeps the tinted value"
         );
+    }
+
+    /// The bezel theme Notte builds, read through the path bezel's own
+    /// widgets use, so the test covers both consumers of the builder.
+    fn notte_bezel(appearance: Appearance) -> bezel::theme::Theme {
+        let mode = match appearance {
+            Appearance::Dark => ThemeMode::Dark,
+            Appearance::Light => ThemeMode::Light,
+        };
+        Theme::for_appearance(mode, appearance, BaseColor::Notte).to_bezel_theme()
+    }
+
+    /// bezel's palette rotated onto Notte's tint and nothing else — what
+    /// Notte would be if it were only a sixth base colour.
+    fn notte_tint_only(appearance: bezel::theme::Appearance) -> bezel::theme::Theme {
+        bezel::theme::Theme::branded(
+            &bezel::theme::Brand {
+                tint: BaseColor::Notte.tint(),
+                ..Default::default()
+            },
+            appearance,
+        )
+    }
+
+    #[test]
+    fn notte_dark_ladder_is_the_four_given_values() {
+        // Written out rather than read from `NOTTE_LADDER`, so a change to
+        // the constant fails here instead of restyling the preset quietly.
+        let bezel = notte_bezel(Appearance::Dark);
+        for (name, token, hex) in [
+            ("bg", bezel.bg, 0x0E1016),
+            ("surface", bezel.surface, 0x202127),
+            ("surface_card", bezel.surface_card, 0x202127),
+            ("surface_raised", bezel.surface_raised, 0x2B2F3A),
+            ("surface_dialog", bezel.surface_dialog, 0x2B2F3A),
+            ("surface_overlay", bezel.surface_overlay, 0x2B2F3A),
+            ("surface_raised_hover", bezel.surface_raised_hover, 0x313337),
+        ] {
+            assert_eq!(token, opaque_hsla(hex), "{name}");
+        }
+
+        // Sirio's own tokens follow the same builder.
+        let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
+        assert_eq!(sirio.bg, Rgba::from(opaque_hsla(0x0E1016)));
+        assert_eq!(sirio.surface, Rgba::from(opaque_hsla(0x202127)));
+        assert_eq!(sirio.surface_raised, Rgba::from(opaque_hsla(0x2B2F3A)));
+        assert_eq!(
+            sirio.terminal_surface, sirio.surface,
+            "the dark terminal well is the pane"
+        );
+    }
+
+    #[test]
+    fn notte_light_is_only_a_tint() {
+        // Four dark surfaces were given and no light ones; inventing a light
+        // ladder was rejected (spec N3).
+        let notte = notte_bezel(Appearance::Light);
+        let tinted = notte_tint_only(bezel::theme::Appearance::Light);
+        for (name, ours, theirs) in [
+            ("bg", notte.bg, tinted.bg),
+            ("surface", notte.surface, tinted.surface),
+            ("surface_card", notte.surface_card, tinted.surface_card),
+            (
+                "surface_raised",
+                notte.surface_raised,
+                tinted.surface_raised,
+            ),
+            (
+                "surface_dialog",
+                notte.surface_dialog,
+                tinted.surface_dialog,
+            ),
+            (
+                "surface_overlay",
+                notte.surface_overlay,
+                tinted.surface_overlay,
+            ),
+            (
+                "surface_raised_hover",
+                notte.surface_raised_hover,
+                tinted.surface_raised_hover,
+            ),
+            ("text", notte.text, tinted.text),
+            ("border", notte.border, tinted.border),
+        ] {
+            assert_eq!(ours, theirs, "light {name}");
+        }
+    }
+
+    #[test]
+    fn notte_keeps_bezels_veils_text_and_hues() {
+        // Only the seven surface tokens move. Veils compose over whatever is
+        // beneath them; the text ladder and the semantic hues are bezel's,
+        // carrying Notte's tint like any other base colour.
+        let notte = notte_bezel(Appearance::Dark);
+        let tinted = notte_tint_only(bezel::theme::Appearance::Dark);
+        for (name, ours, theirs) in [
+            ("element_hover", notte.element_hover, tinted.element_hover),
+            (
+                "element_active",
+                notte.element_active,
+                tinted.element_active,
+            ),
+            ("border", notte.border, tinted.border),
+            ("border_strong", notte.border_strong, tinted.border_strong),
+            ("input_bg", notte.input_bg, tinted.input_bg),
+            ("code_wash", notte.code_wash, tinted.code_wash),
+            ("ring", notte.ring, tinted.ring),
+            ("selection", notte.selection, tinted.selection),
+            ("text", notte.text, tinted.text),
+            ("text_muted", notte.text_muted, tinted.text_muted),
+            ("text_faint", notte.text_faint, tinted.text_faint),
+            ("text_dim", notte.text_dim, tinted.text_dim),
+            ("solid", notte.solid, tinted.solid),
+            ("on_solid", notte.on_solid, tinted.on_solid),
+            ("accent", notte.accent, tinted.accent),
+            ("danger", notte.danger, tinted.danger),
+            ("warning", notte.warning, tinted.warning),
+            ("success", notte.success, tinted.success),
+            ("diff_add", notte.diff_add, tinted.diff_add),
+            ("diff_del", notte.diff_del, tinted.diff_del),
+        ] {
+            assert_eq!(ours, theirs, "dark {name}");
+        }
+    }
+
+    #[test]
+    fn notte_body_text_clears_aaa_on_every_surface() {
+        let sirio = ThemeColors::for_appearance(Appearance::Dark, BaseColor::Notte);
+        let bezel = notte_bezel(Appearance::Dark);
+        for (name, surface) in [
+            ("bg", sirio.bg),
+            ("surface", sirio.surface),
+            ("surface_raised", sirio.surface_raised),
+            (
+                "surface_raised_hover",
+                Rgba::from(bezel.surface_raised_hover),
+            ),
+        ] {
+            let ratio = contrast_ratio(sirio.text, surface);
+            assert!(ratio >= 7.0, "text on {name} is {ratio:.1}:1, below AAA");
+        }
+    }
+
+    #[test]
+    fn notte_depth_ladder_reads_as_depth() {
+        // Ordering only: the given hover step is small, and that is the
+        // user's ladder as given (spec, Risks).
+        let bezel = notte_bezel(Appearance::Dark);
+        let rungs = [
+            ("bg", bezel.bg),
+            ("surface", bezel.surface),
+            ("surface_raised", bezel.surface_raised),
+            ("surface_raised_hover", bezel.surface_raised_hover),
+        ];
+        for pair in rungs.windows(2) {
+            let (lower, upper) = (pair[0], pair[1]);
+            assert!(
+                relative_luminance(Rgba::from(lower.1)) < relative_luminance(Rgba::from(upper.1)),
+                "{} should sit below {}",
+                lower.0,
+                upper.0
+            );
+        }
     }
 
     #[test]
@@ -2532,8 +2768,8 @@ mod tests {
         assert_eq!(typography.ui_size, px(13.0));
         assert_eq!(typography.body_line_height, px(22.0));
         assert_eq!(typography.ui_line_height, px(17.0));
-        assert_eq!(Theme::dark().translucent_surface_opacity, 0.45);
-        assert_eq!(Theme::surface_opacity(true), 0.45);
+        assert_eq!(Theme::dark().translucent_surface_opacity, 0.70);
+        assert_eq!(Theme::surface_opacity(true), 0.70);
         assert_eq!(Theme::surface_opacity(false), 1.0);
     }
 
@@ -2561,6 +2797,43 @@ mod tests {
             base.input_bg.a,
             translucent.input_bg.a
         );
+    }
+
+    /// Translucency belongs to the main window's background alone. A surface
+    /// an event opens over the shell — the New Worktree prompt, a project
+    /// form, a modal sheet, a toast — paints one of the two tokens below,
+    /// and neither may fade with the structural panels: a sheet the desktop
+    /// shows through is unreadable exactly when it is asking for input.
+    #[test]
+    fn event_opened_surfaces_stay_opaque_when_the_panels_fade() {
+        for base in [Theme::dark(), Theme::light()] {
+            assert_eq!(
+                base.dialog_surface, base.surface,
+                "opaque twin of the panel surface"
+            );
+            assert_eq!(
+                base.floating_surface, base.surface_raised,
+                "opaque twin of the raised surface"
+            );
+            for translucent in [
+                base.with_translucency(true),
+                base.with_translucency_at(true, 0.70),
+                base.with_translucency_at(true, 0.9),
+            ] {
+                assert!(
+                    translucent.surface.a < base.surface.a,
+                    "precondition: panels fade"
+                );
+                assert!(
+                    translucent.surface_raised.a < base.surface_raised.a,
+                    "precondition: raised cards fade"
+                );
+                assert_eq!(translucent.dialog_surface, base.dialog_surface);
+                assert_eq!(translucent.floating_surface, base.floating_surface);
+                assert_eq!(translucent.dialog_surface.a, 1.0);
+                assert_eq!(translucent.floating_surface.a, 1.0);
+            }
+        }
     }
 
     #[test]
@@ -2623,6 +2896,36 @@ mod tests {
                 base,
                 "the opaque base is fully recoverable from mode + appearance"
             );
+        }
+    }
+
+    /// The translucent shell must stay legible over the desktop that fights
+    /// its appearance hardest: a white desktop under the dark shell, a black
+    /// one under the light shell. Blur averages the backdrop to one tone, so
+    /// that tone is what the veils composite onto. Seen 2026-09-07: a 0.35
+    /// frame over white washed the dark status strip to light grey.
+    #[test]
+    fn translucent_shell_keeps_wcag_aa_over_an_opposing_desktop() {
+        let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let black = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        for (label, theme, desktop) in [
+            ("dark", Theme::dark().with_translucency(true), white),
+            ("light", Theme::light().with_translucency(true), black),
+        ] {
+            let strip = composite(theme.frame_surface, desktop);
+            let panel = composite(theme.surface, strip);
+            let terminal = composite(theme.terminal_surface, panel);
+            for (place, under, text) in [
+                ("frame strip", strip, theme.text_muted),
+                ("panel", panel, theme.text_muted),
+                ("terminal", terminal, theme.text),
+            ] {
+                let ratio = contrast_ratio(text, under);
+                assert!(
+                    ratio >= 4.5,
+                    "{label} {place} over an opposing desktop: text contrast {ratio:.2}:1, under WCAG AA"
+                );
+            }
         }
     }
 

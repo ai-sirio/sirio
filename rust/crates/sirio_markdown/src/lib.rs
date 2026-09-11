@@ -36,6 +36,31 @@ mod model;
 mod parse;
 mod scan;
 
+/// A scratch directory per test, unique by construction.
+///
+/// Three fixtures in this crate used to name their directory after
+/// `SystemTime::now().as_nanos()` plus the process id, and one of them ended a
+/// test with `remove_dir_all`. libtest starts every test in a binary at once
+/// and that clock has microsecond resolution on macOS, so two fixtures created
+/// in the same tick got the same path and one test deleted the other's file
+/// out from under it — `dirty_external_changes_become_conflict_and_deletion_
+/// is_explicit` failing on the release runner with `left: Deleted, right:
+/// Conflict`, once, in a way that never reproduced.
+///
+/// A counter cannot collide within a process and the process id separates
+/// processes, so the name is unique without depending on how fast the machine
+/// is. Same shape as `sirio_project::git::tests::scratch_dir`. A stale
+/// directory from a reused process id is harmless: every caller writes its
+/// fixture file before reading it.
+#[cfg(test)]
+pub(crate) fn scratch_dir(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
+}
+
 pub use document::{DocumentChange, DocumentError, MarkdownDocument};
 pub use editing::{EditedText, SelectionRange, prefix_selected_lines, wrap_selection};
 pub use file_events::{FileEventKind, FileSystemEvent, FileSystemEventMonitor};

@@ -10,9 +10,9 @@ use gpui::{
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
     FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
-    StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px, quad, rgb,
-    transparent_black,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, ScrollHandle,
+    SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
+    quad, rgb, transparent_black,
 };
 use sirio_acp::{
     AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
@@ -30,7 +30,7 @@ use sirio_persistence::{
 };
 use sirio_theme::Theme;
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -102,7 +102,124 @@ fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<Stri
 struct MarkdownBody {
     document: markdown::Doc,
     link_click: Option<LinkClickOverride>,
+    selection: Option<MarkdownSelection>,
     rendered: Option<AnyElement>,
+}
+
+/// Where an assistant response's rendered markdown sits in the transcript's
+/// one selection: the chat that owns it, and the entry's start in
+/// `transcript_text`, so a bezel cursor and a global offset convert both
+/// ways and a drag from user prose into the response is one highlight.
+#[derive(Clone)]
+struct MarkdownSelection {
+    interaction: TranscriptInteraction,
+    source_start: usize,
+}
+
+/// One caret-enterable part of a rendered document: its block, which part,
+/// and where its text starts (and how long it is) in the document's plain
+/// text — the text `Entry::plain_text` reports for an assistant entry.
+struct DocPart {
+    block: usize,
+    part: markdown::Part,
+    start: usize,
+    len: usize,
+}
+
+/// A rendered document's plain text, and every part's place in it.
+/// Parts of one block are joined by a newline, blocks by a blank line, so
+/// a copied selection reads like the page rather than like the source.
+struct DocParts {
+    text: String,
+    parts: Vec<DocPart>,
+}
+
+impl DocParts {
+    fn of(doc: &markdown::Doc) -> Self {
+        let mut text = String::new();
+        let mut parts = Vec::new();
+        for (block, item) in doc.blocks.iter().enumerate() {
+            if block > 0 {
+                text.push_str("\n\n");
+            }
+            for (ordinal, part) in item.parts().into_iter().enumerate() {
+                if ordinal > 0 {
+                    text.push('\n');
+                }
+                let content = item
+                    .text_at(part)
+                    .map(|text| text.text.as_str())
+                    .unwrap_or("");
+                parts.push(DocPart {
+                    block,
+                    part,
+                    start: text.len(),
+                    len: content.len(),
+                });
+                text.push_str(content);
+            }
+        }
+        Self { text, parts }
+    }
+
+    /// A pointer hit as a plain-text offset. A block no caret can enter is
+    /// never hit, so a missing part means a document out of step with the
+    /// one that was laid out; the entry's start is the safe answer.
+    fn offset_of(&self, cursor: markdown::Cursor) -> usize {
+        self.parts
+            .iter()
+            .find(|part| part.block == cursor.block && part.part == cursor.part)
+            .map(|part| part.start + cursor.offset.min(part.len))
+            .unwrap_or(0)
+    }
+
+    /// The part holding `offset`, clamped to its end — an offset inside a
+    /// separator lands at the end of the part before it.
+    fn cursor_at(&self, offset: usize) -> Option<markdown::Cursor> {
+        let part = self.parts.iter().rev().find(|part| part.start <= offset)?;
+        Some(markdown::Cursor::new(
+            part.block,
+            part.part,
+            (offset - part.start).min(part.len),
+        ))
+    }
+
+    /// The transcript range as this document's own selection: `None` when
+    /// the range lies entirely outside the entry, or touches it only at an
+    /// edge.
+    fn selection_for(
+        &self,
+        range: Range<usize>,
+        source_start: usize,
+    ) -> Option<markdown::Selection> {
+        let start = range.start.max(source_start);
+        let end = range.end.min(source_start + self.text.len());
+        if start >= end {
+            return None;
+        }
+        Some(markdown::Selection::new(
+            self.cursor_at(start - source_start)?,
+            self.cursor_at(end - source_start)?,
+        ))
+    }
+}
+
+/// What a pointer over a rendered response resolves to: the transcript
+/// offset of the glyph under it, read off the layouts the last paint
+/// recorded.
+#[derive(Clone)]
+struct DocHit {
+    parts: Rc<DocParts>,
+    layouts: markdown::BlockLayouts,
+    source_start: usize,
+}
+
+impl DocHit {
+    fn offset_at(&self, position: gpui::Point<Pixels>) -> Option<usize> {
+        self.layouts
+            .hit(position)
+            .map(|cursor| self.source_start + self.parts.offset_of(cursor))
+    }
 }
 
 impl MarkdownBody {
@@ -110,6 +227,7 @@ impl MarkdownBody {
         Self {
             document,
             link_click: None,
+            selection: None,
             rendered: None,
         }
     }
@@ -118,11 +236,119 @@ impl MarkdownBody {
         Self {
             document,
             link_click: Some(link_click),
+            selection: None,
             rendered: None,
         }
     }
 
+    /// A transcript response: part of the chat's one selection, so a drag
+    /// across it selects its visible text and Copy reads that text.
+    fn selectable(
+        document: markdown::Doc,
+        interaction: TranscriptInteraction,
+        source_start: usize,
+    ) -> Self {
+        Self {
+            document,
+            link_click: None,
+            selection: Some(MarkdownSelection {
+                interaction,
+                source_start,
+            }),
+            rendered: None,
+        }
+    }
+
+    /// The transcript's selection painted into the document, and the drag
+    /// that extends it. The same anchor/head model as
+    /// `TranscriptSelectableText`, expressed in the entry's plain-text
+    /// offsets so a drag started on user prose and ended here is one range.
+    fn build_selectable(
+        &self,
+        selection: MarkdownSelection,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let parts = Rc::new(DocParts::of(&self.document));
+        let doc_selection = selection
+            .interaction
+            .chat
+            .read(cx)
+            .transcript_selection
+            .as_ref()
+            .map(TranscriptSelection::range)
+            .and_then(|range| parts.selection_for(range, selection.source_start));
+        let layouts = markdown::BlockLayouts::default();
+        // ponytail: bezel paints its editor caret at the selection's head
+        // too — a 1.5px line at the highlight's edge, only while a
+        // selection exists. Hiding it needs a renderer flag bezel has yet
+        // to offer.
+        let rendered = markdown::render_with_selection(
+            &self.document,
+            doc_selection,
+            Some(&layouts),
+            None,
+            markdown::Caption::Shown,
+            window,
+            cx,
+        );
+        let hit = DocHit {
+            parts,
+            layouts,
+            source_start: selection.source_start,
+        };
+        let interaction = selection.interaction;
+
+        let down_hit = hit.clone();
+        let down_interaction = interaction.clone();
+        let move_hit = hit;
+        let move_interaction = interaction.clone();
+        let up_interaction = interaction;
+        div()
+            .w_full()
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                let Some(offset) = down_hit.offset_at(event.position) else {
+                    return;
+                };
+                down_interaction.chat.update(cx, |chat, cx| {
+                    chat.transcript_selection = Some(TranscriptSelection {
+                        anchor: offset,
+                        head: offset,
+                    });
+                    chat.transcript_dragging = true;
+                    cx.notify();
+                });
+                window.focus(&down_interaction.focus, cx);
+                window.prevent_default();
+            })
+            .on_mouse_move(move |event, _, cx| {
+                if !event.dragging() || !move_interaction.chat.read(cx).transcript_dragging {
+                    return;
+                }
+                let Some(offset) = move_hit.offset_at(event.position) else {
+                    return;
+                };
+                move_interaction.chat.update(cx, |chat, cx| {
+                    if let Some(selection) = &mut chat.transcript_selection {
+                        selection.head = offset;
+                    }
+                    cx.notify();
+                });
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                up_interaction.chat.update(cx, |chat, cx| {
+                    chat.transcript_dragging = false;
+                    cx.notify();
+                });
+            })
+            .child(rendered)
+            .into_any_element()
+    }
+
     fn build(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+        if let Some(selection) = self.selection.clone() {
+            return self.build_selectable(selection, window, cx);
+        }
         let Some(link_click) = self.link_click.clone() else {
             return markdown::render(&self.document, markdown::Caption::Shown, window, cx);
         };
@@ -239,6 +465,10 @@ impl IntoElement for MarkdownBody {
 /// copies.
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 700.0;
 pub(crate) const CARD_H_PADDING: f32 = 14.0;
+/// The tallest the queue's entry list grows before it scrolls (D-CHAT-03):
+/// about five rows, Zed's `max_h_40`, so a long queue never pushes the
+/// composer card off the pane.
+pub(crate) const QUEUE_MAX_HEIGHT: f32 = 160.0;
 pub(crate) const CARD_V_PADDING: f32 = 10.0;
 
 /// The user turn's bubble: rounded, right-aligned, capped at the Bezel
@@ -248,6 +478,16 @@ pub(crate) const USER_PILL_H_PADDING: f32 = 14.0;
 pub(crate) const USER_PILL_V_PADDING: f32 = 9.0;
 pub(crate) const USER_PILL_TEXT_SIZE: f32 = 13.5;
 pub(crate) const TURN_BOTTOM_PADDING: f32 = 28.0;
+
+/// Ten megabytes: past this point a stray drop or paste would stall a turn
+/// (base64 costs about a third more than the file) instead of enriching it
+/// — the same cap as the Swift original's `FileDrop`.
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Caps the model picker's result list at roughly 8 rows before it scrolls,
+/// so an agent advertising dozens of models (`github-copilot/*`, `nvidia/*`)
+/// renders a popover instead of a window-filling one.
+const MODEL_PICKER_LIST_MAX_H: f32 = 260.0;
 
 fn parse_chat_markdown(source: &str) -> markdown::Doc {
     let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
@@ -407,6 +647,9 @@ actions!(
         Send,
         Cancel,
         CopyTranscript,
+        /// Paste into the composer: a picture on the clipboard becomes an
+        /// attachment; anything else falls through to the field's own paste.
+        PasteComposer,
         PopupPrevious,
         PopupNext,
         PopupAccept
@@ -595,7 +838,12 @@ enum Entry {
 pub struct ChatControlSnapshot {
     pub status: String,
     pub composer_text: String,
+    /// The front of the queue — what sends when the running turn ends.
+    /// Kept as a flat string for the `surface.chat.read` readers that
+    /// predate the multi-entry queue.
     pub queued_text: String,
+    /// The whole queue, front first.
+    pub queued: Vec<String>,
     pub transcript: Vec<BTreeMap<String, String>>,
 }
 
@@ -604,7 +852,10 @@ impl Entry {
         match self {
             Self::User { text, .. } => text.clone(),
             Self::Thought { text, .. } => text.clone(),
-            Self::Assistant { text, .. } => text.clone(),
+            // The page's text, not the markdown source: it is what the
+            // reader sees, selects and copies (`MarkdownBody::selectable`).
+            // The hover Copy control is the way to the source.
+            Self::Assistant { document, .. } => DocParts::of(document).text,
             Self::ToolCall {
                 title,
                 status,
@@ -1000,6 +1251,34 @@ enum CopyTarget {
     Assistant(usize),
 }
 
+/// The composer's secondary-click menu, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerContextItem {
+    Cut,
+    Copy,
+    Paste,
+}
+
+impl ComposerContextItem {
+    const ALL: [Self; 3] = [Self::Cut, Self::Copy, Self::Paste];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cut => "Cut",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
+        }
+    }
+
+    fn selector(self) -> &'static str {
+        match self {
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+        }
+    }
+}
+
 /// A host-owned action requested by an edit-summary card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
@@ -1366,9 +1645,6 @@ pub struct Chat {
     /// View state for the same-verb folds of a tool run, keyed by the fold's
     /// first entry index. Not persisted; a fold starts closed.
     open_verb_folds: HashSet<usize>,
-    /// Each turn's say over its Work zone (`widgets::Takeover`), keyed by the
-    /// turn's first entry index. Not persisted; cleared with the entries.
-    work_open: HashMap<usize, bezel::ui::widgets::Takeover>,
     /// The placeholder last pushed into the field, so render pushes a new
     /// one only when the state it names changed.
     composer_placeholder_shown: String,
@@ -1392,10 +1668,14 @@ pub struct Chat {
     /// test, hence the lint allowance.
     #[allow(dead_code)]
     streaming_border_timer_pending: bool,
-    /// D-CHAT-03: the draft committed (Enter) while a turn streams, to be
-    /// sent as the next user turn when the turn ends — one slot, latest
-    /// commit wins. `None` when nothing is queued.
-    queued_item: Option<String>,
+    /// D-CHAT-03: the drafts committed (Enter) while a turn streams, front
+    /// first. Each turn end sends exactly one — the front — so the rest
+    /// wait for the turn that send starts. Empty when nothing is queued.
+    queue: VecDeque<String>,
+    /// Whether the queue block above the composer shows its entries or
+    /// only its counting header. Starts unfolded; the reader's toggle
+    /// holds for the life of the surface and is not persisted.
+    queue_expanded: bool,
     connecting: bool,
     has_completed_turn: bool,
     /// F-CHAT-33: how many of `AcpClient::mcp_warnings()` have already been
@@ -1407,6 +1687,9 @@ pub struct Chat {
     model_config_id: Option<String>,
     selected_model: Option<String>,
     model_picker_open: bool,
+    /// Scroll position of the model picker's result list, kept across
+    /// re-renders the way `settings.rs`'s `detail_scroll` is.
+    model_picker_scroll: ScrollHandle,
     /// F-CHAT-16: the model picker's own search query — live in the field,
     /// read from it at render time. Matches `ModelPickerFilter`'s Swift
     /// semantics — trimmed, case-insensitive substring match against
@@ -1476,6 +1759,9 @@ pub struct Chat {
     attach_error: Option<String>,
     /// In-flight native file picker.
     attach_task: Option<Task<()>>,
+    /// The composer's secondary-click Cut / Copy / Paste menu, at the
+    /// window point it was opened from.
+    composer_context_menu: popover::Popup<gpui::Point<Pixels>>,
     /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
     overflow_focus: FocusHandle,
@@ -1673,7 +1959,6 @@ impl Chat {
             accepted_mentions: Vec::new(),
             attachments: Vec::new(),
             open_verb_folds: HashSet::new(),
-            work_open: HashMap::new(),
             composer_placeholder_shown: String::new(),
             answer_blink: caret::Blink::new(),
             answer_caret_visible: false,
@@ -1689,7 +1974,8 @@ impl Chat {
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
             streaming_border_timer_pending: false,
-            queued_item: None,
+            queue: VecDeque::new(),
+            queue_expanded: true,
             connecting: false,
             has_completed_turn: false,
             mcp_warnings_shown: 0,
@@ -1697,6 +1983,7 @@ impl Chat {
             model_config_id: None,
             selected_model: None,
             model_picker_open: false,
+            model_picker_scroll: ScrollHandle::new(),
             mode_catalog: None,
             mode_picker_open: false,
             context_popover_open: false,
@@ -1722,6 +2009,7 @@ impl Chat {
             mention_task: None,
             attach_error: None,
             attach_task: None,
+            composer_context_menu: popover::Popup::default(),
             overflow_open: false,
             history_open: false,
             history_sessions: Vec::new(),
@@ -1905,7 +2193,19 @@ impl Chat {
             KeyBinding::new("up", PopupPrevious, Some("ChatComposer")),
             KeyBinding::new("down", PopupNext, Some("ChatComposer")),
             KeyBinding::new("tab", PopupAccept, Some("ChatComposer")),
+            // The platform's paste chord reaches the chat first so a picture
+            // on the clipboard becomes an attachment; `paste_composer`
+            // propagates everything else to bezel's own `Paste`. Same chords
+            // bezel's `input::init` binds, per platform.
+            #[cfg(target_os = "macos")]
+            KeyBinding::new("cmd-v", PasteComposer, Some("ChatComposer")),
+            #[cfg(not(target_os = "macos"))]
+            KeyBinding::new("ctrl-v", PasteComposer, Some("ChatComposer")),
+            // Both copy chords: ctrl-c is the Linux/Windows one, cmd-c the
+            // macOS one — a transcript selection that only answered ctrl-c
+            // was uncopyable on the reference platform.
             KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatTranscript")),
+            KeyBinding::new("cmd-c", CopyTranscript, Some("ChatTranscript")),
             KeyBinding::new("escape", Cancel, Some("ChatModelPicker")),
             // The model picker's search field owns focus while the picker is
             // open, so Escape has to resolve from its context too.
@@ -2349,16 +2649,14 @@ impl Chat {
                 self.expire_unanswered();
                 self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
-                if let Some(turn) = segment_turns(&self.entries).last().map(|t| t.start) {
-                    self.remeasure_turn(turn);
-                }
                 self.streaming = false;
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
                 // D-CHAT-03: a turn ended — completed or cancelled alike,
-                // one rule — drains the queued item as the next turn,
-                // exactly once. The footer lands before the queued turn so
-                // the transcript reads: stop stated, then the redirect.
+                // one rule — drains the queue's front entry as the next
+                // turn, exactly once; the rest wait for that turn's end.
+                // The footer lands before the queued turn so the transcript
+                // reads: stop stated, then the redirect.
                 self.send_queued_item(cx);
                 // F-CORE-DOM-07: tell the workspace a turn just settled so
                 // throttled auto-naming has a signal to react to. Emitted
@@ -2577,7 +2875,8 @@ impl Chat {
         ChatControlSnapshot {
             status: status.to_string(),
             composer_text: self.draft.to_string(),
-            queued_text: self.queued_item.clone().unwrap_or_default(),
+            queued_text: self.queue.front().cloned().unwrap_or_default(),
+            queued: self.queue.iter().cloned().collect(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
         }
     }
@@ -2686,7 +2985,6 @@ impl Chat {
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
         self.unfolded_turns.clear();
-        self.work_open.clear();
         self.thought_scroll.clear();
         for turn in transcript.turns {
             for entry in turn.entries {
@@ -2894,7 +3192,8 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "c" && event.keystroke.modifiers.control {
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key == "c" && (modifiers.control || modifiers.platform) {
             self.copy_transcript(&CopyTranscript, window, cx);
         }
     }
@@ -2912,7 +3211,6 @@ impl Chat {
         });
         if self.entries.len() != old_count {
             self.unfolded_turns.clear();
-            self.work_open.clear();
             self.thought_scroll.clear();
             self.list_state.splice(0..old_count, self.entries.len());
         }
@@ -3189,6 +3487,164 @@ impl Chat {
         cx.notify();
     }
 
+    // --- Paste, and the composer's context menu ---
+
+    /// The platform paste chord, ahead of bezel's field: a picture on the
+    /// clipboard becomes an attachment exactly like the "+" picker's. With
+    /// no picture the action propagates, so the field's own `Paste` inserts
+    /// the text.
+    fn paste_composer(&mut self, _: &PasteComposer, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.paste_clipboard_image(cx) {
+            cx.propagate();
+        }
+    }
+
+    /// `true` when the clipboard carried a picture and this consumed it —
+    /// attached, or rejected with the transient message. A composer that
+    /// cannot accept a drop cannot accept a pasted picture either, and
+    /// swallows it the same way (`can_accept_drop`).
+    fn paste_clipboard_image(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        // A screenshot before its text: a clipboard carrying both carries a
+        // file name for the picture, which is not the picture.
+        let Some(image) = item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) => Some(image),
+            _ => None,
+        }) else {
+            return false;
+        };
+        if !self.can_accept_drop() {
+            return true;
+        }
+        let mime = match image.format() {
+            gpui::ImageFormat::Png => "image/png",
+            gpui::ImageFormat::Jpeg => "image/jpeg",
+            gpui::ImageFormat::Gif => "image/gif",
+            gpui::ImageFormat::Webp => "image/webp",
+            _ => {
+                self.show_attach_error(
+                    "Only PNG, JPEG, GIF and WebP images can be pasted.".to_string(),
+                    cx,
+                );
+                return true;
+            }
+        };
+        if image.bytes().len() as u64 > MAX_IMAGE_BYTES {
+            self.show_attach_error("The pasted image is too large (max 10 MB).".to_string(), cx);
+            return true;
+        }
+        use base64::Engine as _;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(image.bytes());
+        self.attachments.push(ImageAttachment {
+            mime_type: mime.to_string(),
+            base64_data: base64,
+        });
+        cx.notify();
+        true
+    }
+
+    /// Secondary click on the field: the Cut / Copy / Paste menu at the
+    /// pointer. The field takes focus so every item acts on it, and keeps
+    /// whatever it had selected — bezel's field only listens to the left
+    /// button.
+    fn open_composer_context_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer_field
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        self.composer_context_menu.open(position);
+        cx.notify();
+    }
+
+    fn close_composer_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.composer_context_menu.begin_close() {
+            popover::reap_popup(cx, |chat| &mut chat.composer_context_menu);
+            cx.notify();
+        }
+    }
+
+    /// One chosen item: bezel's own field action for Cut and Copy, and for
+    /// Paste the same picture-first path as the chord, so a screenshot
+    /// attaches from the menu exactly as it does from Cmd+V.
+    fn composer_context_action(
+        &mut self,
+        item: ComposerContextItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_composer_context_menu(cx);
+        let field = self.composer_field.read(cx).focus_handle(cx);
+        field.focus(window, cx);
+        match item {
+            ComposerContextItem::Cut => field.dispatch_action(&bezel::ui::input::Cut, window, cx),
+            ComposerContextItem::Copy => field.dispatch_action(&bezel::ui::input::Copy, window, cx),
+            ComposerContextItem::Paste => {
+                if !self.paste_clipboard_image(cx) {
+                    field.dispatch_action(&bezel::ui::input::Paste, window, cx);
+                }
+            }
+        }
+    }
+
+    fn render_composer_context_menu(
+        &self,
+        bezel_theme: &bezel::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let position = *self
+            .composer_context_menu
+            .get()
+            .expect("mounted composer context menu");
+        let closing = self.composer_context_menu.closing_since();
+        let painter = bezel::motion::Painter::of(cx);
+        let entity = cx.entity();
+        let mut card = popover::popover_card(bezel_theme)
+            .id("composer-context-menu")
+            .debug_selector(|| "composer-context-menu".into())
+            .w(px(160.0));
+        for item in ComposerContextItem::ALL {
+            let selector = format!("composer-context-{}", item.selector());
+            let row_entity = entity.clone();
+            let row_selector = selector.clone();
+            card = card.child(
+                popover::menu_row(
+                    bezel_theme,
+                    false,
+                    bezel::motion::Fade::new(painter, selector.clone()),
+                )
+                .id(SharedString::from(selector))
+                .debug_selector(move || row_selector.clone())
+                .w_full()
+                .min_h(px(29.0))
+                .text_color(bezel_theme.text)
+                .on_click(move |_, window, cx| {
+                    row_entity.update(cx, |chat, cx| {
+                        chat.composer_context_action(item, window, cx)
+                    });
+                })
+                .child(item.label()),
+            );
+        }
+        // `menu_at` owns the deferred layer; dismissal stays on the card
+        // because bezel leaves that listener to the caller.
+        let card = card.on_mouse_down_out(move |_, _, cx| {
+            entity.update(cx, |chat, cx| chat.close_composer_context_menu(cx));
+        });
+        popover::menu_at(
+            "composer-context-menu-layer",
+            position,
+            card.into_any_element(),
+            closing,
+        )
+    }
+
     // --- File drop (F-CHAT-13) ---
 
     /// Mirrors F-CHAT-05's rule for typed input: a composer that cannot
@@ -3221,10 +3677,6 @@ impl Chat {
         if paths.is_empty() {
             return;
         }
-        // Ten megabytes: past this point a stray drop would stall a turn
-        // (base64 costs about a third more than the file) instead of
-        // enriching it — the same cap as the Swift original's `FileDrop`.
-        const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
         fn image_mime(path: &Path) -> Option<&'static str> {
             let extension = path
                 .extension()
@@ -3344,7 +3796,6 @@ impl Chat {
         let old_count = self.entries.len();
         self.entries.clear();
         self.unfolded_turns.clear();
-        self.work_open.clear();
         self.thought_scroll.clear();
         self.list_state.splice(0..old_count, 0);
         self.accepted_mentions.clear();
@@ -3446,10 +3897,10 @@ impl Chat {
         cx.notify();
     }
 
-    /// D-CHAT-03: while a turn streams, a send commits the draft as the
-    /// queued item — one slot, latest commit wins. Mirrors `send`'s
-    /// consumption of the composer; an empty draft commits nothing and
-    /// leaves any previous item in place.
+    /// D-CHAT-03: while a turn streams, a send commits the draft as a new
+    /// entry at the back of the queue. Mirrors `send`'s consumption of the
+    /// composer; an empty draft commits nothing and leaves the queue as
+    /// it was.
     fn commit_queued_item(&mut self, cx: &mut Context<Self>) {
         if self.draft.trim().is_empty() && self.attachments.is_empty() {
             return;
@@ -3458,26 +3909,59 @@ impl Chat {
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
-        self.queued_item = Some(text);
+        self.queue.push_back(text);
         cx.notify();
     }
 
-    /// D-CHAT-03: the ✕ on the queued row. The item is dropped; nothing
-    /// sends when the turn ends.
-    fn remove_queued_item(&mut self, cx: &mut Context<Self>) {
-        self.queued_item = None;
+    /// D-CHAT-03: the ✕ on one entry. That entry is dropped; the others
+    /// keep their order.
+    fn remove_queued_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.queue.remove(index);
         cx.notify();
     }
 
-    /// D-CHAT-03: drains the queued item as the next user turn. Only the
-    /// turn-end path calls this — completed and cancelled alike — so a
-    /// committed item sends exactly once. A turn end without a client is a
-    /// transport death: the item stays queued rather than firing nowhere.
+    /// "Clear all" in the queue header: nothing sends when the turn ends.
+    fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        self.queue.clear();
+        cx.notify();
+    }
+
+    /// The queue header's disclosure: folds the entries away or unfolds
+    /// them. The counting header stays either way.
+    fn toggle_queue_folded(&mut self, cx: &mut Context<Self>) {
+        self.queue_expanded = !self.queue_expanded;
+        cx.notify();
+    }
+
+    /// "Send now" on one entry. The entry jumps to the front and the
+    /// running turn is cancelled, so the cancelled turn's end sends it
+    /// through the one turn-end rule — the same redirect a stop with a
+    /// queued entry already is, with no second send path to keep in step.
+    /// With no turn running (a queue that outlived its turn because the
+    /// transport died) it sends straight away.
+    fn send_queued_entry_now(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(text) = self.queue.remove(index) else {
+            return;
+        };
+        self.queue.push_front(text);
+        if self.streaming {
+            self.cancel_turn(cx);
+        } else {
+            self.send_queued_item(cx);
+        }
+        cx.notify();
+    }
+
+    /// D-CHAT-03: drains the front entry as the next user turn. Only the
+    /// turn-end path calls this — completed and cancelled alike — so each
+    /// entry sends exactly once, and the next waits for this turn's end.
+    /// A turn end without a client is a transport death: the queue stays
+    /// as it is rather than firing nowhere.
     fn send_queued_item(&mut self, cx: &mut Context<Self>) {
         if self.client.is_none() {
             return;
         }
-        let Some(text) = self.queued_item.take() else {
+        let Some(text) = self.queue.pop_front() else {
             return;
         };
         self.submit_turn(text, Vec::new(), Vec::new(), cx);
@@ -3734,7 +4218,9 @@ impl Chat {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.model_picker_open {
+        if self.composer_context_menu.is_open() {
+            self.close_composer_context_menu(cx);
+        } else if self.model_picker_open {
             self.model_picker_open = false;
             cx.notify();
         } else if self.mode_picker_open {
@@ -4013,6 +4499,20 @@ impl Chat {
         let cancel_entity = entity.clone();
         let placeholder = input.placeholder();
         let prefill_for_click = input.prefill.clone();
+        // The bar always occupies layout, so the answer text does not shift
+        // by two pixels every half second as it blinks. An empty field
+        // carries it at the placeholder's start (`caret::field_placeholder`,
+        // bezel's `TextField` convention), a draft after its last character.
+        let answer_caret = || {
+            div()
+                .debug_selector(|| "question-answer-caret".into())
+                .child(caret::bar(
+                    typography.body_line_height,
+                    theme.text,
+                    caret_visible,
+                ))
+                .into_any_element()
+        };
 
         // The field is a display of `question_draft` while it owns focus;
         // clicking it seeds the draft from the declared prefill when
@@ -4057,33 +4557,25 @@ impl Chat {
                     .flex()
                     .items_center()
                     // A long answer is clipped from the start, so the tail
-                    // being typed stays in view (`caret::field_value`).
+                    // being typed stays in view (`caret::field_value`); the
+                    // placeholder keeps its start (`caret::field_placeholder`).
                     .overflow_hidden()
                     .child(
-                        caret::field_value(if question_answer.draft.is_empty() {
-                            div()
-                                .text_color(theme.text_faint)
-                                .child(placeholder)
-                                .into_any_element()
+                        if question_answer.draft.is_empty() {
+                            caret::field_placeholder(
+                                div().text_color(theme.text_faint).child(placeholder),
+                                Some(answer_caret()),
+                            )
                         } else {
-                            div()
-                                .text_color(theme.text)
-                                .child(question_answer.draft.clone())
-                                .into_any_element()
-                        })
+                            caret::field_value(
+                                div()
+                                    .text_color(theme.text)
+                                    .child(question_answer.draft.clone()),
+                            )
+                        }
                         .debug_selector(|| "question-answer-text".into()),
                     )
-                    // The bar always occupies layout, so the answer text does
-                    // not shift by two pixels every half second as it blinks.
-                    .child(
-                        div()
-                            .debug_selector(|| "question-answer-caret".into())
-                            .child(caret::bar(
-                                typography.body_line_height,
-                                theme.text,
-                                caret_visible,
-                            )),
-                    ),
+                    .children((!question_answer.draft.is_empty()).then(answer_caret)),
             )
             .child(
                 div()
@@ -4540,7 +5032,6 @@ impl Chat {
         edit_summary: Option<EditSummaryState>,
         thought_streaming: bool,
         thought_scroll: &HashMap<usize, thought::ThoughtScroll>,
-        role: &transcript::WorkRole,
         day_heading: Option<&str>,
         window: &mut Window,
         cx: &mut App,
@@ -4584,24 +5075,6 @@ impl Chat {
                             )),
                     )
                     .into_any_element();
-                let question = match role {
-                    transcript::WorkRole::Header { turn, steps, open } if *steps > 0 => div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(bubble)
-                        .child(Chat::render_work_header(
-                            *turn,
-                            *steps,
-                            *open,
-                            theme,
-                            &bezel_theme,
-                            entity.clone(),
-                        ))
-                        .into_any_element(),
-                    _ => bubble,
-                };
                 // The heading row belongs to the `User` entry's row, so no
                 // extra list index is needed: it sits above the question.
                 match day_heading {
@@ -4615,21 +5088,12 @@ impl Chat {
                             theme,
                             &bezel_theme,
                         ))
-                        .child(question)
+                        .child(bubble)
                         .into_any_element(),
-                    None => question,
+                    None => bubble,
                 }
             }
             Entry::Assistant { text, document } => {
-                if matches!(role, transcript::WorkRole::Member { open: true, .. }) {
-                    return Chat::render_interim_prose(
-                        entry_index,
-                        &text,
-                        source_start,
-                        &interaction,
-                        theme,
-                    );
-                }
                 let target = CopyTarget::Assistant(entry_index);
                 let copied = copied_target.as_ref() == Some(&target);
                 let hover_group = format!("assistant-response-{entry_index}");
@@ -4671,22 +5135,26 @@ impl Chat {
                         .group_hover(hover_group.clone(), |style| style.visible())
                         .child("Copy");
                 }
-                let mut answer = div()
+                // Every prose entry is an answer, whether it closes the turn
+                // or sits between tool calls: same markdown, same colour.
+                div()
                     .id(("assistant-response", entry_index))
                     .debug_selector(move || format!("assistant-response-{entry_index}"))
                     .relative()
                     .group(hover_group)
                     .w_full()
-                    .child(MarkdownBody::new(document))
-                    .child(copy);
-                if matches!(role, transcript::WorkRole::Outside) {
-                    answer = answer.child(
+                    .child(MarkdownBody::selectable(
+                        document,
+                        interaction.clone(),
+                        source_start,
+                    ))
+                    .child(copy)
+                    .child(
                         div()
                             .size_0()
                             .debug_selector(move || format!("answer-{entry_index}")),
-                    );
-                }
-                answer.into_any_element()
+                    )
+                    .into_any_element()
             }
             Entry::Thought {
                 text,
@@ -5243,6 +5711,179 @@ impl Chat {
         cx.notify();
     }
 
+    /// D-CHAT-03: the queue block above the composer card — a header that
+    /// counts the entries and folds them, then one row per entry with its
+    /// text, "Send now" and ✕. The front entry is the one the running
+    /// turn's end sends; its dot is the only bright one. The list caps its
+    /// height and scrolls, so a long queue never pushes the card off the
+    /// pane. Callers draw it only while the queue is non-empty.
+    fn render_queue(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
+        let typography = theme.typography;
+        let entity = cx.entity();
+        let count = self.queue.len();
+        let expanded = self.queue_expanded;
+        let title = if count == 1 {
+            "1 message queued".to_string()
+        } else {
+            format!("{count} messages queued")
+        };
+        let toggle_entity = entity.clone();
+        let clear_entity = entity.clone();
+        div()
+            .id("queue")
+            .debug_selector(|| "queue".into())
+            .w_full()
+            .max_w(px(TRANSCRIPT_WIDTH))
+            .mb(px(8.0))
+            .rounded(px(bezel::theme::Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .text_size(typography.footnote)
+            .child(
+                div()
+                    .id("queue-header")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pl(px(8.0))
+                    .pr(px(4.0))
+                    .py(px(4.0))
+                    .child(
+                        div()
+                            .id("queue-toggle")
+                            .debug_selector(|| "queue-toggle".into())
+                            .flex()
+                            .flex_1()
+                            .items_center()
+                            .gap(px(6.0))
+                            .py(px(2.0))
+                            .cursor(CursorStyle::PointingHand)
+                            .on_click(move |_, _, cx| {
+                                toggle_entity.update(cx, |chat, cx| chat.toggle_queue_folded(cx));
+                            })
+                            .child(
+                                IconElement::new(
+                                    if expanded {
+                                        Icon::ChevronDown
+                                    } else {
+                                        Icon::ChevronRight
+                                    },
+                                    IconSize::XSmall,
+                                )
+                                .text_color(theme.text_faint),
+                            )
+                            .child(
+                                div()
+                                    .id("queue-count")
+                                    .debug_selector(move || format!("queue-count-{count}"))
+                                    .text_color(theme.text_muted)
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("queue-clear")
+                            .debug_selector(|| "queue-clear".into())
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.caption2)
+                            .text_color(theme.text_faint)
+                            .cursor(CursorStyle::PointingHand)
+                            .hover(|style| style.bg(theme.overlay))
+                            .on_click(move |_, _, cx| {
+                                clear_entity.update(cx, |chat, cx| chat.clear_queue(cx));
+                            })
+                            .child("Clear all"),
+                    ),
+            )
+            .when(expanded, |block| {
+                block.child(
+                    div()
+                        .id("queue-entries")
+                        .flex()
+                        .flex_col()
+                        .max_h(px(QUEUE_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .children(self.queue.iter().enumerate().map(|(index, text)| {
+                            let send_entity = entity.clone();
+                            let remove_entity = entity.clone();
+                            let text_for_id = text.clone();
+                            let is_next = index == 0;
+                            div()
+                                .id(("queue-entry", index))
+                                .debug_selector(move || format!("queue-entry-{index}"))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .when(index + 1 < count, |row| {
+                                    row.border_b_1().border_color(theme.border)
+                                })
+                                .child(bezel::ui::widgets::status_dot(if is_next {
+                                    theme.text.into()
+                                } else {
+                                    theme.text_faint.into()
+                                }))
+                                .child(
+                                    div()
+                                        .id(("queue-text", index))
+                                        .debug_selector(move || format!("queue-text-{text_for_id}"))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_ellipsis()
+                                        .text_color(theme.text)
+                                        .child(text.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id(("queue-send", index))
+                                        .debug_selector(move || format!("queue-send-{index}"))
+                                        .flex_none()
+                                        .px(px(8.0))
+                                        .py(px(3.0))
+                                        .rounded(theme.radii.control)
+                                        .text_size(typography.caption2)
+                                        .text_color(theme.text_muted)
+                                        .cursor(CursorStyle::PointingHand)
+                                        .hover(|style| style.bg(theme.overlay))
+                                        .on_click(move |_, _, cx| {
+                                            send_entity.update(cx, |chat, cx| {
+                                                chat.send_queued_entry_now(index, cx);
+                                            });
+                                        })
+                                        .child("Send now"),
+                                )
+                                .child(
+                                    div()
+                                        .id(("queue-remove", index))
+                                        .debug_selector(move || format!("queue-remove-{index}"))
+                                        .flex_none()
+                                        .px(px(4.0))
+                                        .rounded(px(3.0))
+                                        .text_color(theme.text_faint)
+                                        .cursor(CursorStyle::PointingHand)
+                                        .hover(|style| style.bg(theme.overlay))
+                                        .on_click(move |_, _, cx| {
+                                            remove_entity.update(cx, |chat, cx| {
+                                                chat.remove_queued_entry(index, cx);
+                                            });
+                                        })
+                                        .child("×"),
+                                )
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_composer(
         &mut self,
         theme: &Theme,
@@ -5267,38 +5908,26 @@ impl Chat {
         let can_send = self.can_send();
         let entity = cx.entity();
 
-        // Swift's `modePill` (ComposerControlBar.swift) always pairs a
-        // status dot with a label, whether that label is a raw state word
-        // ("idle"/"working") or a mode name ("Ask") — the dot survives the
-        // switch to the post-turn mode dropdown, it never disappears.
+        // Swift's `modePill` (ComposerControlBar.swift) pairs a status dot
+        // with the permission mode's name: the dot carries the connection
+        // state, the label the mode, and a raw state word ("idle"/"working")
+        // only stands in while no mode is known. The port used to let
+        // "working" and "connecting" take the label over from the mode, so
+        // the permission the user picked was unreadable exactly while a
+        // turn ran (`status_pill_content`, `composer_view.rs`).
         let connecting = self.connecting;
-        // F-CHAT-15: once a live mode catalog exists, the "Ask" fallback
-        // gives way to the agent's own current-mode name — the pill was a
-        // hardcoded word before this row, now it reflects what
-        // `AcpClient::set_mode` would actually change.
-        let live_mode_name = self.mode_catalog.as_ref().and_then(|catalog| {
-            catalog
-                .options
-                .iter()
-                .find(|mode| mode.id == catalog.current_id)
-                .map(|mode| mode.name.clone())
-        });
-        let (dot, label) = if connecting {
-            (rgb(0xf5a623), "connecting".to_string())
-        } else if self.streaming {
-            (rgb(0xf5a623), "working".to_string())
-        } else if self.mode_catalog.is_some() {
-            // #136: a known mode names itself from the first frame. This
-            // used to wait on `has_completed_turn`, so a fresh chat read
-            // "idle" while the agent had already told us it was in "build".
-            (
-                rgb(0x53c653),
-                live_mode_name.unwrap_or_else(|| "Ask".into()),
-            )
-        } else if self.client.is_some() {
-            (rgb(0x53c653), "idle".to_string())
-        } else {
-            (rgb(0x8a8d99), "offline".to_string())
+        // F-CHAT-15 / #136: a known mode names itself from the first frame,
+        // never waiting on `has_completed_turn`.
+        let (dot, label) = composer_view::status_pill_content(
+            connecting,
+            self.streaming,
+            self.client.is_some(),
+            self.mode_catalog.as_ref(),
+        );
+        let dot = match dot {
+            composer_view::PillDot::Busy => rgb(0xf5a623),
+            composer_view::PillDot::Ready => rgb(0x53c653),
+            composer_view::PillDot::Offline => rgb(0x8a8d99),
         };
         let mode_selectable = self.mode_selectable();
         let status_pill = div()
@@ -5547,78 +6176,94 @@ impl Chat {
                                             .child(self.model_search_field.clone()),
                                     )
                                 })
-                                .when(self.available_models.is_empty(), |this| {
-                                    this.child(
-                                        div()
-                                            .p(px(8.0))
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.text_faint)
-                                            .child(
-                                                "The connected agent did not report any models.",
-                                            ),
-                                    )
-                                })
-                                .when(
-                                    !self.available_models.is_empty() && filtered_models.is_empty(),
-                                    |this| {
-                                        this.child(
-                                            div()
-                                                .id("model-picker-no-match")
-                                                .debug_selector(|| "model-picker-no-match".into())
-                                                .p(px(8.0))
-                                                .text_size(typography.footnote)
-                                                .text_color(theme.text_faint)
-                                                .child("No models match"),
-                                        )
-                                    },
-                                )
-                                .children(filtered_models.iter().cloned().map(|option| {
-                                    let option_id = option.id.clone();
-                                    let option_name = option.name.clone();
-                                    let option_entity = picker_entity.clone();
-                                    let is_recommended =
-                                        recommended_id.as_deref() == Some(option_id.as_str());
-                                    let is_selected =
-                                        selected_id.as_deref() == Some(option_id.as_str());
-                                    popover::menu_row_nav(
-                                        &bezel_theme,
-                                        is_selected,
-                                        false,
-                                        bezel::motion::Fade::new(
-                                            view,
-                                            format!("model-option-{option_id}"),
-                                        ),
-                                    )
-                                    .id(format!("model-option-{option_id}"))
-                                    .debug_selector(move || format!("model-option-{option_id}"))
-                                    .on_click(move |_, _, cx| {
-                                        option_entity.update(cx, |chat, cx| {
-                                            chat.select_model(option.clone(), cx);
-                                        });
-                                    })
-                                    .child(
-                                        div().flex_1().min_w_0().text_ellipsis().child(option_name),
-                                    )
-                                    .when(
-                                        is_recommended,
-                                        |this| {
+                                .child(
+                                    div()
+                                        .id("model-picker-list")
+                                        .debug_selector(|| "model-picker-list".into())
+                                        .max_h(px(MODEL_PICKER_LIST_MAX_H))
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.model_picker_scroll)
+                                        .flex()
+                                        .flex_col()
+                                        .when(self.available_models.is_empty(), |this| {
                                             this.child(
                                                 div()
-                                                    .id("model-option-recommended")
-                                                    .debug_selector(|| {
-                                                        "model-option-recommended".into()
-                                                    })
-                                                    .flex_shrink_0()
-                                                    .px(px(5.0))
-                                                    .rounded(px(4.0))
-                                                    .text_size(typography.caption2)
-                                                    .text_color(theme.text)
-                                                    .bg(theme.overlay_strong)
-                                                    .child("Recommended"),
+                                                    .p(px(8.0))
+                                                    .text_size(typography.footnote)
+                                                    .text_color(theme.text_faint)
+                                                    .child(
+                                                        "The connected agent did not report any models.",
+                                                    ),
                                             )
-                                        },
-                                    )
-                                }))
+                                        })
+                                        .when(
+                                            !self.available_models.is_empty()
+                                                && filtered_models.is_empty(),
+                                            |this| {
+                                                this.child(
+                                                    div()
+                                                        .id("model-picker-no-match")
+                                                        .debug_selector(|| {
+                                                            "model-picker-no-match".into()
+                                                        })
+                                                        .p(px(8.0))
+                                                        .text_size(typography.footnote)
+                                                        .text_color(theme.text_faint)
+                                                        .child("No models match"),
+                                                )
+                                            },
+                                        )
+                                        .children(filtered_models.iter().cloned().map(|option| {
+                                            let option_id = option.id.clone();
+                                            let option_name = option.name.clone();
+                                            let option_entity = picker_entity.clone();
+                                            let is_recommended = recommended_id.as_deref()
+                                                == Some(option_id.as_str());
+                                            let is_selected =
+                                                selected_id.as_deref() == Some(option_id.as_str());
+                                            popover::menu_row_nav(
+                                                &bezel_theme,
+                                                is_selected,
+                                                false,
+                                                bezel::motion::Fade::new(
+                                                    view,
+                                                    format!("model-option-{option_id}"),
+                                                ),
+                                            )
+                                            .id(format!("model-option-{option_id}"))
+                                            .debug_selector(move || {
+                                                format!("model-option-{option_id}")
+                                            })
+                                            .on_click(move |_, _, cx| {
+                                                option_entity.update(cx, |chat, cx| {
+                                                    chat.select_model(option.clone(), cx);
+                                                });
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .text_ellipsis()
+                                                    .child(option_name),
+                                            )
+                                            .when(is_recommended, |this| {
+                                                this.child(
+                                                    div()
+                                                        .id("model-option-recommended")
+                                                        .debug_selector(|| {
+                                                            "model-option-recommended".into()
+                                                        })
+                                                        .flex_shrink_0()
+                                                        .px(px(5.0))
+                                                        .rounded(px(4.0))
+                                                        .text_size(typography.caption2)
+                                                        .text_color(theme.text)
+                                                        .bg(theme.overlay_strong)
+                                                        .child("Recommended"),
+                                                )
+                                            })
+                                        })),
+                                )
                                 .when_some(self.effort.clone(), |this, effort| {
                                     if effort.choices.is_empty() {
                                         return this;
@@ -6466,6 +7111,11 @@ impl Chat {
         // With no agent configured the chip row holds only the send disc.
         let has_agent = self.agent_command.is_some();
 
+        let composer_context_menu = self
+            .composer_context_menu
+            .get()
+            .map(|_| self.render_composer_context_menu(&bezel_theme, cx));
+
         // The composer is the gallery's `Composer` card: one frosted surface
         // at `surface_radius` carrying the field on top and the chip row
         // ending in the send disc under it.
@@ -6555,6 +7205,13 @@ impl Chat {
                     .relative()
                     .w_full()
                     .when(disabled, |input| input.opacity(0.6))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_composer_context_menu(event.position, window, cx);
+                        }),
+                    )
                     .child(self.composer_field.clone())
                     .when(focused, |this| {
                         // Covers bezel's own focus ring with the composer's
@@ -6572,48 +7229,6 @@ impl Chat {
                         )
                     }),
             )
-            .when_some(self.queued_item.clone(), |this, queued| {
-                // D-CHAT-03: the committed next-turn item, its text and a
-                // remove ✕. One slot: the latest commit replaces the row.
-                let remove_entity = entity.clone();
-                let queued_for_id = queued.clone();
-                this.child(
-                    div()
-                        .id("queued-item")
-                        .debug_selector(|| "queued-item".into())
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(theme.radii.control)
-                        .bg(theme.surface_raised)
-                        .text_size(typography.footnote)
-                        .child(div().text_color(theme.text_faint).child("Queued:"))
-                        .child(
-                            div()
-                                .id("queued-text")
-                                .debug_selector(move || format!("queued-text-{queued_for_id}"))
-                                .text_color(theme.text)
-                                .child(queued),
-                        )
-                        .child(
-                            div()
-                                .id("queued-remove")
-                                .debug_selector(|| "queued-remove".into())
-                                .px(px(4.0))
-                                .rounded(px(3.0))
-                                .text_color(theme.text_faint)
-                                .hover(|style| style.bg(theme.overlay))
-                                .on_click(move |_, _, cx| {
-                                    remove_entity.update(cx, |chat, cx| {
-                                        chat.remove_queued_item(cx);
-                                    });
-                                })
-                                .child("×"),
-                        ),
-                )
-            })
             .when_some(self.attach_error.clone(), |this, message| {
                 this.child(
                     div()
@@ -6703,7 +7318,8 @@ impl Chat {
                     ),
             )
             .children(slash_popup)
-            .children(mention_popup);
+            .children(mention_popup)
+            .children(composer_context_menu);
 
         composer_card.into_any_element()
     }
@@ -6836,8 +7452,6 @@ impl Render for Chat {
         // row — segmenting the transcript is O(entries), and the virtualizer
         // calls its row processor separately for every visible index.
         let turn_roles = turn_row_roles(&self.entries, &self.unfolded_turns);
-        let work =
-            transcript::work_roles(&self.entries, &self.work_open, self.streaming_turn_start());
         let transcript_focus = self.transcript_focus.clone();
         // The answer field's caret, resolved before the tree is built so the
         // card and the composer agree within one frame.
@@ -6869,6 +7483,7 @@ impl Render for Chat {
             .on_action(cx.listener(Self::send_action))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::copy_transcript))
+            .on_action(cx.listener(Self::paste_composer))
             .on_action(cx.listener(Self::popup_previous))
             .on_action(cx.listener(Self::popup_next))
             .on_action(cx.listener(Self::popup_accept))
@@ -6989,7 +7604,6 @@ impl Render for Chat {
                                                                         entry_index,
                                                                     ),
                                                                     &this.thought_scroll,
-                                                                    &transcript::WorkRole::Outside,
                                                                     None,
                                                                     &mut *window,
                                                                     &mut *cx,
@@ -7002,40 +7616,6 @@ impl Render for Chat {
                                     }
                                     TurnRowRole::Normal => {}
                                 }
-                                // The Work zone: interim entries fold behind
-                                // the turn's header. Resolved after the
-                                // F-CHAT-22 fold above — a folded turn hides
-                                // its Work header too — and before the
-                                // tool-run grouping below, because a folded
-                                // zone hides its tool runs as well.
-                                let role = work
-                                    .get(entry_index)
-                                    .cloned()
-                                    .unwrap_or(transcript::WorkRole::Outside);
-                                // Permission, Plan, Error and TurnFooter
-                                // entries render where they are, outside every
-                                // zone — even when they sit before the answer.
-                                let in_zone = match &role {
-                                    transcript::WorkRole::Member { open, .. } => {
-                                        let outside = matches!(
-                                            this.entries.get(entry_index),
-                                            Some(
-                                                Entry::Permission { .. }
-                                                    | Entry::Plan { .. }
-                                                    | Entry::Error { .. }
-                                                    | Entry::TurnFooter(_)
-                                            )
-                                        );
-                                        (!outside).then_some(*open)
-                                    }
-                                    _ => None,
-                                };
-                                if in_zone == Some(false) {
-                                    return div()
-                                        .id(("chat-entry", entry_index))
-                                        .into_any_element();
-                                }
-                                let frame_open = in_zone == Some(true);
                                 // F-CHAT-22: a run of consecutive tool
                                 // calls renders as one bordered box, keyed
                                 // to the run's last index. Every other
@@ -7064,15 +7644,10 @@ impl Render for Chat {
                                             })
                                         })
                                         .collect();
-                                    // Bezel Transcript pattern §2: a work
-                                    // zone sits 8px from the answer that
+                                    // Bezel Transcript pattern §2: a tool
+                                    // run sits 8px from the prose that
                                     // follows it, tighter than the 10px
                                     // between turns elsewhere in the list.
-                                    // A run is by construction interim —
-                                    // every tool sits before `answer_from` —
-                                    // so a run never crosses the zone
-                                    // boundary; an open zone frames the whole
-                                    // box here.
                                     let run = this.render_tool_run(
                                         members,
                                         transcript_focus.clone(),
@@ -7080,17 +7655,12 @@ impl Render for Chat {
                                         &row_bezel_theme,
                                         entity.clone(),
                                     );
-                                    let body = if frame_open {
-                                        Chat::render_work_member(entry_index, run, &row_bezel_theme)
-                                    } else {
-                                        run
-                                    };
                                     return div()
                                         .id(("chat-entry", entry_index))
                                         .w_full()
                                         .max_w(px(TRANSCRIPT_WIDTH))
                                         .pb(px(8.0))
-                                        .child(body)
+                                        .child(run)
                                         .into_any_element();
                                 }
                                 let source_start = transcript_ranges
@@ -7101,13 +7671,7 @@ impl Render for Chat {
                                     .get(entry_index)
                                     .cloned()
                                     .map(|entry| {
-                                        // An open member trades the row's own
-                                        // bottom padding for the zone frame's
-                                        // `gap 8`, so members stack at the
-                                        // gallery's spacing.
-                                        let bottom_padding = if frame_open {
-                                            0.0
-                                        } else if matches!(entry, Entry::TurnFooter(_)) {
+                                        let bottom_padding = if matches!(entry, Entry::TurnFooter(_)) {
                                             TURN_BOTTOM_PADDING
                                         } else {
                                             10.0
@@ -7135,21 +7699,11 @@ impl Render for Chat {
                                             this.edit_summaries.get(&entry_index).cloned(),
                                             this.thought_is_streaming(entry_index),
                                             &this.thought_scroll,
-                                            &role,
                                             day_heading.as_deref(),
                                             &mut *window,
                                             &mut *cx,
                                         )
                                         .into_any_element();
-                                        let body = if frame_open {
-                                            Chat::render_work_member(
-                                                entry_index,
-                                                body,
-                                                &row_bezel_theme,
-                                            )
-                                        } else {
-                                            body
-                                        };
                                         div()
                                             .id(("chat-entry", entry_index))
                                             .w_full()
@@ -7262,6 +7816,14 @@ impl Render for Chat {
                     // dropped from the sidebar rows. `agent_cwd` itself stays:
                     // it is load-bearing for prompt content, mention
                     // resolution and the ACP client's launch directory.
+                    //
+                    // D-CHAT-03: the queue sits between the transcript and
+                    // the card, where Zed keeps its queued messages — what
+                    // sends next reads above what is being typed, not
+                    // tucked under it. Drawn only while something is queued.
+                    .when(!self.queue.is_empty(), |this| {
+                        this.child(self.render_queue(&theme, cx))
+                    })
                     .child(self.render_composer(&theme, window, cx)),
             )
             .child({
@@ -7948,6 +8510,28 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// The highlighter `init` installs into bezel-markdown is bezel-syntax's
+    /// tree-sitter classification: a fenced block's tag reaches a grammar,
+    /// so a `rust` block gets keyword spans instead of one plain run. A tag
+    /// no grammar answers is `None`, which bezel-markdown paints plain.
+    #[test]
+    fn markdown_code_blocks_are_classified_by_bezel_syntax() {
+        let code = "fn main() {}";
+        let spans = highlight_markdown_code("rust", code)
+            .expect("bezel-syntax carries a rust grammar by default");
+        assert!(
+            spans.iter().any(|(range, kind)| {
+                matches!(kind, bezel::theme::HighlightKind::Keyword) && &code[range.clone()] == "fn"
+            }),
+            "`fn` must be classified as a keyword; got {} spans",
+            spans.len()
+        );
+        assert!(
+            highlight_markdown_code("no-such-language", code).is_none(),
+            "an unknown fence tag falls back to plain code rather than guessing"
+        );
     }
 
     #[test]
@@ -9249,6 +9833,80 @@ two"
         });
     }
 
+    #[gpui::test]
+    async fn the_turn_rail_marks_the_latest_turn_at_the_bottom(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &[]);
+        push_overflowing_turns(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(Entry::User {
+                text: "last question".into(),
+                at: None,
+            });
+            chat.push_entry(Entry::Assistant {
+                document: parse_chat_markdown("short answer"),
+                text: "short answer".into(),
+            });
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(600.0), px(600.0)));
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.list_state.is_scrolled_to_end(), Some(true));
+            let ticks = turn_rail::turn_ticks(&chat.entries);
+            assert!(chat.list_state.logical_scroll_top().item_ix < ticks[3].entry_index);
+        });
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-3").unwrap().size.width,
+            px(16.0),
+            "at the bottom the latest turn must be highlighted"
+        );
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-2").unwrap().size.width,
+            px(10.0)
+        );
+        chat.update(cx, |chat, cx| {
+            let ticks = turn_rail::turn_ticks(&chat.entries);
+            chat.list_state.scroll_to(gpui::ListOffset {
+                item_ix: ticks[1].entry_index,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-1").unwrap().size.width,
+            px(16.0)
+        );
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-3").unwrap().size.width,
+            px(10.0)
+        );
+    }
+
+    #[gpui::test]
+    async fn the_turn_rail_marks_the_latest_turn_when_content_fits(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &[]);
+        chat.update(cx, |chat, cx| {
+            for text in ["first", "second", "latest"] {
+                chat.push_entry(Entry::User {
+                    text: text.into(),
+                    at: None,
+                });
+            }
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(600.0), px(600.0)));
+        refresh_frame(cx);
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.list_state.is_following_tail());
+            assert_eq!(chat.list_state.is_scrolled_to_end(), None);
+        });
+        assert_eq!(
+            cx.debug_bounds("turn-tick-line-2").unwrap().size.width,
+            px(16.0)
+        );
+    }
+
     /// Three tall turns for a 300px pane: enough to overflow the transcript.
     fn push_overflowing_turns(chat: &gpui::Entity<Chat>, cx: &mut VisualTestContext) {
         chat.update(cx, |chat, cx| {
@@ -10167,11 +10825,6 @@ let answer = 42;
         });
         refresh_frame(cx);
 
-        // The settled turn folds its interim work; open the zone first.
-        let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
-        cx.simulate_click(work.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
         assert!(
             cx.debug_bounds("subagent-task-toggle-1").is_some(),
             "the subagent task card is drawn"
@@ -11359,23 +12012,29 @@ let answer = 42;
         focus_and_type(cx, "queued msg");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        let (queued, entries) = chat.read_with(&cx.cx, |chat, _| {
-            (chat.queued_item.clone(), chat.entries.len())
-        });
+        let entries = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
         assert_eq!(
-            queued.as_deref(),
-            Some("queued msg"),
-            "Enter during a stream commits the draft as the queued item"
+            queue_texts(&chat, cx),
+            vec!["queued msg".to_string()],
+            "Enter during a stream commits the draft as the queued entry"
         );
         assert_eq!(entries, 2, "queueing does not touch the transcript");
         refresh_frame(cx);
+        let queue = cx.debug_bounds("queue").expect("the queue block is drawn");
+        let card = cx
+            .debug_bounds("composer")
+            .expect("the composer card is drawn");
         assert!(
-            cx.debug_bounds("queued-item").is_some(),
-            "the queued row is drawn in the composer"
+            queue.bottom() <= card.top(),
+            "the queue sits above the composer card: queue={queue:?} card={card:?}"
         );
         assert!(
-            cx.debug_bounds("queued-text-queued msg").is_some(),
-            "the queued text is drawn in the row"
+            cx.debug_bounds("queue-text-queued msg").is_some(),
+            "the queued text is drawn in its entry"
+        );
+        assert!(
+            cx.debug_bounds("queue-count-1").is_some(),
+            "the header counts one queued message"
         );
 
         // Text typed after the commit stays in the composer (mid-sentence
@@ -11422,7 +12081,7 @@ let answer = 42;
                     queued_count,
                     uncommitted_sent,
                     chat.draft_text(),
-                    chat.queued_item.is_none(),
+                    chat.queue.is_empty(),
                     chat.has_completed_turn,
                 )
             });
@@ -11461,24 +12120,24 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.queued_item.clone()),
-            Some("queued msg".to_string()),
-            "the ✕ row starts with the committed item"
+            queue_texts(&chat, cx),
+            vec!["queued msg".to_string()],
+            "the ✕ test starts with the committed entry"
         );
         refresh_frame(cx);
         let remove = cx
-            .debug_bounds("queued-remove")
-            .expect("the queued row's remove control is drawn");
+            .debug_bounds("queue-remove-0")
+            .expect("the entry's remove control is drawn");
         cx.simulate_click(remove.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.queued_item.is_none()),
-            "the ✕ clears the queued item"
+            chat.read_with(&cx.cx, |chat, _| chat.queue.is_empty()),
+            "the ✕ removes the entry"
         );
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("queued-item").is_none(),
-            "the queued row is gone after the ✕"
+            cx.debug_bounds("queue").is_none(),
+            "the queue block is gone once nothing is queued"
         );
 
         // The turn ends (cancelled); the removed item must not send.
@@ -11528,9 +12187,9 @@ let answer = 42;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.queued_item.clone()),
-            Some("queued msg".to_string()),
-            "the stop-with-queue test starts with the committed item"
+            queue_texts(&chat, cx),
+            vec!["queued msg".to_string()],
+            "the stop-with-queue test starts with the committed entry"
         );
         refresh_frame(cx);
 
@@ -11562,13 +12221,331 @@ let answer = 42;
             );
             (
                 cancelled_footer,
-                chat.queued_item.is_none(),
+                chat.queue.is_empty(),
                 chat.has_completed_turn,
             )
         });
         assert!(cancelled_footer, "the cancelled turn's footer states it");
         assert!(queue_drained, "the queue drained into the send");
         assert!(completed, "the queued turn completes");
+    }
+
+    /// The queue's entries, front first, as the composer would send them.
+    fn queue_texts(chat: &gpui::Entity<Chat>, cx: &VisualTestContext) -> Vec<String> {
+        chat.read_with(&cx.cx, |chat, _| chat.queue.iter().cloned().collect())
+    }
+
+    /// How many user turns carrying exactly `text` the transcript holds.
+    fn user_turn_count(chat: &Chat, text: &str) -> usize {
+        chat.entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::User { text: sent, .. } if sent == text))
+            .count()
+    }
+
+    /// The index of the first user turn carrying exactly `text`.
+    fn user_turn_position(chat: &Chat, text: &str) -> Option<usize> {
+        chat.entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::User { text: sent, .. } if sent == text))
+    }
+
+    /// Sends "hello" against the `cancel` fixture and waits until its
+    /// partial reply is streaming, with a fresh frame drawn.
+    fn stream_partial_turn(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) {
+        pump_chat_until(cx, chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, chat, |chat| {
+            chat.streaming
+                && chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+        });
+        refresh_frame(cx);
+    }
+
+    /// Types `text` and presses Enter while a turn streams, so it lands in
+    /// the queue. Redraws first: each queued entry grows the block above
+    /// the card, so the card's last-known bounds would be stale.
+    fn queue_entry(cx: &mut VisualTestContext, text: &str) {
+        refresh_frame(cx);
+        focus_and_type(cx, text);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    /// D-CHAT-03, FIFO half: a second Enter during the stream appends a
+    /// second entry rather than replacing the first, both are drawn in
+    /// order under a header that counts them, and each turn end drains
+    /// exactly one entry, front first.
+    #[gpui::test]
+    async fn a_second_enter_appends_to_the_queue_and_turn_ends_drain_it_in_order(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && matches!(
+                    chat.entries.last(),
+                    Some(Entry::Assistant { text, .. }) if text == "first "
+                )
+        });
+
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        assert_eq!(
+            queue_texts(&chat, cx),
+            vec!["first q".to_string(), "second q".to_string()],
+            "the second Enter appends behind the first"
+        );
+        refresh_frame(cx);
+        let first = cx
+            .debug_bounds("queue-entry-0")
+            .expect("the first entry is drawn");
+        let second = cx
+            .debug_bounds("queue-entry-1")
+            .expect("the second entry is drawn");
+        assert!(
+            first.bottom() <= second.top(),
+            "entries are drawn in queue order: first={first:?} second={second:?}"
+        );
+        assert!(
+            cx.debug_bounds("queue-count-2").is_some(),
+            "the header counts two queued messages"
+        );
+
+        // The turn completes: the front entry sends, its turn end sends the
+        // next, and the transcript holds each exactly once in queue order.
+        std::fs::write(dir.0.join("go"), "go").expect("write go file");
+        pump_chat_until(cx, &chat, |chat| {
+            user_turn_count(chat, "second q") == 1 && chat.queue.is_empty() && !chat.streaming
+        });
+        let (first_count, first_at, second_at) = chat.read_with(&cx.cx, |chat, _| {
+            (
+                user_turn_count(chat, "first q"),
+                user_turn_position(chat, "first q"),
+                user_turn_position(chat, "second q"),
+            )
+        });
+        assert_eq!(first_count, 1, "the front entry sends exactly once");
+        assert!(
+            first_at < second_at,
+            "the front entry sends before the one behind it: {first_at:?} {second_at:?}"
+        );
+    }
+
+    /// The ✕ on one entry removes only that entry; the others keep their
+    /// place and their drawn rows renumber from the front.
+    #[gpui::test]
+    async fn removing_one_entry_keeps_the_others_queued(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        refresh_frame(cx);
+
+        let remove = cx
+            .debug_bounds("queue-remove-0")
+            .expect("the front entry's remove control is drawn");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            queue_texts(&chat, cx),
+            vec!["second q".to_string()],
+            "only the removed entry leaves the queue"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-text-second q").is_some(),
+            "the surviving entry is still drawn"
+        );
+        assert!(
+            cx.debug_bounds("queue-text-first q").is_none(),
+            "the removed entry is gone"
+        );
+        assert!(
+            cx.debug_bounds("queue-entry-1").is_none(),
+            "the surviving entry moved up to the front row"
+        );
+    }
+
+    /// "Clear all" in the header empties the queue and takes the block down.
+    #[gpui::test]
+    async fn clear_all_empties_the_queue(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        refresh_frame(cx);
+
+        let clear = cx
+            .debug_bounds("queue-clear")
+            .expect("the clear-all control is drawn");
+        cx.simulate_click(clear.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.queue.is_empty()),
+            "clear all empties the queue"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue").is_none(),
+            "the queue block is gone once nothing is queued"
+        );
+    }
+
+    /// The header folds the entries away and unfolds them again; the count
+    /// stays visible either way, so a folded queue is never a hidden one.
+    #[gpui::test]
+    async fn the_queue_header_folds_the_entries_and_keeps_the_count(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-entry-0").is_some(),
+            "the queue starts unfolded"
+        );
+
+        let toggle = cx
+            .debug_bounds("queue-toggle")
+            .expect("the header toggle is drawn");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-entry-0").is_none(),
+            "folding hides the entries"
+        );
+        assert!(
+            cx.debug_bounds("queue-count-1").is_some(),
+            "the folded header still counts the entries"
+        );
+        assert_eq!(
+            queue_texts(&chat, cx),
+            vec!["first q".to_string()],
+            "folding never touches the queue itself"
+        );
+
+        let toggle = cx
+            .debug_bounds("queue-toggle")
+            .expect("the header toggle is still drawn");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-entry-0").is_some(),
+            "unfolding shows the entries again"
+        );
+    }
+
+    /// "Send now" on a later entry jumps the queue: the running turn is
+    /// cancelled, that entry sends as the redirect exactly once, and the
+    /// entries ahead of it wait for the next turn end in their old order.
+    #[gpui::test]
+    async fn send_now_on_a_later_entry_cancels_the_turn_and_sends_that_entry_first(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        stream_partial_turn(cx, &chat);
+        queue_entry(cx, "first q");
+        queue_entry(cx, "second q");
+        refresh_frame(cx);
+
+        let send_now = cx
+            .debug_bounds("queue-send-1")
+            .expect("the second entry's send-now control is drawn");
+        cx.simulate_click(send_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "send now stops the running turn"
+        );
+
+        pump_chat_until(cx, &chat, |chat| {
+            user_turn_count(chat, "second q") == 1
+                && user_turn_count(chat, "first q") == 1
+                && chat.queue.is_empty()
+                && !chat.streaming
+        });
+        let (cancelled_at, second_at, first_at) = chat.read_with(&cx.cx, |chat, _| {
+            let cancelled_at = chat.entries.iter().position(
+                |entry| matches!(entry, Entry::TurnFooter(text) if text.contains("cancelled")),
+            );
+            (
+                cancelled_at,
+                user_turn_position(chat, "second q"),
+                user_turn_position(chat, "first q"),
+            )
+        });
+        assert!(
+            cancelled_at < second_at,
+            "the cancelled footer lands before the redirect: {cancelled_at:?} {second_at:?}"
+        );
+        assert!(
+            second_at < first_at,
+            "the sent-now entry precedes the one that was ahead of it: {second_at:?} {first_at:?}"
+        );
+    }
+
+    /// "Send now" with no turn running sends the entry straight away — the
+    /// case of a queue that outlived its turn because the transport died.
+    #[gpui::test]
+    async fn send_now_while_no_turn_runs_sends_the_entry_immediately(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.queue.push_back("late".into());
+            cx.notify();
+        });
+        refresh_frame(cx);
+
+        let send_now = cx
+            .debug_bounds("queue-send-0")
+            .expect("the entry's send-now control is drawn");
+        cx.simulate_click(send_now.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            user_turn_count(chat, "late") == 1
+                && chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Assistant { text, .. } if text == "reply "))
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.queue.is_empty()),
+            "the sent entry leaves the queue"
+        );
+    }
+
+    /// The control snapshot keeps `queued_text` as the front entry for the
+    /// existing `surface.chat.read` readers and exposes the whole queue
+    /// beside it.
+    #[gpui::test]
+    async fn the_control_snapshot_exposes_the_whole_queue(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        chat.update(cx, |chat, _| {
+            chat.queue.push_back("a".into());
+            chat.queue.push_back("b".into());
+        });
+        let snapshot = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
+        assert_eq!(snapshot.queued_text, "a", "queued_text is the front entry");
+        assert_eq!(
+            snapshot.queued,
+            vec!["a".to_string(), "b".to_string()],
+            "queued is the whole queue, front first"
+        );
     }
 
     fn configure_test_chat(chat: &mut Chat) {
@@ -11829,73 +12806,14 @@ let answer = 42;
         assert!(matches!(entry, ChatEntry::UserMessage { at: None, .. }));
     }
 
-    /// The streaming turn is the trailing one without a footer, only while
-    /// the chat streams; pressing a zone flips what is on screen and holds.
+    /// Every entry of a turn stays in view once it ends — thought, prose,
+    /// tool run — and the prose the model writes between its tool calls
+    /// reads with the same weight as its answer: no `Worked · N steps`
+    /// header, no muted interim rendering.
     #[gpui::test]
-    async fn the_work_zone_follows_the_stream_until_pressed(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
-            chat.push_entry(Entry::User {
-                text: "q".into(),
-                at: None,
-            });
-            chat.push_entry(test_tool_call("a"));
-            chat.streaming = true;
-            chat
-        });
-        chat.read_with(cx, |chat, _| {
-            assert_eq!(chat.streaming_turn_start(), Some(0));
-            let roles =
-                transcript::work_roles(&chat.entries, &chat.work_open, chat.streaming_turn_start());
-            assert_eq!(
-                roles[1],
-                transcript::WorkRole::Member {
-                    turn: 0,
-                    open: true
-                }
-            );
-        });
-        chat.update(cx, |chat, cx| chat.toggle_work(0, cx));
-        chat.read_with(cx, |chat, _| {
-            let roles =
-                transcript::work_roles(&chat.entries, &chat.work_open, chat.streaming_turn_start());
-            assert_eq!(
-                roles[1],
-                transcript::WorkRole::Member {
-                    turn: 0,
-                    open: false
-                },
-                "pressed while auto-open: closes and holds"
-            );
-        });
-        chat.update(cx, |chat, cx| {
-            chat.handle_event(
-                AcpEvent::TurnEnded {
-                    stop_reason: "end_turn".into(),
-                },
-                cx,
-            );
-        });
-        chat.read_with(cx, |chat, _| {
-            assert_eq!(chat.streaming_turn_start(), None);
-            let roles = transcript::work_roles(&chat.entries, &chat.work_open, None);
-            assert_eq!(
-                roles[1],
-                transcript::WorkRole::Member {
-                    turn: 0,
-                    open: false
-                }
-            );
-        });
-    }
-
-    /// A finished turn folds its interim work — thought, interim prose, tool
-    /// run — behind `Worked · N steps`; the answer stays; a press opens the
-    /// zone and its members draw inside the frame.
-    #[gpui::test]
-    async fn a_finished_turn_folds_its_work_behind_a_header(cx: &mut TestAppContext) {
+    async fn a_finished_turn_keeps_its_work_in_view_and_its_prose_reads_as_an_answer(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
@@ -11925,56 +12843,38 @@ let answer = 42;
         });
         cx.update(|_window, cx| init(cx));
         refresh_frame(cx);
-        let header = cx
-            .debug_bounds("work-toggle-0")
-            .expect("Worked · 2 steps header");
+        assert!(
+            cx.debug_bounds("work-toggle-0").is_none(),
+            "no Work header under the question"
+        );
         let bubble = cx.debug_bounds("user-bubble-0").expect("bubble");
-        assert!(
-            header.top() >= bubble.bottom(),
-            "the header sits under the question"
-        );
-        assert!(
-            cx.debug_bounds("thought-toggle-1").is_none(),
-            "folded: no thought row"
-        );
-        assert!(
-            cx.debug_bounds("interim-2").is_none(),
-            "folded: no interim prose"
-        );
-        assert!(
-            cx.debug_bounds("tool-run-3").is_none(),
-            "folded: no tool run"
-        );
-        assert!(
-            cx.debug_bounds("answer-5").is_some(),
-            "the answer is outside the zone"
-        );
-
-        cx.simulate_click(header.center(), Modifiers::none());
-        refresh_frame(cx);
-        assert!(cx.debug_bounds("work-open-0").is_some());
         let thought = cx
             .debug_bounds("thought-toggle-1")
-            .expect("open: thought header");
-        let interim = cx.debug_bounds("interim-2").expect("open: interim prose");
-        let run = cx.debug_bounds("tool-run-3").expect("open: the run box");
-        let frame = cx
-            .debug_bounds("work-member-1")
-            .expect("the frame around a member");
+            .expect("the thought row is drawn");
         assert!(
-            thought.left() > bubble.left() || thought.left() > frame.left(),
-            "members are inset by the frame"
+            cx.debug_bounds("interim-2").is_none(),
+            "prose before the last tool call is not drawn muted"
+        );
+        let prose = cx
+            .debug_bounds("assistant-response-2")
+            .expect("prose before the last tool call is drawn as an answer");
+        let run = cx.debug_bounds("tool-run-3").expect("the run box is drawn");
+        assert!(
+            cx.debug_bounds("answer-5").is_some(),
+            "the closing prose is an answer too"
         );
         assert!(
-            interim.top() >= thought.bottom() && run.top() >= interim.bottom(),
-            "members keep transcript order"
+            thought.top() >= bubble.bottom()
+                && prose.top() >= thought.bottom()
+                && run.top() >= prose.bottom(),
+            "rows keep transcript order"
         );
     }
 
-    /// The streaming turn's zone is open by itself and folds when the turn
-    /// ends; a turn without tools has no header at all.
+    /// A turn's tool run is drawn while it streams and stays drawn once the
+    /// turn ends: nothing folds away.
     #[gpui::test]
-    async fn the_streaming_turns_zone_is_open_and_folds_on_turn_end(cx: &mut TestAppContext) {
+    async fn a_tool_run_stays_in_view_after_the_turn_ends(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
@@ -11989,14 +12889,11 @@ let answer = 42;
         });
         cx.update(|_window, cx| init(cx));
         refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("work-open-0").is_some(),
-            "open while streaming"
-        );
+        assert!(cx.debug_bounds("work-open-0").is_none(), "no zone to open");
         assert!(cx.debug_bounds("tool-run-1").is_some());
         assert!(
             cx.debug_bounds("chat-generating-spinner").is_some(),
-            "the generating spinner is a sibling of the list, not a zone member"
+            "the generating spinner is a sibling of the list"
         );
         chat.update(cx, |chat, cx| {
             chat.handle_event(AcpEvent::AgentMessageChunk("done".into()), cx);
@@ -12009,28 +12906,14 @@ let answer = 42;
         });
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("work-open-0").is_none(),
-            "folded on turn end"
+            cx.debug_bounds("tool-run-1").is_some(),
+            "the run stays in view after the turn ends"
         );
-        assert!(cx.debug_bounds("tool-run-1").is_none());
         assert!(cx.debug_bounds("answer-2").is_some());
-
-        chat.update(cx, |chat, _| {
-            chat.push_entry(Entry::User {
-                text: "q2".into(),
-                at: None,
-            });
-            chat.push_entry(Entry::Assistant {
-                text: "plain".into(),
-                document: parse_chat_markdown("plain"),
-            });
-        });
-        refresh_frame(cx);
         assert!(
-            cx.debug_bounds("work-toggle-4").is_none(),
-            "no tools, no header"
+            cx.debug_bounds("work-toggle-0").is_none(),
+            "and no header appears for it"
         );
-        assert!(cx.debug_bounds("answer-5").is_some());
     }
 
     #[gpui::test]
@@ -12180,17 +13063,15 @@ let answer = 42;
     /// process that rejects `session/new` with wire code -32000, same
     /// fixture shape as `sirio_acp`'s own
     /// `session_creation_auth_required_error_becomes_typed_auth_required`.
-    #[cfg(unix)]
     #[gpui::test]
     async fn auth_required_launch_gets_a_dedicated_banner_with_login_guidance(
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let command = AgentCommand::new("/bin/sh").args([
-            "-c",
-            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
-        ]);
+        let command = AgentCommand::new("python3")
+            .arg(CHAT_FIXTURE)
+            .arg("auth-required");
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -12198,7 +13079,17 @@ let answer = 42;
         });
 
         cx.executor().allow_parking();
-        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::AuthRequired,
+                        ..
+                    }
+                )
+            })
+        });
         cx.update(|window, _| window.refresh());
 
         assert!(
@@ -12248,10 +13139,9 @@ let answer = 42;
     ) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        let command = AgentCommand::new("/bin/sh").args([
-            "-c",
-            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
-        ]);
+        let command = AgentCommand::new("python3")
+            .arg(CHAT_FIXTURE)
+            .arg("auth-required");
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -12262,7 +13152,20 @@ let answer = 42;
         // The app's real captured running size (see wayland-drive.sh's
         // W1xH1) — the exact width the critic reproduced the clip at.
         cx.simulate_resize(gpui::size(px(1715.0), px(972.0)));
-        cx.run_until_parked();
+        // The fixture is a real subprocess, so the rejection lands whenever
+        // the interpreter has started — pump for the typed entry rather
+        // than assuming one parked scheduler pass was enough.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::AuthRequired,
+                        ..
+                    }
+                )
+            })
+        });
         cx.update(|window, _| window.refresh());
 
         let banner = cx
@@ -12291,7 +13194,9 @@ let answer = 42;
         // AuthRequired error entry landing in the transcript.
         let entries_before_retry = chat.read_with(&*cx, |chat, _| chat.entries.len());
         cx.simulate_click(retry.center(), Modifiers::none());
-        cx.run_until_parked();
+        // Retry spawns a second fixture process; wait for its rejection the
+        // same way the first one was waited for.
+        pump_chat_until(cx, &chat, |chat| chat.entries.len() > entries_before_retry);
         chat.read_with(&cx.cx, |chat, _| {
             assert!(
                 chat.entries.len() > entries_before_retry,
@@ -12320,14 +13225,13 @@ let answer = 42;
     async fn a_disconnected_agent_offers_restart_agent_not_retry(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
-        // Answers initialize and session/new successfully, then on the
-        // first prompt replies with a line the protocol layer cannot parse
-        // as a response to anything, and exits — a transport failure, not
-        // an answerable request failure.
-        let command = AgentCommand::new("/bin/sh").args([
-            "-c",
-            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{}}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf 'not json at all\n'; exit 1 ;; esac; done"#,
-        ]);
+        // `broken-transport` answers initialize and session/new
+        // successfully, then on the first prompt replies with a line the
+        // protocol layer cannot parse as a response to anything, and exits
+        // — a transport failure, not an answerable request failure.
+        let command = AgentCommand::new("python3")
+            .arg(CHAT_FIXTURE)
+            .arg("broken-transport");
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
             configure_test_chat(&mut chat);
@@ -12692,6 +13596,52 @@ let answer = 42;
             chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
                 && chat.attachments.is_empty()),
             "backspace inside the search field must not have eaten composer text"
+        );
+    }
+
+    /// A long model list must scroll inside a capped-height list, not grow
+    /// the popover to the content's full size (which is how it ended up
+    /// covering the whole window with dozens of `github-copilot/*` entries).
+    #[gpui::test]
+    async fn model_picker_list_scrolls_instead_of_growing_unbounded(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = (0..40)
+                .map(|i| ModelOption {
+                    id: format!("model-{i}"),
+                    name: format!("Model {i}"),
+                    description: None,
+                })
+                .collect();
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("model chip is rendered");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let list = cx
+            .debug_bounds("model-picker-list")
+            .expect("the model list sits in its own scrollable region");
+        assert!(
+            list.size.height <= px(MODEL_PICKER_LIST_MAX_H),
+            "list should stay capped at {MODEL_PICKER_LIST_MAX_H}px and scroll instead of \
+             growing with all 40 models (was {}px)",
+            f32::from(list.size.height),
         );
     }
 
@@ -13252,9 +14202,6 @@ let answer = 42;
                 *duration_ms = None;
             }
             chat.push_entry(full);
-            // The zone folds interim rows behind its header; these rows are
-            // the subject, so the turn streams and the zone opens by itself.
-            chat.streaming = true;
             chat
         });
         cx.update(|_window, cx| init(cx));
@@ -13595,16 +14542,19 @@ let answer = 42;
         // The only path back online: the transcript error banner's explicit
         // Retry control, not a side effect of a disabled Send.
         chat.update(cx, |chat, cx| {
-            chat.agent_command = Some(AgentCommand::new("/bin/sh").args([
-                "-c",
-                r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;; esac; done"#,
-            ]));
+            chat.agent_command = Some(AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain"));
             chat.retry(cx);
         });
 
-        for _ in 0..20 {
+        // A real interpreter has to start before the client exists, so the
+        // budget is a deadline polled for the condition, not a fixed number
+        // of sleeps: fast where it connects fast, patient on a cold start.
+        for _ in 0..240 {
             std::thread::sleep(std::time::Duration::from_millis(25));
             cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| chat.client.is_some()) {
+                break;
+            }
         }
         chat.read_with(cx, |chat, _| {
             assert!(chat.client.is_some(), "retry should establish a client");
@@ -13630,9 +14580,12 @@ let answer = 42;
             chat.send(cx);
         });
 
-        for _ in 0..20 {
+        for _ in 0..240 {
             std::thread::sleep(std::time::Duration::from_millis(25));
             cx.run_until_parked();
+            if chat.read_with(cx, |chat, _| chat.has_completed_turn) {
+                break;
+            }
         }
         chat.read_with(cx, |chat, _| {
             assert!(
@@ -14332,15 +15285,6 @@ let answer = 42;
         pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
         focus_and_type(cx, "draft");
         assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.draft_text()), "draft");
-        // Seed zone state so the reset has something to forget.
-        chat.update(cx, |chat, cx| {
-            chat.toggle_work(0, cx);
-        });
-        assert!(
-            chat.read_with(&cx.cx, |chat, _| !chat.work_open.is_empty()),
-            "the completed turn takes a work zone press"
-        );
-
         let overflow = cx
             .debug_bounds("composer-overflow")
             .expect("the overflow control is drawn again");
@@ -14356,9 +15300,8 @@ let answer = 42;
             "New Conversation clears the transcript"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.work_open.is_empty()
-                && chat.unfolded_turns.is_empty()),
-            "New Conversation clears the turn fold and the work zone state"
+            chat.read_with(&cx.cx, |chat, _| chat.unfolded_turns.is_empty()),
+            "New Conversation clears the turn fold state"
         );
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.draft.trim().is_empty()
@@ -14883,10 +15826,6 @@ let answer = 42;
         });
         refresh_frame(cx);
 
-        assert!(
-            cx.debug_bounds("work-toggle-0").is_none(),
-            "a folded turn hides its Work header too"
-        );
         let fold = cx
             .debug_bounds("turn-fold-2")
             .expect("the oldest turn draws its collapsed stand-in row");
@@ -14903,15 +15842,6 @@ let answer = 42;
             .expect("second fold row is drawn");
 
         cx.simulate_click(fold.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
-        // The unfolded turn's tool row lives inside its Work zone.
-        assert!(
-            cx.debug_bounds("work-toggle-0").is_some(),
-            "unfolding the turn brings its Work header back"
-        );
-        let work = cx.debug_bounds("work-toggle-0").expect("the Work header");
-        cx.simulate_click(work.center(), Modifiers::none());
         cx.run_until_parked();
         refresh_frame(cx);
         assert!(
@@ -15323,6 +16253,279 @@ let answer = 42;
         assert!(
             !chat.read_with(cx, |chat, _| chat.model_control_visible()),
             "model control should be hidden when no models"
+        );
+    }
+
+    /// The two events a real secondary click delivers, in order — gpui
+    /// does not synthesize the up from the down.
+    fn right_click(cx: &mut VisualTestContext, position: gpui::Point<Pixels>) {
+        cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Chooses a row of the composer's context menu and lets the menu leave:
+    /// it exits through bezel's animation, staying mounted — and over the
+    /// pointer — until a timer the test clock has to be moved past.
+    fn choose_composer_context_item(cx: &mut VisualTestContext, selector: &'static str) {
+        let row = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is offered"));
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        refresh_frame(cx);
+    }
+
+    /// The composer's secondary-click menu carries Cut / Copy / Paste, and
+    /// each acts on bezel's field: Copy writes the selection, Cut removes it
+    /// after writing it, Paste inserts the clipboard at the caret.
+    #[gpui::test]
+    async fn composer_right_click_menu_offers_cut_copy_paste_on_the_field(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello menu");
+        // Select-all is bezel's own binding, and `input::init` registers it
+        // per platform: cmd-a on macOS, ctrl-a everywhere else. The test has
+        // to press the chord this build actually bound — cmd-a on Windows
+        // selects nothing, and bezel's `Copy` writes nothing for an empty
+        // selection, so the menu would be exercised against no selection at
+        // all. Same shape as `file_view.rs`'s Markdown-toolbar test.
+        #[cfg(target_os = "macos")]
+        cx.simulate_keystrokes("cmd-a");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a");
+        cx.run_until_parked();
+
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the field is drawn");
+        let click = input.center();
+        right_click(cx, click);
+        let menu = cx
+            .debug_bounds("composer-context-menu")
+            .expect("right-click on the composer draws its context menu");
+        // At the pointer horizontally; vertically the composer sits at the
+        // window's bottom edge, so bezel's window snapping may lift the
+        // menu up over the pointer rather than hang it below.
+        assert!(
+            (menu.left() - click.x).abs() <= px(8.0)
+                && menu.top() <= click.y + px(8.0)
+                && menu.bottom() >= click.y - px(8.0),
+            "the menu opens at the pointer: menu={menu:?} click={click:?}"
+        );
+        for item in [
+            "composer-context-cut",
+            "composer-context-copy",
+            "composer-context-paste",
+        ] {
+            assert!(cx.debug_bounds(item).is_some(), "{item} is offered");
+        }
+
+        choose_composer_context_item(cx, "composer-context-copy");
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello menu".into()),
+            "Copy writes the field's selection"
+        );
+        assert!(
+            cx.debug_bounds("composer-context-menu").is_none(),
+            "choosing an item closes the menu"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "hello menu",
+            "Copy leaves the draft alone"
+        );
+
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_string("stale".into()));
+        right_click(cx, click);
+        choose_composer_context_item(cx, "composer-context-cut");
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello menu".into()),
+            "Cut writes the selection"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "",
+            "Cut removes the selection from the draft"
+        );
+
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_string("pasted text".into()));
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the field is drawn");
+        right_click(cx, input.center());
+        choose_composer_context_item(cx, "composer-context-paste");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "pasted text",
+            "Paste inserts the clipboard text into the draft"
+        );
+    }
+
+    /// Paste with a picture on the clipboard attaches it exactly like the
+    /// "+" picker does, and Send carries that attachment to the agent as an
+    /// ACP image block — the fixture names every block it received back.
+    #[gpui::test]
+    async fn pasting_an_image_into_the_composer_attaches_it_and_sends_it_to_the_agent(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["echo-blocks"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
+        refresh_frame(cx);
+
+        let bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_image(&gpui::Image {
+                format: gpui::ImageFormat::Png,
+                bytes: bytes.clone(),
+                id: 7,
+            }));
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+        // `PasteComposer` is bound per platform in `Chat::bind_keys` (cmd-v
+        // on macOS, ctrl-v elsewhere, matching bezel's own `Paste`), so press
+        // the chord this build bound: cmd-v resolves to no binding on Windows
+        // and the picture never reaches `paste_clipboard_image`.
+        #[cfg(target_os = "macos")]
+        cx.simulate_keystrokes("cmd-v");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-v");
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        use base64::Engine as _;
+        let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.clone()),
+            vec![ImageAttachment {
+                mime_type: "image/png".into(),
+                base64_data: expected,
+            }],
+            "a pasted picture becomes an image attachment"
+        );
+        assert!(
+            cx.debug_bounds("attachment-chip-0").is_some(),
+            "the pasted picture is drawn as a chip"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+            "",
+            "a picture paste inserts no text"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Assistant { text, .. } if text.contains("image(image/png)"))
+            })
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.attachments.is_empty()),
+            "Send consumes the pasted attachment"
+        );
+    }
+
+    /// macOS copies with Cmd+C: the transcript's selection must answer the
+    /// platform chord, not only the Linux ctrl-c.
+    #[gpui::test]
+    async fn cmd_c_copies_the_transcript_selection(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::User {
+                text: "user question".into(),
+                at: None,
+            });
+            chat
+        });
+        refresh_frame(cx);
+        chat.update(cx, |chat, _| {
+            chat.transcript_selection = Some(TranscriptSelection {
+                anchor: 0,
+                head: "user question".len(),
+            });
+        });
+        cx.update(|window, cx| {
+            let focus = chat.read(cx).transcript_focus.clone();
+            window.focus(&focus, cx);
+        });
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("user question".into()),
+            "Cmd+C copies the transcript selection"
+        );
+    }
+
+    /// The assistant's rendered markdown is part of the transcript's one
+    /// selection: a drag across it selects its visible text, and the copy
+    /// reads that text — not the markdown source, which is what the hover
+    /// Copy control is for.
+    #[gpui::test]
+    async fn dragging_across_an_assistant_response_selects_its_visible_text(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Assistant {
+                text: "hello **bold** world".into(),
+                document: parse_chat_markdown("hello **bold** world"),
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("the response is drawn");
+        let y = response.top() + px(8.0);
+        let start = point(response.left() + px(1.0), y);
+        // Well past the short paragraph's last glyph, and well short of the
+        // hover Copy control at the response's far right.
+        let end = point(response.left() + px(250.0), y);
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.selected_transcript_text()),
+            Some("hello bold world".into()),
+            "the drag selects the response's visible text"
+        );
+
+        cx.simulate_keystrokes("cmd-c");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello bold world".into()),
+            "Cmd+C copies what the drag selected"
         );
     }
 }

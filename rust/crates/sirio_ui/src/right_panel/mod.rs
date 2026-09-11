@@ -20,7 +20,6 @@ use sirio_theme::Theme;
 use std::path::PathBuf;
 
 use crate::changes::{ChangesTabActionEvent, ChangesTabEvent};
-use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use history::{GitHistory, GitHistoryEvent};
 
@@ -133,6 +132,19 @@ pub enum PanelView {
     History,
 }
 
+/// A settled Files tree, handed to the host on the way out of a worktree so
+/// the way back in draws it at once. `expanded` is kept beside the tree
+/// because the nodes carry their own `expanded` flag: a snapshot taken while
+/// a walk was replacing part of the tree would otherwise lose which folders
+/// the user had open.
+#[derive(Clone, Debug)]
+pub struct FilesSnapshot {
+    file_tree: Vec<files::FileNode>,
+    flattened_file_rows: Vec<files::FileRow>,
+    git_markers: files::GitMarkers,
+    expanded: Vec<PathBuf>,
+}
+
 /// App-wide selection. A GPUI global rather than a field, for the same
 /// reason `DiffViewMode` is one: `select_worktree` throws the whole
 /// `RightPanel` entity away and builds a fresh one, so a field would snap
@@ -193,6 +205,7 @@ pub struct RightPanel {
     /// Files/Changes surface look current while serving stale data.
     worktree_selected: bool,
     file_tree: Vec<files::FileNode>,
+    flattened_file_rows: Vec<files::FileRow>,
     git_markers: files::GitMarkers,
     activity: Vec<ActivitySurface>,
     /// The in-flight folder-expansion walk, if any. Replaced (never
@@ -202,6 +215,9 @@ pub struct RightPanel {
     /// the single-flight guard. It is deliberately *not* the loading state
     /// rendered to users — see `settled`.
     refresh_started: bool,
+    /// The in-flight root refresh. It is separate from `walk_task` so a user
+    /// can expand a directory while the root refresh is still loading.
+    refresh_task: Option<Task<()>>,
     /// Whether any top-level walk has ever finished, successfully or not.
     ///
     /// This, and not `refresh_started`, is what "Loading files…" is about.
@@ -215,6 +231,9 @@ pub struct RightPanel {
     /// read (whose error panel would be replaced by the placeholder on every
     /// tick, hiding the Retry the user is trying to click).
     settled: bool,
+    /// Bumped whenever a root refresh is superseded. A completed refresh must
+    /// not publish data for an earlier checkout or walk.
+    refresh_generation: u64,
     refresh_error: Option<String>,
     selected_path: Option<PathBuf>,
     file_focus: Option<FocusHandle>,
@@ -272,6 +291,8 @@ pub struct RightPanel {
     /// The resolved right-panel width, pushed in by the host every render.
     /// The History toolbar shapes itself from it; see [`GitHistory::panel_width`].
     panel_width: f32,
+    is_stale: bool,
+    updating: bool,
 }
 
 impl RightPanel {
@@ -283,11 +304,14 @@ impl RightPanel {
             allowed_roots: vec![repo_root],
             worktree_selected: true,
             file_tree: Vec::new(),
+            flattened_file_rows: Vec::new(),
             git_markers: files::GitMarkers::default(),
             activity: Vec::new(),
             walk_task: None,
             refresh_started: false,
+            refresh_task: None,
             settled: false,
+            refresh_generation: 0,
             refresh_error: None,
             selected_path: None,
             file_focus: None,
@@ -303,6 +327,8 @@ impl RightPanel {
             history: None,
             history_subscription: None,
             panel_width: 405.0,
+            is_stale: false,
+            updating: false,
         }
     }
 
@@ -328,6 +354,47 @@ impl RightPanel {
         panel.allowed_roots = allowed_roots;
         panel.worktree_selected = worktree_selected;
         panel
+    }
+
+    /// Creates the panel for a worktree the host already holds a settled
+    /// Files tree for. `select_worktree` throws the whole entity away on
+    /// every switch, so without this the tree replays its walk each time and
+    /// the user watches "Loading files..." on a directory they were reading
+    /// a second ago. The restored tree is marked stale on arrival: it is
+    /// drawn immediately, and the refresh armed by `ensure_tree_refresh`
+    /// replaces it with what is on disk now.
+    pub fn with_activity_and_snapshot(
+        repo_root: impl Into<PathBuf>,
+        activity: Vec<ActivitySurface>,
+        snapshot: Option<FilesSnapshot>,
+    ) -> Self {
+        let mut panel = Self::with_activity(repo_root, activity);
+        if let Some(snapshot) = snapshot {
+            panel.file_tree = snapshot.file_tree;
+            files::restore_expanded(&mut panel.file_tree, &snapshot.expanded);
+            panel.flattened_file_rows = snapshot.flattened_file_rows;
+            panel.git_markers = snapshot.git_markers;
+            panel.settled = true;
+            panel.is_stale = true;
+            panel.updating = true;
+        }
+        panel
+    }
+
+    /// The tree the host caches for this worktree, or `None` when there is
+    /// nothing worth caching yet. A tree that is still loading, already
+    /// restored from an older snapshot, or mid-refresh would cache a reading
+    /// the panel itself does not trust -- only a settled walk is offered.
+    pub fn files_snapshot(&self) -> Option<FilesSnapshot> {
+        if !self.settled || self.is_stale || self.updating {
+            return None;
+        }
+        Some(FilesSnapshot {
+            file_tree: self.file_tree.clone(),
+            flattened_file_rows: self.flattened_file_rows.clone(),
+            git_markers: self.git_markers.clone(),
+            expanded: files::collect_expanded(&self.file_tree),
+        })
     }
 
     /// Replace the host-provided activity rows. The host (`main.rs`) calls
@@ -362,6 +429,7 @@ impl RightPanel {
         }
         self.worktree_selected = false;
         self.file_tree.clear();
+        self.flattened_file_rows.clear();
         self.git_markers = files::GitMarkers::default();
         self.selected_path = None;
         self.refresh_error = None;
@@ -370,6 +438,13 @@ impl RightPanel {
         self.changes_subscriptions.clear();
         self.history = None;
         self.history_subscription = None;
+        self.is_stale = false;
+        self.updating = false;
+        self.refresh_started = false;
+        self.refresh_task = None;
+        self.refresh_generation += 1;
+        self.walk_task = None;
+        self.walk_generation += 1;
         cx.notify();
     }
 
@@ -399,7 +474,10 @@ impl RightPanel {
         self.worktree_selected = true;
         self.repo_root = repo_root;
         self.file_tree.clear();
+        self.flattened_file_rows.clear();
         self.git_markers = files::GitMarkers::default();
+        self.settled = false;
+        self.is_stale = false;
         self.selected_path = None;
         self.refresh_error = None;
         self.file_context_menu = None;
@@ -407,7 +485,11 @@ impl RightPanel {
         self.changes_subscriptions.clear();
         self.history = None;
         self.history_subscription = None;
-        self.settled = false;
+        self.updating = false;
+        self.refresh_started = false;
+        self.refresh_task = None;
+        self.refresh_generation += 1;
+        self.walk_task = None;
         self.walk_generation += 1;
         cx.notify();
     }
@@ -439,7 +521,6 @@ impl RightPanel {
         &self,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = PanelView::get(cx);
@@ -482,10 +563,13 @@ impl RightPanel {
                             theme.text_muted
                         },
                     ))
-                    .when(
-                        view == PanelView::Files && self.walk_task.is_some(),
-                        |this| this.child(loading::compact("files-refresh-spinner", window, cx)),
-                    )
+                    // The Files icon never carries a spinner. It used to
+                    // overlay `loading::compact` for as long as `walk_task`
+                    // was in flight, and `ensure_tree_refresh` puts a walk
+                    // in flight every second, so the icon blinked once a
+                    // second for the duration of every `git status`. A walk
+                    // over a settled tree is silent — the same rule the
+                    // `settled` field applies to the tree itself.
                     .when_some(badge_color, |this, color| {
                         this.child(
                             div()
@@ -643,7 +727,7 @@ impl Render for RightPanel {
             .h_full()
             .overflow_hidden()
             .bg(theme.surface)
-            .child(self.render_header(entity.clone(), theme, window, cx))
+            .child(self.render_header(entity.clone(), theme, cx))
             .child(if !self.worktree_selected {
                 self.render_no_worktree(theme).into_any_element()
             } else {
@@ -867,6 +951,55 @@ mod tests {
         );
     }
 
+    /// The Files rail icon never carries a spinner. It used to overlay
+    /// `loading::compact` for as long as `walk_task` was in flight, and
+    /// `ensure_tree_refresh` puts a walk in flight every second, so the icon
+    /// blinked once a second for the duration of every `git status`. A walk
+    /// over a settled tree is silent: the tree stays and the new listing
+    /// lands in place.
+    ///
+    /// The in-flight state is faked with a task that never completes: a
+    /// real walk finishes inside `run_until_parked`, so the frame drawn
+    /// afterwards would be the settled one and prove nothing.
+    #[gpui::test]
+    fn a_walk_in_flight_draws_no_spinner_on_the_files_rail_icon(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("a.txt"), "a").expect("write file");
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let panel =
+            cx.update(|window, _cx| window.root::<RightPanel>().flatten().expect("panel root"));
+        panel.update(&mut cx, |panel, cx| {
+            panel.bind_worktree(dir.0.clone(), cx);
+        });
+        cx.update(|_window, cx| PanelView::set(PanelView::Files, cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("files-refresh-spinner").is_none(),
+            "a settled rail carries no spinner"
+        );
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.walk_task = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            panel.read_with(&cx, |panel, _| panel.walk_task.is_some()),
+            "the walk is still in flight in the drawn frame"
+        );
+        assert!(
+            cx.debug_bounds("files-refresh-spinner").is_none(),
+            "a walk in flight must not draw a spinner on the rail icon"
+        );
+        assert!(
+            cx.debug_bounds(PanelView::Files.element_id()).is_some(),
+            "the rail icon itself stays drawn"
+        );
+    }
+
     fn git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .args(args)
@@ -946,6 +1079,71 @@ mod tests {
                 panel.changes.is_none(),
                 "a stale checkout's diff must not survive"
             );
+        });
+    }
+
+    fn settled_snapshot(
+        panel: &gpui::Entity<RightPanel>,
+        cx: &mut TestAppContext,
+    ) -> FilesSnapshot {
+        panel.update(cx, |panel, _| {
+            panel.settled = true;
+            panel
+                .files_snapshot()
+                .expect("settled panel has a snapshot")
+        })
+    }
+
+    #[gpui::test]
+    fn cached_files_hit_is_immediate_and_stale_while_refreshing(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let first = TempDir::new();
+        let second = TempDir::new();
+        let source = cx.new(|_| RightPanel::new(first.0.clone()));
+        let snapshot = settled_snapshot(&source, cx);
+        let restored = cx.new(|_| {
+            RightPanel::with_activity_and_snapshot(second.0.clone(), Vec::new(), Some(snapshot))
+        });
+        restored.read_with(cx, |panel, _| {
+            assert!(panel.settled);
+            assert!(panel.is_stale);
+            assert!(panel.updating);
+        });
+    }
+
+    #[gpui::test]
+    fn cache_miss_starts_with_first_load_state(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let dir = TempDir::new();
+        let panel =
+            cx.new(|_| RightPanel::with_activity_and_snapshot(dir.0.clone(), Vec::new(), None));
+        panel.read_with(cx, |panel, _| {
+            assert!(!panel.settled);
+            assert!(!panel.is_stale);
+        });
+    }
+
+    #[gpui::test]
+    fn rapid_worktree_switches_keep_each_cached_panel_state_separate(cx: &mut TestAppContext) {
+        cx.update(sirio_theme::Theme::init);
+        let worktree_a = TempDir::new();
+        let worktree_b = TempDir::new();
+        let panel_a = cx.new(|_| RightPanel::new(worktree_a.0.clone()));
+        let snapshot_a = settled_snapshot(&panel_a, cx);
+        let panel_b = cx.new(|_| {
+            RightPanel::with_activity_and_snapshot(worktree_b.0.clone(), Vec::new(), None)
+        });
+        let panel_a_again = cx.new(|_| {
+            RightPanel::with_activity_and_snapshot(
+                worktree_a.0.clone(),
+                Vec::new(),
+                Some(snapshot_a),
+            )
+        });
+        panel_b.read_with(cx, |panel, _| assert!(!panel.settled));
+        panel_a_again.read_with(cx, |panel, _| {
+            assert!(panel.settled);
+            assert_eq!(panel.repo_root, worktree_a.0);
         });
     }
 }

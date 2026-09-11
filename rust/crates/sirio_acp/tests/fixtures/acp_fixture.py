@@ -446,6 +446,8 @@ def main():
             if MODE == "blocks":
                 blocks_prompt(request)
                 return
+            if MODE == "multi":
+                blocks_prompt(request)
             if MODE == "malformed":
                 sys.stdout.write("not-json\n")
                 sys.stdout.flush()
@@ -471,6 +473,8 @@ def main():
                         "content": {"type": "text", "text": "partial"},
                     }
                 )
+                sys.stderr.write("fixture last words before dying\n")
+                sys.stderr.flush()
                 os._exit(17)
             if MODE == "cancel":
                 cancel_prompt(request)

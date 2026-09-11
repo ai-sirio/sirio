@@ -5,7 +5,7 @@ resolver = "2"
 # `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml` can run its tests standalone;
 # excluded here so `cargo build/test --workspace` does not also try to treat it as a member
 # (which conflicts with its own `[workspace]` table).
-exclude = ["vendor/gpui_linux", "vendor/gpui_windows"]
+exclude = ["vendor/gpui_linux", "vendor/gpui_windows", "vendor/libghostty-vt-sys"]
 members = [
     "crates/sirio_perf",
     "crates/sirio",
@@ -28,7 +28,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.9.8"
 edition = "2024"
 publish = false
 
@@ -119,6 +119,29 @@ bezel-gpui-linux = { path = "vendor/gpui_linux" }
 # copy presents through a bitblt swap chain instead; its alpha reaches the redirection surface and
 # the acrylic accent policy shows through. One function changed; see rust/vendor/README.md.
 bezel-gpui-windows = { path = "vendor/gpui_windows" }
+# Local override that makes the Zig-built VT parser portable. Upstream 0.2.1 passes `-Dtarget` to
+# Zig only when cross-compiling, and a Zig target with no explicit arch is resolved by *detecting
+# the host CPU* rather than falling back to the architecture's baseline. Every release job here
+# builds natively (macOS names its own host triple in `--target`, which is not a cross-build), so
+# the parser statically linked into each artifact was compiled for whatever CPU the runner had.
+#
+# Not theoretical: the Windows installer published as v0.9.6 cannot start on a Ryzen 5 5600X. It
+# dies at `0xc000001d` STATUS_ILLEGAL_INSTRUCTION, and the bytes at the fault offset are
+# `62 f2 7d 28 7a c2` -- an EVEX-encoded `vpbroadcastb ymm0, ecx`, which needs AVX512BW+VL. The
+# hosted Windows runner is an Intel Xeon that has it; Zen 3 does not. Nothing downstream can
+# recover from this: a binary that cannot start never reaches the updater that would replace it.
+#
+# The override is deliberately NOT a git dependency on upstream's fix. uzaaft/libghostty-rs#73
+# (merged 2026-08-14, closing #66) makes exactly this change, but every revision carrying it also
+# carries a ghostty pin bump to 22d1317, which requires **Zig 0.16.0** -- and this repo is pinned
+# to exactly 0.15.2 in Scripts/ci.sh, both CI workflows and CLAUDE.md. So the five-line fix is
+# backported onto the published 0.2.1 source instead, byte-identical apart from that hunk. See
+# rust/vendor/README.md. uzaaft/libghostty-rs#97 asks for a release; taking it will mean moving
+# to Zig 0.16 in the same change, which is why this is an override and not a version bump.
+#
+# `libghostty-vt`, the safe wrapper, stays on crates.io 0.2.1 unpatched: the vendored `-sys` keeps
+# 0.2.1's ghostty pin and generated bindings, so the two halves still match.
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
 
 [profile.dev]
 # Keep dev links and debug-info I/O light; remove this line when full debug info is needed.

@@ -1,0 +1,122 @@
+name: Nightly
+
+# The Nightly channel (#317, spec §3.3): built from `main` on a schedule,
+# published as a pre-release plus `nightly.json` on the manifest host. The
+# build path is build-release.yml, the same one the tag release uses -- same
+# three artifacts, same signing key, same publish order. What differs is
+# decided here: the channel constant, a version that sorts above yesterday's,
+# a tag that can never look like a tag release, and notes that say once that
+# the channel tracks main.
+#
+# The channel exists to make the updater observable. A working updater is
+# invisible, so one that updates every day is the one place silence means
+# something. Nothing here, or anywhere, switches a running build between
+# channels: switching channels means installing the other channel's artifact.
+on:
+  schedule:
+    # 03:00 UTC daily. The macOS gate runs on the maintainer's own machine,
+    # so the hour is chosen to be one it is unlikely to be in use.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if main has not moved since the last nightly
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Two overlapping runs would race on the release list and on the gh-pages
+# branch. Queue, never cancel: a cancelled run is a half-published nightly.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      version: ${{ steps.stamp.outputs.version }}
+      tag: ${{ steps.stamp.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The whole gate runs on the maintainer's Mac. A commit that already has
+      # a nightly does not need another one; the manual trigger can insist.
+      # build-release.yml pins every release to its commit with `--target`,
+      # which is what `targetCommitish` reads back.
+      #
+      # A release proves the assets were uploaded, not that the manifest
+      # followed: a run that died between the two leaves a release with no
+      # nightly.json behind it, and skipping on the release alone would then
+      # never publish that commit. So the skip also requires the manifest on
+      # gh-pages to carry this release's stamp. Anything unreadable -- no
+      # branch, no file, no Pages -- means "not published" and rebuilds,
+      # which is the safe direction.
+      - name: Skip when main has not moved since the last nightly
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          LAST=$(gh release list --limit 200 --json tagName \
+            --jq '[.[].tagName | select(startswith("nightly-"))][0] // empty')
+          if [ -n "$LAST" ] && [ "$FORCE" != "true" ]; then
+            LAST_SHA=$(gh release view "$LAST" --json targetCommitish --jq .targetCommitish)
+            PUBLISHED_STAMP=$( (gh api "repos/${GITHUB_REPOSITORY}/contents/nightly.json?ref=gh-pages" --jq .content 2>/dev/null || true) \
+              | base64 -d 2>/dev/null | jq -r '.version // empty' 2>/dev/null | sed -E 's/.*-nightly\.//' || true)
+            if [ "$LAST_SHA" = "$GITHUB_SHA" ] && [ -n "$PUBLISHED_STAMP" ] && [ "$PUBLISHED_STAMP" = "${LAST#nightly-}" ]; then
+              echo "main is still at $GITHUB_SHA, which $LAST already built and published; nothing to do"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+      # `<workspace>-nightly.<YYYYMMDDHHMM>`: the updater compares strict
+      # semver against the version compiled in, so each nightly must sort
+      # above the one before. One numeric prerelease identifier, UTC, monotonic
+      # per minute, and never with a leading zero (the year comes first), which
+      # the `semver` crate would refuse to parse. When main bumps the workspace
+      # version the nightly follows, still sorting above the older line.
+      #
+      # The tag is `nightly-<stamp>`, deliberately not `v<version>`: the tag
+      # release workflow triggers on `v*.*.*`, and a nightly tag must never be
+      # mistaken for one.
+      - name: Stamp the nightly version
+        id: stamp
+        if: steps.decide.outputs.build == 'true'
+        run: |
+          BASE=$(grep -m1 '^version = ' rust/Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ -z "$BASE" ]; then
+            echo "error: could not read the workspace version from rust/Cargo.toml" >&2
+            exit 1
+          fi
+          STAMP=$(date -u +%Y%m%d%H%M)
+          echo "version=${BASE}-nightly.${STAMP}" >> "$GITHUB_OUTPUT"
+          echo "tag=nightly-${STAMP}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    # The called workflow cannot hold more than the caller grants: `publish`
+    # inside it needs contents: write. The build jobs in there scope
+    # themselves back down to contents: read.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-release.yml
+    with:
+      channel: nightly
+      version: ${{ needs.prepare.outputs.version }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      # Spec §7.4: Nightly does not say what changed; it says once that it
+      # tracks main, and names the commit so a report can be pinned to one.
+      notes: "Nightly tracks main. This build is commit ${{ github.sha }}."
+      prerelease: true
+      publish: true
+    secrets: inherit

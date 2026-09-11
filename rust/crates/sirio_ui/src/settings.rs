@@ -22,7 +22,11 @@ use sirio_usage::{
 };
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Duration;
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
+
+/// How long an account action error stays visible before it self-dismisses.
+const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
 
 // The action bound to Escape while the summarizer picker menu is focused.
 // Scoped to the menu's key context so the shell's own Escape handling is
@@ -47,10 +51,11 @@ const DETAIL_BOTTOM_PADDING: f32 = 12.0;
 const DETAIL_SECTION_MARGIN: f32 = 20.0;
 
 const SEGMENTED_THEME: &[&str] = &["System", "Light", "Dark"];
-/// bezel's five base colours, in its own order. Text rather than swatches:
-/// the five differ by hue at chroma 0.013–0.046, which a 16px pill cannot
-/// show, and the names are Tailwind's — a vocabulary a user may already have.
-const SEGMENTED_BASE_COLOR: &[&str] = &["Neutral", "Stone", "Zinc", "Gray", "Slate"];
+/// bezel's five base colours, in its own order, then Sirio's Notte preset.
+/// Text rather than swatches: the five differ by hue at chroma 0.013–0.046,
+/// which a 16px pill cannot show, and the names are Tailwind's — a vocabulary
+/// a user may already have.
+const SEGMENTED_BASE_COLOR: &[&str] = &["Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte"];
 
 /// The segment index of a base colour. `BaseColor::ALL` is the display order,
 /// so the index is its position in that array.
@@ -659,210 +664,6 @@ fn on_status_fill(theme: &Theme) -> Rgba {
     theme.surface
 }
 
-/// Every process id currently a descendant of `root` (not including `root`
-/// itself), found by walking the kernel's live parent/child view via
-/// `/proc/<pid>/task/<tid>/children`. Walked fresh at kill time rather than
-/// captured once at spawn: the login command a terminal emulator runs
-/// attaches to a brand new PTY session as soon as it starts (confirmed live
-/// — `cosmic-term -e sleep N` puts the child in a *different* process group
-/// from the launcher's own, `getpgid(child) != getpgid(launcher)`), so a
-/// single pgid recorded at spawn time never covers it; only a walk done now
-/// does.
-#[cfg(target_os = "linux")]
-fn descendant_pids(root: u32) -> Vec<u32> {
-    let mut discovered = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(root);
-    let mut frontier = vec![root];
-    while let Some(pid) = frontier.pop() {
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            continue;
-        };
-        for task in tasks.flatten() {
-            let Ok(contents) = std::fs::read_to_string(task.path().join("children")) else {
-                continue;
-            };
-            for token in contents.split_whitespace() {
-                let Ok(child) = token.parse::<u32>() else {
-                    continue;
-                };
-                if seen.insert(child) {
-                    discovered.push(child);
-                    frontier.push(child);
-                }
-            }
-        }
-    }
-    discovered
-}
-
-/// macOS implementation of [`descendant_pids`], using libproc's live child
-/// table because macOS has no `/proc` filesystem.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn descendant_pids(root: u32) -> Vec<u32> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut discovered = Vec::new();
-        let mut seen = std::collections::HashSet::from([root]);
-        let mut frontier = vec![root];
-        while let Some(pid) = frontier.pop() {
-            let Ok(children) = macos_child_pids(pid) else {
-                continue;
-            };
-            for child in children {
-                if seen.insert(child) {
-                    discovered.push(child);
-                    frontier.push(child);
-                }
-            }
-        }
-        discovered
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = root;
-        Vec::new()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_child_pids(parent: u32) -> std::io::Result<Vec<u32>> {
-    use std::os::raw::{c_int, c_void};
-
-    const INITIAL_PID_CAPACITY: usize = 64;
-    const MAX_PID_CAPACITY: usize = 16_384;
-
-    #[link(name = "proc")]
-    unsafe extern "C" {
-        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
-    }
-
-    let parent = c_int::try_from(parent).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "process id is too large")
-    })?;
-    let mut buffer = vec![0_i32; INITIAL_PID_CAPACITY];
-    loop {
-        let buffer_size = (buffer.len() * std::mem::size_of::<i32>()) as c_int;
-        // libproc returns the number of PIDs copied, not a byte count.
-        let reported_count =
-            unsafe { proc_listchildpids(parent, buffer.as_mut_ptr().cast(), buffer_size) };
-        if reported_count < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let count = (reported_count as usize).min(buffer.len());
-        if (reported_count as usize) < buffer.len() {
-            return Ok(buffer[..count]
-                .iter()
-                .copied()
-                .filter(|pid| *pid > 0)
-                .map(|pid| pid as u32)
-                .collect());
-        }
-
-        if buffer.len() >= MAX_PID_CAPACITY {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "macOS child-process list exceeded safety limit",
-            ));
-        }
-        buffer.resize((buffer.len() * 2).min(MAX_PID_CAPACITY), 0);
-    }
-}
-
-/// Kills the login terminal and every process it has spawned since launch
-/// (F-SET-14). `kill <pid>` on the launcher alone only ever reaches the
-/// launcher itself — the interactive login command it runs lands in its own
-/// PTY session, detached from the launcher's process group, which is
-/// exactly the failure this row's evidence recorded (the recorded pid, and
-/// even the terminal's own pid killed manually, left the login command
-/// alive). Walking `/proc` for every current descendant and signaling each
-/// one directly — SIGTERM first, SIGKILL after a short grace period for
-/// anything that ignored it — reaches the login command wherever it landed,
-/// without depending on process-group membership at all.
-#[cfg(unix)]
-fn terminate_login_process_group(pid: u32) {
-    let mut targets = vec![pid];
-    targets.extend(descendant_pids(pid));
-    for target in &targets {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(target.to_string())
-            .status();
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    for target in &targets {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(target.to_string())
-            .status();
-    }
-}
-
-/// Windows twin of [`terminate_login_process_group`]. There is no
-/// descendant walk to do here: [`login_launcher`] runs the login command
-/// itself in a fresh console, so the recorded pid *is* the login command
-/// (no terminal-emulator launcher sits in front of it), and one
-/// `TerminateProcess` ends it and closes its console window with it. A
-/// pid that no longer exists (the login already finished) opens no handle
-/// and is left alone.
-#[cfg(windows)]
-fn terminate_login_process_group(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
-
-    // SAFETY: plain Win32 calls on a handle this function opens, checks
-    // for null, and closes itself; nothing is dereferenced.
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle.is_null() {
-            return;
-        }
-        TerminateProcess(handle, 1);
-        CloseHandle(handle);
-    }
-}
-
-/// The process that opens a provider's interactive login for
-/// [`Settings::launch_account_login`]. Unix delegates to the desktop's
-/// terminal emulator (`x-terminal-emulator -e <program> <args>`), so the
-/// child is the emulator and the login command runs inside it.
-#[cfg(not(windows))]
-fn login_launcher(program: &str, args: &[&str]) -> Command {
-    let mut command = Command::new("x-terminal-emulator");
-    command.arg("-e").arg(program).args(args);
-    command
-}
-
-/// Windows twin of [`login_launcher`]: there is no terminal-emulator
-/// alternatives name to delegate to, and a console program started from a
-/// GUI process gets no window of its own unless asked — so the login
-/// command runs directly, in a fresh console (`CREATE_NEW_CONSOLE`). The
-/// child *is* the login command: `wait` ends when the login ends, and the
-/// pid handed to Cancel is the one [`terminate_login_process_group`] ends.
-#[cfg(windows)]
-fn login_launcher(program: &str, args: &[&str]) -> Command {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    let mut command = Command::new(program);
-    command.args(args).creation_flags(CREATE_NEW_CONSOLE);
-    command
-}
-
-/// The card's message when the login could not even be started. Names the
-/// launcher only when it is a different program from the login itself —
-/// on Linux a missing `x-terminal-emulator` is what fails, and blaming
-/// `claude` for it sent a reader to check the wrong install.
-fn login_start_failure(program: &str, launcher: &str, error: &std::io::Error) -> String {
-    if launcher == program {
-        format!("could not start {program} login: {error}")
-    } else {
-        format!("could not start {program} login via {launcher}: {error}")
-    }
-}
-
 /// Small settings view model. The real application can replace these values
 /// with its persistence layer without changing the reusable settings UI.
 /// The badge shown at the trailing edge of a permission row.
@@ -871,6 +672,14 @@ struct PermissionBadge {
     label: &'static str,
     background: Rgba,
     foreground: Rgba,
+}
+
+/// A login command selected from the fixed provider catalog, never user input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountLoginRequest {
+    pub id: u64,
+    pub program: &'static str,
+    pub args: Vec<&'static str>,
 }
 
 /// What an Agents-row button asks the host to do. Emitted only — this
@@ -884,6 +693,11 @@ pub enum SettingsEvent {
     /// re-fetches the registry document (24 h cache respected) and
     /// recomputes every launch source.
     RefreshAgentSources,
+    /// Run the provider CLI in the app's terminal. Settings owns the attempt;
+    /// the host owns the PTY and returns its result with the same id.
+    StartAccountLogin(AccountLoginRequest),
+    /// Credentials changed: refresh the usage bar without waiting for its timer.
+    RefreshUsage,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -993,6 +807,21 @@ pub struct Settings {
     /// confirmation line under the button naming where the install is
     /// running. Cleared the next time the button is clicked again.
     skill_install_launched: bool,
+    /// Host callback for the Agent Hooks card's Install button — Install
+    /// Skill's sibling for the sirioctl lifecycle hooks. The host owns the
+    /// home directory (this crate never touches it): it writes each agent's
+    /// user-global hook config on its own executor and answers through
+    /// [`Settings::set_hooks_install_report`]. Unset, the button renders
+    /// muted and inert, exactly like `on_install_skill`.
+    on_install_hooks: Option<Rc<dyn Fn()>>,
+    /// Set the instant Install Hooks is clicked and reaches a wired
+    /// `on_install_hooks`; renders the in-flight line until the host's
+    /// report replaces it.
+    hooks_install_launched: bool,
+    /// The host's per-agent outcome, one line per agent, rendered under
+    /// the button in place of the in-flight line. `None` until the host
+    /// answers; cleared by the next click.
+    hooks_install_report: Option<String>,
     /// The resolved launch source per adapter id (Task 9). The Agents
     /// screen's pill, version and Install/Update buttons render from this —
     /// a resolved fact — instead of the compiled claim they replaced.
@@ -1006,34 +835,15 @@ pub struct Settings {
     /// hides the row's action; `Failed` shows the installer's own message
     /// and offers the action again; success removes the entry.
     install_states: BTreeMap<String, InstallState>,
-    /// Optional host override for a provider card's Add Account button
-    /// (F-SET-14). The payload is the provider's stable id (`"claude"`,
-    /// `"codex"`, `"opencode"` — [`UsageProvider::id`]'s own convention),
-    /// not a credential or command. When unset, Settings invokes the
-    /// installed provider CLI in an external terminal. Unlike the macOS
-    /// original, this app never holds isolated per-provider credentials of
-    /// its own — [`ProviderAccountStates`] only reads the one credential file
-    /// the provider's CLI manages on this machine (see the "System default"
-    /// row's comment in [`Settings::render_provider_card`]).
+    /// Optional account-management override for embedders.
     on_manage_account: Option<Rc<dyn Fn(&'static str)>>,
-    /// Last failure while handing account management to an external terminal.
-    /// A failed spawn must be visible rather than implying that login started.
     account_action_error: Option<(ProviderKind, String)>,
-    /// The provider whose [`Self::launch_account_login`] is currently
-    /// spawned and being waited on (F-SET-14). While set, the card renders
-    /// "Signing in…" and a Cancel button in place of Add Account, so a
-    /// click that already reached a real subprocess is not left with no
-    /// visible sign anything is happening.
     account_login_pending: Option<ProviderKind>,
-    /// The spawned login terminal's pid, once known — set slightly after
-    /// [`Self::account_login_pending`] (the process must exist before it
-    /// has one) and what [`Self::cancel_account_login`] signals.
-    account_login_pid: Option<u32>,
-    /// Set by [`Self::cancel_account_login`] so the login task's own
-    /// completion handler — which still runs after the killed process's
-    /// `wait()` resolves — does not overwrite the "Sign-in canceled"
-    /// message with an exit-status one.
-    account_login_canceled: bool,
+    /// Distinguishes retries, including retries for the same provider.
+    account_login_id: u64,
+    /// The host supplies a terminal without introducing a terminal dependency
+    /// into sirio_ui. Dropping the surface releases and shuts down its PTY.
+    account_login_surface: Option<gpui::AnyView>,
     /// The OpenCode Go session cookie being typed (F-SET-12). Transient UI
     /// state: Save moves it into [`CredentialStore`], and the field only
     /// ever renders mask dots — the value is never drawn back or persisted
@@ -1199,14 +1009,17 @@ impl Settings {
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             skill_install_launched: false,
+            on_install_hooks: None,
+            hooks_install_launched: false,
+            hooks_install_report: None,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
             install_states: BTreeMap::new(),
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
-            account_login_pid: None,
-            account_login_canceled: false,
+            account_login_id: 0,
+            account_login_surface: None,
             opencode_cookie_input: String::new(),
             opencode_cookie_focus: cx.focus_handle(),
             opencode_cookie_error: None,
@@ -1511,6 +1324,23 @@ impl Settings {
         self
     }
 
+    /// Installs the host callback that writes the user-global sirioctl
+    /// hooks (Settings → Install Hooks). Unset, the Install Hooks button
+    /// renders muted and inert — see [`Settings::on_install_hooks`].
+    pub fn on_install_hooks(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_install_hooks = Some(Rc::new(callback));
+        self
+    }
+
+    /// The host's answer to an Install Hooks click: one line per agent
+    /// (where its hooks went, or why they did not). Replaces the in-flight
+    /// line; `None` clears the card back to its idle state.
+    pub fn set_hooks_install_report(&mut self, report: Option<String>, cx: &mut Context<Self>) {
+        self.hooks_install_report = report;
+        self.hooks_install_launched = false;
+        cx.notify();
+    }
+
     /// Installs the host callback that runs an agent row's Install command
     /// (F-SET-18). Unset, an agent with a known install command still
     /// renders the button muted and inert — see the field doc on
@@ -1548,10 +1378,8 @@ impl Settings {
         }
     }
 
-    /// Installs a host override for a provider card's Add Account button
-    /// (F-SET-14). Without this callback the built-in external-CLI fallback
-    /// remains active; embedders can use the callback to provide their own
-    /// terminal or account-management surface.
+    /// Overrides account management for embedders. By default the host
+    /// handles `SettingsEvent::StartAccountLogin` with an integrated terminal.
     pub fn on_manage_account(mut self, callback: impl Fn(&'static str) + 'static) -> Self {
         self.on_manage_account = Some(Rc::new(callback));
         self
@@ -1839,6 +1667,18 @@ impl Settings {
         }
     }
 
+    /// Handles the Agent Hooks card's Install button: hands the install to
+    /// the host and shows the in-flight line (a previous report is cleared
+    /// so the screen never shows a stale outcome next to a new attempt).
+    fn install_hooks_clicked(&mut self, cx: &mut Context<Self>) {
+        self.hooks_install_launched = true;
+        self.hooks_install_report = None;
+        cx.notify();
+        if let Some(handler) = self.on_install_hooks.clone() {
+            handler();
+        }
+    }
+
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
         self.provider_accounts = ProviderAccountStates::discovered();
         self.sync_account_identity_cache();
@@ -1846,128 +1686,90 @@ impl Settings {
         cx.notify();
     }
 
-    /// Opens the provider's own interactive login flow in a terminal (the
-    /// desktop's emulator on Unix, a fresh console on Windows — see
-    /// [`login_launcher`]). Sirio waits off the render thread and re-reads
-    /// the local account stores when that terminal session ends, so
-    /// cancel/retry and a successful login all leave the card truthful.
-    ///
-    /// F-SET-14: while the terminal is up, [`Self::account_login_pending`]
-    /// is set so the card can render "Signing in…" and a Cancel button
-    /// instead of leaving a click that reached a real subprocess with no
-    /// visible sign anything happened.
+    /// Requests an app-owned terminal on every supported desktop platform.
     fn launch_account_login(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
-        self.account_action_error = None;
-        // Unreachable from the UI for a provider without a login command
-        // (its card renders no Add Account button); a no-op beats a panic.
+        if self.account_login_pending.is_some() {
+            return;
+        }
         let Some(login) = provider_login_command(provider) else {
             return;
         };
-        let program = login.program;
-        let args = login.args;
-        let entity = cx.entity();
+        self.account_action_error = None;
+        self.account_login_id += 1;
         self.account_login_pending = Some(provider);
-        self.account_login_pid = None;
-        self.account_login_canceled = false;
+        cx.emit(SettingsEvent::StartAccountLogin(AccountLoginRequest {
+            id: self.account_login_id,
+            program: login.program,
+            args: login.args,
+        }));
         cx.notify();
-        cx.spawn(async move |_, cx| {
-            let spawned = cx
-                .background_spawn(async move {
-                    let mut command = login_launcher(program, &args);
-                    let launcher = command.get_program().to_string_lossy().into_owned();
-                    command
-                        .spawn()
-                        .map_err(|error| login_start_failure(program, &launcher, &error))
-                })
-                .await;
-
-            let mut child = match spawned {
-                Ok(child) => child,
-                Err(message) => {
-                    entity.update(cx, |settings, cx| {
-                        settings.account_login_pending = None;
-                        settings.account_login_pid = None;
-                        settings.account_action_error = Some((provider, message));
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            // Publish the pid as soon as the process exists, so a Cancel
-            // click that lands before this point still has something to
-            // kill once it does; [`Self::cancel_account_login`] guards on
-            // `account_login_pending` still naming this provider, so a
-            // Cancel that already fired is not clobbered by this update.
-            let pid = child.id();
-            entity.update(cx, |settings, cx| {
-                if settings.account_login_pending == Some(provider) {
-                    settings.account_login_pid = Some(pid);
-                    cx.notify();
-                }
-            });
-
-            let result = cx.background_spawn(async move { child.wait() }).await;
-
-            entity.update(cx, |settings, cx| {
-                settings.account_login_pending = None;
-                settings.account_login_pid = None;
-                if settings.account_login_canceled {
-                    // Cancel already set the "Sign-in canceled" message and
-                    // fired its own notify; the process's own exit status
-                    // (a signal, once `kill` lands) is not a real outcome.
-                    settings.account_login_canceled = false;
-                    return;
-                }
-                settings.provider_accounts = ProviderAccountStates::discovered();
-                settings.sync_account_identity_cache();
-                settings.account_action_error = match result {
-                    Ok(status) if status.success() => None,
-                    Ok(status) => Some((
-                        provider,
-                        format!(
-                            "{} login exited without success ({})",
-                            program,
-                            status
-                                .code()
-                                .map_or_else(|| "signal".to_string(), |code| code.to_string())
-                        ),
-                    )),
-                    Err(error) => Some((
-                        provider,
-                        format!("could not start {program} login: {error}"),
-                    )),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
-    /// Cancels a login [`Self::launch_account_login`] spawned (F-SET-14).
-    /// Killing the terminal emulator process closes its pty, which takes
-    /// the foreground login command down with it on every terminal this app
-    /// targets; the outstanding `child.wait()` in the login task then
-    /// resolves on its own and clears the pending state from there — this
-    /// only needs to handle the pid and the message. If this runs before
-    /// the spawn task has published a pid yet (a race no human click can
-    /// realistically win, since the surface must render the Cancel button
-    /// first), there is nothing to kill and the terminal is left running;
-    /// the button simply reappears as "Add Account" once that login exits
-    /// on its own.
-    fn cancel_account_login(&mut self, cx: &mut Context<Self>) {
+    pub fn is_account_login_current(&self, id: u64) -> bool {
+        self.account_login_pending.is_some() && self.account_login_id == id
+    }
+
+    pub fn set_account_login_surface(
+        &mut self,
+        id: u64,
+        surface: gpui::AnyView,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_account_login_current(id) {
+            self.account_login_surface = Some(surface);
+            cx.notify();
+        }
+    }
+
+    /// Late exits from canceled attempts cannot clear a newer login or its error.
+    pub fn complete_account_login(
+        &mut self,
+        id: u64,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_account_login_current(id) {
+            return;
+        }
+        let provider = self.account_login_pending.take().expect("current login");
+        self.account_login_surface = None;
+        let succeeded = result.is_ok();
+        self.account_action_error = result.err().map(|message| (provider, message));
+        if self.account_action_error.is_some() {
+            self.schedule_account_error_dismissal(id, cx);
+        }
+        self.refresh_provider_accounts(cx);
+        if succeeded {
+            cx.emit(SettingsEvent::RefreshUsage);
+        }
+    }
+
+    pub fn cancel_account_login(&mut self, cx: &mut Context<Self>) {
         let Some(provider) = self.account_login_pending.take() else {
             return;
         };
-        if let Some(pid) = self.account_login_pid.take() {
-            // Off the render thread: the escalation below deliberately waits
-            // out a grace period before the kill-9, and blocking here would
-            // freeze the surface for that whole window.
-            cx.background_spawn(async move { terminate_login_process_group(pid) })
-                .detach();
-        }
-        self.account_login_canceled = true;
+        self.account_login_surface = None;
         self.account_action_error = Some((provider, "Sign-in canceled".to_string()));
+        self.schedule_account_error_dismissal(self.account_login_id, cx);
         cx.notify();
+    }
+
+    /// Clears `account_action_error` after a delay, unless a newer login
+    /// attempt already took its place — same dismissal shape as
+    /// `chat::ChatView::show_attach_error`.
+    fn schedule_account_error_dismissal(&mut self, id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(ACCOUNT_ERROR_DISMISS)
+                .await;
+            let _ = this.update(cx, |settings, cx| {
+                if settings.account_login_id == id {
+                    settings.account_action_error = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Re-runs agent discovery for the Agents screen's "↻ Refresh" button
@@ -2667,8 +2469,8 @@ impl Settings {
         };
         let manage_account_entity = entity.clone();
         let host_manage_account = self.on_manage_account.clone();
-        let manage_account_handler =
-            Some(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+        let manage_account_handler = self.account_login_pending.is_none().then_some(
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
                 if let Some(handler) = host_manage_account.as_ref() {
                     handler(provider_id);
                 } else {
@@ -2676,7 +2478,8 @@ impl Settings {
                         settings.launch_account_login(provider, cx)
                     });
                 }
-            });
+            },
+        );
         if let Some((error_provider, error)) = self.account_action_error.as_ref()
             && *error_provider == provider
         {
@@ -2696,7 +2499,7 @@ impl Settings {
         // Cancel button — a click that already reached a real subprocess
         // must not look like nothing happened, and a login that will not
         // finish (a wrong password, a login the user no longer wants) must
-        // be escapable without alt-tabbing to the spawned terminal.
+        // be escapable from the provider card.
         let account_action: AnyElement = if self.account_login_pending == Some(provider) {
             let cancel_entity = entity.clone();
             div()
@@ -2768,6 +2571,19 @@ impl Settings {
             account_action,
             theme,
         ));
+        if self.account_login_pending == Some(provider)
+            && let Some(surface) = self.account_login_surface.as_ref()
+        {
+            card = card.child(
+                div()
+                    .id("account-login-terminal")
+                    .debug_selector(|| "account-login-terminal".into())
+                    .w_full()
+                    .h(px(320.0))
+                    .overflow_hidden()
+                    .child(surface.clone()),
+            );
+        }
         card = card.child(controls::account_row(
             format!("system-default-{select_provider_id}"),
             "System default".to_string(),
@@ -2857,18 +2673,24 @@ impl Settings {
             // the end-of-text caret to the far right.
             .overflow_hidden()
             .child(
-                caret::field_value(text!(if is_empty {
-                    placeholder.to_string()
+                if is_empty {
+                    // Empty and focused: the bar at the hint's start, the
+                    // way bezel's `TextField` paints an empty field.
+                    caret::field_placeholder(
+                        text!(placeholder.to_string()),
+                        is_focused.then(|| caret::bar(px(16.0), theme.text, caret_visible)),
+                    )
                 } else {
-                    display_text
-                }))
+                    caret::field_value(text!(display_text))
+                }
                 .id("settings-text-field-text")
                 .debug_selector(|| "settings-text-field-text".to_owned()),
             )
             // The field's insertion caret: end-of-text, since these compact
-            // single-line fields always append. Invisible (but still laid
-            // out) while unfocused so the bar never shifts the text.
-            .when(is_focused, |this| {
+            // single-line fields always append. Drawn only while focused,
+            // and after a value; an empty field carries it at the hint's
+            // start above.
+            .when(is_focused && !is_empty, |this| {
                 this.child(caret::bar(px(16.0), theme.text, caret_visible))
             })
     }
@@ -3267,7 +3089,7 @@ impl Settings {
             .rounded(theme.radii.user_pill)
             .border_1()
             .border_color(theme.border)
-            .bg(theme.surface_raised)
+            .bg(theme.floating_surface)
             .shadow_lg();
         for choice in SummarizerChoice::ALL {
             let is_selected = choice == selected;
@@ -3624,6 +3446,69 @@ impl Settings {
             );
         }
 
+        // Install Hooks: Install Skill's sibling for the sirioctl lifecycle
+        // hooks. The host owns the home directory — this crate never touches
+        // it — so the click only reaches `on_install_hooks`; the host writes
+        // each agent's user-global config and answers through
+        // `set_hooks_install_report`.
+        let install_hooks_entity = entity.clone();
+        let install_hooks_handler = self.on_install_hooks.clone().map(|_| {
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                install_hooks_entity.update(cx, |settings, cx| settings.install_hooks_clicked(cx));
+            }
+        });
+        let mut hooks = controls::card(theme)
+            .child(controls::action_row(
+                controls::button_maybe(
+                    "general-install-hooks",
+                    "Install Hooks",
+                    theme,
+                    install_hooks_handler,
+                ),
+                theme,
+            ))
+            .child(
+                div()
+                    .id("general-install-hooks-caption")
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(text!(
+                        "Adds Sirio's sirioctl lifecycle hooks to each agent's user-level config, \
+                         for agents you start yourself inside a Sirio terminal."
+                    )),
+            );
+        if let Some(report) = &self.hooks_install_report {
+            let mut lines = div()
+                .id("general-install-hooks-report")
+                .debug_selector(|| "general-install-hooks-report".into())
+                .px(px(BezelTheme::SPACE_MD))
+                .py(px(BezelTheme::SPACE_XS))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .text_size(theme.typography.footnote)
+                .text_color(theme.text_muted);
+            for line in report.lines() {
+                lines = lines.child(text!(line.to_string()));
+            }
+            hooks = hooks.child(lines);
+        } else if self.hooks_install_launched {
+            hooks = hooks.child(
+                div()
+                    .id("general-install-hooks-status")
+                    .debug_selector(|| "general-install-hooks-status".into())
+                    .px(px(BezelTheme::SPACE_MD))
+                    .py(px(BezelTheme::SPACE_XS))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.text_muted)
+                    .child(text!(
+                        "Installing… writing each agent's user-level hook config."
+                    )),
+            );
+        }
+
         let apply_update_handler = self
             .on_apply_update
             .clone()
@@ -3709,6 +3594,7 @@ impl Settings {
             .child(settings_section("Performance", performance, theme))
             .child(settings_section("sirioctl", control, theme))
             .child(settings_section("Agent Skill", skill, theme))
+            .child(settings_section("Agent Hooks", hooks, theme))
     }
 
     #[cfg(target_os = "macos")]
@@ -4103,10 +3989,15 @@ impl Render for Settings {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_base_colour_segments_are_bezels_five_in_order() {
+    fn the_base_colour_segments_are_bezels_five_then_sirios_preset() {
         assert_eq!(
             SEGMENTED_BASE_COLOR,
-            &["Neutral", "Stone", "Zinc", "Gray", "Slate"]
+            &["Neutral", "Stone", "Zinc", "Gray", "Slate", "Notte"]
+        );
+        assert_eq!(
+            SEGMENTED_BASE_COLOR.len(),
+            sirio_theme::BaseColor::ALL.len(),
+            "a base colour without a segment cannot be picked"
         );
     }
 
@@ -4121,91 +4012,219 @@ mod tests {
     use gpui::{Modifiers, VisualTestContext};
     use std::cell::{Cell, RefCell};
 
-    /// F-SET-14: proves `descendant_pids` finds a grandchild that has
-    /// detached into its own session/process group — the exact shape of
-    /// the live failure (`x-terminal-emulator -e <login>` puts the login
-    /// command in a *different* pgid from the launcher's own, confirmed
-    /// live against this sandbox's real terminal emulator) that made a
-    /// single `kill <launcher_pid>` leave the login command running.
-    /// `setsid` (or Python's `os.setsid` on macOS, where the command is not
-    /// installed) reproduces that detachment without depending on any
-    /// terminal emulator being installed.
-    ///
-    /// Unix-only: the subject `descendant_pids` has no Windows arm (it
-    /// walks `/proc`, which Windows lacks), and its partner
-    /// `terminate_login_process_group` is a documented no-op there — the
-    /// comment above it names the Toolhelp32/Job-Object pairing as the
-    /// intended counterpart. Gating here suppresses coverage of that
-    /// admitted gap, not of a portable behaviour; the Toolhelp32 walk
-    /// should land with this test's fixture ported to a Windows
-    /// equivalent.
-    #[cfg(unix)]
-    #[test]
-    fn descendant_pids_finds_a_child_detached_into_its_own_session() {
-        // `sh` is the launcher (kept as one live process, same pid the
-        // whole time — the same shape `x-terminal-emulator` has, confirmed
-        // live against this sandbox's real terminal emulator). Its
-        // backgrounded detached child creates a brand new session/process
-        // group, the exact detachment that made a single `kill <launcher_pid>`
-        // leave the real login command running.
-        let detached_command = if cfg!(target_os = "macos") {
-            "python3 -c 'import os,time; child=os.fork(); os.setsid() if child == 0 else os.waitpid(child,0); time.sleep(60)'"
-        } else {
-            "setsid sleep 60"
-        };
-        let mut launcher = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("{detached_command} & wait"))
-            .spawn()
-            .expect("spawn launcher");
-        let launcher_pid = launcher.id();
-
-        // Give the grandchild time to actually fork before walking /proc.
-        let mut found = Vec::new();
-        for _ in 0..50 {
-            found = descendant_pids(launcher_pid);
-            if !found.is_empty() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(
-            !found.is_empty(),
-            "expected at least one descendant of the launcher (the `sleep` grandchild)"
+    #[gpui::test]
+    async fn account_login_requests_the_hosts_integrated_terminal(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        let requests = Rc::new(Cell::new(0));
+        let observed = requests.clone();
+        cx.update(|cx| {
+            cx.subscribe(&settings, move |_, _: &SettingsEvent, _| {
+                observed.set(observed.get() + 1);
+            })
+            .detach();
+        });
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            requests.get(),
+            1,
+            "login must reach the host terminal without an external emulator"
         );
+    }
 
-        terminate_login_process_group(launcher_pid);
-        // Reap the launcher: SIGTERM already ended it, but as its real
-        // parent this process, not `kill -0`, is the one that decides
-        // whether its pid stays occupied as a zombie — reap it before
-        // checking liveness so the check reflects "terminated", not
-        // "terminated but not yet reaped".
-        let _ = launcher.wait();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            let all_gone = found.iter().all(|pid| {
-                std::process::Command::new("kill")
-                    .arg("-0")
-                    .arg(pid.to_string())
-                    .status()
-                    .map(|status| !status.success())
-                    .unwrap_or(true)
-            });
-            if all_gone {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        for pid in found {
-            let status = std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .status();
-            assert!(
-                status.map(|status| !status.success()).unwrap_or(true),
-                "pid {pid} should have been terminated"
+    #[gpui::test]
+    async fn account_login_cancel_and_retry_ignore_old_completion(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        let refreshes = Rc::new(Cell::new(0));
+        let observed = refreshes.clone();
+        cx.update(|cx| {
+            cx.subscribe(&settings, move |_, event: &SettingsEvent, _| {
+                if matches!(event, SettingsEvent::RefreshUsage) {
+                    observed.set(observed.get() + 1);
+                }
+            })
+            .detach();
+        });
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            let old = settings.account_login_id;
+            settings.launch_account_login(ProviderKind::Codex, cx);
+            assert_eq!(settings.account_login_pending, Some(ProviderKind::Claude));
+            assert_eq!(
+                settings.account_login_id, old,
+                "only one login may run at a time"
             );
+            settings.cancel_account_login(cx);
+            settings.complete_account_login(old, Err("late failure".into()), cx);
+            assert_eq!(
+                settings.account_action_error.as_ref().unwrap().1,
+                "Sign-in canceled"
+            );
+
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            let current = settings.account_login_id;
+            assert_ne!(old, current);
+            settings.complete_account_login(old, Ok(()), cx);
+            assert!(settings.is_account_login_current(current));
+            settings.complete_account_login(current, Err("login failed".into()), cx);
+            assert!(!settings.is_account_login_current(current));
+            assert_eq!(
+                settings.account_action_error.as_ref().unwrap().1,
+                "login failed"
+            );
+
+            settings.launch_account_login(ProviderKind::Codex, cx);
+            settings.complete_account_login(settings.account_login_id, Ok(()), cx);
+            assert!(settings.account_login_pending.is_none());
+            assert!(settings.account_action_error.is_none());
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            refreshes.get(),
+            1,
+            "only the current successful login refreshes usage"
+        );
+    }
+
+    #[gpui::test]
+    async fn account_error_self_dismisses_after_the_delay(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            let id = settings.account_login_id;
+            settings.complete_account_login(id, Err("login failed".into()), cx);
+        });
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert!(settings.account_action_error.is_some());
+        });
+
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS);
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert!(
+                settings.account_action_error.is_none(),
+                "the error must self-dismiss after the delay"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_newer_account_error_survives_a_stale_dismissal_timer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            let first = settings.account_login_id;
+            settings.complete_account_login(first, Err("first failure".into()), cx);
+        });
+        cx.run_until_parked();
+
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS / 2);
+        cx.run_until_parked();
+
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Codex, cx);
+            let second = settings.account_login_id;
+            settings.complete_account_login(second, Err("second failure".into()), cx);
+        });
+        cx.run_until_parked();
+
+        // The stale timer from the first failure fires here; the guard on
+        // `account_login_id` must keep it from wiping the second error.
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS / 2);
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert_eq!(
+                settings.account_action_error.as_ref().unwrap().1,
+                "second failure",
+                "a stale dismissal must not clear a newer error"
+            );
+        });
+
+        cx.executor().advance_clock(ACCOUNT_ERROR_DISMISS / 2);
+        cx.run_until_parked();
+        settings.read_with(cx, |settings, _| {
+            assert!(settings.account_action_error.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn account_login_cancel_releases_the_terminal_surface(cx: &mut gpui::TestAppContext) {
+        struct LoginSurface;
+        impl Render for LoginSurface {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
         }
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        let released = Rc::new(Cell::new(false));
+        let observed = released.clone();
+        let surface = cx.new(|cx| {
+            cx.on_release(move |_: &mut LoginSurface, _| observed.set(true))
+                .detach();
+            LoginSurface
+        });
+        settings.update(cx, |settings, cx| {
+            settings.launch_account_login(ProviderKind::Claude, cx);
+            settings.set_account_login_surface(settings.account_login_id, surface.into(), cx);
+            assert!(settings.account_login_surface.is_some());
+            settings.cancel_account_login(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            released.get(),
+            "Cancel must release the view that owns the PTY"
+        );
+    }
+
+    #[gpui::test]
+    async fn account_login_emits_each_providers_cli_command(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let settings = cx.new(Settings::new);
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let observed = requests.clone();
+        cx.update(|cx| {
+            cx.subscribe(&settings, move |_, event: &SettingsEvent, _| {
+                if let SettingsEvent::StartAccountLogin(request) = event {
+                    observed.borrow_mut().push(request.clone());
+                }
+            })
+            .detach();
+        });
+        for provider in [
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::OpenCodeGo,
+        ] {
+            settings.update(cx, |settings, cx| {
+                settings.launch_account_login(provider, cx)
+            });
+            cx.run_until_parked();
+            settings.update(cx, |settings, cx| settings.cancel_account_login(cx));
+        }
+        let requests = requests.borrow();
+        let commands: Vec<_> = requests
+            .iter()
+            .map(|r| (r.program, r.args.clone()))
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                ("claude", vec!["auth", "login"]),
+                ("codex", vec!["login"]),
+                ("opencode", vec!["auth", "login"]),
+            ]
+        );
+        assert!(requests.windows(2).all(|pair| pair[0].id < pair[1].id));
     }
 
     #[test]
@@ -4794,75 +4813,6 @@ mod tests {
         // F-SET-13: Ollama Cloud is cookie-only — no CLI login flow
         // exists to delegate to, and its card renders no Add Account.
         assert_eq!(provider_login_command(ProviderKind::OllamaCloud), None);
-    }
-
-    /// Windows has no `x-terminal-emulator`: Add Account used to die with
-    /// "could not start claude login: program not found" (the launcher was
-    /// what was missing, not `claude`). The login now runs itself, in a
-    /// console of its own, so the spawned child *is* the login command.
-    #[cfg(windows)]
-    #[test]
-    fn login_launcher_runs_the_login_itself_on_windows() {
-        let command = login_launcher("claude", &["auth", "login"]);
-        assert_eq!(command.get_program(), "claude");
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, ["auth", "login"]);
-    }
-
-    /// Unix keeps delegating to the desktop's terminal emulator, with the
-    /// login command as its `-e` payload.
-    #[cfg(not(windows))]
-    #[test]
-    fn login_launcher_delegates_to_the_terminal_emulator_on_unix() {
-        let command = login_launcher("claude", &["auth", "login"]);
-        assert_eq!(command.get_program(), "x-terminal-emulator");
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, ["-e", "claude", "auth", "login"]);
-    }
-
-    /// The failure message blames the launcher only when a separate one
-    /// failed; a login that is its own launcher is named once.
-    #[test]
-    fn login_start_failure_names_a_separate_launcher_only() {
-        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
-        assert_eq!(
-            login_start_failure("claude", "x-terminal-emulator", &error),
-            "could not start claude login via x-terminal-emulator: program not found"
-        );
-        assert_eq!(
-            login_start_failure("claude", "claude", &error),
-            "could not start claude login: program not found"
-        );
-    }
-
-    /// F-SET-14 on Windows: Cancel really ends the recorded login process.
-    /// `ping` stands in for the login command as a process that would
-    /// otherwise outlive the test by half a minute.
-    #[cfg(windows)]
-    #[test]
-    fn terminate_login_process_group_ends_the_recorded_process_on_windows() {
-        let mut child = std::process::Command::new("ping")
-            .args(["-n", "30", "127.0.0.1"])
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn a long-lived stand-in for the login");
-        terminate_login_process_group(child.id());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match child.try_wait().expect("poll the stand-in") {
-                Some(status) => {
-                    assert!(!status.success(), "terminated, not finished: {status}");
-                    break;
-                }
-                None if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                None => {
-                    let _ = child.kill();
-                    panic!("the stand-in login was still running after terminate");
-                }
-            }
-        }
     }
 
     fn cookie_test_states() -> ProviderAccountStates {
@@ -6241,6 +6191,118 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Install Hooks is Install Skill's sibling: the click reaches the wired
+    /// host callback (the host writes the user-global hook files — this
+    /// crate never touches the home directory) and leaves an in-flight line
+    /// under the button until the host reports back.
+    #[gpui::test]
+    async fn install_hooks_click_reaches_the_wired_host_callback(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let calls = Rc::new(RefCell::new(0usize));
+        let recorder = calls.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_hooks(move || *recorder.borrow_mut() += 1)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let install = cx
+            .debug_bounds("general-install-hooks")
+            .expect("Install Hooks renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(*calls.borrow(), 1, "the click reaches the host once");
+        assert!(
+            cx.debug_bounds("general-install-hooks-status").is_some(),
+            "an in-flight line appears once the install is handed off"
+        );
+        assert!(
+            cx.debug_bounds("general-install-hooks-report").is_none(),
+            "no report yet — the host has not answered"
+        );
+    }
+
+    /// Unwired, Install Hooks must not look wired — muted and inert, the
+    /// same dead-control-avoidance convention Install Skill follows.
+    #[gpui::test]
+    async fn install_hooks_renders_muted_and_inert_when_unwired(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let install = cx
+            .debug_bounds("general-install-hooks")
+            .expect("Install Hooks still renders, muted");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("general-install-hooks-status").is_none(),
+            "an unwired click hands nothing off, so it claims nothing"
+        );
+    }
+
+    /// The host's per-agent outcome replaces the in-flight line: the user
+    /// reads where each agent's hooks went (or why they did not), not a
+    /// permanent "installing…".
+    #[gpui::test]
+    async fn install_hooks_report_replaces_the_in_flight_line(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).on_install_hooks(|| {})
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+        let install = cx
+            .debug_bounds("general-install-hooks")
+            .expect("Install Hooks renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_hooks_install_report(
+                Some("Claude Code: /home/me/.claude/settings.json".into()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("general-install-hooks-report").is_some(),
+            "the host's report renders under the button"
+        );
+        assert!(
+            cx.debug_bounds("general-install-hooks-status").is_none(),
+            "the in-flight line is gone once the host has answered"
+        );
+    }
+
     /// F-SET-14: clicking a provider card's Add Account button hands the
     /// host that provider's stable id — the seam this app can honestly
     /// offer, since it never holds isolated per-provider credentials of
@@ -6278,10 +6340,7 @@ mod tests {
         );
     }
 
-    /// F-SET-14: production Settings supplies a real fallback handler even
-    /// when an embedding does not install the optional host callback. The
-    /// live click is exercised against the running app, not by spawning a
-    /// terminal from this visual test.
+    /// The default button requests an integrated terminal from the host.
     #[gpui::test]
     async fn add_account_renders_wired_by_default(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
@@ -6302,15 +6361,7 @@ mod tests {
         assert!(add_claude.size.width > px(0.0));
     }
 
-    /// F-SET-14: while a card's login is spawned and being waited on,
-    /// "Add Account" is replaced by a "Signing in…" indicator and a Cancel
-    /// button, and Cancel both clears that state and leaves an explanatory
-    /// message — the residual gap on top of the already-real
-    /// `x-terminal-emulator` fallback `add_account_renders_wired_by_default`
-    /// covers. Drives `account_login_pending` directly rather than through
-    /// a real spawn, since this sandbox may not have `x-terminal-emulator`
-    /// installed; [`Settings::cancel_account_login`] itself is exercised
-    /// through a real click.
+    /// The pending login renders a Cancel action which clears the surface.
     #[gpui::test]
     async fn add_account_in_flight_renders_signing_in_and_cancel(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);

@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use gpui::{Context, Div, IntoElement, ParentElement, Pixels, Rgba, Styled, div, px};
+use gpui::{AnyElement, Context, Div, IntoElement, ParentElement, Pixels, Rgba, Styled, div, px};
 
 /// Blink cadence. 530ms matches the conventional text-caret cycle closely
 /// enough that nobody perceives the difference from a native field.
@@ -129,6 +129,46 @@ pub fn field_value(text: impl IntoElement) -> Div {
         .child(div().whitespace_nowrap().flex_shrink_0().child(text))
 }
 
+/// The placeholder of an empty single-line field — the hint that stands in
+/// for a value until one is typed — and, while the field is focused, its
+/// [`bar`].
+///
+/// Laid out in the same slot as [`field_value`] (a shrinking, never growing
+/// flex item), but clipped at the *end*, with an ellipsis. Nobody is typing
+/// into a placeholder, so the tail is not where the eye is; the start
+/// carries the meaning — "base branch (optional, …)", "location (optional,
+/// …)" — and a hint read from its middle ("branch (optional, defaults to
+/// HEAD)") describes the wrong thing. Routing a placeholder through
+/// [`field_value`] did exactly that: its start-clipping is right for a
+/// value and wrong for a hint.
+///
+/// The bar goes *here*, not after the wrapper the way it follows
+/// [`field_value`]: an empty field's insertion point is offset 0, and
+/// bezel's `TextField` paints it there, over the hint's first glyph, with
+/// the hint where it always is. A bar appended after the hint read
+/// "branch name|", as if the hint had been typed. The bar is positioned
+/// absolutely so it takes no room in the row and the hint does not shift
+/// by the bar's width when focus arrives or leaves. `None` while unfocused.
+pub fn field_placeholder(text: impl IntoElement, bar: Option<AnyElement>) -> Div {
+    div()
+        .relative()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(text)
+        .children(bar.map(|bar| {
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(bar)
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{
@@ -240,6 +280,177 @@ mod tests {
         assert_eq!(
             run.origin.x, field.origin.x,
             "the value starts at the field's start"
+        );
+        assert_eq!(
+            bar.origin.x,
+            run.origin.x + run.size.width,
+            "the bar touches the last character: bar={bar:?} run={run:?}"
+        );
+        assert!(
+            bar.origin.x + bar.size.width < field.origin.x + field.size.width / 2.0,
+            "the bar is not pushed to the far edge of the field: bar={bar:?} field={field:?}"
+        );
+    }
+
+    /// An empty field whose placeholder is longer than the field, laid out
+    /// the way every single-line field lays out [`field_placeholder`]:
+    /// clipped container, the hint, the bar.
+    struct OverflowingPlaceholder {
+        placeholder: String,
+    }
+
+    impl Render for OverflowingPlaceholder {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div()
+                    .debug_selector(|| "field".to_owned())
+                    .w(px(120.0))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(
+                        field_placeholder(
+                            div()
+                                .debug_selector(|| "run".to_owned())
+                                .child(self.placeholder.clone()),
+                            None,
+                        )
+                        .debug_selector(|| "placeholder".to_owned()),
+                    )
+                    .child(div().debug_selector(|| "bar".to_owned()).child(bar(
+                        px(16.0),
+                        black().into(),
+                        true,
+                    ))),
+            )
+        }
+    }
+
+    fn placeholder_field(cx: &mut TestAppContext, placeholder: &str) -> VisualTestContext {
+        let placeholder = placeholder.to_owned();
+        let window = cx.open_window(size(px(400.0), px(100.0)), move |_, _| {
+            OverflowingPlaceholder { placeholder }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.refresh());
+        cx.cx.run_until_parked();
+        cx
+    }
+
+    /// A placeholder is clipped from the *end*: its start — the words that
+    /// say what the field is for — stays in view. Routed through
+    /// [`field_value`] it was clipped from the start instead, and "location
+    /// (optional, defaults next to project)" read as "ı (optional, defaults
+    /// next to project)".
+    #[gpui::test]
+    async fn an_overflowing_placeholder_keeps_its_start_in_view(cx: &mut TestAppContext) {
+        let mut cx = placeholder_field(cx, "location (optional, defaults next to project)");
+        let field = bounds(&mut cx, "field");
+        let run = bounds(&mut cx, "run");
+        let bar = bounds(&mut cx, "bar");
+
+        assert!(
+            run.origin.x >= field.origin.x,
+            "the start of the hint is in view: run={run:?} field={field:?}"
+        );
+        assert!(
+            run.origin.x + run.size.width <= field.origin.x + field.size.width,
+            "the hint is truncated to the field, not laid out past it: run={run:?} field={field:?}"
+        );
+        assert!(
+            bar.origin.x + bar.size.width <= field.origin.x + field.size.width,
+            "the bar stays inside the field: bar={bar:?} field={field:?}"
+        );
+    }
+
+    /// An empty, focused field, laid out the way every single-line field
+    /// lays out [`field_placeholder`] with its bar: clipped container, the
+    /// hint carrying the bar.
+    struct FocusedPlaceholder {
+        placeholder: String,
+    }
+
+    impl Render for FocusedPlaceholder {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div()
+                    .debug_selector(|| "field".to_owned())
+                    .w(px(120.0))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(
+                        field_placeholder(
+                            div()
+                                .debug_selector(|| "run".to_owned())
+                                .child(self.placeholder.clone()),
+                            Some(
+                                div()
+                                    .debug_selector(|| "bar".to_owned())
+                                    .child(bar(px(16.0), black().into(), true))
+                                    .into_any_element(),
+                            ),
+                        )
+                        .debug_selector(|| "placeholder".to_owned()),
+                    ),
+            )
+        }
+    }
+
+    fn focused_placeholder_field(cx: &mut TestAppContext, placeholder: &str) -> VisualTestContext {
+        let placeholder = placeholder.to_owned();
+        let window = cx.open_window(size(px(400.0), px(100.0)), move |_, _| FocusedPlaceholder {
+            placeholder,
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, _| window.refresh());
+        cx.cx.run_until_parked();
+        cx
+    }
+
+    /// bezel's `TextField` paints an empty, focused field with the caret at
+    /// offset 0 of the (empty) value — over the placeholder's first glyph —
+    /// and the placeholder exactly where it sits unfocused. The bar handed
+    /// to [`field_placeholder`] does the same: it stands at the hint's
+    /// start, and the hint is not pushed aside by the bar's width, so
+    /// nothing moves when focus arrives or leaves.
+    #[gpui::test]
+    async fn a_focused_empty_field_draws_the_bar_at_the_placeholders_start(
+        cx: &mut TestAppContext,
+    ) {
+        let mut cx = focused_placeholder_field(cx, "location (optional, defaults next to project)");
+        let field = bounds(&mut cx, "field");
+        let run = bounds(&mut cx, "run");
+        let bar = bounds(&mut cx, "bar");
+
+        assert_eq!(
+            bar.origin.x, field.origin.x,
+            "the bar stands at the field's start: bar={bar:?} field={field:?}"
+        );
+        assert_eq!(
+            run.origin.x, field.origin.x,
+            "the placeholder is not pushed aside by the bar: run={run:?} field={field:?}"
+        );
+        assert!(
+            bar.origin.y >= field.origin.y
+                && bar.origin.y + bar.size.height <= field.origin.y + field.size.height,
+            "the bar is inside the field vertically: bar={bar:?} field={field:?}"
+        );
+    }
+
+    /// A short placeholder behaves like a short value: it starts at the
+    /// field's start and the bar follows its last character rather than
+    /// being pushed to the far edge.
+    #[gpui::test]
+    async fn a_short_placeholder_keeps_the_bar_at_its_end_not_the_fields(cx: &mut TestAppContext) {
+        let mut cx = placeholder_field(cx, "ab");
+        let field = bounds(&mut cx, "field");
+        let run = bounds(&mut cx, "run");
+        let bar = bounds(&mut cx, "bar");
+
+        assert_eq!(
+            run.origin.x, field.origin.x,
+            "the hint starts at the field's start"
         );
         assert_eq!(
             bar.origin.x,

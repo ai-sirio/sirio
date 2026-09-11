@@ -8,7 +8,7 @@ use bezel::ui::popover;
 use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, Rgba, uniform_list,
 };
-use sirio_git::{DirectoryGitStatus, directory_statuses, status};
+use sirio_git::{DirectoryGitStatus, IgnoredPaths, directory_statuses, ignored_paths, status};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -46,6 +46,12 @@ pub(crate) const ROW_HEIGHT: f32 = 26.0;
 pub(super) struct GitMarkers {
     files: HashMap<PathBuf, DirectoryGitStatus>,
     directories: HashMap<PathBuf, DirectoryGitStatus>,
+    /// The third, independent half of the model: paths the ignore rules
+    /// exclude, from [`sirio_git::ignored_paths`]. Ignored paths never
+    /// appear in `files`/`directories` (the status call runs without
+    /// `--ignored`), so this cannot collide with a status marker — an
+    /// ignored row dims instead of carrying a dot.
+    ignored: IgnoredPaths,
 }
 
 impl GitMarkers {
@@ -58,6 +64,12 @@ impl GitMarkers {
             self.files.get(relative).copied()
         }
     }
+
+    /// Whether a worktree-relative path is git-ignored, itself or by
+    /// ancestry (git reports a fully-ignored directory once, collapsed).
+    fn is_ignored(&self, relative: &Path) -> bool {
+        self.ignored.is_ignored(relative)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +81,10 @@ pub(super) struct FileNode {
     /// aggregate of everything beneath it for a directory. `None` is a
     /// clean row.
     git_status: Option<DirectoryGitStatus>,
+    /// Whether the ignore rules exclude this path — the row renders its
+    /// name a step dimmer. Set by ancestry too: every row walked beneath
+    /// an ignored directory carries it.
+    is_ignored: bool,
     expanded: bool,
     /// Why the directory could not be read (permissions, a vanished
     /// mount). Rendered on the row — an unreadable directory must not
@@ -78,7 +94,7 @@ pub(super) struct FileNode {
 }
 
 #[derive(Clone, Debug)]
-struct FileRow {
+pub(super) struct FileRow {
     node: FileNode,
     depth: usize,
 }
@@ -106,42 +122,68 @@ impl RightPanel {
             .any(|root| normalize_path(root) == normalize_path(&self.repo_root))
         {
             self.settled = true;
+            // A panel restored from a snapshot arrives with `updating` set:
+            // clear it here too, or the progress bar runs forever on a root
+            // this panel is never going to walk.
+            self.updating = false;
             self.refresh_error = Some("worktree is outside the project roots".to_string());
             return;
         }
         self.refresh_started = true;
+        self.updating = true;
         self.refresh_error = None;
         let repo_root = self.repo_root.clone();
-        self.walk_task = Some(cx.spawn(async move |this, cx| {
+        self.refresh_generation += 1;
+        let refresh_generation = self.refresh_generation;
+        let expected_repo_root = repo_root.clone();
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     // Files can browse a plain directory too; an absent Git
                     // repository means no status dots, not an unreadable
                     // filesystem. Root traversal remains the error boundary.
-                    let markers = status(&repo_root)
-                        .map(|snapshot| GitMarkers {
-                            files: snapshot
-                                .entries
-                                .iter()
-                                .map(|entry| {
-                                    (entry.path.clone(), DirectoryGitStatus::for_file(entry))
-                                })
-                                .collect(),
-                            // F-GIT-STATUS-02: the tested aggregate, not a
-                            // second implementation of it. It is what
-                            // resolves conflicted > changed > untracked on a
-                            // shared ancestor and what marks *both* sides of
-                            // a rename.
-                            directories: directory_statuses(&snapshot.entries),
+                    let (files, directories) = status(&repo_root)
+                        .map(|snapshot| {
+                            (
+                                snapshot
+                                    .entries
+                                    .iter()
+                                    .map(|entry| {
+                                        (entry.path.clone(), DirectoryGitStatus::for_file(entry))
+                                    })
+                                    .collect(),
+                                // F-GIT-STATUS-02: the tested aggregate, not a
+                                // second implementation of it. It is what
+                                // resolves conflicted > changed > untracked on a
+                                // shared ancestor and what marks *both* sides of
+                                // a rename.
+                                directory_statuses(&snapshot.entries),
+                            )
                         })
                         .unwrap_or_default();
+                    let markers = GitMarkers {
+                        files,
+                        directories,
+                        // Same rule as status above: a plain directory has
+                        // no ignore rules, which means nothing dims — not
+                        // an unreadable filesystem.
+                        ignored: ignored_paths(&repo_root).unwrap_or_default(),
+                    };
                     let tree = read_tree(&repo_root, &repo_root, &markers)
                         .map_err(|error| error.to_string())?;
                     Ok::<_, String>((markers, tree))
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
-                panel.walk_task = None;
+                let is_current_refresh = panel.refresh_generation == refresh_generation
+                    && panel.repo_root == expected_repo_root;
+                if !is_current_refresh {
+                    if panel.refresh_generation == refresh_generation {
+                        panel.refresh_started = false;
+                    }
+                    return;
+                }
+                panel.refresh_task = None;
                 panel.refresh_started = false;
                 // The walk finished. Whichever way it went, the panel now
                 // has something truthful to show — a tree, an empty tree, or
@@ -161,14 +203,24 @@ impl RightPanel {
                         // expansion/children for any node the fresh walk
                         // still reports at the same path.
                         panel.file_tree = preserve_expansion(&panel.file_tree, tree);
+                        panel.rebuild_file_rows();
                         panel.refresh_error = None;
+                        panel.is_stale = false;
                     }
-                    Err(error) => panel.refresh_error = Some(error),
+                    Err(error) => {
+                        panel.refresh_error = Some(error);
+                        panel.is_stale = !panel.file_tree.is_empty();
+                    }
                 }
+                panel.updating = false;
                 sirio_perf::event("notify.RightPanel.refresh_complete", cx.entity_id().as_u64());
                 cx.notify();
             });
         }));
+    }
+
+    pub(super) fn is_files_updating(&self) -> bool {
+        self.updating && self.settled
     }
 
     /// Arms the periodic tree refresh: once immediately, then on a fixed
@@ -234,6 +286,7 @@ impl RightPanel {
             node.read_error = None;
             (node.expanded, node.expanded && node.children.is_empty())
         };
+        self.rebuild_file_rows();
         if needs_walk {
             self.start_walk(path.to_path_buf(), cx);
         } else if !expanded {
@@ -275,6 +328,7 @@ impl RightPanel {
                         Ok(children) => node.children = children,
                         Err(error) => node.read_error = Some(error),
                     }
+                    panel.rebuild_file_rows();
                 }
                 cx.notify();
             });
@@ -409,9 +463,12 @@ impl RightPanel {
     }
 
     fn file_rows(&self) -> Vec<FileRow> {
-        let mut rows = Vec::new();
-        flatten_files(&self.file_tree, 0, &mut rows);
-        rows
+        self.flattened_file_rows.clone()
+    }
+
+    fn rebuild_file_rows(&mut self) {
+        self.flattened_file_rows.clear();
+        flatten_files(&self.file_tree, 0, &mut self.flattened_file_rows);
     }
 
     fn render_file_row(
@@ -426,17 +483,26 @@ impl RightPanel {
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
         let git_status = row.node.git_status;
+        let is_ignored = row.node.is_ignored;
         let read_error = row.node.read_error.clone();
         // The marker's selector names both the row and the status it
         // resolved to, so a drawn test can assert that a directory holding a
         // conflict *and* a modification marks conflicted — the precedence is
         // otherwise unobservable from a frame.
+        //
+        // The relative path is spelled with forward slashes on every
+        // platform. `debug_selector` is a no-op outside a test build, so
+        // this string exists only to be looked up by `debug_bounds`, which
+        // takes a `&'static str` and so cannot be formatted per platform at
+        // the call site: taking the separator from `Path::display` would
+        // make every nested selector (`file-status-changed-move/from`) a
+        // different string on Windows and silently unfindable there.
         let marker_selector = git_status.map(|status| {
             let relative = path
                 .strip_prefix(&repo_root)
                 .unwrap_or(&path)
-                .display()
-                .to_string();
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
             format!("file-status-{}-{relative}", status.slug())
         });
         let disclosure = if is_dir {
@@ -481,8 +547,9 @@ impl RightPanel {
             .text_size(theme.typography.scaled(13.5))
             // Names are neutral text; the status dot carries the git state
             // (three distinguishable colours, not one "modified" amber),
-            // and unreadable directories dim rather than shout.
-            .text_color(if read_error.is_some() {
+            // and unreadable directories and git-ignored paths dim rather
+            // than shout.
+            .text_color(if read_error.is_some() || is_ignored {
                 theme.text_muted
             } else {
                 theme.text
@@ -714,7 +781,9 @@ impl RightPanel {
                     cx,
                 ))
                 .into_any_element()
-        } else if let Some(error) = &self.refresh_error {
+        } else if self.file_tree.is_empty()
+            && let Some(error) = &self.refresh_error
+        {
             let retry_entity = entity.clone();
             div()
                 .id("files-error")
@@ -741,6 +810,7 @@ impl RightPanel {
                 ))
                 .into_any_element()
         } else {
+            let retry_entity = entity.clone();
             let list = uniform_list(
                 "right-panel-files",
                 rows.len(),
@@ -765,13 +835,47 @@ impl RightPanel {
             .on_key_down(cx.listener(Self::on_file_key))
             .flex_1()
             .min_h(px(0.0));
-            list.into_any_element()
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .when_some(self.refresh_error.clone(), |this, error| {
+                    this.child(
+                        div()
+                            .id("files-refresh-error")
+                            .debug_selector(|| "files-refresh-error".to_owned())
+                            .flex_none()
+                            .p(theme.spacing.card_gap)
+                            .text_color(theme.danger)
+                            .child(format!("Files refresh failed: {error}")),
+                    )
+                    .child(files_action_button(
+                        "Retry",
+                        "files-refresh-retry",
+                        theme,
+                        move |cx| retry_entity.update(cx, |panel, cx| panel.refresh(cx)),
+                    ))
+                })
+                .child(list)
+                .into_any_element()
         };
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .when(self.is_files_updating(), |this| {
+                this.child(
+                    div()
+                        .id("files-refresh-progress")
+                        .debug_selector(|| "files-refresh-progress".to_owned())
+                        .h(px(2.0))
+                        .w_full()
+                        .flex_none()
+                        .bg(theme.accent),
+                )
+            })
             .child(body)
             .into_any_element()
     }
@@ -845,11 +949,13 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
             let is_dir = entry.file_type().ok()?.is_dir();
             let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
             let git_status = markers.get(&relative, is_dir);
+            let is_ignored = markers.is_ignored(&relative);
             Some(FileNode {
                 name: path.file_name()?.to_string_lossy().to_string(),
                 path,
                 is_dir,
                 git_status,
+                is_ignored,
                 expanded: false,
                 read_error: None,
                 children: Vec::new(),
@@ -875,11 +981,13 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
 /// blind replacement in `refresh()` silently collapsed every expanded
 /// folder on the next 1s tick.
 fn preserve_expansion(old: &[FileNode], new: Vec<FileNode>) -> Vec<FileNode> {
+    let old_by_path: HashMap<(&Path, bool), &FileNode> = old
+        .iter()
+        .map(|node| ((node.path.as_path(), node.is_dir), node))
+        .collect();
     new.into_iter()
         .map(|mut node| {
-            if let Some(old_node) = old
-                .iter()
-                .find(|candidate| candidate.path == node.path && candidate.is_dir == node.is_dir)
+            if let Some(old_node) = old_by_path.get(&(node.path.as_path(), node.is_dir))
                 && old_node.expanded
             {
                 node.expanded = true;
@@ -899,6 +1007,24 @@ fn flatten_files(nodes: &[FileNode], depth: usize, rows: &mut Vec<FileRow>) {
         if node.is_dir && node.expanded {
             flatten_files(&node.children, depth + 1, rows);
         }
+    }
+}
+
+pub(super) fn collect_expanded(nodes: &[FileNode]) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+    for node in nodes {
+        if node.expanded {
+            expanded.push(node.path.clone());
+            expanded.extend(collect_expanded(&node.children));
+        }
+    }
+    expanded
+}
+
+pub(super) fn restore_expanded(nodes: &mut [FileNode], expanded: &[PathBuf]) {
+    for node in nodes {
+        node.expanded = expanded.iter().any(|path| path == &node.path);
+        restore_expanded(&mut node.children, expanded);
     }
 }
 
@@ -1169,6 +1295,97 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_root_outside_the_allowlist_stops_the_progress_bar(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let elsewhere = TempDir::new();
+        let panel = cx.new(|_| {
+            RightPanel::with_activity_and_roots(
+                dir.0.clone(),
+                vec![elsewhere.0.clone()],
+                Vec::new(),
+            )
+        });
+        panel.update(cx, |panel, cx| {
+            // What a snapshot-restored panel looks like before its first
+            // refresh: a tree on screen and the bar running.
+            panel.settled = true;
+            panel.updating = true;
+            panel.refresh(cx);
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.refresh_error.is_some(), "a rejected root reports why");
+            assert!(
+                !panel.is_files_updating(),
+                "a root this panel will never walk stops the progress bar"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_completed_refresh_replaces_stale_rows_without_duplicates(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let old_file = dir.0.join("old.txt");
+        let new_file = dir.0.join("new.txt");
+        std::fs::write(&old_file, "old").expect("write old file");
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || panel.read_with(cx, |panel, _| panel.settled));
+
+        std::fs::remove_file(&old_file).expect("remove old file");
+        std::fs::write(&new_file, "new").expect("write new file");
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                !panel.refresh_started && find_node(&panel.file_tree, &new_file).is_some()
+            })
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert!(find_node(&panel.file_tree, &old_file).is_none());
+            assert_eq!(
+                panel
+                    .file_tree
+                    .iter()
+                    .filter(|node| node.path == new_file)
+                    .count(),
+                1,
+                "a completed refresh publishes each new row once"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn an_expansion_during_refresh_survives_the_refresh_result(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let folder = dir.0.join("folder");
+        seed_dir_with_files(&folder, 2000);
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &folder).is_some()
+            })
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.refresh(cx);
+            assert!(panel.refresh_started, "the root refresh is still loading");
+            panel.toggle_file(&folder, cx);
+        });
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| !panel.refresh_started)
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(!panel.refresh_started);
+            let node = find_node(&panel.file_tree, &folder).expect("folder node");
+            assert!(node.expanded, "the user's expansion survives refresh");
+            assert_eq!(node.children.len(), 2000);
+        });
+    }
+
+    #[gpui::test]
     async fn a_superseded_walk_is_dropped(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let first = dir.0.join("first");
@@ -1211,6 +1428,18 @@ mod tests {
         });
     }
 
+    /// Unix only: the fixture has to make a real directory genuinely
+    /// unreadable, and the only primitive that does it here is the POSIX
+    /// mode bit — `chmod 000` through `PermissionsExt::from_mode`. Windows
+    /// ignores mode bits entirely; its nearest analogue is a deny ACE
+    /// written with `icacls`, which the fixture would then have to unwind
+    /// before `TempDir`'s own cleanup could remove the directory. Without a
+    /// lock the walk simply succeeds and `read_error` stays `None`, so on
+    /// Windows this test would assert nothing at all — it is compiled out
+    /// rather than left to time out in `pump_until`. The behaviour it
+    /// covers (an unreadable directory reports why instead of vanishing) is
+    /// platform-independent; only the way to provoke it is not.
+    #[cfg(unix)]
     #[gpui::test]
     async fn an_unreadable_directory_renders_an_error(cx: &mut TestAppContext) {
         let dir = TempDir::new();
@@ -1226,7 +1455,6 @@ mod tests {
             })
         });
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
@@ -1253,7 +1481,6 @@ mod tests {
             assert_eq!(node.children.len(), 0);
         });
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
@@ -1304,6 +1531,12 @@ mod tests {
                 window.root::<RightPanel>().flatten().expect("panel root")
             })
             .expect("window");
+        cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &dir.0.join("visible.txt")).is_some()
+            })
+        });
         std::fs::remove_dir_all(&dir.0).expect("break root refresh");
         cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -1313,11 +1546,17 @@ mod tests {
         cx.cx.run_until_parked();
 
         assert!(
-            cx.debug_bounds("files-error").is_some(),
-            "a failed refresh is drawn as an error"
+            cx.debug_bounds("files-refresh-error").is_some(),
+            "a failed refresh keeps its error visible above the previous tree"
+        );
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &dir.0.join("visible.txt")).is_some()
+            }),
+            "a failed refresh keeps the previous tree visible"
         );
         let retry = cx
-            .debug_bounds("files-retry")
+            .debug_bounds("files-refresh-retry")
             .expect("Retry is drawn for a failed refresh");
 
         std::fs::create_dir_all(&dir.0).expect("restore root");
@@ -1740,6 +1979,47 @@ mod tests {
              lowercase sort puts file10 before file2"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ignored rows dim: `read_tree` must flag a path git lists as
+    /// ignored — and everything beneath an ignored directory, which git
+    /// reports once, collapsed, with a trailing slash (so the children
+    /// only exist as an ancestor match, never as their own entries).
+    #[test]
+    fn the_files_tree_marks_ignored_paths_and_their_children() {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.0.join("target").join("debug")).expect("create ignored dir");
+        std::fs::write(dir.0.join("target").join("debug").join("app"), b"bin")
+            .expect("write ignored child");
+        std::fs::create_dir_all(dir.0.join("src")).expect("create tracked dir");
+        std::fs::write(dir.0.join("src").join("main.rs"), b"fn main() {}")
+            .expect("write tracked file");
+        std::fs::write(dir.0.join(".env"), b"secret").expect("write ignored file");
+
+        let markers = GitMarkers {
+            ignored: sirio_git::parse_ignored(b"target/\0.env\0"),
+            ..GitMarkers::default()
+        };
+
+        let nodes = read_tree(&dir.0, &dir.0, &markers).expect("read the fixture tree");
+        let by_name = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.name == name)
+                .unwrap_or_else(|| panic!("fixture is missing a {name} row"))
+        };
+        assert!(by_name("target").is_ignored, "an ignored directory flags");
+        assert!(by_name(".env").is_ignored, "an ignored file flags");
+        assert!(!by_name("src").is_ignored, "a tracked directory must not");
+
+        // Expanding the ignored directory walks its children lazily,
+        // through the same `read_tree`; they inherit the flag by ancestry.
+        let children =
+            read_tree(&dir.0, &dir.0.join("target"), &markers).expect("read the ignored dir");
+        assert!(
+            !children.is_empty() && children.iter().all(|node| node.is_ignored),
+            "children of an ignored directory inherit the flag"
+        );
     }
 
     #[test]

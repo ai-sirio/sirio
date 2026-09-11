@@ -1,0 +1,360 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers: what does a Zed-flavoured left sidebar look like
+  when the worktree is the row and its tabs are pills inside that row?
+  Not production code, not gpui. Double-click to open; no build step.
+  Palette: NOTTE_LADDER (sirio_theme/src/base_color.rs:49-54) plus approximated
+  bezel greys — text/border tones are eyeballed, not read from bezel.
+-->
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>Sidebar Zed-like — varianti</title>
+<style>
+  :root {
+    --page:    #0E1016;
+    --surface: #202127;
+    --raised:  #2B2F3A;
+    --hover:   #313337;
+    --border:  #2B2D35;
+    --text:    #E4E6EC;
+    --text-2:  #9BA0AB;
+    --text-3:  #6E727D;
+    --accent:  #E08B52;
+    --running: #E08B52;
+    --needs:   #E0B341;
+    --done:    #6FBF73;
+    --error:   #E0605E;
+    --sidebar-w: 325px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 24px 110px;
+    background: var(--page); color: var(--text);
+    font: 13px/1.4 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  h2.caption { font: 600 12px/1 ui-sans-serif; color: var(--text-3); margin: 0 0 8px 2px; letter-spacing: .02em; }
+  #stage { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
+
+  /* ---- sidebar shell ---- */
+  .sidebar {
+    width: var(--sidebar-w); height: 620px;
+    background: var(--surface); border-right: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden;
+    display: flex; flex-direction: column; padding-top: 8px;
+  }
+  .head {
+    height: 20px; padding: 0 20px; display: flex; align-items: center;
+    justify-content: space-between; color: var(--text-3);
+    font-weight: 600; font-size: 12.5px;
+  }
+  .head .plus { width: 20px; height: 20px; display: grid; place-items: center; font-size: 17px; border-radius: 4px; cursor: pointer; }
+  .head .plus:hover { background: var(--hover); }
+
+  /* filtro: cornice piena (oggi) vs piatto (Zed) */
+  .filter {
+    margin: 6px 7px 0 20px; height: 28px; padding: 0 9px; display: flex;
+    align-items: center; gap: 7px; border-radius: 6px;
+    background: #1A1B21; border: 1px solid var(--border); color: var(--text-3);
+  }
+  .filter.flat { background: transparent; border: 0; border-bottom: 1px solid var(--border);
+                 border-radius: 0; margin: 6px 0 0 0; padding: 0 12px; height: 34px; }
+  .filter svg { width: 13px; height: 13px; opacity: .7; }
+
+  .list { flex: 1; overflow-y: auto; padding: 6px 0 10px; }
+  .list::-webkit-scrollbar { width: 8px; }
+  .list::-webkit-scrollbar-thumb { background: #35373F; border-radius: 4px; }
+
+  /* ---- header di sezione (progetto) ---- */
+  .section {
+    padding: 0 12px; height: 26px; display: flex; align-items: center; gap: 6px;
+    color: var(--text-2); font-size: 12px; letter-spacing: .01em;
+  }
+  .section.zed { background: #1A1B21; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+                 color: var(--text-2); font-weight: 500; margin-top: 4px; }
+  .section .count { color: var(--text-3); font-size: 11px; }
+  .section .dots { margin-left: auto; color: var(--text-3); opacity: 0; }
+  .section:hover .dots { opacity: 1; }
+
+  /* ---- riga worktree ---- */
+  .row { position: relative; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .row .title { color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .sub { color: var(--text-3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .time { color: var(--text-3); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+  .row .star { color: var(--text-3); font-size: 10px; flex: none; }
+
+  /* selezione full-bleed alla Zed */
+  .row.flat { padding: 0 12px; height: 28px; }
+  .row.flat:hover { background: #26272E; }
+  .row.flat.sel { background: var(--raised); }
+  .row.flat.sel::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
+
+  /* card a due righe */
+  .row.card { padding: 7px 12px; height: 51px; align-items: flex-start; }
+  .row.card .col { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+  .row.card:hover { background: #26272E; }
+  .row.card.sel { background: var(--raised); }
+  .row.card.sel::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--accent); }
+
+  /* ---- pastiglie tab ---- */
+  .pills { display: flex; gap: 4px; align-items: center; flex: none; }
+  .pill {
+    width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center;
+    font-size: 10px; font-weight: 700; background: #2A2C34; color: var(--text-2);
+    position: relative; cursor: pointer;
+  }
+  .pill:hover { background: var(--hover); }
+  .pill.on { outline: 1px solid var(--accent); color: var(--text); }
+  .pill .badge { position: absolute; right: -2px; top: -2px; width: 6px; height: 6px; border-radius: 50%; }
+  .pill.add { background: transparent; border: 1px dashed #3A3D46; color: var(--text-3); font-weight: 400; }
+  .pill .x { display: none; position: absolute; inset: 0; background: #3A3D46; border-radius: 5px; place-items: center; font-size: 10px; }
+  .rowC:hover .pill .x, .row.sel .pill .x { display: none; }
+  .pill:hover .x.enabled { display: grid; }
+
+  /* rail pastiglie sotto la riga (variante C) */
+  .rail { display: none; padding: 0 12px 6px 27px; gap: 4px; }
+  .rowwrap:hover .rail, .rowwrap.sel .rail { display: flex; }
+  .rowwrap.sel { background: #23252C; }
+  .rail .pill { width: auto; height: 20px; padding: 0 7px; border-radius: 5px; gap: 5px; display: flex; align-items: center; font-weight: 500; }
+
+  /* ---- baseline: albero attuale ---- */
+  .trow { display: flex; align-items: center; gap: 7px; height: 32px; margin: 0 7px 2px 7px; padding: 0 8px; border-radius: 6px; cursor: pointer; }
+  .trow:hover { background: #26272E; }
+  .trow.sel { background: var(--raised); }
+  .trow.two { height: 51px; align-items: flex-start; padding-top: 7px; }
+  .tri { width: 10px; color: var(--text-3); font-size: 9px; flex: none; }
+
+  /* ---- barra varianti ---- */
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; background: #16171C;
+    border-top: 1px solid var(--border); padding: 10px 16px;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  #bar button {
+    background: #23252C; color: var(--text-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font: 12px ui-sans-serif; cursor: pointer;
+  }
+  #bar button.on { background: var(--accent); color: #17181C; border-color: var(--accent); font-weight: 600; }
+  #state { margin-left: auto; color: var(--text-3); font: 11.5px ui-monospace, monospace; }
+  .note { color: var(--text-3); font-size: 11.5px; max-width: var(--sidebar-w); margin: 8px 2px 0; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="bar">
+  <button data-v="A">A · riga singola</button>
+  <button data-v="B">B · card 2 righe</button>
+  <button data-v="C">C · rail su hover</button>
+  <button data-v="D">D · Sirio oggi</button>
+  <button data-v="all">tutte affiancate</button>
+  <span id="state"></span>
+</div>
+
+<script>
+const DATA = [
+  { name: "sirio", worktrees: [
+    { branch: "main", primary: true, comment: null, time: "2m", status: "running",
+      tabs: [ {a:"claude", label:"Claude", status:"running", time:"2m"},
+              {a:"term",   label:"zsh",    status:"idle",    time:"1h"} ] },
+    { branch: "feat/sidebar-zed", primary: false, comment: "redesign left sidebar", time: "18m", status: "needs",
+      tabs: [ {a:"codex", label:"Codex", status:"needs", time:"18m"},
+              {a:"claude",label:"Claude",status:"idle",  time:"40m"},
+              {a:"term",  label:"zsh",   status:"idle",  time:"2h"} ] },
+    { branch: "fix/acp-watchdog", primary: false, comment: null, time: "3h", status: "done",
+      tabs: [ {a:"pi", label:"Pi", status:"done", time:"3h"} ] },
+    { branch: "chore/bezel-bump", primary: false, comment: "bloccato su gpui 0.2.2", time: "ieri", status: "error",
+      tabs: [ {a:"omp", label:"omp", status:"error", time:"ieri"} ] },
+  ]},
+  { name: "herdr", worktrees: [
+    { branch: "main", primary: true, comment: null, time: "5h", status: "idle", tabs: [] },
+    { branch: "calm-forest-c8d9", primary: false, comment: "worktree di Pi", time: "26m", status: "running",
+      tabs: [ {a:"pi", label:"Pi", status:"running", time:"26m"} ] },
+  ]},
+];
+
+const AGENT = {
+  claude: { g:"C", c:"#D97757" }, codex: { g:"X", c:"#4FB6A0" },
+  opencode:{ g:"O", c:"#7C8CF8" }, pi: { g:"π", c:"#A78BFA" },
+  omp:   { g:"ω", c:"#EC8FC0" },  term: { g:"▮", c:"#8A8F99" },
+};
+const STATUS = { running:"var(--running)", needs:"var(--needs)", done:"var(--done)", error:"var(--error)", idle:"#4A4E58" };
+
+let sel = { project: "sirio", branch: "feat/sidebar-zed", tab: 0 };
+
+const el = (tag, cls, txt) => { const n = document.createElement(tag); if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+const search = (flat) => {
+  const f = el("div", "filter" + (flat ? " flat" : ""));
+  f.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>';
+  f.append(el("span", null, flat ? "Search worktrees…" : "Filtra…"));
+  return f;
+};
+const isSel = (p, w) => sel.project === p.name && sel.branch === w.branch;
+
+function pill(t, i, w, p, interactive) {
+  const meta = AGENT[t.a] || AGENT.term;
+  const n = el("div", "pill" + (isSel(p, w) && sel.tab === i ? " on" : ""), meta.g);
+  n.style.color = meta.c;
+  if (t.status !== "idle") { const b = el("div", "badge"); b.style.background = STATUS[t.status]; n.append(b); }
+  if (interactive) n.onclick = (e) => { e.stopPropagation(); sel = { project: p.name, branch: w.branch, tab: i }; render(); };
+  n.title = `${t.label} · ${t.status} · ${t.time}`;
+  return n;
+}
+function addPill() { const n = el("div", "pill add", "+"); n.title = "Nuovo agente su questo worktree"; return n; }
+
+function sectionHeader(p, zed) {
+  const s = el("div", "section" + (zed ? " zed" : ""));
+  s.append(el("span", null, zed ? p.name : p.name.toUpperCase()));
+  s.append(el("span", "count", `${p.worktrees.length}`));
+  s.append(el("span", "dots", "⋯"));
+  return s;
+}
+function statusDot(w) { const d = el("div", "dot"); d.style.background = STATUS[w.status]; return d; }
+
+/* A — riga singola: branch + tempo + pastiglie indicatore */
+function variantA() {
+  const list = el("div", "list");
+  for (const p of DATA) {
+    list.append(sectionHeader(p, true));
+    for (const w of p.worktrees) {
+      const r = el("div", "row flat" + (isSel(p, w) ? " sel" : ""));
+      r.append(statusDot(w));
+      const t = el("div", "title", w.branch); t.style.flex = "1"; r.append(t);
+      if (w.primary) r.append(el("div", "star", "★"));
+      const pills = el("div", "pills");
+      w.tabs.forEach((tab, i) => pills.append(pill(tab, i, w, p, true)));
+      r.append(pills, el("div", "time", w.time));
+      r.onclick = () => { sel = { project: p.name, branch: w.branch, tab: null }; render(); };
+      list.append(r);
+    }
+  }
+  return shell(list, true, "A · riga singola (28px)");
+}
+
+/* B — card due righe: branch + tempo, sotto commento/path, pastiglie a destra */
+function variantB() {
+  const list = el("div", "list");
+  for (const p of DATA) {
+    list.append(sectionHeader(p, true));
+    for (const w of p.worktrees) {
+      const r = el("div", "row card" + (isSel(p, w) ? " sel" : ""));
+      const dotWrap = el("div"); dotWrap.style.paddingTop = "5px"; dotWrap.append(statusDot(w)); r.append(dotWrap);
+      const col = el("div", "col");
+      const line1 = el("div"); line1.style.cssText = "display:flex;align-items:center;gap:6px;min-width:0";
+      const t = el("div", "title", w.branch); t.style.flex = "1"; line1.append(t);
+      if (w.primary) line1.append(el("div", "star", "★"));
+      line1.append(el("div", "time", w.time));
+      const line2 = el("div"); line2.style.cssText = "display:flex;align-items:center;gap:6px;min-width:0";
+      line2.append(el("div", "sub", w.comment || `~/…/${p.name}/${w.branch.split("/").pop()}`));
+      const pills = el("div", "pills"); pills.style.marginLeft = "auto";
+      w.tabs.forEach((tab, i) => pills.append(pill(tab, i, w, p, true)));
+      if (isSel(p, w)) pills.append(addPill());
+      line2.append(pills);
+      col.append(line1, line2); r.append(col);
+      r.onclick = () => { sel = { project: p.name, branch: w.branch, tab: null }; render(); };
+      list.append(r);
+    }
+  }
+  return shell(list, true, "B · card 2 righe (51px)");
+}
+
+/* C — riga singola compatta; il rail dei tab appare su hover o quando selezionata */
+function variantC() {
+  const list = el("div", "list");
+  for (const p of DATA) {
+    list.append(sectionHeader(p, true));
+    for (const w of p.worktrees) {
+      const wrap = el("div", "rowwrap" + (isSel(p, w) ? " sel" : ""));
+      const r = el("div", "row flat" + (isSel(p, w) ? " sel" : ""));
+      r.append(statusDot(w));
+      const t = el("div", "title", w.branch); t.style.flex = "1"; r.append(t);
+      if (w.comment) { const c = el("div", "sub", w.comment); c.style.maxWidth = "110px"; r.append(c); }
+      r.append(el("div", "time", w.time));
+      r.onclick = () => { sel = { project: p.name, branch: w.branch, tab: null }; render(); };
+      const rail = el("div", "rail");
+      w.tabs.forEach((tab, i) => {
+        const n = pill(tab, i, w, p, true);
+        n.append(el("span", null, tab.label));
+        rail.append(n);
+      });
+      rail.append(addPill());
+      wrap.append(r, rail);
+      list.append(wrap);
+    }
+  }
+  return shell(list, true, "C · rail su hover/selezione");
+}
+
+/* D — baseline: l'albero attuale, con indentazione e righe-tab */
+function variantD() {
+  const list = el("div", "list");
+  for (const p of DATA) {
+    const head = el("div", "trow");
+    head.append(el("div", "tri", "▾"), el("div", "title", p.name));
+    list.append(head);
+    for (const w of p.worktrees) {
+      const two = !!w.comment;
+      const r = el("div", "trow" + (two ? " two" : "") + (isSel(p, w) ? " sel" : ""));
+      r.style.marginLeft = "20px";
+      r.append(el("div", "tri", "▾"), statusDot(w));
+      const col = el("div", "col"); col.style.cssText = "display:flex;flex-direction:column;gap:4px;min-width:0;flex:1";
+      col.append(el("div", "title", w.branch));
+      if (two) col.append(el("div", "sub", w.comment));
+      r.append(col);
+      const pills = el("div", "pills");
+      w.tabs.filter(t => t.status === "running").forEach((tab, i) => pills.append(pill(tab, i, w, p, false)));
+      r.append(pills);
+      r.onclick = () => { sel = { project: p.name, branch: w.branch, tab: null }; render(); };
+      list.append(r);
+      for (const [i, tab] of w.tabs.entries()) {
+        const tr = el("div", "trow" + (isSel(p, w) && sel.tab === i ? " sel" : ""));
+        tr.style.marginLeft = "40px";
+        const meta = AGENT[tab.a] || AGENT.term;
+        const g = el("div", "tri", meta.g); g.style.color = meta.c;
+        tr.append(g, el("div", "title", tab.label));
+        const d = el("div", "dot"); d.style.background = STATUS[tab.status]; d.style.marginLeft = "auto"; tr.append(d);
+        tr.onclick = (e) => { e.stopPropagation(); sel = { project: p.name, branch: w.branch, tab: i }; render(); };
+        list.append(tr);
+      }
+    }
+  }
+  return shell(list, false, "D · Sirio oggi (baseline)");
+}
+
+function shell(list, flatFilter, caption) {
+  const box = el("div");
+  box.append(el("h2", "caption", caption));
+  const sb = el("div", "sidebar");
+  const head = el("div", "head");
+  head.append(el("span", null, "Projects"));
+  head.append(el("div", "plus", "+"));
+  sb.append(head, search(flatFilter), list);
+  box.append(sb);
+  return box;
+}
+
+const VARIANTS = { A: variantA, B: variantB, C: variantC, D: variantD };
+let current = new URLSearchParams(location.search).get("v") || "all";
+
+function render() {
+  const stage = document.getElementById("stage");
+  stage.innerHTML = "";
+  const keys = current === "all" ? Object.keys(VARIANTS) : [current];
+  keys.forEach(k => stage.append(VARIANTS[k]()));
+  document.querySelectorAll("#bar button").forEach(b => b.classList.toggle("on", b.dataset.v === current));
+  document.getElementById("state").textContent =
+    `variant=${current}  selected=${sel.project}/${sel.branch}` + (sel.tab != null ? `  tab=#${sel.tab}` : "  tab=—");
+}
+
+document.querySelectorAll("#bar button").forEach(b => {
+  b.onclick = () => {
+    current = b.dataset.v;
+    history.replaceState(null, "", `?v=${current}`);
+    render();
+  };
+});
+render();
+</script>
+</body>
+</html>

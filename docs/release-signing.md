@@ -41,30 +41,93 @@ Rules for the private half (`sirio-release-signing.key`):
 The public half is pasted as standard base64 into the app's `AcceptedKeys`
 (the updater compiles the set into the binary, next to the manifest URL).
 
-## Signing a release
+## What the release job needs
+
+`.github/workflows/build-release.yml` — the path both channels share — reads
+the two halves from the repository, and refuses to build or publish when
+either is missing:
+
+| Where | Name | Value |
+| --- | --- | --- |
+| Repository **variable** | `SIRIO_RELEASE_ACCEPTED_KEYS` | The contents of `sirio-release-signing.pub`, space-separated if more than one key (rotation below). Compiled into every binary of both channels; the build fails when it is empty, because an empty set is fail-closed and looks exactly like a dead updater. |
+| Repository **secret** | `SIRIO_RELEASE_SIGNING_KEY` | The contents of `sirio-release-signing.key` (the base64 seed). Read by the `publish` job only, written to a `0600` file for the length of one `sign` call, then deleted. |
+
+The `publish` job then, in this order and never another (spec §9.1): creates
+the GitHub release as a **draft** with every artifact attached (or re-uploads
+into an existing one, so a re-run is idempotent), reads the asset list back
+and refuses to continue unless it matches what was built, signs the artifacts
+into `<channel>.json`, verifies that manifest against the *public* keys the
+binaries were compiled with — so a key mismatch between secret and variable
+is caught before anything is public — makes the release public, and only
+then commits the manifest onto the `gh-pages` branch, which is what
+`dl.sirioai.app` serves (#312). A failure before the un-draft leaves a draft
+to retry, never a public release without a manifest.
+Only that one file is added on the branch: the other channel's manifest and
+GitHub's own `CNAME` file survive a publish. Last, it reads the manifest back
+from the branch and polls `https://dl.sirioai.app/<channel>.json`, the URL
+compiled into every install, until it serves that version. Until #312 wires
+that host to `gh-pages` the poll fails and the run ends red: the release and
+the manifest are in place, but no install can see them yet, and a green run
+would have said otherwise.
+
+Every build job also asks the `sirioctl` it just built for its compiled
+channel and version (`sirioctl version --json`, via
+`Scripts/assert-built-channel.sh`), so a binary that fell back to the `dev`
+channel is refused before it is bundled or signed.
+
+The Stable job takes its notes from `docs/release-notes/<version>.md` and
+refuses a tag without one (see `docs/release-notes/README.md`). The Nightly
+job compiles `<workspace>-nightly.<YYYYMMDDHHMM>` in and says only that it
+tracks `main`.
+
+## Signing by hand
+
+The same CLI the job runs, for a release signed outside CI:
 
 ```bash
 cargo run -p sirio_release --bin sirio-release -- sign \
   --key /secure/sirio-signing/sirio-release-signing.key \
   --channel stable --version 0.6.1 \
-  --notes "$(cat release-notes-0.6.1.md)" \
-  --url-template 'https://dl.sirioai.app/{channel}/{version}/Sirio-{version}-{platform}' \
-  --artifact darwin-aarch64=./dist/Sirio-0.6.1-darwin-aarch64.dmg \
-  --artifact windows-x86_64=./dist/Sirio-0.6.1-windows-x86_64.zip \
+  --notes "$(cat docs/release-notes/0.6.1.md)" \
+  --url-template 'https://github.com/ai-sirio/sirio/releases/download/v0.6.1/{file}' \
+  --artifact darwin-aarch64=./dist/Sirio-0.6.1.dmg \
+  --artifact linux-x86_64=./dist/Sirio-0.6.1-x86_64.AppImage \
+  --artifact windows-x86_64=./dist/SirioSetup-0.6.1.exe \
   --out stable.json
 ```
 
 Each `--artifact <platform>=<file>` is hashed (SHA-256, lowercase hex) and
 signed (Ed25519 over the exact file bytes) in one pass. The URL template
-substitutes `{channel}`, `{version}` and `{platform}` per artifact. Sanity-
-check the manifest before publishing — no signature survives a re-uploaded
-file:
+substitutes `{channel}`, `{version}`, `{platform}` and `{file}` — the
+artifact's own file name — per artifact; `{file}` is what lets the template
+name the three differently-shaped files GitHub Releases keeps. Sanity-check
+the manifest before publishing — no signature survives a re-uploaded file:
 
 ```bash
 sirio-release verify --manifest stable.json --platform darwin-aarch64 \
-  --artifact ./dist/Sirio-0.6.1-darwin-aarch64.dmg \
+  --artifact ./dist/Sirio-0.6.1.dmg \
   --pub-key "$(cat /secure/sirio-signing/sirio-release-signing.pub)"
 ```
+
+## The install scripts on the download host
+
+`install.sh` and `install.ps1` sit at the repository root and are served from
+the same host as the manifest, so the documented one-liners
+(`https://dl.sirioai.app/install.sh`, `.../install.ps1`) resolve. They are
+static: they resolve the newest tag from GitHub and download the release asset
+for the platform, so they only need re-publishing when the scripts themselves
+change, not once per release. dl.sirioai.app is this repository's `gh-pages`
+branch, so publishing is a copy into it:
+
+```bash
+git checkout gh-pages
+git checkout main -- install.sh install.ps1
+git commit -m "chore: publish the install scripts" && git push
+```
+
+Unlike the manifest, these are not signed: a `curl | sh` bootstrap rests on TLS
+to this host either way (see the header comment in `install.sh`). The signed
+path is the in-app updater, below.
 
 ## The manifest format (contract for #311)
 
@@ -78,12 +141,17 @@ sirio-release verify --manifest stable.json --platform darwin-aarch64 \
   "notes": "- Fixed the pane restore crash\n- Nightly now uses less CPU",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://dl.sirioai.app/stable/0.6.1/Sirio-0.6.1-darwin-aarch64.dmg",
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.6.1/Sirio-0.6.1.dmg",
       "sha256": "86c40f34762a9bdd7cbd4ce25dea5dd4d4687b14466c280c72f8c85881a03d61",
       "signature": "cOeO6MCkN/sQFkMg3+KfNln+6Cl4PLGQ4plGMXRQiDOYd18bBo1FAa1VI3wrK32MN8tHAIKrNeLZgJdBRUwmBQ=="
     },
+    "linux-x86_64": {
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.6.1/Sirio-0.6.1-x86_64.AppImage",
+      "sha256": "…",
+      "signature": "…"
+    },
     "windows-x86_64": {
-      "url": "https://dl.sirioai.app/stable/0.6.1/Sirio-0.6.1-windows-x86_64.zip",
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.6.1/SirioSetup-0.6.1.exe",
       "sha256": "…",
       "signature": "…"
     }
