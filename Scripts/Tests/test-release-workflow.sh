@@ -106,6 +106,17 @@ CHANNEL_LINE=$(line_of 'SIRIO_RELEASE_CHANNEL: ${{ inputs.channel }}' "$BUILD")
 JOBS_LINE=$(line_of 'jobs:' "$BUILD")
 [ "$CHANNEL_LINE" -lt "$JOBS_LINE" ] || fail "the channel env must be workflow-level, above jobs:"
 
+# The CPU floor belongs in the same place and for the same reason. Every job
+# builds natively, so without an explicit floor the Zig-built VT parser is
+# compiled for whichever CPU the runner happens to have -- which is how v0.9.6
+# shipped a Windows binary that died with STATUS_ILLEGAL_INSTRUCTION on a Zen 3
+# desktop. `baseline` is also what the Rust half compiles at, so the two halves
+# of the binary agree on the floor.
+grep -qE '^  LIBGHOSTTY_VT_SYS_CPU: baseline$' "$BUILD" \
+  || fail "LIBGHOSTTY_VT_SYS_CPU must be pinned to baseline at workflow level"
+CPU_LINE=$(line_of 'LIBGHOSTTY_VT_SYS_CPU: baseline' "$BUILD")
+[ "$CPU_LINE" -lt "$JOBS_LINE" ] || fail "the CPU floor env must be workflow-level, above jobs:"
+
 # An empty key set is fail-closed in the app (spec §4.2): every download fails
 # verification, which from the outside is indistinguishable from a dead
 # updater. Refuse to build at all.
