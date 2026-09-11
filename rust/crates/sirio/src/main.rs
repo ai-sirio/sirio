@@ -18629,10 +18629,22 @@ mod tests {
     #[gpui::test]
     async fn boot_seeding_reaches_project_worktree_defaults_in_one_pass(cx: &mut TestAppContext) {
         let repo = dom01_boot_seed_repo("core-dom-01-boot-seed");
+        // Per-process and wiped first, the way `test_repo` treats its own
+        // scratch directory. The parent here is the shared system temp
+        // directory, and the checkout below lands at a *fixed* name inside
+        // this one, so a bare `dom-01-pinned-location` is the same path for
+        // every run on the machine. One leftover then makes
+        // `git worktree add` refuse a non-empty target, and the assertions
+        // read that leftover as this run's work: the location assertion
+        // passes on the stale directory and the marker assertion fails on
+        // the file no run ever wrote into it. Seen here as a checkout
+        // orphaned eight days earlier, holding the name with nothing in it
+        // but a `.git` pointing at a repository that no longer existed.
         let location_dir = repo
             .parent()
             .expect("scratch repo has a parent directory")
-            .join("dom-01-pinned-location");
+            .join(format!("dom-01-pinned-location-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&location_dir);
         std::fs::create_dir_all(&location_dir).expect("create pinned location dir");
 
         let mut settings = BTreeMap::new();
