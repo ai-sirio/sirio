@@ -62,6 +62,16 @@ on:
 env:
   SIRIO_RELEASE_CHANNEL: ${{ inputs.channel }}
   SIRIO_RELEASE_ACCEPTED_KEYS: ${{ vars.SIRIO_RELEASE_ACCEPTED_KEYS }}
+  # The CPU floor of every artifact this workflow publishes, stated rather than
+  # inherited. `rust/vendor/libghostty-vt-sys` already defaults to `baseline`,
+  # so this line changes nothing today -- which is the point: the value a
+  # release is compiled against should be readable here, next to the channel
+  # and the keys, instead of being whatever a build script happened to default
+  # to. v0.9.6 shipped a Windows binary that could not start on a Ryzen 5 5600X
+  # precisely because that value was nobody's decision. `baseline` matches the
+  # Rust half, which compiles at the x86-64 baseline because no target-cpu is
+  # set anywhere; raising the floor means raising both together, deliberately.
+  LIBGHOSTTY_VT_SYS_CPU: baseline
 
 jobs:
   macos:
