@@ -65,20 +65,31 @@ env:
 
 jobs:
   macos:
-    runs-on: [self-hosted, macOS, arm64]
-    # Read only: this job compiles and runs build scripts and test binaries from
-    # roughly 400 third-party crates on the maintainer's personal, non-ephemeral
-    # Mac; handing that a repo-write token buys nothing, because no build job
-    # calls the API. The write scope lives on `publish` alone.
+    # Hosted, pinned to 15. This ran on the maintainer's own Mac mini
+    # (`[self-hosted, macOS, arm64]`) until 2026-09-11, which was fast and
+    # always warm, and had the one cost that eventually mattered: a release
+    # took the machine away from the person who owns it, for half an hour at a
+    # time. Reverting is this one line plus the three install steps below,
+    # which become `command -v` preflights again.
+    #
+    # `macos-15`, never `macos-latest`: see the Zig step for why macOS 26 is a
+    # host this build cannot use, and why an unpinned label would find it on
+    # its own schedule rather than ours.
+    runs-on: macos-15
+    # Read only: no build job calls the API, so a repo-write token buys
+    # nothing here. The write scope lives on `publish` alone.
     permissions:
       contents: read
-    # 120, not 60. The first release runs on a cold self-hosted runner and has
-    # to fit a full debug `cargo build --workspace` plus `cargo test
-    # --workspace` (the CI gate), then a *second, separate* release compile:
-    # `--target aarch64-apple-darwin` uses its own target directory, so nothing
-    # from the gate is reused. Then the Apple round-trips on top. The warm
-    # `~/.cargo` and `target/` that make 60 minutes plausible only exist from
-    # the second release onward.
+    # 120, not 60, and the reason changed with the runner. It has to fit a full
+    # debug `cargo build --workspace --all-targets` plus the test run (the CI
+    # gate), then a *second, separate* release compile -- `--target
+    # aarch64-apple-darwin` uses its own target directory, so nothing from the
+    # gate is reused -- and then the Apple round-trips on top. On the Mac mini
+    # the warm `target/` made that comfortable. A hosted runner starts from
+    # `Swatinem/rust-cache`, which restores the registry and the gate's
+    # artifacts but cannot make a third of the cores into a full set. Expect
+    # the first run, with no cache to restore at all, to be the slowest this
+    # workflow has ever been.
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -127,53 +138,53 @@ jobs:
           bash Scripts/Tests/test-nightly-workflow.sh
           bash Scripts/Tests/test-generate-changelog.sh
 
-      # Deliberately NOT `mlugg/setup-zig` here, unlike the two hosted jobs.
-      # The official Zig 0.15.2 tarball links against its own bundled
-      # `lib/libc/darwin/libSystem.tbd`, which predates macOS 26: on this
-      # runner every libc symbol comes back undefined (`_abort`, `_bzero`,
-      # `_dispatch_semaphore_create`, ...) and `zig build` dies inside
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `mlugg/setup-zig` here too, which the self-hosted runner could not use.
+      # The reason is the whole reason `macos-15` is pinned above rather than
+      # `macos-latest`: the official Zig 0.15.2 tarball links against its own
+      # bundled `lib/libc/darwin/libSystem.tbd`, which predates macOS 26, and
+      # on a macOS 26 host every libc symbol comes back undefined (`_abort`,
+      # `_bzero`, `_dispatch_semaphore_create`, ...) and `zig build` dies inside
       # `libghostty-vt-sys`'s build script. The downloaded binary cannot even
       # run `zig libc` on itself; a fresh cache and an explicit SDKROOT change
-      # nothing. Homebrew's Zig 0.15.2, already on this Mac, builds against the
-      # real SDK and works, so the runner supplies Zig and CI only checks it.
-      # Same version pin either way -- upstream requires exactly 0.15.2 (#63).
-      - name: Require Zig 0.15.2 on the runner
-        run: |
-          if ! command -v zig >/dev/null 2>&1; then
-            echo "error: zig is not on PATH on this runner; install Zig 0.15.2 (brew install zig) -- see CLAUDE.md" >&2
-            exit 1
-          fi
-          FOUND=$(zig version)
-          if [ "$FOUND" != "0.15.2" ]; then
-            echo "error: libghostty-vt-sys pins Zig 0.15.2 exactly and this runner has $FOUND; a newer Zig fails too (#63)" >&2
-            exit 1
-          fi
+      # nothing. That is exactly what the Mac mini runs, which is why it
+      # supplied Homebrew's Zig instead. A hosted macOS 15 image is old enough
+      # for the bundled .tbd, so the action works -- and the day `macos-latest`
+      # moves to 26, an unpinned label would walk straight back into it.
+      # Same version pin either way: upstream requires exactly 0.15.2 (#63).
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally
-      # (spec §1.5, §9.5). The hosted jobs install it; this self-hosted runner
-      # is expected to have it, and the failure without it looks nothing like
-      # its cause, so say so here rather than three crates into the build.
-      - name: Require sccache on the runner
-        run: |
-          if ! command -v sccache >/dev/null 2>&1; then
-            echo "error: sccache is not on PATH on this runner; rust/.cargo/config.toml requires it (spec §1.5)" >&2
-            exit 1
-          fi
+      # (spec §1.5, §9.5), so a runner without it fails before compiling a
+      # single crate, in a way that looks nothing like its cause.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       # Scripts/ci.sh runs the workspace's tests through nextest rather than
       # `cargo test`: cargo runs the 45 test binaries one after another, so the
       # two slow ones dominate the wall clock while the other 43 wait at idle
       # cores, and every test in a binary shares one process with its
-      # neighbours. Same shape as the two preflights above -- the runner
-      # supplies the tool, CI only checks it is there, because the failure
-      # without it (`no such subcommand: nextest`) arrives nine minutes into a
-      # build that has already paid for its own compile.
-      - name: Require cargo-nextest on the runner
+      # neighbours. The prebuilt binary rather than `cargo install`, which
+      # would compile it here and cost more than it saves.
+      - name: Install cargo-nextest
         run: |
-          if ! command -v cargo-nextest >/dev/null 2>&1; then
-            echo "error: cargo-nextest is not on PATH on this runner; install it with 'cargo install cargo-nextest --locked' or 'brew install cargo-nextest'" >&2
-            exit 1
-          fi
+          curl -LsSf https://get.nexte.st/latest/mac \
+            | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
+      # Without this every run is fully cold: ~400 crates twice over, once for
+      # the gate and once for the release compile, on a machine with a third of
+      # the Mac mini's cores. The self-hosted runner needed no cache because its
+      # `target/` and `~/.cargo` simply persisted between runs.
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       # There was an `Unlock login keychain` step here, inherited verbatim from
       # the Swift-era pipeline. It is gone on purpose, and should not come back
