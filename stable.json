@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "channel": "stable",
+  "version": "0.9.6",
+  "notes": "The first Stable release of Sirio.\n\nRun Claude Code, Codex, OpenCode, Pi and Oh-My-Pi side by side in one native\nwindow — one sidebar per project, one terminal per git worktree, and a glance\nthat tells you which agent is working and which is waiting on you.\n\n**Install**\n\n```\ncurl -fsSL https://dl.sirioai.app/install.sh | sh\n```\n\nOn Windows, `powershell -ExecutionPolicy ByPass -c \"irm\nhttps://dl.sirioai.app/install.ps1 | iex\"`. The script puts the\napp where your OS expects it — `Sirio.app` in `/Applications`, the AppImage in\n`~/.local/bin`, a per-user install under `%LOCALAPPDATA%\\Programs\\Sirio` — and\nneeds elevated access nowhere.\n\n**What you get**\n\n- Five agent CLIs as first-class panes, each launched the way its own binary\n  expects, with worktree-local hook configuration written for you and your\n  user-global config left alone unless you ask for it in Settings.\n- A status per pane resolved from four independent signals — the agent's own\n  lifecycle hooks, its terminal title, what it printed, and what is actually\n  running in the shell — so a pane that needs you says so even when the agent\n  has no way to announce it.\n- A real terminal per worktree, built on libghostty-vt, that stays alive as you\n  move around the sidebar.\n- `sirioctl`, a small CLI that drives the running app over a local socket:\n  list and open worktrees, create panes, read scrollback, send notifications.\n\n**Updates**\n\nThis release turns the update channel on. Sirio checks once a day, verifies\nevery download against a signing key compiled into the binary, and applies\nnothing it cannot verify. There is a Nightly channel too, built from `main`;\nswitching between channels means installing the other channel's build, not\nflipping a setting.\n\nmacOS builds are signed with a Developer ID and notarized by Apple.",
+  "artifacts": {
+    "darwin-aarch64": {
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.9.6/Sirio-0.9.6.dmg",
+      "sha256": "d4e6b7772abdfbcfce5a898bb418a91a74c6974e4603748f1e7c1ed5f6342967",
+      "signature": "Ee1xzAy61pvzUiWjzQWhyZrtk9/BeFsPWw+/IDkIMSPOzCDCGTNy9Rp1HYd9e76Uex0XJqfIIZ/ixZASCgICAA=="
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.9.6/Sirio-0.9.6-x86_64.AppImage",
+      "sha256": "22e0284c5a50697f38cf94315223cf7ac1ef53a6a50ca763b4193184305992e1",
+      "signature": "/gMoNhKSC/qmmmCho14vrnYd0ROILo3LwmN93NlbnlZMt3VPmqM4J2kMlRga40rWuSx6F9lhUg8coAU9ZMB0Cg=="
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.9.6/SirioSetup-0.9.6.exe",
+      "sha256": "2709abf0bbb925d6f57afb276084d21da05089a22d21e56d06954b857154a5bc",
+      "signature": "IRlV+MUxfn93BUGONYlWLMxDbqUL/hp3obIKjG4qh+/Pwcue2gPQr0zES3jo93sXMAj8uCqQQwETpV0z+JYLAg=="
+    }
+  }
+}
