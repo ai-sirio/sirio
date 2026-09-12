@@ -4106,7 +4106,7 @@ impl Render for Sidebar {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(17.0))
+                            .text_size(theme.typography.scaled(17.0))
                             .text_color(theme.text_faint)
                             .hover(|style| style.bg(theme.element_hover).rounded(theme.radii.control))
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
@@ -4149,7 +4149,12 @@ impl Render for Sidebar {
                         }),
                     )
                     .on_key_down(cx.listener(Self::on_filter_key))
-                    .child(div().text_size(px(12.5)).text_color(theme.text_faint).child("⌕"))
+                    .child(
+                        div()
+                            .text_size(theme.typography.scaled(16.0))
+                            .text_color(theme.text_faint)
+                            .child("⌕"),
+                    )
                             .min_w_0()
                     .child(
                         div()

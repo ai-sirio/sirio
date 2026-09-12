@@ -512,7 +512,7 @@ impl Sidebar {
         let icon_size = IconSize::Small;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
-                .text_size(px(15.0))
+                .text_size(theme.typography.scaled(15.0))
                 .child(emoji.clone())
                 .into_any_element(),
             // A locally chosen PNG is real file content already on disk — no
@@ -694,7 +694,7 @@ impl Sidebar {
                     div()
                         .debug_selector(move || format!("sidebar-primary-star-{row_id}"))
                         .flex_none()
-                        .text_size(px(10.0))
+                        .text_size(theme.typography.scaled(10.0))
                         .text_color(theme.text_faint)
                         .child("★"),
                 )
@@ -715,7 +715,7 @@ impl Sidebar {
             .items_center()
             .gap(px(6.0))
             .line_height(px(ROW_SUB_LINE_HEIGHT))
-            .text_size(px(12.5))
+            .text_size(theme.typography.scaled(12.5))
             .text_color(theme.text_faint)
             .child(
                 div()
@@ -742,7 +742,7 @@ impl Sidebar {
                         .cursor(gpui::CursorStyle::PointingHand)
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(px(13.0))
+                        .text_size(theme.typography.scaled(13.0))
                         .text_color(theme.text_faint)
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
@@ -767,7 +767,7 @@ impl Sidebar {
                         .debug_selector(move || format!("remove-worktree-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(px(12.0))
+                        .text_size(theme.typography.scaled(12.0))
                         .text_color(theme.text_faint)
                         .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.element_hover))
@@ -797,7 +797,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-tab-close-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(px(14.0))
+                        .text_size(theme.typography.scaled(14.0))
                         .text_color(theme.text_muted)
                         .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.element_hover))
