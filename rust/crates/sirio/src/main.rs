@@ -45,6 +45,7 @@ use sirio_ui::{
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::open_command as platform_open_command,
     file_view::{FileView, FileViewEvent},
+    loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
     right_panel::{
@@ -54,9 +55,9 @@ use sirio_ui::{
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
-        AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
-        SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef, SidebarWorktree,
-        TAB_ROW_ID_OFFSET,
+        AgentMark, ProjectSettingsUpdate, RowStatusGlyph, Sidebar, SidebarContextAction,
+        SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab, SidebarTabRef,
+        SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
     },
     status_bar::{
@@ -467,7 +468,8 @@ const TAB_ICON_WIDTH: f32 = 14.;
 const TAB_GAP: f32 = 6.;
 const TAB_STATUS_WIDTH: f32 = 16.;
 const TAB_CLOSE_WIDTH: f32 = 14.;
-/// The status mark and the dirty mark: one small dot, not a text glyph.
+/// The dirty mark: one small dot, not a text glyph. The status mark beside
+/// the title is the sidebar's bloom now (`loading::BLOOM_GLYPH`).
 const TAB_STATUS_DOT: f32 = 6.;
 const TAB_TITLE_ESTIMATED_CHAR_WIDTH: f32 = 7.5;
 
@@ -12072,9 +12074,36 @@ impl SirioWorkspace {
         rename_caret_visible: bool,
         entity: Entity<Self>,
         theme: Theme,
+        window: &mut Window,
+        cx: &mut App,
     ) -> impl IntoElement {
         let id = tab.id;
         let is_file = file.is_some();
+        // The status glyph is the one the sidebar worktree row draws
+        // (`RowStatusGlyph`): a bloom travelling while work is in flight,
+        // stopped and tinted by the state it settled in, nothing at all for
+        // idle. The 6px dot this replaces said the same facts in a second
+        // vocabulary -- and a different palette -- so a tab and its worktree
+        // could disagree about the same pane.
+        let status_bloom = status.and_then(|status| {
+            let bloom = match RowStatusGlyph::for_status(Some(status), theme) {
+                RowStatusGlyph::Running(tint) => loading::bloom(
+                    "workspace-tab-running-bloom",
+                    loading::BLOOM_GLYPH,
+                    tint,
+                    &theme,
+                    window,
+                    cx,
+                ),
+                RowStatusGlyph::Settled(tint) => loading::settled_bloom(
+                    "workspace-tab-settled-bloom",
+                    loading::BLOOM_GLYPH,
+                    tint,
+                ),
+                RowStatusGlyph::None => return None,
+            };
+            Some((tab_status_name(status), bloom))
+        });
         let icon = tab_icon(tab.kind, file.as_deref(), agent.map(|agent| agent.icon));
         // An agent mark is drawn in that agent's brand, here, on the sidebar
         // tab row and in the worktree badge alike — the reference has one
@@ -12250,19 +12279,15 @@ impl SirioWorkspace {
                     .flex()
                     .items_center()
                     .gap(px(3.0))
-                    .when_some(status, |this, status| {
-                        let status_name = tab_status_name(status);
+                    .when_some(status_bloom, |this, (status_name, bloom)| {
                         this.child(
                             div()
                                 .id(format!("workspace-tab-status-glyph-{id}"))
                                 .debug_selector(move || {
                                     format!("workspace-tab-status-{status_name}-{id}")
                                 })
-                                .w(px(TAB_STATUS_DOT))
-                                .h(px(TAB_STATUS_DOT))
                                 .flex_none()
-                                .rounded_full()
-                                .bg(right_panel::status_color(status, theme)),
+                                .child(bloom),
                         )
                     })
                     .when_some(exit_label, |this, label| {
@@ -13301,8 +13326,10 @@ impl SirioWorkspace {
         role: PaneRole,
         theme: Theme,
         entity: Entity<Self>,
-        window: &Window,
-        cx: &App,
+        // `&mut`, not `&`: a running tab's bloom takes a lease on Bezel's
+        // shared clock through `window` and `cx` (see `loading::bloom`).
+        window: &mut Window,
+        cx: &mut App,
     ) -> impl IntoElement {
         let pane_focused = self.center_split.focused() == role;
         let group_tabs = self
@@ -13383,6 +13410,8 @@ impl SirioWorkspace {
                 self.tab_rename_caret_visible,
                 entity.clone(),
                 theme,
+                window,
+                cx,
             ));
         }
         if has_overflow {
@@ -13443,7 +13472,7 @@ impl SirioWorkspace {
         theme: &Theme,
         entity: Entity<Self>,
         cx: &mut Context<Self>,
-        window: &Window,
+        window: &mut Window,
     ) -> impl IntoElement {
         let primary_surface = if self.has_current_worktree() {
             div()
@@ -23726,10 +23755,11 @@ mod tests {
         );
     }
 
-    /// The status cell is a 6px dot in the status colour, not a text glyph:
-    /// one small mark that reads at a glance beside the title.
+    /// The status cell is the sidebar worktree row's bloom (`RowStatusGlyph`),
+    /// not a dot of its own: one glyph, one palette, for the same pane in
+    /// both places.
     #[gpui::test]
-    async fn drawn_tab_status_is_a_six_pixel_dot(cx: &mut TestAppContext) {
+    async fn drawn_tab_status_is_the_sidebar_bloom(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -23748,10 +23778,15 @@ mod tests {
             workspace.tab_status(&workspace.tabs[0], app)
         });
         assert_eq!(status, Some(ActivityStatus::Error));
-        let dot = cx
+        // The glyph is the sidebar's bloom (`RowStatusGlyph`), so the cell
+        // is `loading::BLOOM_GLYPH` square, not the 6px dot it replaced.
+        let glyph = cx
             .debug_bounds("workspace-tab-status-error-0")
             .expect("a terminal tab draws its status");
-        assert_eq!(dot.size, size(px(6.0), px(6.0)));
+        assert_eq!(
+            glyph.size,
+            size(px(loading::BLOOM_GLYPH), px(loading::BLOOM_GLYPH))
+        );
     }
 
     #[gpui::test]
@@ -23774,7 +23809,12 @@ mod tests {
         assert_eq!(initial_status, Some(ActivityStatus::Idle));
         assert!(cx.debug_bounds("workspace-tab-0").is_some());
         assert!(cx.debug_bounds("workspace-tab-status-0").is_some());
-        assert!(cx.debug_bounds("workspace-tab-status-idle-0").is_some());
+        // Idle draws nothing, exactly as the sidebar worktree row: the
+        // wrapper cell is always there, the glyph only for a notable state.
+        assert!(
+            cx.debug_bounds("workspace-tab-status-idle-0").is_none(),
+            "an idle tab draws no status glyph, like the sidebar row"
+        );
 
         workspace.update(cx, |workspace, cx| {
             workspace

@@ -30,7 +30,7 @@ pub struct SidebarPill {
 /// neither is a state a bloom can draw, so they stay text (see
 /// `Sidebar::status_text`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum RowStatusGlyph {
+pub enum RowStatusGlyph {
     /// No glyph at all.
     None,
     /// A bloom still travelling: work is in flight.
@@ -41,7 +41,7 @@ pub(super) enum RowStatusGlyph {
 }
 
 impl RowStatusGlyph {
-    pub(super) fn for_status(status: Option<ActivityStatus>, theme: Theme) -> Self {
+    pub fn for_status(status: Option<ActivityStatus>, theme: Theme) -> Self {
         match status {
             None | Some(ActivityStatus::Idle) => Self::None,
             // Running shares `success` with done deliberately: green is the
