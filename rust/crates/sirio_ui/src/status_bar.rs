@@ -3,7 +3,10 @@
 //! The usage segment is real data: the bar owns a Claude
 //! usage fetch that runs on the background executor (never the render
 //! thread), refreshes on a fixed interval, and can be triggered manually
-//! from the refresh button. The bar shows numbers and nothing else: a
+//! from the refresh button. Every refresh is silent — the settled numbers
+//! stay put and the new ones land in place, and the control never turns
+//! into a spinner — so a bar that refreshes on an interval does not blink
+//! at its own schedule. The bar shows numbers and nothing else: a
 //! provider that is missing, unreadable, unsupported here or still loading
 //! has no segment at all rather than a reason; a timed-out refresh keeps
 //! the last good numbers visibly dimmed rather than showing them as
@@ -296,18 +299,13 @@ impl StatusBar {
     /// one is listening via [`Self::on_refresh`], and — independent of
     /// whether a host is wired up at all — forces every provider segment
     /// to refetch immediately instead of waiting for the next interval
-    /// tick. Segments flip to `Loading` right away — the refresh control
-    /// spins and the numbers leave the bar until the fetches return — so
-    /// the click has a visible effect before any result is in.
+    /// tick. The refresh is silent: the settled numbers stay in the bar
+    /// and the new ones land in place when the fetches return, exactly as
+    /// an interval tick does.
     pub fn on_refresh_clicked(&mut self, cx: &mut Context<Self>) {
         if let Some(callback) = &self.on_refresh {
             callback();
         }
-        self.claude = ProviderUsageState::Loading;
-        self.codex = ProviderUsageState::Loading;
-        self.opencode_go = ProviderUsageState::Loading;
-        self.ollama_cloud = ProviderUsageState::Loading;
-        cx.notify();
 
         let workspace_override = {
             let trimmed = self.prefs.opencode_workspace_id_override.trim();
@@ -469,17 +467,13 @@ impl StatusBar {
 }
 
 impl Render for StatusBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("StatusBar.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();
         let update_settings = self.on_update.clone().or(settings.clone());
         let refresh_entity = cx.entity();
-        let refreshing = matches!(&self.claude, ProviderUsageState::Loading)
-            || matches!(&self.codex, ProviderUsageState::Loading)
-            || matches!(&self.opencode_go, ProviderUsageState::Loading)
-            || matches!(&self.ollama_cloud, ProviderUsageState::Loading);
 
         let icon_button = |id: &'static str, icon: Icon| {
             div()
@@ -576,26 +570,13 @@ impl Render for StatusBar {
 
         // The segments follow the settings surface's "Show in usage bar"
         // toggles (F-SET-10): a provider hidden there does not render here.
-        let refresh_button = div()
-            .id("status-refresh")
-            .w(px(22.0))
-            .h(px(22.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(theme.radii.control)
-            .text_size(theme.typography.footnote)
-            .text_color(theme.text)
-            .hover(|style| style.bg(theme.element_hover))
+        // The control is a plain icon button: a refresh in flight leaves it
+        // alone rather than swapping in a spinner, because the interval
+        // refresh would otherwise blink it on its own schedule.
+        let refresh_button = icon_button("status-refresh", Icon::RefreshCw)
+            .debug_selector(|| "status-refresh".to_owned())
             .on_click(move |_, _, cx| {
                 refresh_entity.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
-            })
-            .child(if refreshing {
-                loading::compact("status-refresh-spinner", window, cx)
-            } else {
-                IconElement::new(Icon::RefreshCw, IconSize::Medium)
-                    .text_color(theme.text)
-                    .into_any_element()
             });
 
         let mut left = div()
@@ -1061,25 +1042,20 @@ mod tests {
         );
     }
 
-    /// F-SET-10: the wave-D critic confirmed `on_refresh_clicked` sets all
-    /// four provider states to `Loading` and `cx.notify()`s synchronously,
-    /// before the background fetches are even spawned -- but could not
-    /// catch the transient pixels live under this session's shared-machine
-    /// contention (every capture round trip outlasted the fetch). This
-    /// proves the synchronous half directly: read the entity's state right
-    /// after calling the click handler and before `run_until_parked` lets
-    /// the spawned fetch task run at all, so there is no race to lose.
+    /// A manual refresh is silent: the click used to flip every provider
+    /// to `Loading` before the fetches were even spawned, so the numbers
+    /// left the bar and the control spun until the results came back. A
+    /// refresh over a settled bar keeps the settled numbers and lets the
+    /// new ones land in place. This reads the entity's state right after
+    /// the click handler and before `run_until_parked` lets the spawned
+    /// fetch task run at all, so there is no race to lose.
     #[gpui::test]
-    async fn refresh_click_flips_every_provider_to_loading_before_the_fetch_runs(
+    async fn refresh_click_keeps_the_settled_state_until_the_fetch_returns(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        // Let the constructor's own fetch loop settle so every segment
-        // starts from something other than Loading -- otherwise the test
-        // could pass by accident (never having left the constructor's
-        // initial state).
         cx.run_until_parked();
 
         let bar = cx.update(|window, _cx| {
@@ -1088,13 +1064,23 @@ mod tests {
                 .flatten()
                 .expect("status bar root")
         });
-        let settled = cx.update(|_window, cx| bar.read(cx).claude.clone());
-        assert!(
-            !matches!(settled, ProviderUsageState::Loading),
-            "the fetch loop must have settled to something other than \
-             Loading before the click, or this test cannot tell the click \
-             apart from the constructor's own initial state"
-        );
+        let usage = ProviderUsage {
+            session: Some(UsageWindow::new("5h", 3)),
+            weekly: Some(UsageWindow::new("wk", 24)),
+            monthly: None,
+            fable_weekly: None,
+        };
+        let settled_usage = usage.clone();
+        bar.update(&mut cx, |bar, cx| {
+            bar.apply_outcomes(
+                UsageFetchOutcome::Success(usage),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+                cx,
+            );
+        });
+        cx.run_until_parked();
 
         bar.update(&mut cx, |bar, cx| bar.on_refresh_clicked(cx));
 
@@ -1110,14 +1096,69 @@ mod tests {
                 bar.ollama_cloud.clone(),
             )
         });
-        assert!(matches!(claude, ProviderUsageState::Loading));
-        assert!(matches!(codex, ProviderUsageState::Loading));
-        assert!(matches!(opencode_go, ProviderUsageState::Loading));
-        assert!(matches!(ollama_cloud, ProviderUsageState::Loading));
+        assert_eq!(
+            claude,
+            ProviderUsageState::Loaded(settled_usage),
+            "a refresh click keeps the settled numbers until the fetch returns"
+        );
+        assert_eq!(
+            codex,
+            ProviderUsageState::Unavailable(UsageReason::LoggedOut)
+        );
+        assert_eq!(
+            opencode_go,
+            ProviderUsageState::Unavailable(UsageReason::LoggedOut)
+        );
+        assert_eq!(
+            ollama_cloud,
+            ProviderUsageState::Unavailable(UsageReason::LoggedOut)
+        );
 
         // Let the detached fetch task finish so it does not outlive the
         // test's executor.
         cx.run_until_parked();
+    }
+
+    /// The refresh control never turns into a spinner. The bar used to
+    /// swap the button for `loading::compact` for as long as any provider
+    /// sat in `Loading`, which every manual refresh forced. A refresh is
+    /// silent: the button stays and the new numbers land in place.
+    ///
+    /// The in-flight state is faked by setting the providers to `Loading`
+    /// by hand: a real fetch finishes inside `run_until_parked`, so the
+    /// frame drawn afterwards would be the settled one and prove nothing.
+    #[gpui::test]
+    async fn a_refresh_in_flight_keeps_the_refresh_button_and_draws_no_spinner(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+        bar.update(&mut cx, |bar, cx| {
+            bar.claude = ProviderUsageState::Loading;
+            bar.codex = ProviderUsageState::Loading;
+            bar.opencode_go = ProviderUsageState::Loading;
+            bar.ollama_cloud = ProviderUsageState::Loading;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("status-refresh-spinner").is_none(),
+            "a refresh in flight must not draw a spinner in the bar"
+        );
+        assert!(
+            cx.debug_bounds("status-refresh").is_some(),
+            "the refresh control stays put while a refresh is in flight"
+        );
     }
 
     /// P58, F-SET-10: `UsageBarPrefs::from_snapshot` is the single mapping
