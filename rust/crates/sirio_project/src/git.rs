@@ -70,6 +70,26 @@ use crate::GitError;
 /// script first on `PATH` to exercise the timeout path.
 const GIT_BINARY: &str = "git";
 
+thread_local! {
+    /// How many `git` processes this runner has spawned on the current
+    /// thread. See [`git_subprocesses_spawned_on_this_thread`].
+    static SPAWNED_ON_THIS_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of `git` subprocesses this runner has spawned **on the calling
+/// thread** so far.
+///
+/// A process spawn is a UI-thread hazard, not a correctness one: 40-50 ms on
+/// an idle Windows box, seconds on a busy one, and invisible to any test that
+/// only checks results. This counter lets a test pin a code path as
+/// spawn-free by reading it before and after. It is per thread on purpose --
+/// discovery running for a sibling test on another thread, or on the
+/// background executor, must not move a number that stands for "what the
+/// UI thread paid".
+pub fn git_subprocesses_spawned_on_this_thread() -> u64 {
+    SPAWNED_ON_THIS_THREAD.with(|count| count.get())
+}
+
 /// How long a single git invocation may run before it is killed.
 ///
 /// Discovery commands (`worktree list --porcelain`, `branch --show-current`,
@@ -159,6 +179,7 @@ pub(crate) fn run_with_timeout(
     let mut child = command.spawn().map_err(|error| GitError::Spawn {
         message: error.to_string(),
     })?;
+    SPAWNED_ON_THIS_THREAD.with(|count| count.set(count.get() + 1));
 
     // Drain both pipes on reader threads so a chatty child cannot deadlock
     // against full pipe buffers. Each reader sends its buffer when the pipe

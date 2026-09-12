@@ -17,6 +17,12 @@ bezel.workspace = true
 # transitive dependencies.
 fontdb = "0.23"
 
+[dev-dependencies]
+# Pins the bundled terminal faces to the family name the candidate list
+# leads with, and checks their Nerd Font glyph coverage. The parser fontdb
+# itself is built on, so no new transitive dependency.
+ttf-parser = "0.25"
+
 # The XDG desktop portal's color-scheme query. Same crate gpui_linux uses for
 # the same purpose; declared here (rather than the workspace manifest) because
 # only this crate consumes it. Linux-only: macOS resolves appearance

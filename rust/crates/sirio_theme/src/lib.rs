@@ -32,6 +32,7 @@
 //! old behavior: `NSAppearance` is synchronous and authoritative there.
 
 use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, rgb, size};
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use std::ops::Deref;
@@ -1048,17 +1049,89 @@ pub const CODE_FAMILY_CANDIDATES: &[&str] = &[
     "SF Mono",
 ];
 
+/// The terminal family Sirio ships: JetBrains Mono patched by Nerd Fonts
+/// (v3.5.1, `patched-fonts/JetBrainsMono/Ligatures`), the `Mono` build in
+/// which every icon and Powerline glyph is exactly one cell wide. Bundled
+/// for the same reason bezel bundles Geist — so the terminal's face does not
+/// depend on what the host happens to have installed. The 2026-09-12
+/// Windows screenshot is what that dependence looked like: a stock box has
+/// none of the JetBrains, Nerd or Linux families below, every candidate was
+/// skipped, and fontdb's built-in generic answered "Courier New" — a slab
+/// serif with no Nerd Font glyph at all, so Claude Code's status-line pills
+/// (`U+E0B6`/`U+E0B4`) painted as tofu. DirectWrite's system fallback does
+/// not cover the Private Use Area those glyphs live in, so only the primary
+/// face can supply them; a symbols-only fallback would not do either, since
+/// gpui's Windows `FontFallbacks` are looked up in the *system* collection,
+/// never the registered one.
+///
+/// Four static faces rather than a variable file: gpui's cosmic-text path
+/// (Linux) rasterizes a variable font at its default instance only, and
+/// DirectWrite matches weight and style against real faces without
+/// synthesising an oblique — the agent TUIs use both bold and italic. Name
+/// and bytes are pinned to each other by
+/// `bundled_terminal_faces_name_the_family_and_cover_the_agent_glyphs`.
+/// Licence: SIL OFL 1.1 (`rust/assets/fonts/OFL.txt`); provenance in
+/// `THIRD_PARTY_NOTICES.md`.
+pub const BUNDLED_TERMINAL_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+
+/// The same four faces under the family name their legacy (`nameID 1`)
+/// record carries, for a text system that reports that one rather than the
+/// typographic (`nameID 16`) name above.
+pub const BUNDLED_TERMINAL_FAMILY_LEGACY_NAME: &str = "JetBrainsMono NFM";
+
+static TERMINAL_FONT_REGULAR: &[u8] =
+    include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
+static TERMINAL_FONT_BOLD: &[u8] =
+    include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf");
+static TERMINAL_FONT_ITALIC: &[u8] =
+    include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Italic.ttf");
+static TERMINAL_FONT_BOLD_ITALIC: &[u8] =
+    include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-BoldItalic.ttf");
+
+/// The bundled terminal faces, regular, bold, italic and bold italic, as
+/// the bytes `TextSystem::add_fonts` takes.
+pub fn bundled_terminal_fonts() -> Vec<Cow<'static, [u8]>> {
+    vec![
+        Cow::Borrowed(TERMINAL_FONT_REGULAR),
+        Cow::Borrowed(TERMINAL_FONT_BOLD),
+        Cow::Borrowed(TERMINAL_FONT_ITALIC),
+        Cow::Borrowed(TERMINAL_FONT_BOLD_ITALIC),
+    ]
+}
+
+/// Registers the bundled terminal faces with the text system. Must run
+/// before [`Theme::init`] for the same reason bezel's `register_fonts`
+/// must: `Theme::install` resolves and remembers `TERMINAL_FAMILY` from
+/// `all_font_names()` on its first call, and a face registered afterwards
+/// is never seen. Failure is non-fatal: the candidate chain below still
+/// resolves, now to a Windows- or Linux-native family rather than to the
+/// generic answer.
+pub fn register_bundled_terminal_font(cx: &App) -> anyhow::Result<()> {
+    cx.text_system().add_fonts(bundled_terminal_fonts())
+}
+
 /// Monospace families to prefer, in order, when resolving the terminal
 /// font. The terminal renders agent TUIs whose glyph set needs a Nerd Font
 /// (MesloLGS Nerd Font Mono is what Claude Code itself asks to be
-/// installed), so the Nerd Font builds of JetBrains Mono lead, with the
-/// plain JetBrains Mono and the generic chain behind them.
+/// installed), so the bundled [`BUNDLED_TERMINAL_FAMILY`] leads — it is
+/// registered before the theme resolves, so it is normally the answer —
+/// with the user-installed Nerd Font builds of JetBrains Mono, the plain
+/// JetBrains Mono, then the platforms' own monospace faces behind it.
+/// Cascadia Mono, Cascadia Code and Consolas are the Windows-native
+/// entries: absent everywhere else, they exist so that a Windows box on
+/// which the bundled registration failed still lands on a real terminal
+/// face rather than on fontdb's generic "Courier New".
 #[cfg(not(target_os = "macos"))]
 pub const TERMINAL_FAMILY_CANDIDATES: &[&str] = &[
+    BUNDLED_TERMINAL_FAMILY,
+    BUNDLED_TERMINAL_FAMILY_LEGACY_NAME,
     "JetBrainsMono Nerd Font",
     "JetBrains Mono NL Nerd Font",
     "MesloLGS Nerd Font Mono",
     "JetBrains Mono",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "Consolas",
     "Fira Mono",
     "Hack",
     "Ubuntu Mono",
@@ -1068,14 +1141,21 @@ pub const TERMINAL_FAMILY_CANDIDATES: &[&str] = &[
 ];
 
 /// Monospace families to prefer, in order, when resolving the terminal
-/// font on macOS — Apple's own SF Mono first, the Nerd Font faces after.
+/// font on macOS — Apple's own SF Mono first, the bundled and installed
+/// Nerd Font faces after. See the non-macOS list for the Windows-native
+/// entries.
 #[cfg(target_os = "macos")]
 pub const TERMINAL_FAMILY_CANDIDATES: &[&str] = &[
     "SF Mono",
+    BUNDLED_TERMINAL_FAMILY,
+    BUNDLED_TERMINAL_FAMILY_LEGACY_NAME,
     "JetBrainsMono Nerd Font",
     "JetBrains Mono NL Nerd Font",
     "MesloLGS Nerd Font Mono",
     "JetBrains Mono",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "Consolas",
     "Fira Mono",
     "Hack",
     "Ubuntu Mono",
@@ -3093,6 +3173,117 @@ mod tests {
         let resolved = resolve_terminal_family(&HashSet::new());
         assert_eq!(resolved, system_monospace_family());
         assert!(!resolved.is_empty());
+    }
+
+    /// The family list DirectWrite reports on a stock Windows 11 install,
+    /// captured on 2026-09-12 from the maintainer's box: the system faces
+    /// and nothing else — no JetBrains, Nerd or Linux family.
+    fn stock_windows_families() -> HashSet<String> {
+        [
+            "Arial",
+            "Cascadia Code",
+            "Cascadia Mono",
+            "Consolas",
+            "Courier New",
+            "Lucida Console",
+            "Segoe UI",
+            "Segoe UI Symbol",
+            "Times New Roman",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    /// The app registers the bundled face before the theme resolves, so on
+    /// a stock Windows box the installed list is the system faces plus
+    /// [`BUNDLED_TERMINAL_FAMILY`] — and that one must win over every
+    /// system face, Cascadia Mono included.
+    #[test]
+    fn terminal_family_on_a_stock_windows_box_picks_the_bundled_nerd_font() {
+        let mut installed = stock_windows_families();
+        installed.insert(BUNDLED_TERMINAL_FAMILY.to_string());
+        assert_eq!(resolve_terminal_family(&installed), BUNDLED_TERMINAL_FAMILY);
+
+        let mut legacy_name_only = stock_windows_families();
+        legacy_name_only.insert(BUNDLED_TERMINAL_FAMILY_LEGACY_NAME.to_string());
+        assert_eq!(
+            resolve_terminal_family(&legacy_name_only),
+            BUNDLED_TERMINAL_FAMILY_LEGACY_NAME
+        );
+    }
+
+    /// Were the bundled registration ever skipped, a stock Windows box must
+    /// still land on a Windows-native monospace face, never on the generic
+    /// answer: fontdb's built-in generic on Windows is "Courier New", the
+    /// slab serif the 2026-09-12 screenshot showed Claude Code rendered in.
+    #[test]
+    fn terminal_family_on_a_stock_windows_box_never_lands_on_courier_new() {
+        let resolved = resolve_terminal_family(&stock_windows_families());
+        assert_ne!(resolved, "Courier New");
+        assert_eq!(resolved, "Cascadia Mono");
+    }
+
+    /// The Nerd Font glyphs the agent TUIs draw their chrome with and that
+    /// no system fallback can supply, since they live in the Private Use
+    /// Area: the Powerline arrows and the rounded caps Claude Code's
+    /// status-line pills are made of.
+    const AGENT_TUI_PRIVATE_USE_GLYPHS: &[char] = &['\u{E0B0}', '\u{E0B2}', '\u{E0B4}', '\u{E0B6}'];
+
+    /// The bundled bytes and [`BUNDLED_TERMINAL_FAMILY`] must agree — the
+    /// candidate list leads with a family the app itself registers, so a
+    /// wrong file would silently fall through to the next candidate — and
+    /// must be the four faces the TUIs need, each carrying the Private Use
+    /// glyphs at a letter's own advance: the terminal shapes a whole row at
+    /// once, so a wider glyph would push every cell after it off the grid.
+    /// Checked with ttf-parser, the parser under fontdb.
+    #[test]
+    fn bundled_terminal_faces_name_the_family_and_cover_the_agent_glyphs() {
+        let faces = bundled_terminal_fonts();
+        assert_eq!(faces.len(), 4, "regular, bold, italic and bold italic");
+        let mut styles = HashSet::new();
+        for bytes in &faces {
+            let face = ttf_parser::Face::parse(bytes, 0).expect("bundled face parses");
+            let family_names: HashSet<String> = face
+                .names()
+                .into_iter()
+                .filter(|name| {
+                    name.name_id == ttf_parser::name_id::FAMILY
+                        || name.name_id == ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                })
+                .filter_map(|name| name.to_string())
+                .collect();
+            assert!(
+                family_names.contains(BUNDLED_TERMINAL_FAMILY),
+                "bundled face is named {family_names:?}, not {BUNDLED_TERMINAL_FAMILY:?}"
+            );
+            assert!(
+                family_names.contains(BUNDLED_TERMINAL_FAMILY_LEGACY_NAME),
+                "bundled face is named {family_names:?}, not {BUNDLED_TERMINAL_FAMILY_LEGACY_NAME:?}"
+            );
+            styles.insert((face.is_bold(), face.is_italic()));
+
+            let letter = face.glyph_index('m').expect("the face has an 'm'");
+            let letter_advance = face
+                .glyph_hor_advance(letter)
+                .expect("the 'm' has an advance");
+            for &glyph in AGENT_TUI_PRIVATE_USE_GLYPHS {
+                let id = face
+                    .glyph_index(glyph)
+                    .unwrap_or_else(|| panic!("bundled face lacks U+{:04X}", glyph as u32));
+                assert_eq!(
+                    face.glyph_hor_advance(id),
+                    Some(letter_advance),
+                    "U+{:04X} is not one cell wide",
+                    glyph as u32
+                );
+            }
+        }
+        assert_eq!(
+            styles.len(),
+            4,
+            "expected regular, bold, italic and bold italic, got {styles:?}"
+        );
     }
 
     /// With nothing installed, the fallback is the system's generic

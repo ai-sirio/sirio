@@ -112,6 +112,7 @@ pub use file::{FileTreeEntry, FileTreeError, load_file_tree, validate_relative_p
 pub use file_icon::FileIconKey;
 pub use file_link::{FileLinkTarget, is_markdown_path, resolve_file_link};
 pub use file_sort::{compare_file_tree_names, natural_case_insensitive_compare};
+pub use git::git_subprocesses_spawned_on_this_thread;
 pub use id::{ProjectId, TabId, WorktreeId};
 pub use layout::{
     ContentKind, FocusIntent, LayoutCommand, LayoutError, LayoutNode, LayoutTransition,

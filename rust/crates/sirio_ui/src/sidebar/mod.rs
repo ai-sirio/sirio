@@ -22,14 +22,14 @@ use bezel::ui::tree;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, Point, PromptLevel, Render, Rgba, ScrollHandle,
-    StyleRefinement, Window, div, img, prelude::*, px, rgb,
+    Pixels, StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{
     UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
     remove_worktree_and_remote_branch, resolve_parent_directory, upstream_of,
 };
 use sirio_project::{TabKind, display_absolute_path, display_path};
-use sirio_theme::{AgentBrandColor, Theme};
+use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
 use crate::loading;
@@ -173,6 +173,11 @@ const FILTER_LEFT_INSET: f32 = 20.0;
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
 /// Single-line row title line height (13.5px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
+/// Single-line row title size, in the same points every other explicit UI
+/// size in this file is written in. It is drawn through
+/// [`Typography::scaled`], never as a bare `px`, so Settings -> Appearance ->
+/// Interface font size carries the worktree names with the rest of the shell.
+pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.5;
 /// Two-line card context line height (11.5px).
 pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
 /// Legacy content rhythm retained for the sidebar conformance inventory.
@@ -313,10 +318,10 @@ pub enum SidebarContextAction {
     RemoveProject,
     SetPrimary,
     UnsetPrimary,
-    /// Remove the checkout and its local branch. A deliberate menu choice
-    /// is the confirmation: the row's hover-x opens the same two choices
-    /// (see `Sidebar::open_worktree_close_menu`), so neither route reaches
-    /// `remove_worktree_row` from a stray click.
+    /// Remove the checkout and its local branch. Both this item and the
+    /// row's hover-x (see `Sidebar::open_worktree_close_menu`) lead to the
+    /// same confirmation dialog, `Sidebar::request_remove_worktree`, which
+    /// is the only way into `remove_worktree_row`.
     RemoveWorktree,
     /// [`Self::RemoveWorktree`] preceded by deleting the branch on the
     /// remote it tracks; disabled with a reason while the upstream is
@@ -1144,9 +1149,9 @@ impl Sidebar {
                         true,
                         None,
                     ),
-                    // Both removals are listed; choosing one is the
-                    // confirmation (the hover-x opens the same pair, see
-                    // `open_worktree_close_menu`). #372: the primary checkout
+                    // Both removals are listed; each leads to the
+                    // confirmation dialog (the hover-x opens the same pair,
+                    // see `open_worktree_close_menu`). #372: the primary checkout
                     // cannot be removed — `git worktree remove` refuses the
                     // main worktree and deleting its directory would destroy
                     // the repository — so both stay visible but disabled
@@ -1721,7 +1726,7 @@ impl Sidebar {
                 } else {
                     None
                 };
-                self.remove_worktree_row(row_id, remote, cx);
+                self.request_remove_worktree(row_id, remote, window, cx);
             }
             return;
         }
@@ -2541,8 +2546,9 @@ impl Sidebar {
 
     /// The hover-x's closure menu: two removals — from disk, or from disk
     /// after deleting the remote branch — with the branch named in the
-    /// heading (#372). Choosing is the confirmation; no native prompt
-    /// follows, and a click outside dismisses without removing anything.
+    /// heading (#372). Choosing opens the confirmation dialog
+    /// (`request_remove_worktree`); a click outside dismisses without
+    /// removing anything.
     fn open_worktree_close_menu(
         &mut self,
         row_id: usize,
@@ -2587,9 +2593,15 @@ impl Sidebar {
         }
     }
 
-    /// A choice in the closure menu: unmount at once (a chosen command is a
-    /// completed transition, as in `dispatch_context_action`) and remove.
-    fn choose_worktree_close(&mut self, with_remote_branch: bool, cx: &mut Context<Self>) {
+    /// A choice in the closure menu: close the menu at once (a chosen
+    /// command is a completed transition, as in `dispatch_context_action`)
+    /// and ask for confirmation.
+    fn choose_worktree_close(
+        &mut self,
+        with_remote_branch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(menu) = self.worktree_close_menu.get().cloned() else {
             return;
         };
@@ -2604,7 +2616,54 @@ impl Sidebar {
         } else {
             None
         };
-        self.remove_worktree_row(menu.row_id, remote, cx);
+        self.request_remove_worktree(menu.row_id, remote, window, cx);
+    }
+
+    /// Every worktree removal — context-menu item or hover-x choice — passes
+    /// through this dialog. It names the branch and says outright that
+    /// uncommitted changes in the checkout are deleted with it: once
+    /// confirmed, the removal is forced through (`sirio_git::remove_worktree`),
+    /// so this is the one place the user is warned. Cancel is a full retreat.
+    fn request_remove_worktree(
+        &mut self,
+        row_id: usize,
+        remote: Option<UpstreamBranch>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(branch) = self
+            .rows
+            .iter()
+            .find(|row| row.id == row_id && row.kind == RowKind::Worktree && !row.is_primary)
+            .map(|row| row.title.clone())
+        else {
+            return;
+        };
+        let detail = match &remote {
+            Some(upstream) => format!(
+                "The checkout and its local branch will be deleted, and '{}' will be deleted \
+                 on '{}'. Any uncommitted changes in the checkout will be lost.",
+                upstream.branch, upstream.remote
+            ),
+            None => "The checkout and its local branch will be deleted. Any uncommitted \
+                     changes in the checkout will be lost."
+                .to_string(),
+        };
+        let receiver = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove worktree '{branch}'?"),
+            Some(&detail),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |sidebar, cx| {
+            if receiver.await.unwrap_or(1) == 0 {
+                let _ = sidebar.update(cx, |sidebar, cx| {
+                    sidebar.remove_worktree_row(row_id, remote, cx)
+                });
+            }
+        })
+        .detach();
     }
 
     /// Looks up, off the render thread, whether the worktree row's branch
@@ -2651,6 +2710,13 @@ impl Sidebar {
     /// Removes a worktree on the background executor and drops its rows.
     /// With `remote`, its branch is deleted on that remote first (see
     /// `sirio_git::remove_worktree_and_remote_branch` for why that order).
+    ///
+    /// Only reached from `request_remove_worktree`, after the user has
+    /// confirmed. The rows go and the host is told whether or not git
+    /// succeeded: the user's decision was the worktree leaving the sidebar,
+    /// and a failure (a locked checkout, a removal killed at its deadline)
+    /// is logged rather than shown. The next catalog refresh restores
+    /// whatever is genuinely still on disk.
     fn remove_worktree_row(
         &mut self,
         row_id: usize,
@@ -2703,23 +2769,21 @@ impl Sidebar {
                     }
                 })
                 .await;
-            this.update(cx, |sidebar, cx| match result {
-                Ok(()) => {
-                    sidebar.drop_worktree_rows(row_id);
-                    if let Some(project_id) = project_id {
-                        cx.emit(SidebarEvent::WorktreeRemoved {
-                            project_id,
-                            path: worktree_path,
-                        });
-                    }
-                    cx.notify();
+            this.update(cx, |sidebar, cx| {
+                if let Err(error) = result {
+                    eprintln!(
+                        "[git] failed to remove worktree '{branch}' at {}: {error}",
+                        worktree_path.display()
+                    );
                 }
-                Err(error) => {
-                    // git refused (typically uncommitted changes); surface
-                    // its reason instead of forcing through.
-                    sidebar.notice = Some(error.to_string());
-                    cx.notify();
+                sidebar.drop_worktree_rows(row_id);
+                if let Some(project_id) = project_id {
+                    cx.emit(SidebarEvent::WorktreeRemoved {
+                        project_id,
+                        path: worktree_path,
+                    });
                 }
+                cx.notify();
             })
             .ok();
         })
@@ -3204,8 +3268,10 @@ impl Sidebar {
         .w_full()
         .min_h(px(29.0))
         .text_color(bezel_theme.text)
-        .on_click(move |_, _, cx| {
-            disk_entity.update(cx, |sidebar, cx| sidebar.choose_worktree_close(false, cx));
+        .on_click(move |_, window, cx| {
+            disk_entity.update(cx, |sidebar, cx| {
+                sidebar.choose_worktree_close(false, window, cx)
+            });
         })
         .child("Remove from disk");
 
@@ -3238,8 +3304,10 @@ impl Sidebar {
                     );
             }
             None => {
-                remote_row = remote_row.on_click(move |_, _, cx| {
-                    remote_entity.update(cx, |sidebar, cx| sidebar.choose_worktree_close(true, cx));
+                remote_row = remote_row.on_click(move |_, window, cx| {
+                    remote_entity.update(cx, |sidebar, cx| {
+                        sidebar.choose_worktree_close(true, window, cx)
+                    });
                 });
             }
         }
@@ -3972,7 +4040,7 @@ impl Render for Sidebar {
                 row,
             };
             let row_id = inputs.row.id;
-            let row_height = Self::row_min_height(&inputs.row);
+            let row_height = Self::row_drawn_height(&inputs.row, &theme.typography);
             let view = match row_views.remove(&row_id) {
                 Some(view) => {
                     view.update(cx, |view, cx| {
@@ -5153,6 +5221,68 @@ mod tests {
         );
     }
 
+    /// F-SID: Settings -> Appearance -> Interface font size must carry the
+    /// sidebar's worktree names with it. The title element named a weight, a
+    /// line height and an ellipsis and no size at all, so it fell through to
+    /// gpui's default `TextStyle` -- a fixed 16px -- exactly as its colour
+    /// once did (see `Sidebar::title_color`). Every other string in the shell
+    /// moved with the setting and the branch names stayed where they were.
+    #[gpui::test]
+    async fn worktree_row_titles_follow_the_interface_font_size(cx: &mut gpui::TestAppContext) {
+        let project_root = PathBuf::from("/tmp/sidebar-interface-font");
+        cx.update(Theme::init);
+        let window = cx.open_window(size(px(320.0), px(240.0)), |_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "interface-font".into(),
+                    name: "Project".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees: vec![SidebarWorktree {
+                        branch: "worktree/green-meadow-592b".into(),
+                        path: project_root.join("green-meadow"),
+                        is_primary: false,
+                        comment: None,
+                    }],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let default_title = cx
+            .debug_bounds("sidebar-row-title-1")
+            .expect("the worktree title is drawn at the default interface size");
+        let default_row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn at the default interface size");
+
+        cx.update(|_, cx| {
+            Theme::set_interface_font_size(18, cx);
+            cx.refresh_windows();
+        });
+        cx.run_until_parked();
+
+        let enlarged_title = cx
+            .debug_bounds("sidebar-row-title-1")
+            .expect("the worktree title is drawn at the enlarged interface size");
+        let enlarged_row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn at the enlarged interface size");
+
+        assert!(
+            enlarged_title.size.height > default_title.size.height,
+            "the worktree name must grow with the interface font size: \
+             default={default_title:?}, enlarged={enlarged_title:?}"
+        );
+        assert!(
+            enlarged_row.size.height > default_row.size.height,
+            "the row must make room for the taller title rather than clip it: \
+             default={default_row:?}, enlarged={enlarged_row:?}"
+        );
+    }
+
     fn structural_row(kind: RowKind, depth: usize, expanded: bool) -> SidebarRow {
         SidebarRow {
             id: depth,
@@ -5881,10 +6011,10 @@ mod tests {
     }
 
     /// The context menu's "Remove Worktree" is a real removal (not just an
-    /// event nobody outside sidebar.rs would act on), and the deliberate
-    /// menu choice is the confirmation: no native prompt follows it.
+    /// event nobody outside sidebar.rs would act on), gated by the same
+    /// confirmation dialog as the hover-x.
     #[gpui::test]
-    async fn right_click_context_menu_remove_worktree_removes_without_a_native_prompt(
+    async fn right_click_context_menu_remove_worktree_asks_for_confirmation_then_removes(
         cx: &mut gpui::TestAppContext,
     ) {
         // See remove_button_removes_the_worktree's identical comment: widen
@@ -5945,10 +6075,9 @@ mod tests {
         cx.simulate_click(remove.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(
-            !cx.has_pending_prompt(),
-            "the menu choice is the confirmation; no native prompt follows"
-        );
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        cx.simulate_prompt_answer("Remove");
+        cx.run_until_parked();
         cx.condition(&sidebar_entity, |sidebar, _cx| {
             !sidebar
                 .rows
@@ -6456,10 +6585,9 @@ mod tests {
             .expect("the closure menu offers the remote removal");
         cx.simulate_click(remove_both.center(), Modifiers::none());
         cx.run_until_parked();
-        assert!(
-            !cx.has_pending_prompt(),
-            "a menu choice is the confirmation"
-        );
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        cx.simulate_prompt_answer("Remove");
+        cx.run_until_parked();
 
         cx.condition(&sidebar_entity, |sidebar, _cx| {
             !sidebar
@@ -6528,17 +6656,16 @@ mod tests {
         cx.simulate_click(remove_button, Modifiers::none());
         cx.run_until_parked();
 
-        // The x opens the closure menu; "Remove from disk" is the
-        // confirmation -- no native prompt follows.
+        // The x opens the closure menu; "Remove from disk" leads to the
+        // confirmation dialog, which is where the removal is decided.
         let remove_from_disk = cx
             .debug_bounds("worktree-close-item-remove-disk")
             .expect("the closure menu offers removing from disk");
         cx.simulate_click(remove_from_disk.center(), Modifiers::none());
         cx.run_until_parked();
-        assert!(
-            !cx.has_pending_prompt(),
-            "a menu choice is the confirmation"
-        );
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        cx.simulate_prompt_answer("Remove");
+        cx.run_until_parked();
 
         let sidebar_entity =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
@@ -6572,6 +6699,162 @@ mod tests {
         assert!(
             !porcelain.contains("to-remove"),
             "porcelain no longer reports the removed worktree:\n{porcelain}"
+        );
+    }
+
+    /// Hovers the worktree row titled `title`, clicks its x, and chooses
+    /// "Remove from disk" — leaving the confirmation dialog up.
+    fn open_remove_from_disk_dialog(cx: &mut VisualTestContext, title: &str) {
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let row_id = sidebar_entity
+            .read_with(cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == title)
+                    .map(|row| row.id)
+            })
+            .expect("the worktree row exists");
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the remove control is drawn")
+            .center();
+        cx.simulate_click(remove_button, Modifiers::none());
+        cx.run_until_parked();
+        let remove_from_disk = cx
+            .debug_bounds("worktree-close-item-remove-disk")
+            .expect("the closure menu offers removing from disk");
+        cx.simulate_click(remove_from_disk.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+    }
+
+    /// Cancelling the dialog is a full retreat: the row stays, git is not
+    /// touched, nothing is emitted.
+    #[gpui::test]
+    async fn cancelling_the_removal_dialog_keeps_the_worktree(cx: &mut gpui::TestAppContext) {
+        // SAFETY: see remove_button_removes_the_worktree.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("remove-cancel");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        click_section_add(&mut cx);
+        cx.simulate_input("kept");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = tests_support::collect_events(&sidebar_entity, &mut cx);
+
+        open_remove_from_disk_dialog(&mut cx, "kept");
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        let still_listed = sidebar_entity.read_with(&cx, |sidebar, _| {
+            sidebar
+                .rows
+                .iter()
+                .any(|row| row.kind == RowKind::Worktree && row.title == "kept")
+        });
+        assert!(still_listed, "cancelling keeps the worktree row");
+        assert!(
+            porcelain(&repo).contains("kept"),
+            "cancelling leaves the checkout in the repository"
+        );
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::WorktreeRemoved { .. })),
+            "cancelling emits no removal"
+        );
+    }
+
+    /// After the user has confirmed, a removal git cannot complete is not
+    /// reported back: the row goes, the host is told, and the failure is
+    /// only logged. The next catalog refresh is what restores anything
+    /// genuinely still on disk.
+    #[gpui::test]
+    async fn a_failed_removal_stays_silent_and_drops_the_row(cx: &mut gpui::TestAppContext) {
+        // SAFETY: see remove_button_removes_the_worktree.
+        unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("remove-fails");
+        // A "worktree" whose directory contains the repository: git does not
+        // know it, and `sirio_git`'s disk fallback refuses to delete a
+        // directory holding the repository, so this removal fails for sure
+        // — and deletes nothing.
+        let undeletable = repo
+            .parent()
+            .expect("scratch repo has a parent")
+            .to_path_buf();
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            sidebar_entity.update(cx, |sidebar, cx| {
+                sidebar.set_projects(
+                    vec![SidebarProject {
+                        id: "remove-fails".to_string(),
+                        name: "remove-fails".to_string(),
+                        is_git: true,
+                        root_path: repo.clone(),
+                        worktrees: vec![
+                            SidebarWorktree {
+                                branch: "main".to_string(),
+                                path: repo.clone(),
+                                is_primary: true,
+                                comment: None,
+                            },
+                            SidebarWorktree {
+                                branch: "doomed".to_string(),
+                                path: undeletable.clone(),
+                                is_primary: false,
+                                comment: None,
+                            },
+                        ],
+                    }],
+                    cx,
+                );
+            });
+        });
+        let events = tests_support::collect_events(&sidebar_entity, &mut cx);
+        cx.run_until_parked();
+
+        open_remove_from_disk_dialog(&mut cx, "doomed");
+        cx.simulate_prompt_answer("Remove");
+        cx.run_until_parked();
+
+        cx.condition(&sidebar_entity, |sidebar, _cx| {
+            !sidebar
+                .rows
+                .iter()
+                .any(|row| row.kind == RowKind::Worktree && row.title == "doomed")
+        })
+        .await;
+        assert!(undeletable.exists(), "the guarded directory is untouched");
+        sidebar_entity.read_with(&cx, |sidebar, _| {
+            assert_eq!(sidebar.notice(), None, "the failure is not shown");
+        });
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::WorktreeRemoved { path, .. } if *path == undeletable
+            )),
+            "the host is told the worktree is gone"
         );
     }
 

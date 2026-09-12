@@ -1525,6 +1525,11 @@ pub struct SessionStore {
 }
 
 struct SessionInner {
+    /// Where [`SessionStore::open`] was pointed. Kept so a caller holding a
+    /// store never has to re-derive it through the process-global
+    /// [`database_path`] -- which answers for the *app*, not for this store,
+    /// and is a different database in every test.
+    path: PathBuf,
     /// `None` when the database failed to open: the store runs in fallback
     /// mode and every flush is a no-op.
     db: Mutex<Option<AppDatabase>>,
@@ -1565,6 +1570,7 @@ impl SessionStore {
         };
         let store = Self {
             inner: Arc::new(SessionInner {
+                path: path.to_path_buf(),
                 db: Mutex::new(db),
                 pending: Mutex::new(None),
                 next_flush: Mutex::new(Instant::now()),
@@ -1603,6 +1609,11 @@ impl SessionStore {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(layout);
+    }
+
+    /// The database this store was opened on.
+    pub fn database_path(&self) -> &Path {
+        &self.inner.path
     }
 
     /// Returns the worktree identity used by persisted tabs and chats. A
