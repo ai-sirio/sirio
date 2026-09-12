@@ -29,8 +29,8 @@ use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, stable_worktree_id,
 };
 use sirio_project::{
-    OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, current_branch, display_absolute_path,
-    display_path, is_git_repository, numeric_tab_selection, read_head_label,
+    OnceGate, PaneRole, TabKind, UpdateEvent, UpdateState, display_absolute_path, display_path,
+    is_git_repository, numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -5328,10 +5328,7 @@ impl SirioWorkspace {
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         SessionLayout {
             working_directory: self.working_directory.clone(),
-            branch: current_branch(&self.working_directory)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "main".to_string()),
+            branch: self.head_branch_label(),
             tabs: owned_tabs
                 .iter()
                 .map(|tab| SessionTab {
@@ -5391,6 +5388,33 @@ impl SirioWorkspace {
                 })
                 .collect(),
         }
+    }
+
+    /// The branch label a layout is persisted with, read without spawning a
+    /// process: the checkout's own `HEAD` file ([`read_head_label`], #114),
+    /// then the catalog's label for this worktree, then `main`.
+    ///
+    /// This was `current_branch` -- one `git branch --show-current`
+    /// subprocess per call -- and [`Self::layout`] runs twice on every
+    /// worktree switch (parking the outgoing tabs, then `schedule_save`),
+    /// on the UI thread, where a spawn costs 40-50 ms on an idle Windows box
+    /// and was measured at up to a second under the background load the
+    /// previous switch itself started. Together with the synchronous rescan
+    /// in `select_worktree` that was the lag of clicking a sidebar row.
+    fn head_branch_label(&self) -> String {
+        read_head_label(&self.working_directory)
+            .or_else(|| {
+                self.project_catalog
+                    .projects()
+                    .iter()
+                    .flat_map(|project| project.worktrees.iter())
+                    .find(|worktree| {
+                        paths_name_the_same_document(&worktree.path, &self.working_directory)
+                    })
+                    .map(|worktree| worktree.branch.clone())
+                    .filter(|branch| !branch.is_empty())
+            })
+            .unwrap_or_else(|| "main".to_string())
     }
 
     /// Records the current layout; the session store's debounce collapses a
@@ -5784,7 +5808,6 @@ impl SirioWorkspace {
             return;
         }
         let before = self.project_catalog.clone();
-        let selected_path = self.selected_workspace_path();
         let mounted_paths = self.mounted_worktree_paths(None);
         let mut catalog = self.project_catalog.clone();
         cx.spawn(async move |this, cx| {
@@ -5803,6 +5826,11 @@ impl SirioWorkspace {
                 if result.is_ok() {
                     workspace.project_catalog = catalog;
                 }
+                // Read when the result lands, not when the task was spawned:
+                // `select_worktree` now runs this after every switch, and a
+                // second click while discovery was still running must not
+                // have its highlight flipped back to the row before it.
+                let selected_path = workspace.selected_workspace_path();
                 workspace.apply_catalog_refresh(before, result, selected_path, cx);
             });
         })
@@ -7817,15 +7845,36 @@ impl SirioWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        self.refresh_project_for_path(&requested_path, cx);
-        let Some(selected_path) = self
-            .project_catalog
-            .projects()
-            .iter()
-            .flat_map(|project| project.worktrees.iter())
-            .find(|worktree| paths_name_the_same_document(&worktree.path, &requested_path))
-            .map(|worktree| worktree.path.clone())
-        else {
+        let catalog_path_for = |workspace: &Self| {
+            workspace
+                .project_catalog
+                .projects()
+                .iter()
+                .flat_map(|project| project.worktrees.iter())
+                .find(|worktree| paths_name_the_same_document(&worktree.path, &requested_path))
+                .map(|worktree| worktree.path.clone())
+        };
+        // 7d2e9b56 rescans the project on every selection so a worktree
+        // added or removed behind Sirio's back shows up. That rescan is a
+        // `git worktree list` subprocess, and it used to run right here, on
+        // the UI thread, before any click was answered: 40-50 ms on an idle
+        // Windows box, and 0.2-1.9 s measured while the box was busy with
+        // the background work the *previous* click had started (the new
+        // right panel's `git status`, the status bar's usage fetches) -- so
+        // the lag grew click by click. A path the catalog already names,
+        // which is every sidebar click, needs no rescan to be selected; its
+        // rescan runs at the end of the switch on the background executor
+        // (the same path focus-regain takes). Only a path the catalog does
+        // not know -- a control-socket select of a worktree created a
+        // moment ago -- is still discovered synchronously, because the
+        // lookup below needs the answer.
+        let mut selected = catalog_path_for(self);
+        let rescan_in_background = selected.is_some();
+        if selected.is_none() {
+            self.refresh_project_for_path(&requested_path, cx);
+            selected = catalog_path_for(self);
+        }
+        let Some(selected_path) = selected else {
             return Err(format!("unknown worktree: {}", requested_path.display()));
         };
         let old_path = self.working_directory.clone();
@@ -7922,6 +7971,7 @@ impl SirioWorkspace {
                     &mut self.activity,
                     &saved_session_refs,
                     Some(&self.terminal_pane_cache),
+                    Some(&self.session),
                     cx,
                 );
                 let keep_content_ids: HashSet<String> = reused_terminal_panes
@@ -8068,6 +8118,9 @@ impl SirioWorkspace {
             sidebar.set_selected_worktree(&selected_path, cx);
         });
         self.schedule_save(cx);
+        if rescan_in_background {
+            self.refresh_project_for_path_in_background(&selected_path, cx);
+        }
         cx.notify();
         Ok(())
     }
@@ -15758,6 +15811,7 @@ fn restore_tabs(
         activity,
         saved_session_refs,
         None,
+        None,
         cx,
     );
     (tabs, active)
@@ -15859,6 +15913,7 @@ fn restore_tabs_with_terminal_cache(
     activity: &mut AgentActivityModel,
     saved_session_refs: &BTreeMap<String, String>,
     terminal_pane_cache: Option<&TerminalPaneCache<Entity<TerminalView>>>,
+    session: Option<&SessionStore>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize, HashSet<usize>) {
     // Chat launch sources resolve here from offline facts; the registry
@@ -15876,13 +15931,28 @@ fn restore_tabs_with_terminal_cache(
     // it means every completed turn after the *first* restart is silently
     // unsaved (persist_settled_transcript's `self.persistence.as_ref()?`
     // early-returns), and the transcript never restores into `entries`
-    // either. `session::database_path()` is the same deterministic path
-    // `main()` already opened at startup; `worktree_id` matches what
-    // `add_chat_tab` computes for a freshly created chat, so restored and
-    // freshly-opened chats persist under the same key convention.
-    let database_path = session::database_path();
-    let worktree_id =
-        session::persisted_worktree_id_for_database(&database_path, working_directory);
+    // either. `worktree_id` matches what `add_chat_tab` computes for a
+    // freshly created chat, so restored and freshly-opened chats persist
+    // under the same key convention.
+    //
+    // A caller that owns the store hands it over: resolving through the
+    // already-open database answers from the persisted catalog, while the
+    // `None` path re-opens `session::database_path()` and, for a worktree
+    // that database does not name, falls through to `discover_project` --
+    // a `git worktree list` subprocess on the calling thread. That is
+    // tolerable once at boot; `select_worktree` runs this on every click.
+    let (database_path, worktree_id) = match session {
+        Some(session) => (
+            session.database_path().to_path_buf(),
+            session.persisted_worktree_id(working_directory),
+        ),
+        None => {
+            let database_path = session::database_path();
+            let worktree_id =
+                session::persisted_worktree_id_for_database(&database_path, working_directory);
+            (database_path, worktree_id)
+        }
+    };
     let mut tabs = Vec::new();
     let mut active = 0usize;
     let mut reused_terminal_panes = HashSet::new();
@@ -27296,6 +27366,150 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&created);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Clicking a sidebar row lagged -- measured at 0.45 s idle and up to
+    /// 3 s under load on Windows, growing click by click -- because the
+    /// switch spawned three `git` processes on the UI thread: `git worktree
+    /// list` to rescan the project before selecting, and `git branch
+    /// --show-current` twice through `layout` (parking the outgoing tabs,
+    /// then `schedule_save`). Every phase without a spawn stayed at 2-5 ms
+    /// in the same measurements. A switch to a worktree the catalog already
+    /// names now spawns nothing on the calling thread: the branch comes
+    /// from the `HEAD` file and the rescan runs afterwards on the
+    /// background executor. The count is per thread, so sibling tests'
+    /// discovery cannot move it.
+    #[gpui::test]
+    async fn selecting_a_known_worktree_spawns_no_git_on_the_calling_thread(
+        cx: &mut TestAppContext,
+    ) {
+        let repo = committed_test_repo("select-no-git-spawn");
+        // A real linked worktree, so the background rescan that replaces
+        // the synchronous one reports exactly the catalog seeded below.
+        // Relative to the repo: git refuses the `\\?\` form the canonical
+        // temp path carries on Windows.
+        let linked_name = format!(
+            "{}-linked",
+            repo.file_name()
+                .expect("fixture repo has a name")
+                .to_string_lossy()
+        );
+        let linked = repo
+            .parent()
+            .expect("fixture repo has a parent")
+            .join(&linked_name);
+        let _ = std::fs::remove_dir_all(&linked);
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                &format!("../{linked_name}"),
+            ],
+        );
+        cx.set_global(Theme::light());
+        let workspace = cx.new(|cx| {
+            worktree_state_test_workspace(
+                cx,
+                &repo,
+                vec![
+                    session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                    },
+                    session::CatalogWorktree {
+                        branch: "linked".into(),
+                        path: linked.clone(),
+                        is_primary: false,
+                    },
+                ],
+            )
+        });
+        workspace.update(cx, |workspace, _| {
+            // The catalog goes to the database first, as boot does, or the
+            // layout below is dropped as belonging to an unknown worktree.
+            workspace
+                .session
+                .schedule_catalog(&workspace.project_catalog);
+            // A persisted `diff` surface, so the switch restores a tab
+            // without spawning a shell (the CENTER-01 test's reasoning).
+            workspace.session.save_layout_now(&SessionLayout {
+                working_directory: linked.clone(),
+                branch: "linked".into(),
+                tabs: vec![SessionTab {
+                    id: "linked-diff".into(),
+                    title: "Linked".into(),
+                    kind: "diff".into(),
+                    agent_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState::default()],
+            });
+        });
+
+        let spawned_during_switch = workspace.update(cx, |workspace, cx| {
+            let before = sirio_project::git_subprocesses_spawned_on_this_thread();
+            workspace
+                .select_worktree(linked.clone(), None, cx)
+                .expect("select the linked worktree");
+            sirio_project::git_subprocesses_spawned_on_this_thread() - before
+        });
+        assert_eq!(
+            spawned_during_switch, 0,
+            "selecting a worktree the catalog already names must not spawn git on the UI thread"
+        );
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                paths_name_the_same_document(&workspace.working_directory, &linked),
+                "the switch landed on the linked worktree"
+            );
+            assert_eq!(
+                workspace.layout(cx).branch,
+                "linked",
+                "the persisted branch label is read from HEAD, not from a git process"
+            );
+        });
+
+        // The rescan 7d2e9b56 added still happens, off the UI thread: once
+        // it lands the catalog names both worktrees and the selection the
+        // click made is untouched.
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            let paths: Vec<PathBuf> = workspace.project_catalog.projects()[0]
+                .worktrees
+                .iter()
+                .map(|worktree| worktree.path.clone())
+                .collect();
+            for expected in [&repo, &linked] {
+                assert!(
+                    paths
+                        .iter()
+                        .any(|path| paths_name_the_same_document(path, expected)),
+                    "the background rescan kept {} in the catalog: {paths:?}",
+                    expected.display()
+                );
+            }
+            assert!(
+                paths_name_the_same_document(&workspace.working_directory, &linked),
+                "the background rescan must not move the selection"
+            );
+        });
+
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &format!("../{linked_name}"),
+            ],
+        );
+        let _ = std::fs::remove_dir_all(&linked);
         let _ = std::fs::remove_dir_all(&repo);
     }
 
