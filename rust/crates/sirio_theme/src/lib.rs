@@ -263,7 +263,9 @@ fn bezel_theme_for(base_color: BaseColor, appearance: Appearance) -> bezel::them
             Appearance::Light => bezel::theme::Appearance::Light,
         },
     );
-    if base_color == BaseColor::Notte && appearance == Appearance::Dark {
+    if base_color == BaseColor::Neutral {
+        paint_neutral_ladder(&mut theme, appearance);
+    } else if base_color == BaseColor::Notte && appearance == Appearance::Dark {
         paint_notte_ladder(&mut theme);
     }
     theme
@@ -295,6 +297,29 @@ fn paint_notte_ladder(theme: &mut bezel::theme::Theme) {
     theme.surface_dialog = opaque_hsla(ladder.raised);
     theme.surface_overlay = opaque_hsla(ladder.raised);
     theme.surface_raised_hover = opaque_hsla(ladder.raised_hover);
+}
+
+/// Neutral's own surface ladder, same mechanism as [`paint_notte_ladder`].
+///
+/// Approved shell values (2026-09-12): sidebars `#191919`, central panes
+/// `#141414`, chat `#232323`, composer `#313131`, hover `#363636` as a
+/// solid fill; light mirrors the same steps. The tint stays `NONE` — this
+/// moves lightness only, so bezel widgets (via `to_bezel_theme`) and Sirio
+/// tokens see one ladder by construction.
+fn paint_neutral_ladder(theme: &mut bezel::theme::Theme, appearance: Appearance) {
+    let (page, surface, raised, raised_hover, input, hover) = match appearance {
+        Appearance::Dark => (0x141414, 0x191919, 0x232323, 0x363636, 0x313131, 0x363636),
+        Appearance::Light => (0xF8F8F8, 0xE8E8E8, 0xECECEC, 0xD9D9D9, 0xFFFFFF, 0xD9D9D9),
+    };
+    theme.bg = opaque_hsla(page);
+    theme.surface = opaque_hsla(surface);
+    theme.surface_card = opaque_hsla(surface);
+    theme.surface_raised = opaque_hsla(raised);
+    theme.surface_dialog = opaque_hsla(raised);
+    theme.surface_overlay = opaque_hsla(raised);
+    theme.surface_raised_hover = opaque_hsla(raised_hover);
+    theme.input_bg = opaque_hsla(input);
+    theme.element_hover = opaque_hsla(hover);
 }
 
 /// Opaque `0xRRGGBB` as the `Hsla` bezel's tokens are stored in.
@@ -338,8 +363,9 @@ impl ThemeColors {
         //
         // Chosen: saturation 0.70 and lightness 0.60/0.40, against two
         // constraints rather than taste. Each variant clears WCAG AA on the
-        // surface it is painted on (6.62:1 dark, 4.61:1 light — the light one
-        // is the first lightness step that does), held by
+        // surface it is painted on (6.68:1 dark, 4.71:1 light against the
+        // Neutral ladder — the light step was re-derived when the light
+        // surface moved to `#E8E8E8`), held by
         // `brand_coral_clears_contrast_on_its_own_surface`. And both stay clear of
         // every `AgentBrandColor`, held by
         // `worktree_activity_colours_name_the_agent_and_never_a_status`: a tab
@@ -348,7 +374,7 @@ impl ThemeColors {
         // `#D97757` is the near one at 22 units, which is also why the obvious
         // shortcut — reusing our own Swift's Claude fill for the coral — is
         // the one coral this app cannot have.
-        let brand_coral = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0xAD581F), appearance);
+        let brand_coral = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0x9E5119), appearance);
         // The state hues are not a fresh design problem: Sirio already
         // shipped them. These four are the sRGB components of
         // `App/AppTheme.swift`'s `tabNeedsInput`, `tabDone`, `tabError` and
@@ -431,6 +457,20 @@ impl ThemeColors {
         // survive as calls rather than as tokens of their own.
         let overlay = wash(VEIL_FAINT, appearance);
         let overlay_strong = wash(VEIL_MID, appearance);
+        // Neutral's ladder replaces two veil rules with solid fills: the
+        // terminal follows the page (central panes `#141414`), and both
+        // hovers are the approved `#363636` / `#D9D9D9` everywhere.
+        let terminal_surface = if base == BaseColor::Neutral {
+            Rgba::from(bezel.bg)
+        } else {
+            terminal_surface
+        };
+        let (overlay, overlay_strong) = if base == BaseColor::Neutral {
+            let hover = Self::adaptive(rgb_hex(0x363636), rgb_hex(0xD9D9D9), appearance);
+            (hover, hover)
+        } else {
+            (overlay, overlay_strong)
+        };
         // A selection wash sits under its own text, so it has two jobs at
         // once: be visible, and not swallow the glyphs. The top rung of the
         // veil ladder is the strongest wash that still does both in either
@@ -1503,11 +1543,8 @@ impl Theme {
                 let Some(preference) = preference else { return };
                 if cx.global::<Theme>().mode == ThemeMode::System {
                     let current = *cx.global::<Theme>();
-                    let mut next = Theme::for_appearance(
-                        ThemeMode::System,
-                        preference,
-                        current.base_color,
-                    );
+                    let mut next =
+                        Theme::for_appearance(ThemeMode::System, preference, current.base_color);
                     next.typography = current.typography;
                     let next = next.with_translucency_at(
                         current.translucency_enabled,
@@ -1522,11 +1559,7 @@ impl Theme {
     }
 
     /// Returns a theme resolved for a requested mode and system appearance.
-    pub fn for_mode(
-        mode: ThemeMode,
-        system_appearance: WindowAppearance,
-        base: BaseColor,
-    ) -> Self {
+    pub fn for_mode(mode: ThemeMode, system_appearance: WindowAppearance, base: BaseColor) -> Self {
         let appearance = resolve_mode(mode, system_appearance);
         Self::for_appearance(mode, appearance, base)
     }
@@ -1960,13 +1993,19 @@ mod tests {
     /// where the values come from now lives in `docs/THEME-PROVENANCE.md`.
     #[test]
     fn dark_palette_comes_from_bezel() {
-        assert_palette_comes_from_bezel(Appearance::Dark, bezel::theme::Theme::dark());
+        assert_palette_comes_from_bezel(
+            Appearance::Dark,
+            bezel_theme_for(BaseColor::Neutral, Appearance::Dark),
+        );
     }
 
     /// The light palette is bezel's, for the same reason.
     #[test]
     fn light_palette_comes_from_bezel() {
-        assert_palette_comes_from_bezel(Appearance::Light, bezel::theme::Theme::light());
+        assert_palette_comes_from_bezel(
+            Appearance::Light,
+            bezel_theme_for(BaseColor::Neutral, Appearance::Light),
+        );
     }
 
     /// Every token Sirio takes from bezel, checked against bezel itself.
@@ -2021,23 +2060,61 @@ mod tests {
     }
 
     #[test]
-    fn neutral_reproduces_the_palette_shipped_before_base_colours() {
-        // The upgrade guard. `Tint::NONE` is bezel's shipped grey, so an
-        // install that has never touched the new setting must paint exactly
-        // what it painted yesterday — every token, both appearances.
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            let neutral = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
-            let bezel = match appearance {
-                Appearance::Dark => bezel::theme::Theme::dark(),
-                Appearance::Light => bezel::theme::Theme::light(),
-            };
-            assert_eq!(
-                neutral.bg,
-                Rgba::from(bezel.bg),
-                "{appearance:?} bg is bezel's untinted page"
-            );
-            assert_eq!(neutral.surface, Rgba::from(bezel.surface));
-            assert_eq!(neutral.border, Rgba::from(bezel.border));
+    fn neutral_ladder_is_the_approved_values() {
+        // Neutral carries its own approved ladder since 2026-09-12 (sidebars
+        // `#191919`, central panes `#141414`, chat `#232323`, composer
+        // `#313131`, solid hover `#363636`; light mirrored). Written out
+        // rather than read from the painter, so a change fails here instead
+        // of restyling every install quietly — the same contract Notte's
+        // ladder test holds. `Tint::NONE` still holds (see
+        // `neutral_is_bezels_shipped_grey`): the ladder moves lightness only.
+        for (appearance, page, surface, raised, raised_hover, input, hover) in [
+            (
+                Appearance::Dark,
+                0x141414,
+                0x191919,
+                0x232323,
+                0x363636,
+                0x313131,
+                0x363636,
+            ),
+            (
+                Appearance::Light,
+                0xF8F8F8,
+                0xE8E8E8,
+                0xECECEC,
+                0xD9D9D9,
+                0xFFFFFF,
+                0xD9D9D9,
+            ),
+        ] {
+            let bezel = bezel_theme_for(BaseColor::Neutral, appearance);
+            for (name, token, hex) in [
+                ("bg", bezel.bg, page),
+                ("surface", bezel.surface, surface),
+                ("surface_card", bezel.surface_card, surface),
+                ("surface_raised", bezel.surface_raised, raised),
+                ("surface_dialog", bezel.surface_dialog, raised),
+                ("surface_overlay", bezel.surface_overlay, raised),
+                (
+                    "surface_raised_hover",
+                    bezel.surface_raised_hover,
+                    raised_hover,
+                ),
+                ("input_bg", bezel.input_bg, input),
+                ("element_hover", bezel.element_hover, hover),
+            ] {
+                assert_eq!(token, opaque_hsla(hex), "{appearance:?} {name}");
+            }
+            let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
+            assert_eq!(sirio.bg, Rgba::from(opaque_hsla(page)));
+            assert_eq!(sirio.surface, Rgba::from(opaque_hsla(surface)));
+            assert_eq!(sirio.terminal_surface, Rgba::from(opaque_hsla(page)));
+            assert_eq!(sirio.surface_raised, Rgba::from(opaque_hsla(raised)));
+            assert_eq!(sirio.input_bg, Rgba::from(opaque_hsla(input)));
+            assert_eq!(sirio.element_hover, Rgba::from(opaque_hsla(hover)));
+            assert_eq!(sirio.overlay, Rgba::from(opaque_hsla(hover)));
+            assert_eq!(sirio.overlay_strong, Rgba::from(opaque_hsla(hover)));
         }
     }
 
@@ -2065,9 +2142,11 @@ mod tests {
                 "{appearance:?} coral is Sirio's, not bezel's to rotate"
             );
             if appearance == Appearance::Light {
-                assert_eq!(
+                // Tinted panes keep the paper terminal; Neutral follows its
+                // own approved page instead.
+                assert_ne!(
                     slate.terminal_surface, neutral.terminal_surface,
-                    "light terminal remains paper despite the pane tint"
+                    "light: tinted panes keep paper, neutral follows its page"
                 );
             }
         }
@@ -2078,10 +2157,18 @@ mod tests {
         for base in BaseColor::ALL {
             let theme = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, base);
 
-            assert_eq!(
-                theme.terminal_surface, theme.surface,
-                "dark terminal background must match the pane for {base:?}"
-            );
+            if base == BaseColor::Neutral {
+                // Neutral's central panes are their own approved plane.
+                assert_eq!(
+                    theme.terminal_surface, theme.bg,
+                    "neutral dark terminal is the central pane"
+                );
+            } else {
+                assert_eq!(
+                    theme.terminal_surface, theme.surface,
+                    "dark terminal background must match the pane for {base:?}"
+                );
+            }
         }
     }
 
@@ -2111,8 +2198,7 @@ mod tests {
         let translucent = theme.with_translucency(true);
         assert_eq!(translucent.base_color, BaseColor::Slate);
         assert_eq!(
-            translucent.colors.border,
-            theme.colors.border,
+            translucent.colors.border, theme.colors.border,
             "a non-faded token keeps the tinted value"
         );
     }
@@ -2293,13 +2379,8 @@ mod tests {
         // `install` recovers both from the previously installed theme. This
         // is the pure half of that contract: rebuilding for a new mode from
         // an existing theme's fields must carry the choice across.
-        let installed =
-            Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Zinc);
-        let next = Theme::for_appearance(
-            ThemeMode::Light,
-            Appearance::Light,
-            installed.base_color,
-        );
+        let installed = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Zinc);
+        let next = Theme::for_appearance(ThemeMode::Light, Appearance::Light, installed.base_color);
         assert_eq!(next.base_color, BaseColor::Zinc);
         assert_ne!(
             next.colors.bg,
@@ -2398,10 +2479,8 @@ mod tests {
         // every call site uses. `text_muted` stands in for the text ladder
         // here because the primary rung is softened —
         // `body_text_is_softened_off_bezels_full_contrast` covers that one.
-        for (appearance, bezel) in [
-            (Appearance::Dark, bezel::theme::Theme::dark()),
-            (Appearance::Light, bezel::theme::Theme::light()),
-        ] {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let bezel = bezel_theme_for(BaseColor::Neutral, appearance);
             let sirio = ThemeColors::for_appearance(appearance, BaseColor::Neutral);
             assert_eq!(sirio.surface, Rgba::from(bezel.surface));
             assert_eq!(sirio.text_muted, Rgba::from(bezel.text_muted));
@@ -2863,7 +2942,9 @@ mod tests {
     /// near-black sidebar.
     #[test]
     fn fading_an_already_translucent_surface_does_not_make_it_more_opaque() {
-        let base = Theme::dark();
+        // Pinned on Slate: Neutral's input is an opaque fill since its own
+        // ladder, so the veil regression this guards needs a tinted base.
+        let base = Theme::for_appearance(ThemeMode::Dark, Appearance::Dark, BaseColor::Slate);
         assert!(
             base.input_bg.a < 0.5,
             "precondition: dark input_bg is a veil, not a fill (got {})",
@@ -2949,7 +3030,10 @@ mod tests {
             let translucent = base.with_translucency(true);
 
             assert!(translucent.translucency_enabled);
-            let faded = |s: Rgba| Rgba { a: s.a * opacity, ..s };
+            let faded = |s: Rgba| Rgba {
+                a: s.a * opacity,
+                ..s
+            };
             assert_eq!(translucent.surface, faded(base.surface));
             assert_eq!(translucent.surface_raised, faded(base.surface_raised));
             assert_eq!(translucent.input_bg, faded(base.input_bg));
@@ -2986,8 +3070,18 @@ mod tests {
     /// frame over white washed the dark status strip to light grey.
     #[test]
     fn translucent_shell_keeps_wcag_aa_over_an_opposing_desktop() {
-        let white = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-        let black = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        let white = Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let black = Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
         for (label, theme, desktop) in [
             ("dark", Theme::dark().with_translucency(true), white),
             ("light", Theme::light().with_translucency(true), black),
@@ -3335,7 +3429,11 @@ mod tests {
     /// assert.
     #[test]
     fn theme_for_mode_resolves_for_the_appearance_it_was_asked_for() {
-        let theme = Theme::for_mode(ThemeMode::Light, WindowAppearance::Light, BaseColor::Neutral);
+        let theme = Theme::for_mode(
+            ThemeMode::Light,
+            WindowAppearance::Light,
+            BaseColor::Neutral,
+        );
         assert_eq!(theme.appearance, Appearance::Light);
 
         let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark, BaseColor::Neutral);

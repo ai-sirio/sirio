@@ -18,7 +18,8 @@ use bezel::theme::Tint;
 /// One of bezel's five base colours, or Sirio's own preset.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BaseColor {
-    /// bezel's shipped grey, carrying no hue at all.
+    /// bezel's shipped grey, carrying no hue at all. Both appearances paint
+    /// the approved surface ladder on top (see `paint_neutral_ladder`).
     #[default]
     Neutral,
     Stone,
@@ -155,7 +156,12 @@ mod tests {
     #[test]
     fn notte_tint_is_the_mean_of_its_own_ladder() {
         let ladder = NOTTE_LADDER;
-        let rungs = [ladder.page, ladder.surface, ladder.raised, ladder.raised_hover];
+        let rungs = [
+            ladder.page,
+            ladder.surface,
+            ladder.raised,
+            ladder.raised_hover,
+        ];
         let (hue_sum, chroma_sum) = rungs.iter().fold((0.0_f32, 0.0_f32), |(h, c), &hex| {
             let (_, chroma, hue) = oklch_of(hex);
             (h + hue, c + chroma)

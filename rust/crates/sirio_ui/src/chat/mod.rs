@@ -5957,9 +5957,7 @@ impl Chat {
             })
             .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
             .child(div().text_color(theme.text).child(label))
-            .when(mode_selectable, |this| {
-                this.child(picker_chevron(theme))
-            });
+            .when(mode_selectable, |this| this.child(picker_chevron(theme)));
 
         let selected_model_name = self
             .selected_model
@@ -7479,7 +7477,7 @@ impl Render for Chat {
             .flex()
             .flex_col()
             .items_center()
-            .bg(theme.surface)
+            .bg(theme.surface_raised)
             .on_action(cx.listener(Self::send_action))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::copy_transcript))
@@ -7671,11 +7669,12 @@ impl Render for Chat {
                                     .get(entry_index)
                                     .cloned()
                                     .map(|entry| {
-                                        let bottom_padding = if matches!(entry, Entry::TurnFooter(_)) {
-                                            TURN_BOTTOM_PADDING
-                                        } else {
-                                            10.0
-                                        };
+                                        let bottom_padding =
+                                            if matches!(entry, Entry::TurnFooter(_)) {
+                                                TURN_BOTTOM_PADDING
+                                            } else {
+                                                10.0
+                                            };
                                         // The heading is the processor's to
                                         // pass in: it holds `&this.entries`.
                                         let day_heading = match this.entries.get(entry_index) {
@@ -8539,10 +8538,7 @@ mod tests {
         for theme in [bezel::theme::Theme::dark(), bezel::theme::Theme::light()] {
             let edge = composer_field_edge(&theme);
             // Opaque: the bezel ring underneath must not show through.
-            assert_eq!(
-                edge.a, 1.0,
-                "the field edge must be opaque, got {edge:?}"
-            );
+            assert_eq!(edge.a, 1.0, "the field edge must be opaque, got {edge:?}");
             // Distinct from the focus ring it covers, in both appearances
             // (white ring on dark, black ring on light).
             let gap = (edge.l - theme.ring.l).abs();
