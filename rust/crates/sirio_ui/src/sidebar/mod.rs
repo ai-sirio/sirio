@@ -4368,10 +4368,40 @@ impl Render for Sidebar {
                                 })
                                 .child(
                                     div()
-                                        .text_size(theme.typography.headline)
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.text)
-                                        .child(format!("New worktree in {}", prompt.project_name)),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_size(theme.typography.headline)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.text)
+                                                .child(format!(
+                                                    "New worktree in {}",
+                                                    prompt.project_name
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("worktree-prompt-close")
+                                                .px(px(6.0))
+                                                .py(px(2.0))
+                                                .rounded(theme.radii.control)
+                                                .text_size(theme.typography.headline)
+                                                .text_color(theme.text_muted)
+                                                .cursor_pointer()
+                                                .hover(|this| this.text_color(theme.text))
+                                                .on_click({
+                                                    let close_entity = prompt_owner.clone();
+                                                    move |_, _, cx| {
+                                                        close_entity.update(cx, |sidebar, cx| {
+                                                            sidebar.cancel_worktree_prompt(cx);
+                                                        });
+                                                    }
+                                                })
+                                                .child("×"),
+                                        ),
                                 )
                                 .child(Self::render_worktree_prompt_field(
                                     "worktree-prompt-branch",
@@ -4435,10 +4465,29 @@ impl Render for Sidebar {
                                 })
                                 .child(
                                     div()
-                                        .text_size(theme.typography.caption2)
-                                        .text_color(theme.text_faint)
+                                        .flex()
+                                        .flex_row()
+                                        .justify_end()
                                         .child(
-                                            "Tab to switch field · Enter to create · Esc to cancel",
+                                            div()
+                                                .id("worktree-prompt-confirm")
+                                                .px(px(12.0))
+                                                .py(px(6.0))
+                                                .rounded(theme.radii.control)
+                                                .bg(theme.element_active)
+                                                .text_size(theme.typography.footnote)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.text)
+                                                .cursor_pointer()
+                                                .on_click({
+                                                    let confirm_entity = prompt_owner.clone();
+                                                    move |_, _, cx| {
+                                                        confirm_entity.update(cx, |sidebar, cx| {
+                                                            sidebar.confirm_worktree_prompt(cx);
+                                                        });
+                                                    }
+                                                })
+                                                .child("Create"),
                                         ),
                                 ),
                         ),
