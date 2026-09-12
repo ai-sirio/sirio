@@ -335,9 +335,6 @@ pub enum SidebarContextAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarDisabledReason {
     AlreadyGitProject,
-    /// #372: the primary checkout cannot be `git worktree remove`d —
-    /// deleting its directory would destroy the repository itself.
-    PrimaryWorktree,
     /// The branch's upstream is still being looked up.
     ResolvingUpstream,
     /// The branch tracks no remote branch, so there is nothing to delete
@@ -349,7 +346,6 @@ impl std::fmt::Display for SidebarDisabledReason {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyGitProject => formatter.write_str("Git is already initialized"),
-            Self::PrimaryWorktree => formatter.write_str("The primary worktree cannot be removed"),
             Self::ResolvingUpstream => formatter.write_str("Checking the remote…"),
             Self::NoUpstreamBranch => formatter.write_str("No remote branch to delete"),
         }
@@ -1154,21 +1150,22 @@ impl Sidebar {
                     // see `open_worktree_close_menu`). #372: the primary checkout
                     // cannot be removed — `git worktree remove` refuses the
                     // main worktree and deleting its directory would destroy
-                    // the repository — so both stay visible but disabled
-                    // with that reason; the remote variant also needs a
-                    // known upstream.
+                    // the repository — so both stay visible but disabled,
+                    // without a reason: the sentence did not fit beside the
+                    // label in the 240px menu. The remote variant also needs
+                    // a known upstream.
                     item(
                         "Remove Worktree",
                         SidebarContextAction::RemoveWorktree,
                         !is_primary,
-                        is_primary.then_some(SidebarDisabledReason::PrimaryWorktree),
+                        None,
                     ),
                     item(
                         "Remove Worktree and Remote Branch",
                         SidebarContextAction::RemoveWorktreeAndRemoteBranch,
                         !is_primary && remote_tracking.upstream().is_some(),
                         if *is_primary {
-                            Some(SidebarDisabledReason::PrimaryWorktree)
+                            None
                         } else {
                             remote_tracking.disabled_reason()
                         },
@@ -5684,9 +5681,10 @@ mod tests {
     }
 
     /// #372: the primary checkout cannot be `git worktree remove`d, so its
-    /// context-menu entries stay visible but disabled with a reason instead
-    /// of offering the destructive choice; any other worktree stays enabled,
-    /// and the remote variant additionally needs a known upstream.
+    /// context-menu entries stay visible but disabled — without a reason,
+    /// which overflowed the menu — instead of offering the destructive
+    /// choice; any other worktree stays enabled, and the remote variant
+    /// additionally needs a known upstream.
     #[test]
     fn only_a_non_primary_worktree_offers_removal() {
         let find = |items: &[SidebarContextItem], action: SidebarContextAction| {
@@ -5717,10 +5715,9 @@ mod tests {
                 !item.enabled,
                 "{action:?} must be disabled on the primary checkout"
             );
-            assert_eq!(
-                item.disabled_reason,
-                Some(SidebarDisabledReason::PrimaryWorktree),
-                "the disabled primary entry must say why"
+            assert!(
+                item.disabled_reason.is_none(),
+                "the disabled primary entry carries no reason: it does not fit the 240px menu (#372)"
             );
         }
 

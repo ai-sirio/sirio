@@ -86,9 +86,6 @@ impl PaletteDisabledReason {
             Self::Window(WindowCommandDisabledReason::NoActiveFile) => "No active file",
             Self::Window(WindowCommandDisabledReason::NoActiveBrowser) => "No active browser",
             Self::Sidebar(SidebarDisabledReason::AlreadyGitProject) => "Git is already initialized",
-            Self::Sidebar(SidebarDisabledReason::PrimaryWorktree) => {
-                "The primary worktree cannot be removed"
-            }
             Self::Sidebar(SidebarDisabledReason::ResolvingUpstream) => "Checking the remote…",
             Self::Sidebar(SidebarDisabledReason::NoUpstreamBranch) => "No remote branch to delete",
             Self::NoActiveTab => "No active tab",
