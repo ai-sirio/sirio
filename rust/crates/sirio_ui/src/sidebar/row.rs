@@ -210,6 +210,23 @@ impl Sidebar {
         }
     }
 
+    /// The title's line height at the persisted interface font size: the
+    /// card rhythm above, shifted by the same delta the title's own size
+    /// takes, so a larger interface font gets a taller line instead of a
+    /// clipped one.
+    pub(super) fn title_line_height(typography: &Typography) -> Pixels {
+        typography.scaled(ROW_TITLE_LINE_HEIGHT)
+    }
+
+    /// The height a row is actually drawn at: the kind's rhythm plus
+    /// whatever its title line grew by. `row_min_height` stays the rhythm at
+    /// the default interface size, which is what the conformance inventory
+    /// pins; only the drawn height follows the setting.
+    pub(super) fn row_drawn_height(row: &SidebarRow, typography: &Typography) -> f32 {
+        Self::row_min_height(row) + f32::from(Self::title_line_height(typography))
+            - ROW_TITLE_LINE_HEIGHT
+    }
+
     /// The structural row handed to bezel. Sirio keeps the data and content;
     /// bezel owns branch/leaf identity, indentation, disclosure and chrome.
     /// The bezel tree shape of one row. Projects retain their disclosure;
@@ -453,7 +470,7 @@ impl Sidebar {
         // something for that second line; every other row is single-line at
         // the 32px action-row height. See `has_sub_line`.
         let has_sub_line = Self::has_sub_line(&row);
-        let row_min_height = Self::row_min_height(&row);
+        let row_height = Self::row_drawn_height(&row, &theme.typography);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
         // per distinct running agent, 3px apart, 7px clear of the title. It
         // takes its width out of the title's, so a busy worktree truncates
@@ -519,7 +536,7 @@ impl Sidebar {
             .debug_selector(move || row_debug_selector)
             .group(hover_group.clone())
             .relative()
-            .h(px(row_min_height))
+            .h(px(row_height))
             .w_full()
             .px(px(12.0))
             .py(px(7.0))
@@ -638,7 +655,15 @@ impl Sidebar {
             .overflow_hidden()
             .text_ellipsis()
             .debug_selector(move || format!("sidebar-row-title-{row_id}"))
-            .line_height(px(ROW_TITLE_LINE_HEIGHT))
+            // Named, not inherited. The element used to leave both the size
+            // and the colour to its ancestry, and nothing in the sidebar's
+            // ancestry sets either -- the window root establishes only
+            // `font_family` -- so the branch name fell through to gpui's
+            // default `TextStyle`: a fixed 16px that Settings -> Appearance
+            // -> Interface font size could not move. See `title_color` for
+            // the same defect, and the same fix, on the colour.
+            .text_size(theme.typography.scaled(ROW_TITLE_FONT_SIZE))
+            .line_height(Self::title_line_height(&theme.typography))
             .font_weight(if is_project {
                 FontWeight::SEMIBOLD
             } else {
