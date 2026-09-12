@@ -26,8 +26,12 @@ opencode.json
 __pycache__/
 *.pyc
 
-# Local tool/IDE/planning artifacts — not shared repo content
+# Local tool/IDE/planning artifacts — not shared repo content. docs/ stays
+# local except the release notes: release.yml refuses a tag whose
+# docs/release-notes/<version>.md is missing, so that one directory is repo
+# content (a parent excluded with `/docs/` could not be re-included).
 /.codegraph/
-/docs/
+/docs/*
+!/docs/release-notes/
 /output/
 /plans/
