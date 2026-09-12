@@ -330,8 +330,8 @@ pub enum SidebarContextAction {
     NewTab(NewTabAction),
 }
 
-/// Typed explanation for an unavailable context-menu command. The reason is
-/// rendered beside the disabled item instead of leaving a grey mystery row.
+/// Typed explanation for an unavailable context-menu command. Only the
+/// command palette renders it; the sidebar menus just grey the item out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarDisabledReason {
     AlreadyGitProject,
@@ -3144,15 +3144,10 @@ impl Sidebar {
                     });
                 });
             }
+            // The disabled reason is not rendered here: it did not fit
+            // beside the label in this card. The command palette still
+            // shows it.
             row = row.child(item.label);
-            if let Some(reason) = item.disabled_reason {
-                row = row.child(
-                    div()
-                        .text_size(theme.typography.scaled(11.0))
-                        .text_color(bezel_theme.text_faint)
-                        .child(reason.to_string()),
-                );
-            }
             card = card.child(row);
         }
         // F-SID-15: `menu_at` owns the deferred priority-1 layer, so later
@@ -3288,25 +3283,16 @@ impl Sidebar {
             bezel_theme.text_faint
         })
         .child("Remove from disk and remote branch");
-        match remote_reason {
-            Some(reason) => {
-                remote_row = remote_row
-                    .cursor_default()
-                    .bg(gpui::transparent_black())
-                    .child(
-                        div()
-                            .text_size(theme.typography.scaled(11.0))
-                            .text_color(bezel_theme.text_faint)
-                            .child(reason.to_string()),
-                    );
-            }
-            None => {
-                remote_row = remote_row.on_click(move |_, window, cx| {
-                    remote_entity.update(cx, |sidebar, cx| {
-                        sidebar.choose_worktree_close(true, window, cx)
-                    });
+        // Disabled without the reason beside the label: it did not fit
+        // the card. The command palette still shows it.
+        if remote_reason.is_some() {
+            remote_row = remote_row.cursor_default().bg(gpui::transparent_black());
+        } else {
+            remote_row = remote_row.on_click(move |_, window, cx| {
+                remote_entity.update(cx, |sidebar, cx| {
+                    sidebar.choose_worktree_close(true, window, cx)
                 });
-            }
+            });
         }
 
         // The heading names the target at the moment of choice (#372), in
