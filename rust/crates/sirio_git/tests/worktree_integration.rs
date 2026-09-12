@@ -411,28 +411,120 @@ fn remove_worktree_keeps_branch_when_deletion_is_refused() {
 }
 
 #[test]
-fn remove_refuses_a_worktree_with_uncommitted_changes() {
+fn remove_forces_through_uncommitted_changes() {
     let repo = make_repo("dirty");
     let path = repo.path().with_extension("wt-dirty");
     create_worktree(repo.path(), "feature-x", &path, None).expect("create");
     std::fs::write(path.join("uncommitted.txt"), "work in progress\n").expect("write");
 
-    let error =
-        remove_worktree(repo.path(), &path, "feature-x").expect_err("git refuses by default");
+    // The confirmation dialog in the UI is the safety net now: after it,
+    // removal must go through even with uncommitted work in the checkout.
+    remove_worktree(repo.path(), &path, "feature-x").expect("removal is forced through");
 
-    assert!(
-        matches!(error, WorktreeError::Git(_)),
-        "the refusal is surfaced, not forced through: {error}"
-    );
+    assert!(!path.exists(), "the dirty checkout directory is gone");
     assert_eq!(
         porcelain_worktree_count(repo.path()),
-        2,
-        "the worktree still exists after the refused removal"
+        1,
+        "only the primary worktree remains"
     );
+}
+
+#[test]
+fn remove_deletes_the_directory_when_git_refuses() {
+    let repo = make_repo("locked");
+    let path = repo.path().with_extension("wt-locked");
+    create_worktree(repo.path(), "feature-x", &path, None).expect("create");
+    // A locked worktree is one thing a single `--force` cannot remove, so
+    // git's refusal is deterministic here; the fallback must still take the
+    // checkout off disk.
+    let path_arg = porcelain_spelling(&path);
+    git(repo.path(), &["worktree", "lock", &path_arg]);
+
+    remove_worktree(repo.path(), &path, "feature-x").expect("the fallback removes the checkout");
+
+    assert!(!path.exists(), "the locked checkout directory is gone");
+}
+
+#[test]
+fn remove_never_deletes_a_directory_that_is_not_a_checkout() {
+    let repo = make_repo("not-a-checkout");
+    // A plain directory with a file in it, never registered as a worktree:
+    // git refuses, and the disk fallback must refuse too instead of
+    // `rm -rf`-ing whatever a stale sidebar row happened to point at.
+    let path = repo.path().with_extension("plain-dir");
+    std::fs::create_dir_all(&path).expect("create dir");
+    std::fs::write(path.join("keep.txt"), "not yours\n").expect("write");
+
+    let error = remove_worktree(repo.path(), &path, "feature-x")
+        .expect_err("a directory git does not know is left alone");
+
+    assert!(matches!(error, WorktreeError::Git(_)), "{error}");
     assert!(
-        path.join("uncommitted.txt").exists(),
-        "the uncommitted work survives"
+        path.join("keep.txt").exists(),
+        "the unrelated directory and its contents survive"
     );
+    std::fs::remove_dir_all(&path).expect("cleanup");
+}
+
+#[test]
+fn remove_never_deletes_another_repositorys_checkout() {
+    // The disk fallback runs *because* git refused, and the commonest
+    // reason for a refusal is that the path is not this repository's
+    // worktree at all. "Is it a linked checkout" is therefore not enough
+    // on its own: a checkout of a different repository answers yes.
+    let ours = make_repo("foreign-ours");
+    let theirs = make_repo("foreign-theirs");
+    let foreign = theirs.path().with_extension("wt-foreign");
+    create_worktree(theirs.path(), "feature-x", &foreign, None).expect("create");
+    std::fs::write(
+        foreign.join("their-work.txt"),
+        "someone else's work
+",
+    )
+    .expect("write");
+    assert!(
+        foreign.join(".git").is_file(),
+        "the fixture must pass the weaker 'is a linked checkout' test"
+    );
+
+    let error = remove_worktree(ours.path(), &foreign, "feature-x")
+        .expect_err("another repository's checkout is not ours to delete");
+
+    assert!(matches!(error, WorktreeError::Git(_)), "{error}");
+    assert!(
+        foreign.join("their-work.txt").exists(),
+        "the other repository's checkout and its uncommitted work survive"
+    );
+    let _ = std::fs::remove_dir_all(&foreign);
+}
+
+#[test]
+fn remove_never_deletes_a_checkout_that_holds_the_repository() {
+    // A checkout that contains the repository would take the repository
+    // with it. Nothing creates this shape on purpose; the guard is there
+    // because the fallback is the one path that deletes recursively.
+    let repo = make_repo("contains-repo");
+    let parent = repo
+        .path()
+        .parent()
+        .expect("repo has a parent")
+        .to_path_buf();
+    std::fs::write(
+        parent.join(".git"),
+        format!(
+            "gitdir: {}
+",
+            repo.path().join(".git").display()
+        ),
+    )
+    .expect("write a checkout marker above the repository");
+
+    let error = remove_worktree(repo.path(), &parent, "feature-x")
+        .expect_err("a directory holding the repository is never deleted");
+
+    assert!(matches!(error, WorktreeError::Git(_)), "{error}");
+    assert!(repo.path().exists(), "the repository survives");
+    let _ = std::fs::remove_file(parent.join(".git"));
 }
 
 #[test]

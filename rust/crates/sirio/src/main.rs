@@ -8,6 +8,9 @@ use gpui::{
     div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use sirio_acp::AgentCommand;
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
@@ -72,6 +75,45 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+/// How many watcher paths may queue between two drains.
+///
+/// The recursive watch reports every write under the checkout, and a build
+/// produces them faster than the 300ms drain consumes them. The queue only
+/// ever answers one question -- "did anything change" -- so paths past this
+/// point add nothing a drain would act on differently, and dropping them
+/// keeps a build from growing the buffer without bound.
+const FILES_WATCH_PENDING_LIMIT: usize = 4096;
+
+/// Whether one watcher path is worth a repository walk.
+///
+/// `ignored` is the checkout's ignore set from the last completed walk, when
+/// there is one. Ignored output is the bulk of what a recursive watch sees --
+/// `target/`, `node_modules/` -- and none of it changes the tree the panel
+/// draws, so it must not buy a walk. With no snapshot yet nothing is known
+/// and the path is kept: the first walk is about to run regardless.
+fn files_watch_path_is_relevant(
+    root: &Path,
+    changed: &Path,
+    ignored: Option<&FilesSnapshot>,
+) -> bool {
+    let Ok(relative) = changed.strip_prefix(root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    if first.as_os_str() != ".git" {
+        return !ignored.is_some_and(|snapshot| snapshot.ignores(relative));
+    }
+    let Some(second) = components.next() else {
+        return false;
+    };
+    second.as_os_str() == "HEAD"
+        || second.as_os_str() == "index"
+        || (second.as_os_str() == "refs" && components.next().is_some())
+}
 
 mod account_login;
 mod command_palette;
@@ -4215,6 +4257,22 @@ struct SirioWorkspace {
     /// Unbounded: one tree per worktree visited this run -- bound it if a
     /// session with many large worktrees shows the memory.
     files_snapshots: HashMap<PathBuf, FilesSnapshot>,
+    /// Worktrees currently being populated by the bounded background cache.
+    files_snapshot_in_flight: HashSet<PathBuf>,
+    /// Worktrees whose last precache walk failed -- a checkout removed from
+    /// disk, or one this process cannot read.
+    ///
+    /// Without this the precache has no absorbing state for failure: a walk
+    /// that errors caches nothing, so the path stays eligible and the
+    /// completion handler's own `precache_files_snapshots` call spawns it
+    /// again at once. Measured on a worktree deleted mid-session, that ran
+    /// 190k walks without parking. A path leaves this set only on evidence
+    /// that the answer may have changed -- a watcher event, or the user
+    /// selecting the worktree -- never on a timer.
+    files_snapshot_failed: HashSet<PathBuf>,
+    files_watchers: HashMap<PathBuf, RecommendedWatcher>,
+    files_watch_events: Arc<Mutex<Vec<PathBuf>>>,
+    files_watch_poll_started: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4879,6 +4937,11 @@ impl SirioWorkspace {
             parked_worktree_tabs: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
+            files_snapshot_in_flight: HashSet::new(),
+            files_snapshot_failed: HashSet::new(),
+            files_watchers: HashMap::new(),
+            files_watch_events: Arc::new(Mutex::new(Vec::new())),
+            files_watch_poll_started: false,
         };
         // The sidebar mounts its rows as cached views under the same rule as
         // the shell's own child views (see `cache_child_views`).
@@ -5431,6 +5494,175 @@ impl SirioWorkspace {
         );
         paths.retain(|path| !is_excluded(path));
         paths
+    }
+
+    /// Keeps the recently mounted worktrees warm without competing with the
+    /// visible panel: at most two repository walks are in flight.
+    ///
+    /// Every candidate must reach one of three absorbing states -- cached
+    /// clean, failed, or in flight -- because the completion handler calls
+    /// this again to refill the slot it just freed. A candidate that can
+    /// fall out of all three on its own turns that refill into a permanent
+    /// walk loop, which is why what counts as "already cached" here is
+    /// *evidence*, not age: a clean snapshot stays clean until the watcher
+    /// marks it dirty. `FilesSnapshot::is_fresh`'s two-second window decides
+    /// whether a restored tree may be *shown* without a refresh, and must
+    /// not be reused as this gate -- it expires by itself, so every cached
+    /// worktree would become eligible again a moment after being walked.
+    fn precache_files_snapshots(&mut self, cx: &mut Context<Self>) {
+        let mut candidates = self.mounted_worktree_paths(None);
+        candidates.push(self.working_directory.clone());
+        candidates.extend(self.files_snapshots.keys().cloned());
+        candidates.sort();
+        candidates.dedup();
+        self.start_files_watcher_poll(cx);
+        for path in candidates {
+            self.watch_files_root(&path);
+            if self.files_snapshot_in_flight.len() >= 2 {
+                break;
+            }
+            let cached_and_clean = self
+                .files_snapshots
+                .get(&path)
+                .is_some_and(|snapshot| !snapshot.is_dirty());
+            if cached_and_clean
+                || self.files_snapshot_in_flight.contains(&path)
+                || self.files_snapshot_failed.contains(&path)
+            {
+                continue;
+            }
+            self.files_snapshot_in_flight.insert(path.clone());
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_spawn({
+                        let path = path.clone();
+                        async move { right_panel::build_files_snapshot(path) }
+                    })
+                    .await;
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.files_snapshot_in_flight.remove(&path);
+                    match result {
+                        Ok(snapshot) => {
+                            workspace.files_snapshot_failed.remove(&path);
+                            workspace.files_snapshots.insert(path.clone(), snapshot);
+                            if paths_name_the_same_document(&workspace.working_directory, &path) {
+                                workspace.right_panel.update(cx, |panel, cx| {
+                                    panel.mark_files_dirty(cx);
+                                });
+                            }
+                        }
+                        // The stale snapshot, if any, is left in place: a
+                        // tree that was readable a moment ago is still the
+                        // best thing to draw.
+                        Err(_) => {
+                            workspace.files_snapshot_failed.insert(path.clone());
+                        }
+                    }
+                    workspace.precache_files_snapshots(cx);
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn watch_files_root(&mut self, path: &Path) {
+        if self.files_watchers.contains_key(path) || !path.is_dir() {
+            return;
+        }
+        let events = self.files_watch_events.clone();
+        let Ok(mut watcher) = RecommendedWatcher::new(
+            move |result: notify::Result<Event>| {
+                let Ok(event) = result else { return };
+                if matches!(
+                    event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) && let Ok(mut pending) = events.lock()
+                {
+                    let room = FILES_WATCH_PENDING_LIMIT.saturating_sub(pending.len());
+                    pending.extend(event.paths.into_iter().take(room));
+                }
+            },
+            NotifyConfig::default(),
+        ) else {
+            return;
+        };
+        if watcher.watch(path, RecursiveMode::Recursive).is_ok() {
+            self.files_watchers.insert(path.to_path_buf(), watcher);
+        }
+    }
+
+    fn start_files_watcher_poll(&mut self, cx: &mut Context<Self>) {
+        if self.files_watch_poll_started {
+            return;
+        }
+        self.files_watch_poll_started = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(300))
+                    .await;
+                if this
+                    .update(cx, |workspace, cx| {
+                        let pending = std::mem::take(
+                            &mut *workspace
+                                .files_watch_events
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        );
+                        // One drain can carry thousands of paths under the
+                        // same root, and the first relevant one has already
+                        // bought that root its walk. Collect the roots, then
+                        // mark each once: `mark_files_snapshot_dirty` starts
+                        // a precache pass, so marking per path would start
+                        // one per event.
+                        let mut dirty_roots: Vec<PathBuf> = Vec::new();
+                        for path in pending {
+                            let Some(root) = workspace
+                                .files_watchers
+                                .keys()
+                                .find(|root| path.starts_with(root))
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            if dirty_roots.contains(&root) {
+                                continue;
+                            }
+                            if files_watch_path_is_relevant(
+                                &root,
+                                &path,
+                                workspace.files_snapshots.get(&root),
+                            ) {
+                                dirty_roots.push(root);
+                            }
+                        }
+                        for root in dirty_roots {
+                            workspace.mark_files_snapshot_dirty(&root, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn mark_files_snapshot_dirty(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.files_snapshots.get_mut(path) {
+            snapshot.mark_dirty();
+        }
+        // Something changed under this root, so a walk that failed before is
+        // worth one more attempt -- this is how a worktree that was missing
+        // and came back rejoins the cache.
+        self.files_snapshot_failed.remove(path);
+        if paths_name_the_same_document(&self.working_directory, path) {
+            self.right_panel.update(cx, |panel, cx| {
+                panel.mark_files_dirty(cx);
+            });
+        }
+        self.precache_files_snapshots(cx);
     }
 
     fn refresh_catalog_project(
@@ -6082,6 +6314,10 @@ impl SirioWorkspace {
                             | TerminalActivityEvent::LifecycleChanged { .. }
                     )
                 {
+                    if matches!(event, TerminalActivityEvent::ChildExited { .. }) {
+                        let worktree = workspace.working_directory.clone();
+                        workspace.mark_files_snapshot_dirty(&worktree, cx);
+                    }
                     workspace.mark_activity_dirty();
                     sirio_perf::event(
                         "notify.Workspace.terminal_activity",
@@ -7803,6 +8039,7 @@ impl SirioWorkspace {
             )
         });
         Self::subscribe_right_panel(&self.right_panel, cx);
+        self.precache_files_snapshots(cx);
 
         if old_sidebar_id != new_sidebar_id
             && let Some(old_sidebar_id) = old_sidebar_id
@@ -18392,10 +18629,22 @@ mod tests {
     #[gpui::test]
     async fn boot_seeding_reaches_project_worktree_defaults_in_one_pass(cx: &mut TestAppContext) {
         let repo = dom01_boot_seed_repo("core-dom-01-boot-seed");
+        // Per-process and wiped first, the way `test_repo` treats its own
+        // scratch directory. The parent here is the shared system temp
+        // directory, and the checkout below lands at a *fixed* name inside
+        // this one, so a bare `dom-01-pinned-location` is the same path for
+        // every run on the machine. One leftover then makes
+        // `git worktree add` refuse a non-empty target, and the assertions
+        // read that leftover as this run's work: the location assertion
+        // passes on the stale directory and the marker assertion fails on
+        // the file no run ever wrote into it. Seen here as a checkout
+        // orphaned eight days earlier, holding the name with nothing in it
+        // but a `.git` pointing at a repository that no longer existed.
         let location_dir = repo
             .parent()
             .expect("scratch repo has a parent directory")
-            .join("dom-01-pinned-location");
+            .join(format!("dom-01-pinned-location-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&location_dir);
         std::fs::create_dir_all(&location_dir).expect("create pinned location dir");
 
         let mut settings = BTreeMap::new();
@@ -21411,6 +21660,31 @@ mod tests {
     /// the sidebar at 30 fps. Every child view of the shell is cached, so
     /// those frames must replay the still terminal pane rather than render
     /// it: the shell frame count moves, the terminal's render count does not.
+    ///
+    /// "Does not move at all" is a unix statement, and the assertion below is
+    /// split because Windows cannot honour it. A pane is only as still as its
+    /// PTY, and ConPTY repaints one whose child writes nothing: roughly every
+    /// 220ms it sends `ESC[?25l`, an `ESC[K` per row, `ESC[H`, `ESC[?25h` --
+    /// erasing rows that are already blank and homing a cursor already at
+    /// home. The grid it produces is identical (this fixture's whole retained
+    /// grid stays 0 bytes throughout), but the bytes are real, so the parser
+    /// runs, the owner thread reports output, and the view repaints. A perf
+    /// trace of the run shows the shape exactly: two `notify.Terminal.output`
+    /// events, each followed 0.1ms later by one `TerminalView.render`, and
+    /// nothing else touching the pane.
+    ///
+    /// Three cheaper ways to suppress that were measured and rejected.
+    /// Deduplicating the bytes is unsafe -- identical bytes legitimately
+    /// change a grid, since the same text printed twice appends two lines.
+    /// libghostty-vt's own damage tracking cannot see it: ghostty marks a row
+    /// dirty on *write*, not on change, so this traffic reads `Full` and
+    /// `Partial`, never `Clean`. Fingerprinting the grid per PTY batch means
+    /// `build_snapshot`'s per-cell FFI walk on every batch instead of once
+    /// per drawn frame. What is left -- having the view pull a snapshot
+    /// before deciding to notify -- is correct but restructures the repaint
+    /// path, and its failure mode is a terminal that stops updating. Not
+    /// worth ~5 idle wakeups a second on one platform without measuring it
+    /// first.
     #[gpui::test]
     async fn a_spinner_frame_replays_the_still_terminal_pane(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -21458,15 +21732,35 @@ mod tests {
             tick(cx);
         }
         let frames = workspace.read_with(&cx.cx, |workspace, _| workspace.frames_rendered);
+        let terminal_after = terminal.read_with(&cx.cx, |terminal, _| terminal.render_count());
+        let frames_drawn = frames - frames_before;
+        let pane_renders = terminal_after - terminal_renders_before;
         assert!(
             frames >= frames_before + 5,
             "the spinner lease must keep the shell drawing ({frames_before} -> {frames})"
         );
-        assert_eq!(
-            terminal.read_with(&cx.cx, |terminal, _| terminal.render_count()),
-            terminal_renders_before,
-            "a still cached pane must be replayed, not re-rendered, by spinner frames"
-        );
+        if cfg!(windows) {
+            // ConPTY repaints a pane whose child writes nothing (see the
+            // note on this test), so "not one single render" is not
+            // available here. What the cache is actually for still is: a
+            // replayed pane must not track the shell's frame rate. Measured
+            // on this fixture, stable across runs: 13 shell frames to 2 pane
+            // renders. A broken cache renders once per frame, so the two
+            // deltas converge -- half the shell's frames is comfortably
+            // above the platform's noise and far below that failure.
+            assert!(
+                pane_renders * 2 < frames_drawn,
+                "a still cached pane must be replayed, not driven by the \
+                 shell's frame rate: {pane_renders} pane renders against \
+                 {frames_drawn} shell frames"
+            );
+        } else {
+            assert_eq!(
+                pane_renders, 0,
+                "a still cached pane must be replayed, not re-rendered, by \
+                 spinner frames"
+            );
+        }
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
@@ -31098,6 +31392,131 @@ mod tests {
             "an empty-catalog boot must not render working_directory's real \
              file tree just because that fallback path happens to exist"
         );
+    }
+
+    /// The recursive watch sees the checkout's build output as well as its
+    /// source, and each reported path would otherwise buy a repository-sized
+    /// walk. The ignore set the last walk already computed is what separates
+    /// them; only `.git` is judged by name, because git's own writes are not
+    /// gitignored and only three of them mean anything to the tree.
+    #[test]
+    fn watcher_events_under_ignored_output_do_not_buy_a_walk() {
+        let repo = committed_test_repo("files-watch-ignored");
+        std::fs::write(repo.join(".gitignore"), "target/\n").expect("seed ignore rules");
+        git_test(&repo, &["add", ".gitignore"]);
+        git_test(&repo, &["commit", "-q", "-m", "ignore build output"]);
+        std::fs::create_dir_all(repo.join("target/debug")).expect("seed build output");
+        std::fs::write(repo.join("target/debug/app.exe"), "binary").expect("seed build artefact");
+        let snapshot =
+            right_panel::build_files_snapshot(repo.clone()).expect("walk the ignore fixture");
+        let snapshot = Some(&snapshot);
+
+        assert!(
+            !files_watch_path_is_relevant(&repo, &repo.join("target/debug/app.exe"), snapshot),
+            "ignored build output must not mark the tree dirty"
+        );
+        assert!(
+            files_watch_path_is_relevant(&repo, &repo.join("src/lib.rs"), snapshot),
+            "a source file under the checkout still counts"
+        );
+        assert!(
+            files_watch_path_is_relevant(&repo, &repo.join("target/debug/app.exe"), None),
+            "with no walk yet nothing is known, so the path is kept"
+        );
+
+        // `.git` keeps its own rule: git's writes are not gitignored, and
+        // all but these three are noise the tree never draws.
+        assert!(files_watch_path_is_relevant(
+            &repo,
+            &repo.join(".git/HEAD"),
+            snapshot
+        ));
+        assert!(files_watch_path_is_relevant(
+            &repo,
+            &repo.join(".git/index"),
+            snapshot
+        ));
+        assert!(files_watch_path_is_relevant(
+            &repo,
+            &repo.join(".git/refs/heads/main"),
+            snapshot
+        ));
+        assert!(!files_watch_path_is_relevant(
+            &repo,
+            &repo.join(".git/objects/ab/cdef"),
+            snapshot
+        ));
+        assert!(
+            !files_watch_path_is_relevant(&repo, Path::new("/somewhere/else"), snapshot),
+            "a path outside the watched root belongs to no tree here"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// The files precache must reach a resting state even when a candidate
+    /// worktree cannot be walked at all.
+    ///
+    /// Its completion handler calls `precache_files_snapshots` again to
+    /// refill the slot it just freed, so any candidate that stays eligible
+    /// after being attempted is walked forever. A failed walk caches no
+    /// snapshot, which is exactly that shape: with a worktree deleted
+    /// mid-session this ran 190k walks and `run_until_parked` never
+    /// returned. The absorbing state is `files_snapshot_failed`.
+    #[gpui::test]
+    async fn a_worktree_that_cannot_be_walked_stops_the_precache_instead_of_looping(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| empty_catalog_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // A worktree the session has already cached, then removed from disk:
+        // it stays a precache candidate through its own snapshot key, but
+        // `build_files_snapshot` can only return the read error now.
+        let missing = workspace
+            .read_with(&cx.cx, |workspace, _| workspace.working_directory.clone())
+            .join("worktree-removed-from-disk");
+        std::fs::create_dir_all(&missing).expect("create the worktree to be removed");
+        let cached = right_panel::build_files_snapshot(missing.clone())
+            .expect("walk the worktree while it still exists");
+        std::fs::remove_dir_all(&missing).expect("remove the cached worktree");
+        assert!(!missing.exists(), "the cached worktree must now be gone");
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.files_snapshots.insert(missing.clone(), cached);
+            workspace.mark_files_snapshot_dirty(&missing, cx);
+        });
+
+        // Before the fix this never returns.
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(
+                workspace.files_snapshot_failed.contains(&missing),
+                "an unwalkable worktree must be remembered as failed"
+            );
+            assert!(
+                workspace.files_snapshot_in_flight.is_empty(),
+                "no walk may still be in flight once the precache has settled"
+            );
+        });
+
+        // A second request must not restart the loop either: the failure is
+        // only cleared by evidence that the tree changed.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.precache_files_snapshots(cx);
+            assert!(
+                !workspace.files_snapshot_in_flight.contains(&missing),
+                "a remembered failure must not be retried on the next pass"
+            );
+        });
+        cx.run_until_parked();
     }
 
     /// F-CHG-02, second half: adding a project whose (auto-synthesized, for

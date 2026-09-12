@@ -81,7 +81,9 @@ const CHANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// every ten reloads from a tab nobody is looking at.
 pub(crate) const SUSPENDED_TICK_BUDGET: u32 = 10;
 const TOOLBAR_HEIGHT: f32 = 34.0;
-/// File headers: gallery 12px mono text at the app's 30px row rhythm.
+/// File headers: sidebar-family 12px UI text at the app's 30px row
+/// rhythm — the rows and their action buttons read like the rest of the
+/// chrome; the mono face is reserved for the diff code below.
 pub(crate) const ROW_HEIGHT: f32 = 30.0;
 pub(crate) const HUNK_ROW_HEIGHT: f32 = 24.0;
 /// Diff code lines: gallery 12px mono on an 18px line at 20px overall.
@@ -1112,9 +1114,9 @@ impl ChangesTab {
         let repo_root = self.repo_root.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    diff_entry(&repo_root, &entry, CHANGES_CONTEXT_LINES)
-                })
+                .background_spawn(
+                    async move { diff_entry(&repo_root, &entry, CHANGES_CONTEXT_LINES) },
+                )
                 .await;
             let _ = this.update(cx, |tab, cx| {
                 match result {
@@ -1558,7 +1560,8 @@ impl ChangesTab {
                 .gap(px(DIFF_ROW_GAP))
                 .px(px(DIFF_ROW_PADDING))
                 .py(px(1.0))
-                .font_family(theme.typography.code_family)
+                // A message, not code: the row matches the sidebar face.
+                .font_family(theme.typography.ui_family)
                 .text_size(theme.typography.scaled(12.0))
                 .line_height(px(18.0))
                 .text_color(theme.text_faint)
@@ -1604,7 +1607,8 @@ impl ChangesTab {
             .items_center()
             .justify_center()
             .gap(px(8.0))
-            .font_family(theme.typography.code_family)
+            // A meta row ("N context lines"), not code: sidebar face.
+            .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             .text_color(theme.text_faint)
             .bg(ink(0.02))
@@ -1654,7 +1658,9 @@ impl ChangesTab {
             .flex()
             .items_center()
             .gap(px(DIFF_ROW_GAP))
-            .font_family(theme.typography.code_family)
+            // Section chrome ("Staged (N)" + batch action), not code: the
+            // sidebar face, like every other section heading in the app.
+            .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             .bg(ink(0.02))
             .hover(|style| style.bg(theme.element_hover))
@@ -1754,7 +1760,10 @@ impl ChangesTab {
             .gap(px(DIFF_ROW_GAP))
             .border_b_1()
             .border_color(theme.border)
-            .font_family(theme.typography.code_family)
+            // The row and its action buttons (Discard / Unstage / Open
+            // diff) match the left sidebar's family, not the code face:
+            // they are chrome, and the path is a label, not content.
+            .font_family(theme.typography.ui_family)
             .text_size(theme.typography.scaled(12.0))
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.text)
@@ -2838,10 +2847,10 @@ fn load_worktree_snapshot(
     let mut diffs = HashMap::new();
     let mut diff_errors = HashMap::new();
     for entry in &entries {
-        if let Some(expanded_paths) = expanded_paths {
-            if !expanded_paths.contains(&entry.path) {
-                continue;
-            }
+        if let Some(expanded_paths) = expanded_paths
+            && !expanded_paths.contains(&entry.path)
+        {
+            continue;
         }
         match diff_entry(repo_root, entry, CHANGES_CONTEXT_LINES) {
             Ok(diff) => {
@@ -4771,10 +4780,9 @@ mod tests {
                 .expect("seed changed file");
         }
 
-        let expanded: HashSet<PathBuf> =
-            [PathBuf::from("f0.txt"), PathBuf::from("f2.txt")].into();
-        let snapshot = load_worktree_snapshot(&dir.0, Some(&expanded))
-            .expect("snapshot load must succeed");
+        let expanded: HashSet<PathBuf> = [PathBuf::from("f0.txt"), PathBuf::from("f2.txt")].into();
+        let snapshot =
+            load_worktree_snapshot(&dir.0, Some(&expanded)).expect("snapshot load must succeed");
 
         assert_eq!(
             snapshot.entries.len(),
