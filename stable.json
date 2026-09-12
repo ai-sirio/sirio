@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.9.8",
-  "notes": "A fix release. **If you installed 0.9.6 on Windows or Linux, please reinstall\nfrom here** — on many machines 0.9.6 cannot start at all, and it cannot update\nitself out of that state.\n\n**Sirio 0.9.6 would not start on CPUs without AVX-512**\n\nSirio's terminal emulation is compiled by Zig, and the build was targeting the\nCPU of the machine that built it instead of a portable floor. The release\nrunners have Intel Xeons with AVX-512; a great many desktop processors do not —\nevery AMD Zen 3 part and every Intel consumer chip since Alder Lake, among\nothers. On those machines 0.9.6 exited the moment you launched it: no window,\nno error, no log. Nothing to see, which is what made it easy to mistake for\nthe app simply not opening.\n\nThe Windows installer is where this surfaced. The Linux AppImage was built the\nsame way and carried the same exposure. macOS was built the same way too, but\nthe narrow spread of features across Apple Silicon meant it did not misfire in\npractice.\n\nEvery artifact is now compiled against a portable baseline, and the release\nworkflow states that floor explicitly rather than inheriting whatever the\nbuild machine happened to offer.\n\n**Why you may have to reinstall by hand**\n\nThe auto-updater cannot repair this one. A binary that cannot start never runs\nthe code that checks for a new version, so there is no path from a broken\n0.9.6 to this release except a manual install:\n\n```\ncurl -fsSL https://dl.sirioai.app/install.sh | sh\n```\n\nOn Windows, `powershell -ExecutionPolicy ByPass -c \"irm\nhttps://dl.sirioai.app/install.ps1 | iex\"`, or run the installer below over\nthe top of the existing one. Your settings, projects and sessions are kept.\n\nIf 0.9.6 already runs for you, this release changes nothing you can see, and\nthe update can wait for its normal prompt.",
+  "version": "0.10.8",
+  "notes": "A quality release: the terminal gets the font the agent TUIs expect, the\nFiles panel stops polling, and a few things that behaved unevenly across\nplatforms now behave the same everywhere.\n\n**The terminal ships its own font**\n\nSirio now bundles JetBrains Mono Nerd Font Mono and uses it for every\nterminal pane. Before, the terminal used whichever monospace face the machine\nhappened to have, and on a stock Windows install that meant Courier New: a\nslab serif with none of the Powerline and icon glyphs that Claude Code, Codex\nand the other agents draw their status lines with, so the coloured \"pills\"\nended in little boxes. Those glyphs now render as designed, bold and italic\nincluded, on Windows and Linux alike. macOS keeps SF Mono, as before. If you\nhave your own Nerd Font installed, it is no longer needed for Sirio, but it\ndoes no harm.\n\n**Files panel: refreshed on change, instant on switch**\n\nThe Files panel used to re-walk the tree on a timer. It now refreshes when\nsomething on disk actually changes or when you switch views, and the settled\ntree stays on screen while the refresh runs in the background. Switching\nbetween worktrees is instant, because the trees of your mounted worktrees are\nprepared ahead of time. Build output directories are ignored by the watcher,\nso a `cargo build` in a pane no longer makes the panel flicker.\n\n**Removing a worktree asks first, then gets it done**\n\nRemoving a worktree — from the row's × or its context menu — now shows a\nconfirmation naming the branch and warning that uncommitted changes in that\ncheckout are lost. Once confirmed, the removal is forced through: a checkout\ncarrying a large build tree used to hit a 10-second limit and leave the row\nbehind with a raw git error under it. It now gets its own generous deadline,\nand if git still refuses, Sirio deletes the checkout itself — with guards so\nit only ever removes a linked worktree, never a home directory or the\nrepository.\n\n**Smaller things you may notice**\n\n- Settings → Appearance → *Interface font size* now scales the worktree names\n  in the sidebar too; they were the one string that stayed at a fixed size,\n  and long names were clipped instead of growing the row.\n- The Local changes panel draws its chrome — file rows, section headers,\n  Discard/Unstage/Open diff — in the same face as the sidebar. Diff code and\n  line numbers stay monospace.\n- A terminal pane you are not looking at no longer makes the whole window\n  repaint on every line of output. On a busy hidden pane this cut the window's\n  redraw rate by over 90% and the process's CPU use by roughly 40%.\n\n**Updating**\n\nThe update prompt in Sirio takes you there. If you are on 0.9.6, which cannot\nstart on many CPUs, reinstall by hand as the 0.9.8 notes describe; from 0.9.8\nthe normal prompt is all you need.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.9.8/Sirio-0.9.8.dmg",
-      "sha256": "07c11e39e3a4ea73c897537d474760cbc797ab35543f9b121f4932bc1a745732",
-      "signature": "jAxoSlzao7FplHeana6SYtOSLcEhu14PZyt0QAyFkhCiFqyNSshDC76hjthaTNPFj33+8JUtm6XWNSME8lFvDg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.10.8/Sirio-0.10.8.dmg",
+      "sha256": "5a1877431c3a4eb7925ee36776838f6fc77b0d109ec545dc8ed2e1f970558874",
+      "signature": "4W0MEcoCIQxj3W6/yPifBIKZSDbKXpGdFwcVVJ+SBawsFFfrVfY0uEYk1U7/7nA1VpHP0ebHmMFRbJwZgd03DQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.9.8/Sirio-0.9.8-x86_64.AppImage",
-      "sha256": "724b86ab420ed0d2493ed6d62e47515826ae09d537c21a3afa33f63019eea309",
-      "signature": "KJ19Q7qOHwDvH3eJ0QvTWBGl4yJvUin8/rlw5u/abcB5Gyppqg7LU0ueQcmcmYrWHKcExyEqt9yYAIy4KmrOBQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.10.8/Sirio-0.10.8-x86_64.AppImage",
+      "sha256": "b0f019a4b1bc8cbf71173b0d8274474f739475da6c7313af4363aaa25418ca7d",
+      "signature": "lkyCa8G54BgK6V58JqrO40P8Jb4PfFLQX89Bv/IX3qUM3VW7JevKo2qtkGLJaCNSrb3GXGTcpfK2WHvjDPANBg=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.9.8/SirioSetup-0.9.8.exe",
-      "sha256": "6a08c2177bed28fce89a244ced00f6399ba5936cb5d09a93c789b0b30da3fe7a",
-      "signature": "BP7UqBPcx6NhYBt3TdR/c4/R4Hp1gNI+G0MZn7HkF7gatD28V1v+C1n5GRn2kUbMs1TXolZNACC/B/E6y47BAw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.10.8/SirioSetup-0.10.8.exe",
+      "sha256": "2fc13cfe37a3fd812bca0615263bf16816fea5a339ff4895dec028dc20aeb274",
+      "signature": "ZiN7TPyI3qmIbo2OZiE+3kUZtlSDMI600/u8Tap8KDXcAe/jDjw06wLpqX/63i4nCprVAYa/vl6WbL0C/kNNCQ=="
     }
   }
 }
