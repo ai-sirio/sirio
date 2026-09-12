@@ -16996,25 +16996,38 @@ fn app_icon() -> Arc<image::RgbaImage> {
     Arc::new(image)
 }
 
-/// Registers bezel's bundled Geist faces with the text system, on every
-/// platform. Sirio used to carry its own copies in `assets/fonts` and skip
-/// macOS, which kept SF Pro there; B3 makes one face the face everywhere, and
-/// bezel's copies include the 500/600/700 statics Sirio's never had.
+/// Registers the bundled faces with the text system, on every platform:
+/// bezel's Geist for the UI and code, and `sirio_theme`'s JetBrainsMono Nerd
+/// Font Mono for the terminal. Sirio used to carry its own Geist copies in
+/// `assets/fonts` and skip macOS, which kept SF Pro there; B3 makes one face
+/// the face everywhere, and bezel's copies include the 500/600/700 statics
+/// Sirio's never had. The terminal face came back into `assets/fonts` for
+/// the reason recorded at `sirio_theme::BUNDLED_TERMINAL_FAMILY`: on a stock
+/// Windows box no candidate in the terminal chain existed, and the generic
+/// answer was Courier New with no Nerd Font glyph in it.
 ///
 /// Must run before [`Theme::init`]: `Theme::install` resolves and caches
-/// `UI_FAMILY`/`CODE_FAMILY` from `TextSystem::all_font_names()` on its
-/// first call, so a font registered afterwards would never be seen and the
-/// resolution would fall through to the JetBrains chain for the rest of the
-/// process's life.
+/// `UI_FAMILY`/`CODE_FAMILY`/`TERMINAL_FAMILY` from
+/// `TextSystem::all_font_names()` on its first call, so a font registered
+/// afterwards would never be seen and the resolution would fall through to
+/// the installed chain for the rest of the process's life.
 ///
 /// Not covered by a test, and not for want of trying: under `TestAppContext`
 /// gpui installs a stub text system that answers `add_fonts` with `Ok(())`
 /// and then omits the added families from `all_font_names()`, so a test can
 /// neither see this succeed nor see it fail. A missing registration shows up
-/// as fallback or blank glyphs at runtime and nowhere earlier.
+/// as fallback or blank glyphs at runtime and nowhere earlier — for the
+/// terminal, as a Cascadia Mono or Consolas pane whose Powerline glyphs are
+/// tofu.
 fn register_fonts(cx: &App) {
     if let Err(error) = bezel::ui::register_fonts(cx) {
         eprintln!("[fonts] failed to register Geist: {error}");
+    }
+    if let Err(error) = sirio_theme::register_bundled_terminal_font(cx) {
+        eprintln!(
+            "[fonts] failed to register {}: {error}",
+            sirio_theme::BUNDLED_TERMINAL_FAMILY
+        );
     }
 }
 

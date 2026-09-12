@@ -87,6 +87,36 @@ OpenCode and Pi marks come from the Codicons and Simple Icons sets above;
 until 2026-09-05 Claude, OpenAI and OpenCode were the Zed catalog's
 `ai_*.svg` assets and Pi a project-owned monogram, both since removed.
 
+## JetBrainsMono Nerd Font Mono (terminal font)
+
+The terminal face in `rust/assets/fonts/` is
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) 2.304 as patched
+by [Nerd Fonts](https://github.com/ryanoasis/nerd-fonts) v3.5.1 — the four
+static `JetBrainsMonoNerdFontMono-{Regular,Bold,Italic,BoldItalic}.ttf`
+faces, copied byte-for-byte from the nerd-fonts repository's
+`patched-fonts/JetBrainsMono/Ligatures/` on 2026-09-12; SHA-256 sums are in
+`rust/assets/fonts/README.md`. JetBrains Mono is licensed under the SIL Open
+Font License 1.1, copied in `rust/assets/fonts/OFL.txt`; the Nerd Fonts
+patcher itself is MIT. The glyph sets the patch adds carry their own
+licences, as listed by the nerd-fonts project for this font:
+
+| Glyph set | Source | Licence |
+| --- | --- | --- |
+| Codicons | https://github.com/microsoft/vscode-codicons | CC BY 4.0 |
+| Devicons | https://github.com/devicons/devicon | MIT |
+| extraglyphs | https://github.com/source-foundry/Hack | MIT |
+| Font Awesome | https://github.com/FortAwesome/Font-Awesome | CC BY 4.0 |
+| Font Awesome Extension | https://github.com/AndreLZGava/font-awesome-extension | MIT |
+| Font Logos | https://github.com/lukas-w/font-logos | unlicensed |
+| Material Design | https://github.com/Templarian/MaterialDesign-Font | Apache 2.0 |
+| Octicons | https://github.com/primer/octicons | MIT |
+| Seti and original | https://github.com/jesseweed/seti-ui | MIT |
+| Pomicons | https://github.com/gabrielelana/pomicons | OFL 1.1 RFN |
+| Powerline Extra | https://github.com/ryanoasis/powerline-extra-symbols | MIT |
+| Powerline Symbols | https://github.com/powerline/powerline | MIT |
+| Power Symbols IEC | https://github.com/jloughry/Unicode | MIT |
+| Weather Icons | https://github.com/erikflowers/weather-icons | OFL 1.1 |
+
 ## Trademark notice
 
 The agent marks (Anthropic, OpenAI, OpenCode, Pi, Oh-My-Pi) are third-party
