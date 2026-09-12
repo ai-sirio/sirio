@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.10.8",
-  "notes": "A quality release: the terminal gets the font the agent TUIs expect, the\nFiles panel stops polling, and a few things that behaved unevenly across\nplatforms now behave the same everywhere.\n\n**The terminal ships its own font**\n\nSirio now bundles JetBrains Mono Nerd Font Mono and uses it for every\nterminal pane. Before, the terminal used whichever monospace face the machine\nhappened to have, and on a stock Windows install that meant Courier New: a\nslab serif with none of the Powerline and icon glyphs that Claude Code, Codex\nand the other agents draw their status lines with, so the coloured \"pills\"\nended in little boxes. Those glyphs now render as designed, bold and italic\nincluded, on Windows and Linux alike. macOS keeps SF Mono, as before. If you\nhave your own Nerd Font installed, it is no longer needed for Sirio, but it\ndoes no harm.\n\n**Files panel: refreshed on change, instant on switch**\n\nThe Files panel used to re-walk the tree on a timer. It now refreshes when\nsomething on disk actually changes or when you switch views, and the settled\ntree stays on screen while the refresh runs in the background. Switching\nbetween worktrees is instant, because the trees of your mounted worktrees are\nprepared ahead of time. Build output directories are ignored by the watcher,\nso a `cargo build` in a pane no longer makes the panel flicker.\n\n**Removing a worktree asks first, then gets it done**\n\nRemoving a worktree — from the row's × or its context menu — now shows a\nconfirmation naming the branch and warning that uncommitted changes in that\ncheckout are lost. Once confirmed, the removal is forced through: a checkout\ncarrying a large build tree used to hit a 10-second limit and leave the row\nbehind with a raw git error under it. It now gets its own generous deadline,\nand if git still refuses, Sirio deletes the checkout itself — with guards so\nit only ever removes a linked worktree, never a home directory or the\nrepository.\n\n**Smaller things you may notice**\n\n- Settings → Appearance → *Interface font size* now scales the worktree names\n  in the sidebar too; they were the one string that stayed at a fixed size,\n  and long names were clipped instead of growing the row.\n- The Local changes panel draws its chrome — file rows, section headers,\n  Discard/Unstage/Open diff — in the same face as the sidebar. Diff code and\n  line numbers stay monospace.\n- A terminal pane you are not looking at no longer makes the whole window\n  repaint on every line of output. On a busy hidden pane this cut the window's\n  redraw rate by over 90% and the process's CPU use by roughly 40%.\n\n**Updating**\n\nThe update prompt in Sirio takes you there. If you are on 0.9.6, which cannot\nstart on many CPUs, reinstall by hand as the 0.9.8 notes describe; from 0.9.8\nthe normal prompt is all you need.",
+  "version": "0.11.1",
+  "notes": "0.11.0 shipped the darker Neutral shell but never reached a build: two\ntheme checks still described the palette it replaced. This release is\nthose two checks, brought back in line — the same app, now able to\nrelease.\n\n**Readable text on the status chips**\n\nThe \"not installed\" pill and the terminal-only ACP badge paint their\ntext on a saturated red or amber fill. That text took its colour from\nthe pane, which Neutral's new ladder moved a rung darker in light mode\n— enough to drop the red chip to 3.89:1 and make the label hard to\nread. It now takes the page colour, which is the plane it was always\nmeant to sit against, and clears WCAG AA in both appearances again.\n\n**No visible change otherwise**\n\nThe light coral was retuned in 0.11.0 to stay legible on the new\nsurfaces; the conformance check that pins it still named the old value.\nNothing about the colour moves here — only the check that guards it.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.10.8/Sirio-0.10.8.dmg",
-      "sha256": "5a1877431c3a4eb7925ee36776838f6fc77b0d109ec545dc8ed2e1f970558874",
-      "signature": "4W0MEcoCIQxj3W6/yPifBIKZSDbKXpGdFwcVVJ+SBawsFFfrVfY0uEYk1U7/7nA1VpHP0ebHmMFRbJwZgd03DQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.11.1/Sirio-0.11.1.dmg",
+      "sha256": "8797b95f85c60676eb3702d5e02a1e010215b77766d4d5b4357442fbe0b4a9d2",
+      "signature": "WilU9V106K0U4oOeW4TIQxhl3LTTxeULNikKJ+WF2hdFBPu0rk7vsboxfgWBwrv+vNa7dwDmy7Rchitmw8wwAQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.10.8/Sirio-0.10.8-x86_64.AppImage",
-      "sha256": "b0f019a4b1bc8cbf71173b0d8274474f739475da6c7313af4363aaa25418ca7d",
-      "signature": "lkyCa8G54BgK6V58JqrO40P8Jb4PfFLQX89Bv/IX3qUM3VW7JevKo2qtkGLJaCNSrb3GXGTcpfK2WHvjDPANBg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.11.1/Sirio-0.11.1-x86_64.AppImage",
+      "sha256": "1631cc52e3c524dcfdbd97a16f7844e0615c74a99b7d22e7838180796a0940a0",
+      "signature": "hueDYAUCzs9aS9fhbH6lY+slcQ1BVh95cW/rPJIq+awjAOKGWTJyhm6cSYlVd1+ECrltJ24DZ4Nh3nN3Rs0qBw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.10.8/SirioSetup-0.10.8.exe",
-      "sha256": "2fc13cfe37a3fd812bca0615263bf16816fea5a339ff4895dec028dc20aeb274",
-      "signature": "ZiN7TPyI3qmIbo2OZiE+3kUZtlSDMI600/u8Tap8KDXcAe/jDjw06wLpqX/63i4nCprVAYa/vl6WbL0C/kNNCQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.11.1/SirioSetup-0.11.1.exe",
+      "sha256": "287d99d9f7c20378831e8cedbfe15c363c386193f92dcd3d351f09d01191f040",
+      "signature": "duKRvqAYJNQhawcVvD3BW0AQ0GiA7XMH1Z56LVCk6CxUbl0zqVOav88YCRpCQIy/qCZlDzHWiv655sdiCjEADQ=="
     }
   }
 }
