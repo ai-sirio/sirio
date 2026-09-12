@@ -657,11 +657,17 @@ impl ProviderKind {
 /// actually contrasts with both fills, and it is already what the granted
 /// permission badge uses two screens over.
 ///
+/// That ground is `bg`, not `surface`. The two were near enough to stand in
+/// for each other until Neutral got its own ladder and the light pane
+/// settled on `#E8E8E8` — a rung darker than the page, which dropped the
+/// danger chip to 3.89:1 and put the text back out of reach. `bg` is the
+/// plane this was always describing, so it is now the one it reads.
+///
 /// macOS-only in production (the permission rows it serves are macOS
 /// gates); the contrast test below uses it on every platform.
 #[cfg(any(test, target_os = "macos"))]
 fn on_status_fill(theme: &Theme) -> Rgba {
-    theme.surface
+    theme.bg
 }
 
 /// Small settings view model. The real application can replace these values

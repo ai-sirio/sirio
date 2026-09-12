@@ -159,7 +159,7 @@ async fn install_into_bezel_makes_theme_of_return_the_branded_palette(cx: &mut T
     });
 }
 
-/// The coral is still Sirio's — `#E08B52` dark / `#AD581F` light — and the
+/// The coral is still Sirio's — `#E08B52` dark / `#9E5119` light — and the
 /// active chrome is deliberately *not* it.
 ///
 /// The chrome used to be an alias of the coral, and this test existed to stop
@@ -183,7 +183,7 @@ fn the_accent_is_the_pickers_coral_and_no_longer_the_chrome() {
 
     let light = Theme::light();
     assert_eq!(light.appearance, Appearance::Light);
-    expect_hex(light.brand_coral, 0xAD_58_1F, "light coral");
+    expect_hex(light.brand_coral, 0x9E_51_19, "light coral");
     assert_ne!(light.text, light.brand_coral);
 }
 
