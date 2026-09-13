@@ -95,6 +95,11 @@ fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
     bezel_theme
 }
 
+/// The neutral gray the thinking and loading orbs paint in.
+fn loading_accent(theme: &Theme) -> Rgba {
+    theme.text_muted
+}
+
 /// The view whose render is leasing the shared Bezel animation clock.
 fn painter(window: &Window) -> Painter {
     Painter::from(window.current_view())
@@ -107,7 +112,8 @@ pub fn thinking_indicator(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let bezel_theme = bezel_theme(theme);
+    let mut bezel_theme = bezel_theme(theme);
+    bezel_theme.accent = loading_accent(theme).into();
     loaders::orb(
         loaders::Orb::Cluster,
         id,
@@ -127,7 +133,8 @@ pub fn indeterminate(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let bezel_theme = bezel_theme(theme);
+    let mut bezel_theme = bezel_theme(theme);
+    bezel_theme.accent = loading_accent(theme).into();
     loaders::orb(
         loaders::Orb::Cluster,
         id,
@@ -311,6 +318,21 @@ mod tests {
         let dark = bezel_theme(&Theme::dark());
         assert_eq!(dark.bg, bezel::theme::Theme::dark().bg);
         assert_eq!(dark.accent, Theme::dark().brand_coral.into());
+    }
+
+    #[test]
+    fn loading_orb_accent_is_muted_for_both_appearances() {
+        let light = Theme::light();
+        let mut light_bezel = bezel_theme(&light);
+        light_bezel.accent = loading_accent(&light).into();
+        assert_eq!(light_bezel.accent, light.text_muted.into());
+        assert_ne!(light_bezel.accent, light.brand_coral.into());
+
+        let dark = Theme::dark();
+        let mut dark_bezel = bezel_theme(&dark);
+        dark_bezel.accent = loading_accent(&dark).into();
+        assert_eq!(dark_bezel.accent, dark.text_muted.into());
+        assert_ne!(dark_bezel.accent, dark.brand_coral.into());
     }
 
     /// "Stopped at full" is the whole point of the settled shape: the outer
