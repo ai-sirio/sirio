@@ -37,7 +37,13 @@ fi
 # runtime does, by materializing squashfs-root under the current directory.
 cat > "$out" <<'PAYLOAD'
 #!/bin/sh
+# Mirrors the real AppImage runtime: --appimage-extract accepts at most one
+# pattern. Two or more is "Unexpected argument count" and exits non-zero.
 if [ "${1:-}" = "--appimage-extract" ]; then
+  if [ "$#" -gt 2 ]; then
+    echo "Unexpected argument count" >&2
+    exit 1
+  fi
   mkdir -p squashfs-root/usr/share/applications squashfs-root/usr/share/icons/hicolor/512x512/apps
   printf '[Desktop Entry]\nType=Application\nName=Sirio\nExec=sirio\nIcon=app.sirioai.sirio\n' \
     > squashfs-root/usr/share/applications/app.sirioai.sirio.desktop
@@ -58,8 +64,12 @@ EOF
 chmod +x "$BIN/uname"
 
 run_install() {
+  # HOME alone is not hermetic: install.sh prefers XDG_DATA_HOME for the
+  # .desktop entry and icon, so a host that exports it would be written to.
+  # Pin it (and HOME) inside the sandbox.
   env PATH="$BIN:$PATH" \
       HOME="$WORK/home" \
+      XDG_DATA_HOME="$WORK/home/.local/share" \
       CURL_LOG="$WORK/curl.log" \
       FAKE_OS="$1" FAKE_ARCH="$2" FAKE_EFFECTIVE_URL="$3" \
       SIRIO_INSTALL_DIR="$WORK/home/.local/bin" \
