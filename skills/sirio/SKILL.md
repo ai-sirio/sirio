@@ -9,7 +9,7 @@ description: Use when running inside a Sirio pane to create and manage terminal 
 Use `sirioctl` only inside a terminal launched by Sirio. Establish the control connection and obtain machine-stable identity before orchestrating:
 
 ```bash
-[ "$SIRIO_ENV" = "1" ] || exit 1
+[ -n "$SIRIO_PANE_ID" ] || exit 1
 sirioctl ping
 sirioctl identify --json
 ```
@@ -22,10 +22,10 @@ Capture every created panel's UUID immediately. `panel create` and `panel split`
 
 ```bash
 TAB_ID=$(sirioctl panel create --cmd 'codex')
-SPLIT_ID=$(sirioctl panel split right --from "$SIRIO_PANE_ID" --cmd 'pi')
+SPLIT_ID=$(sirioctl panel split right --from "$TAB_ID" --cmd 'pi')
 ```
 
-`$SIRIO_PANE_ID` identifies the current pane when choosing a split source. It does not authorize visual-selection inference. Use `TAB_ID` for the tab above and `SPLIT_ID` for the split above rather than whichever panel happens to be focused.
+`panel split --from` only accepts a UUID that `panel create` or `panel split` itself returned — never `$SIRIO_PANE_ID` or any other static pane/tab id, not even the caller's own current pane; passing one fails with `unknown pane`. It does not authorize visual-selection inference either way. Use `TAB_ID` for the tab above and `SPLIT_ID` for the split above rather than whichever panel happens to be focused.
 
 ## Drive a known panel
 
@@ -33,12 +33,14 @@ All lifecycle operations target an explicitly captured UUID:
 
 ```bash
 sirioctl panel write --id "$TAB_ID" --input 'Run the assigned task' --enter
-sirioctl panel key --id "$TAB_ID" enter
+sirioctl panel key --id "$TAB_ID" --key enter
 sirioctl panel read --id "$TAB_ID"
 sirioctl panel wait --id "$TAB_ID"
 sirioctl panel focus --id "$TAB_ID"
 sirioctl panel close --id "$TAB_ID"
 ```
+
+`panel read`, `panel state`, and `panel scrollback` return the pane's scrollback as base64 in their `data`/`scrollback` field — `--json` changes the envelope, not the encoding. Decode it (`base64 -d`) before treating it as text.
 
 `panel wait` propagates the child process exit code. Preserve it when doing post-wait work so a failed child remains a failure:
 
@@ -64,6 +66,15 @@ exit "$status"
 The trap performs cleanup for successful completion, child failure, and an interrupted orchestration path. Do not replace explicit UUID targeting with current-selection assumptions.
 
 ## Browser automation
+
+**Not currently invocable.** `sirioctl` has no `browser` subcommand — every
+verb below only exists as a `browser.*` control-socket request, reachable
+today only by sending that request directly (see
+`sirio_control/examples/browser_probe.rs`), not through this CLI. Attempting
+any `sirioctl browser ...` command below fails with `unknown command
+'browser'`. Tracked in
+[#458](https://github.com/ai-sirio/sirio/issues/458); treat this section as
+the intended contract, not a working recipe, until it lands.
 
 Use the browser surface when an agent needs to inspect or drive a page inside
 Sirio. Browser commands target the caller's worktree by default. Keep the
@@ -164,6 +175,6 @@ These capabilities return `not_supported`, never a silent success:
 Attach durable progress to the current worktree and use notifications for user-visible completion:
 
 ```bash
-sirioctl worktree set --workspace "$SIRIO_WORKTREE_ID" --comment 'Implemented and verified'
+sirioctl worktree-set --worktree "$SIRIO_WORKTREE_ID" --comment 'Implemented and verified'
 sirioctl notify --title 'Done' --body 'Worker completed'
 ```
