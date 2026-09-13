@@ -258,6 +258,9 @@ impl TabSelection {
     }
 }
 
+/// `Clone` only when `T` is: a cloned tree shares every leaf's content
+/// handle exactly as `PaneContent`'s own `Clone` does.
+#[derive(Clone)]
 pub(crate) enum PaneNode<T> {
     Leaf {
         id: usize,
@@ -532,6 +535,12 @@ impl<T> PaneNode<T> {
     }
 }
 
+/// Cloning shares the underlying entities (gpui `Entity` handles), never
+/// duplicates them: a clone of a tab's content tree points at the same
+/// `TerminalView`/`Chat` instances the original does. That is what lets
+/// `retain_worktree_chats` keep live chats across a worktree switch without
+/// a second session coming up on re-adoption.
+#[derive(Clone)]
 pub(crate) enum PaneContent {
     Chat(Entity<Chat>),
     Terminal { view: Entity<TerminalView> },

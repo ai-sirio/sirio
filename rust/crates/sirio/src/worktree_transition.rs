@@ -35,7 +35,9 @@ pub struct PersistedWorktreeSnapshot {
 }
 
 pub enum TransitionIntent {
-    Boot { target: PathBuf },
+    Boot {
+        target: PathBuf,
+    },
     Switch {
         outgoing: PersistedWorktreeSnapshot,
         target: PathBuf,
@@ -107,7 +109,9 @@ impl WorktreeTransition {
             }
         };
         let (state, wake) = &*self.state;
-        let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.next_generation += 1;
         let generation = state.next_generation;
         state.pending = Some(QueuedTransition {
@@ -121,7 +125,9 @@ impl WorktreeTransition {
 
     pub fn take_ready(&self) -> impl Iterator<Item = TransitionVerdict> {
         let (state, _) = &*self.state;
-        let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::mem::take(&mut state.ready).into_iter()
     }
 }
@@ -129,7 +135,9 @@ impl WorktreeTransition {
 impl Drop for WorktreeTransition {
     fn drop(&mut self) {
         let (state, wake) = &*self.state;
-        let mut state = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.shutdown = true;
         wake.notify_one();
     }
@@ -139,9 +147,13 @@ fn worker(store: Arc<dyn WorktreeTransitionStore>, state: Arc<(Mutex<TransitionS
     loop {
         let queued = {
             let (lock, wake) = &*state;
-            let mut guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             while guard.pending.is_none() && !guard.shutdown {
-                guard = wake.wait(guard).unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard = wake
+                    .wait(guard)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
             if guard.shutdown {
                 return;
@@ -158,10 +170,10 @@ fn worker(store: Arc<dyn WorktreeTransitionStore>, state: Arc<(Mutex<TransitionS
                 {
                     let layout = SessionLayout::default_in(queued.target.clone());
                     RestoredSession {
-                    working_directory: queued.target.clone(),
-                    tabs: layout.tabs,
-                    tab_states: layout.tab_states,
-                    diagnostics: vec![format!("restore failed: {error}")],
+                        working_directory: queued.target.clone(),
+                        tabs: layout.tabs,
+                        tab_states: layout.tab_states,
+                        diagnostics: vec![format!("restore failed: {error}")],
                     }
                 },
                 Some(error),
@@ -171,7 +183,9 @@ fn worker(store: Arc<dyn WorktreeTransitionStore>, state: Arc<(Mutex<TransitionS
             TransitionVerdict::Stale
         } else {
             let (lock, _) = &*state;
-            let guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if guard.next_generation != queued.generation {
                 TransitionVerdict::Stale
             } else {
@@ -286,7 +300,10 @@ mod tests {
         });
         assert!(coordinator.take_ready().next().is_none());
         store.release_restore();
-        assert!(matches!(take_until_ready(&coordinator).as_slice(), [TransitionVerdict::Ready(_)]));
+        assert!(matches!(
+            take_until_ready(&coordinator).as_slice(),
+            [TransitionVerdict::Ready(_)]
+        ));
     }
 
     #[test]
@@ -327,7 +344,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(matches!(verdicts[0], TransitionVerdict::Stale));
-        assert!(matches!(&verdicts[1], TransitionVerdict::Ready(ready) if ready.repo_root == PathBuf::from("/latest")));
+        assert!(
+            matches!(&verdicts[1], TransitionVerdict::Ready(ready) if ready.repo_root == PathBuf::from("/latest"))
+        );
     }
 
     #[test]

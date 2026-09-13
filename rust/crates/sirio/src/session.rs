@@ -695,9 +695,10 @@ impl ProjectCatalog {
             missing_worktrees.remove(&canonical_path(&worktree.path));
         }
         for worktree in &mut replacement.worktrees {
-            if let Some(previous) = previous.iter().find(|previous| {
-                canonical_path(&previous.path) == canonical_path(&worktree.path)
-            }) {
+            if let Some(previous) = previous
+                .iter()
+                .find(|previous| canonical_path(&previous.path) == canonical_path(&worktree.path))
+            {
                 worktree.is_primary = previous.is_primary;
             }
             missing_worktrees.remove(&canonical_path(&worktree.path));
@@ -891,7 +892,11 @@ fn catalog_ids_for_discovered_path(
     else {
         return path_derived_catalog_ids(&working_directory);
     };
-    (root, project_id.clone(), worktree_id(&project_id, &working_directory))
+    (
+        root,
+        project_id.clone(),
+        worktree_id(&project_id, &working_directory),
+    )
 }
 
 /// Resolves a worktree through Git when no persisted catalog row identifies
@@ -1077,16 +1082,14 @@ fn persisted_catalog_ids_for_path(
 ) -> Result<Option<(PathBuf, String, String)>, PersistenceError> {
     let requested_path = working_directory.to_string_lossy();
     let canonical_working_directory = working_directory.canonicalize().ok();
-    let Some(worktree) = db
-        .worktrees()?
-        .into_iter()
-        .find(|worktree| {
-            worktree.path == requested_path
-                || canonical_working_directory.as_ref().is_some_and(|canonical| {
+    let Some(worktree) = db.worktrees()?.into_iter().find(|worktree| {
+        worktree.path == requested_path
+            || canonical_working_directory
+                .as_ref()
+                .is_some_and(|canonical| {
                     Path::new(&worktree.path).canonicalize().ok().as_ref() == Some(canonical)
                 })
-        })
-    else {
+    }) else {
         return Ok(None);
     };
     let Some(project) = db
@@ -1166,11 +1169,8 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
                 }
             }
         }
-        for (worktree_index, (worktree, id)) in project
-            .worktrees
-            .iter()
-            .zip(worktree_ids)
-            .enumerate()
+        for (worktree_index, (worktree, id)) in
+            project.worktrees.iter().zip(worktree_ids).enumerate()
         {
             let mut record = WorktreeRecord::new(
                 id.clone(),
@@ -2487,7 +2487,7 @@ mod tests {
             vec![
                 ("appearance.baseColor".into(), "neutral".into()),
                 ("appearance.centerSplitRatio".into(), "610".into()),
-                    ("appearance.rightPanelWidth".into(), "500".into()),
+                ("appearance.rightPanelWidth".into(), "500".into()),
                 ("appearance.sidebarWidth".into(), "300".into()),
                 ("appearance.terminalFontSize".into(), "16".into()),
                 ("appearance.theme".into(), "dark".into()),
@@ -3209,7 +3209,11 @@ mod tests {
         assert!(status.success(), "git worktree remove failed: {status}");
 
         let mut refreshed = ProjectCatalog::default();
-        assert!(refreshed.add(&primary).expect("rediscover primary repository"));
+        assert!(
+            refreshed
+                .add(&primary)
+                .expect("rediscover primary repository")
+        );
         store.schedule_catalog(&refreshed);
 
         let after = AppDatabase::open(&database).expect("open database after refresh");
@@ -3385,10 +3389,12 @@ mod tests {
         catalog
             .refresh_project(&project_id)
             .expect("refresh after external add");
-        assert!(catalog.projects()[0]
-            .worktrees
-            .iter()
-            .any(|worktree| worktree.path == added));
+        assert!(
+            catalog.projects()[0]
+                .worktrees
+                .iter()
+                .any(|worktree| worktree.path == added)
+        );
         store.schedule_catalog(&catalog);
 
         let status = std::process::Command::new("git")

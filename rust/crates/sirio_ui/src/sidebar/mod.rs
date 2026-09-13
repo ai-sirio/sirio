@@ -48,8 +48,7 @@ mod fade;
 mod row;
 mod section;
 
-#[cfg(test)]
-use row::RowStatusGlyph;
+pub use row::RowStatusGlyph;
 pub use row::SidebarPill;
 use row::{RowInputs, RowView};
 
