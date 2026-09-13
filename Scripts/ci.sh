@@ -34,6 +34,16 @@ if [[ "$ZIG_FOUND" != "0.15.2" ]]; then
     exit 1
 fi
 
+# The workspace version names the NEXT release, and the bump that opens a cycle
+# happens once, in a commit right after the tag. Forget it and the failure is
+# silent: main keeps the released number, the next nightly is stamped
+# `<already-released>-nightly.<stamp>`, which semver sorts BELOW the stable the
+# user already has, and no test notices -- the updater just skips it. This is
+# the cheapest check here (one file read, one `git tag`) and the only one whose
+# subject is the version rather than the code, so it runs before anything is
+# compiled, let alone tested.
+Scripts/check-cycle-version.sh
+
 cd rust
 
 # SIRIO_CI_RELEASE_GATE=1 is set by .github/workflows/build-release.yml and by

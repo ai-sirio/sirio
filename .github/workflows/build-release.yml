@@ -138,6 +138,7 @@ jobs:
       - name: Verify release scripts
         run: |
           bash Scripts/Tests/test-check-release-version.sh
+          bash Scripts/Tests/test-check-cycle-version.sh
           bash Scripts/Tests/test-set-workspace-version.sh
           bash Scripts/Tests/test-assert-built-channel.sh
           bash Scripts/Tests/test-build-dmg.sh
