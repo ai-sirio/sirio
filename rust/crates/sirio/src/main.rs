@@ -19528,6 +19528,21 @@ mod tests {
         );
     }
 
+    /// Typed into a fixture terminal to give its scrollback a line the switch
+    /// must not lose. The marker is split across printf's format and its
+    /// argument so that the *echoed* command line cannot contain
+    /// [`SCROLLBACK_MARKER`]: a settle loop has to wait for the command's
+    /// output, never for its echo. These panes run `$SHELL -il`, so they
+    /// inherit whatever prompt the developer uses, and a transient-prompt
+    /// shell (oh-my-posh, powerlevel10k) rewrites the submitted prompt line
+    /// into a shorter form on accept-line -- before the command even runs. A
+    /// capture keyed on the echo is therefore taken one rewrite too early, and
+    /// the restored scrollback no longer starts with it. That rewrite lands
+    /// within the same prompt cycle as the output, so waiting for the output
+    /// is ordering, not timing: it holds under any load.
+    const SCROLLBACK_MARKER_INPUT: &[u8] = b"printf 'MARKER%s\\n' '-H'\n";
+    const SCROLLBACK_MARKER: &str = "MARKER-H";
+
     /// F-CORE-ACT-17, drawn end to end through the app:
     /// `AgentActivityModel::agent_id_for_panes` decides which brand mark a
     /// worktree row draws and which status its indicator carries. Nothing
@@ -19693,9 +19708,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         original_terminals[0].update(&mut cx.cx, |terminal, _| {
-            terminal.input(b"printf 'MARKER-H\\n'\n".to_vec());
+            terminal.input(SCROLLBACK_MARKER_INPUT.to_vec());
         });
         let zsh_before_switch = live_zsh_children();
+        // The marker wait below is a whole interactive prompt cycle of
+        // `$SHELL -il` -- the shell has to accept the line, run it and draw the
+        // next prompt -- not just the echo of a keystroke, so it gets its own
+        // budget instead of whatever the mount wait left of the one above.
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
         let mut previous_scrollback = None;
         let (original_pids, original_scrollback) = loop {
             cx.run_until_parked();
@@ -19717,10 +19737,9 @@ mod tests {
             let settled = previous_scrollback
                 .as_ref()
                 .is_some_and(|previous| previous == &scrollback);
-            if state[0].1.contains("MARKER-H")
-                && state.iter().all(|(pid, _)| pid.is_some())
-                && settled
-            {
+            let marker_seen = state[0].1.contains(SCROLLBACK_MARKER);
+            let mounted = state.iter().all(|(pid, _)| pid.is_some());
+            if marker_seen && mounted && settled {
                 break (
                     state
                         .iter()
@@ -19732,7 +19751,9 @@ mod tests {
             previous_scrollback = Some(scrollback);
             assert!(
                 std::time::Instant::now() < deadline,
-                "the fixture marker never reached both terminals"
+                "the fixture marker never reached both terminals: \
+                 marker_seen={marker_seen} mounted={mounted} settled={settled} \
+                 scrollback={previous_scrollback:?}"
             );
             std::thread::sleep(Duration::from_millis(100));
         };
@@ -19919,9 +19940,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         original_terminals[0].update(&mut cx.cx, |terminal, _| {
-            terminal.input(b"printf 'MARKER-H\\n'\n".to_vec());
+            terminal.input(SCROLLBACK_MARKER_INPUT.to_vec());
         });
         let zsh_before_switch = live_zsh_children();
+        // The marker wait below is a whole interactive prompt cycle of
+        // `$SHELL -il` -- the shell has to accept the line, run it and draw the
+        // next prompt -- not just the echo of a keystroke, so it gets its own
+        // budget instead of whatever the mount wait left of the one above.
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
         let mut previous_scrollback = None;
         let (original_pids, original_scrollback) = loop {
             cx.run_until_parked();
@@ -19943,10 +19969,9 @@ mod tests {
             let settled = previous_scrollback
                 .as_ref()
                 .is_some_and(|previous| previous == &scrollback);
-            if state[0].1.contains("MARKER-H")
-                && state.iter().all(|(pid, _)| pid.is_some())
-                && settled
-            {
+            let marker_seen = state[0].1.contains(SCROLLBACK_MARKER);
+            let mounted = state.iter().all(|(pid, _)| pid.is_some());
+            if marker_seen && mounted && settled {
                 break (
                     state
                         .iter()
@@ -19958,7 +19983,9 @@ mod tests {
             previous_scrollback = Some(scrollback);
             assert!(
                 std::time::Instant::now() < deadline,
-                "the fixture marker never reached both terminals"
+                "the fixture marker never reached both terminals: \
+                 marker_seen={marker_seen} mounted={mounted} settled={settled} \
+                 scrollback={previous_scrollback:?}"
             );
             std::thread::sleep(Duration::from_millis(100));
         };
