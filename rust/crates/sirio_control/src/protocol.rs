@@ -226,6 +226,14 @@ pub mod request {
         format!("{}-{n}-{nanos}", std::process::id())
     }
 
+    /// A `browser.*` request (#458). Every browser method shares one string
+    /// map; which keys are meaningful is the app's business, and the CLI adds
+    /// its own page-script fallbacks for the ones the running app does not
+    /// answer (see `sirioctl`'s browser section).
+    pub fn browser(method: &str, params: BTreeMap<String, String>) -> ControlRequest {
+        request(method, params)
+    }
+
     /// Agent-status update; `agent_session` is included only when non-empty.
     pub fn notify(session: &str, status: &str, agent_session: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();
@@ -609,9 +617,9 @@ pub mod request {
 
 #[cfg(test)]
 mod tests {
-    use super::request;
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     use super::default_socket_path;
+    use super::request;
     #[cfg(any(target_os = "windows", test))]
     use super::windows_default_socket_path;
     use std::collections::BTreeMap;
@@ -649,11 +657,11 @@ mod tests {
                 r"C:\Users\alice\AppData\Local".to_string(),
             ),
             ("HOME".to_string(), "/c/Users/alice".to_string()),
+            ("XDG_RUNTIME_DIR".to_string(), "/run/user/1000".to_string()),
             (
-                "XDG_RUNTIME_DIR".to_string(),
-                "/run/user/1000".to_string(),
+                "XDG_STATE_HOME".to_string(),
+                "/c/Users/alice/.local/state".to_string(),
             ),
-            ("XDG_STATE_HOME".to_string(), "/c/Users/alice/.local/state".to_string()),
         ]);
         let expected = r"C:\Users\alice\AppData\Local\Sirio\control.sock".replace(r"\", "/");
         let native_path = windows_default_socket_path(&native).replace(r"\", "/");
@@ -702,10 +710,7 @@ mod tests {
                 "LOCALAPPDATA".to_string(),
                 r"C:\Users\alice\AppData\Local".to_string(),
             ),
-            (
-                "SIRIO_SOCKET".to_string(),
-                r"\\.\pipe\custom".to_string(),
-            ),
+            ("SIRIO_SOCKET".to_string(), r"\\.\pipe\custom".to_string()),
         ]);
         assert_eq!(default_socket_path(&override_env), r"\\.\pipe\custom");
     }
