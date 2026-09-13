@@ -4690,6 +4690,7 @@ impl Chat {
         let open_entity = entity.clone();
         let header_id = format!("{id_prefix}-open");
         let header_selector = header_id.clone();
+        let counts_selector = format!("{id_prefix}-counts");
         let scroll_id = format!("{id_prefix}-scroll");
         let mut scroll = div()
             .id(SharedString::from(scroll_id))
@@ -4854,11 +4855,21 @@ impl Chat {
                     .child(
                         IconElement::new(Icon::File, IconSize::Small).text_color(theme.file_link),
                     )
-                    .child(diff.path.display().to_string())
-                    .child(div().flex_1())
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(diff.path.display().to_string()),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(counts_selector.clone()))
+                            .debug_selector(move || counts_selector.clone())
                             .flex()
+                            .flex_shrink_0()
                             .gap(px(6.0))
                             .child(div().text_color(theme.diff_add).child(format!("+{added}")))
                             .child(
@@ -4922,6 +4933,10 @@ impl Chat {
                     .id(format!("edit-summary-open-{entry}-{index}"))
                     .debug_selector(move || format!("edit-summary-open-{entry}-{index}"))
                     .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(typography.footnote)
                     .text_color(theme.file_link)
                     .cursor(CursorStyle::PointingHand)
@@ -4938,6 +4953,7 @@ impl Chat {
                     div()
                         .id(format!("edit-summary-reverted-{entry}-{index}"))
                         .debug_selector(move || format!("edit-summary-reverted-{entry}-{index}"))
+                        .flex_shrink_0()
                         .text_size(typography.caption2)
                         .text_color(theme.text_faint)
                         .child("reverted"),
@@ -4948,6 +4964,7 @@ impl Chat {
                         div()
                             .id(format!("edit-summary-confirm-{entry}-{index}"))
                             .debug_selector(move || format!("edit-summary-confirm-{entry}-{index}"))
+                            .flex_shrink_0()
                             .px(px(7.0))
                             .py(px(4.0))
                             .rounded(theme.radii.control)
@@ -4965,6 +4982,7 @@ impl Chat {
                         div()
                             .id(format!("edit-summary-cancel-{entry}-{index}"))
                             .debug_selector(move || format!("edit-summary-cancel-{entry}-{index}"))
+                            .flex_shrink_0()
                             .px(px(7.0))
                             .py(px(4.0))
                             .rounded(theme.radii.control)
@@ -4983,6 +5001,7 @@ impl Chat {
                     div()
                         .id(format!("edit-summary-revert-{entry}-{index}"))
                         .debug_selector(move || format!("edit-summary-revert-{entry}-{index}"))
+                        .flex_shrink_0()
                         .px(px(7.0))
                         .py(px(4.0))
                         .rounded(theme.radii.control)
@@ -5249,6 +5268,8 @@ impl Chat {
                     title
                 };
                 let mut card = div()
+                    .id(("permission-card", request_id as usize))
+                    .debug_selector(move || format!("permission-card-{request_id}"))
                     .w_full()
                     .rounded(theme.radii.code_block)
                     .bg(theme.surface_raised)
@@ -5311,7 +5332,7 @@ impl Chat {
                         answer_caret_visible,
                     ));
                 } else {
-                    let mut row = div().flex().gap(px(8.0));
+                    let mut row = div().flex().flex_wrap().gap(px(8.0)).gap_y(px(6.0));
                     for option in options {
                         let entity = entity.clone();
                         let option_for_click = option.clone();
@@ -5428,7 +5449,7 @@ impl Chat {
                                 .child("No answer — the turn ended"),
                         );
                     } else {
-                        let mut row = div().flex().gap(px(8.0));
+                        let mut row = div().flex().flex_wrap().gap(px(8.0)).gap_y(px(6.0));
                         for option in &approval.options {
                             let entity = entity.clone();
                             let option_for_click = option.clone();
@@ -5668,6 +5689,7 @@ impl Chat {
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
         let typography = theme.typography;
+        let at_selector = format!("turn-fold-{turn_id}-at");
         div()
             .id(("turn-fold", turn_id))
             .debug_selector(move || format!("turn-fold-{turn_id}"))
@@ -5692,12 +5714,19 @@ impl Chat {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(typography.footnote)
                     .text_color(theme.text_muted)
                     .child(format!("Turn: {label}")),
             )
             .child(
                 div()
+                    .id(SharedString::from(at_selector.clone()))
+                    .debug_selector(move || at_selector.clone())
+                    .flex_shrink_0()
                     .text_size(typography.caption2)
                     .text_color(theme.text_faint)
                     .child(at),
@@ -6889,6 +6918,7 @@ impl Chat {
                         let confirming = self.history_delete_confirm.as_deref() == Some(&tab_id);
                         let open_tab_id = tab_id.clone();
                         let row_id = SharedString::from(format!("chat-history-row-{tab_id}"));
+                        let row_selector = format!("chat-history-row-{tab_id}");
                         let title = if session.title.is_empty() {
                             "Untitled chat".to_string()
                         } else {
@@ -6896,6 +6926,7 @@ impl Chat {
                         };
                         div()
                             .id(row_id)
+                            .debug_selector(move || row_selector.clone())
                             .w_full()
                             .flex()
                             .items_center()
@@ -6909,6 +6940,10 @@ impl Chat {
                                 div()
                                     .id(SharedString::from(format!("chat-history-open-{tab_id}")))
                                     .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .text_size(typography.footnote)
                                     .text_color(theme.text)
                                     .child(title)
@@ -6923,12 +6958,14 @@ impl Chat {
                                         "chat-history-confirm-{tab_id}"
                                     )))
                                     .flex()
+                                    .flex_shrink_0()
                                     .gap(px(6.0))
                                     .child(
                                         div()
                                             .id(SharedString::from(format!(
                                                 "chat-history-confirm-delete-{tab_id}"
                                             )))
+                                            .flex_shrink_0()
                                             .text_size(typography.footnote)
                                             .text_color(theme.danger)
                                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -6944,6 +6981,7 @@ impl Chat {
                                             .id(SharedString::from(format!(
                                                 "chat-history-cancel-delete-{tab_id}"
                                             )))
+                                            .flex_shrink_0()
                                             .text_size(typography.footnote)
                                             .text_color(theme.text_muted)
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -6954,8 +6992,11 @@ impl Chat {
                                     .into_any_element()
                             } else {
                                 let delete_tab_id = tab_id.clone();
+                                let delete_selector = format!("chat-history-delete-{tab_id}");
                                 div()
                                     .id(SharedString::from(format!("chat-history-delete-{tab_id}")))
+                                    .debug_selector(move || delete_selector.clone())
+                                    .flex_shrink_0()
                                     .text_size(typography.footnote)
                                     .text_color(theme.text_muted)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -13873,6 +13914,282 @@ let answer = 42;
              show right {} vs bar right {}",
             show.right(),
             bar.right(),
+        );
+    }
+
+    /// ACP-supplied option labels can be long ("Yes, and do not ask again
+    /// for this session") and a request can offer many of them: without
+    /// `flex_wrap` the option row grows past the card and the buttons are
+    /// pushed beyond its border.
+    #[gpui::test]
+    async fn long_permission_option_labels_wrap_inside_the_card(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/sirio-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Permission {
+                request_id: 1,
+                title: "Permission requested".into(),
+                prompt: "The agent wants to edit files in the repository.".into(),
+                options: vec![
+                    AnswerOption {
+                        id: "allow-once".into(),
+                        label: "Yes, allow this time only and remember my choice for later".into(),
+                        is_rejection: false,
+                    },
+                    AnswerOption {
+                        id: "allow-always".into(),
+                        label: "Yes, and do not ask again for this session or any future one".into(),
+                        is_rejection: false,
+                    },
+                    AnswerOption {
+                        id: "allow-session".into(),
+                        label: "Yes, and do not ask again for this session regardless of file".into(),
+                        is_rejection: false,
+                    },
+                    AnswerOption {
+                        id: "deny".into(),
+                        label: "No, never allow this tool call to modify anything in this directory"
+                            .into(),
+                        is_rejection: true,
+                    },
+                ],
+                text_input: None,
+                resolved: None,
+                expired: false,
+                dismissed: false,
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("permission-card-1")
+            .expect("the permission card is drawn");
+        let last = cx
+            .debug_bounds("permission-option-deny")
+            .expect("the last option button is drawn");
+        assert!(
+            last.right() <= card.right(),
+            "the last option button overflows the permission card: \
+             option right {} vs card right {}",
+            last.right(),
+            card.right(),
+        );
+    }
+
+    /// A diff header's path is external text of arbitrary length: without
+    /// `min_w_0` the flex row never shrinks below the path's min-content,
+    /// so the `+added/-removed` counts are pushed past the header's border
+    /// (the same `#233` pattern as the pending-question bar above).
+    #[gpui::test]
+    async fn a_long_diff_path_does_not_push_the_change_counts_out_of_the_header(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let long_path = format!("src/{}/edited.rs", "deeply-nested-segment/".repeat(20));
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::ToolCall {
+                id: "edit-long-path".into(),
+                title: "Edit file".into(),
+                status: "Completed".into(),
+                kind: "Edit".into(),
+                content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
+                    path: PathBuf::from(long_path),
+                    old_text: Some("old\n".into()),
+                    new_text: "new\n".into(),
+                })],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: true,
+                duration_ms: None,
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let header = cx
+            .debug_bounds("tool-diff-0-0-open")
+            .expect("the diff header is drawn");
+        let counts = cx
+            .debug_bounds("tool-diff-0-0-counts")
+            .expect("the header carries its +added/-removed counts");
+        assert!(
+            counts.right() <= header.right(),
+            "the change counts overflow the diff header: \
+             counts right {} vs header right {}",
+            counts.right(),
+            header.right(),
+        );
+    }
+
+    /// The edit-summary row's path is external text too: `flex_1` alone
+    /// leaves the row at the path's min-content width and pushes Revert
+    /// past the card's border.
+    #[gpui::test]
+    async fn a_long_edit_summary_path_does_not_push_revert_out_of_the_card(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let long_path = format!("src/{}/edited.rs", "deeply-nested-segment/".repeat(20));
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::ToolCall {
+                id: "edit-long-path".into(),
+                title: "Edit file".into(),
+                status: "Completed".into(),
+                kind: "Edit".into(),
+                content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
+                    path: PathBuf::from(long_path),
+                    old_text: Some("old\n".into()),
+                    new_text: "new\n".into(),
+                })],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: true,
+                duration_ms: None,
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let card = cx
+            .debug_bounds("edit-summary-0")
+            .expect("the edit summary card is drawn");
+        let revert = cx
+            .debug_bounds("edit-summary-revert-0-0")
+            .expect("the card carries its Revert control");
+        assert!(
+            revert.right() <= card.right(),
+            "Revert overflows the edit summary card: \
+             revert right {} vs card right {}",
+            revert.right(),
+            card.right(),
+        );
+    }
+
+    /// A fold row's label is the first user message clipped to 60 chars, and
+    /// wide text can still exceed the row: without `min_w_0` the label keeps
+    /// the row at its min-content width and pushes the timestamp out.
+    #[gpui::test]
+    async fn a_long_turn_label_does_not_push_the_timestamp_out_of_the_fold_row(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let long_first_turn = format!(
+            "{} {}",
+            "W".repeat(TURN_LABEL_MAX_CHARS),
+            "and the rest of a message far longer than its clipped label ".repeat(6)
+        );
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            // Four turns so the oldest fold; the first carries the wide label.
+            chat.push_entry(Entry::User {
+                text: long_first_turn,
+                at: None,
+            });
+            chat.push_entry(test_tool_call("long-turn-step"));
+            chat.push_entry(Entry::TurnFooter("10:00".into()));
+            chat.push_entry(Entry::User {
+                text: "second question".into(),
+                at: None,
+            });
+            chat.push_entry(Entry::TurnFooter("10:01".into()));
+            chat.push_entry(Entry::User {
+                text: "third question".into(),
+                at: None,
+            });
+            chat.push_entry(Entry::TurnFooter("10:02".into()));
+            chat.push_entry(Entry::User {
+                text: "fourth question".into(),
+                at: None,
+            });
+            chat
+        });
+        // The label is clipped at 60 chars, so it can only outgrow a
+        // narrower pane: the default test window is ~1273px wide.
+        cx.simulate_resize(size(px(420.0), px(900.0)));
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        let row = cx
+            .debug_bounds("turn-fold-2")
+            .expect("the oldest turn draws its collapsed row");
+        let at = cx
+            .debug_bounds("turn-fold-2-at")
+            .expect("the fold row carries its timestamp");
+        assert!(
+            at.right() <= row.right(),
+            "the timestamp overflows the fold row: \
+             at right {} vs row right {}",
+            at.right(),
+            row.right(),
+        );
+    }
+
+    /// A chat-history row's title is external text and the menu is only
+    /// 260px wide: `flex_1` without `min_w_0` grows the row to the title's
+    /// min-content and pushes Delete past the row's border.
+    #[gpui::test]
+    async fn a_long_chat_history_title_does_not_push_delete_out_of_the_row(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let long_title = "LongSessionTitle".repeat(20);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                Some(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.history_open = true;
+            chat.history_sessions = vec![ChatSessionSummary {
+                tab_id: "long-title-chat".into(),
+                title: long_title,
+                agent_id: None,
+                turn_count: 1,
+                last_activity: 0,
+            }];
+            chat
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+
+        let row = cx
+            .debug_bounds("chat-history-row-long-title-chat")
+            .expect("the chat history row is drawn");
+        let delete = cx
+            .debug_bounds("chat-history-delete-long-title-chat")
+            .expect("the row carries its Delete control");
+        assert!(
+            delete.right() <= row.right(),
+            "Delete overflows the chat history row: \
+             delete right {} vs row right {}",
+            delete.right(),
+            row.right(),
         );
     }
 
